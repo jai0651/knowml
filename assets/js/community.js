@@ -1,4 +1,4 @@
-/* NeuralPath — shared view/like counters + per-page discussion.
+/* KnowML — shared view/like counters + per-page discussion.
    Backed by /api/counters and /api/comments (Postgres via Neon).
    Fails silently if the API isn't reachable (e.g. plain static preview
    without `vercel dev`) so the rest of the site keeps working. */
@@ -28,7 +28,7 @@
     bar.className = 'page-community';
     bar.id = 'pageCommunity';
     bar.innerHTML =
-      '<span class="pc-views">👁 <span id="pcViewCount">' + counts.views + '</span> views</span>' +
+      '<span class="pc-views"><svg class="pc-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z"/><circle cx="12" cy="12" r="3"/></svg> <span id="pcViewCount">' + counts.views + '</span> views</span>' +
       '<button class="pc-like-btn' + (liked ? ' is-liked' : '') + '" id="pcLikeBtn" type="button">' +
         '<span class="pc-heart">' + (liked ? '❤️' : '🤍') + '</span> <span id="pcLikeCount">' + counts.likes + '</span>' +
       '</button>';
@@ -37,19 +37,10 @@
 
   function mountCommunityBar(bar) {
     var header = document.querySelector('.topic-header');
-    if (header) {
-      var metaRow = header.querySelector('.meta-row');
-      if (metaRow) { metaRow.insertAdjacentElement('afterend', bar); return; }
-      header.appendChild(bar);
-      return;
-    }
-    var hero = document.querySelector('.hero');
-    if (hero) {
-      var cta = hero.querySelector('.hero-cta');
-      if (cta) { cta.insertAdjacentElement('afterend', bar); return; }
-      hero.appendChild(bar);
-      return;
-    }
+    if (!header) return; /* topic pages only — not the homepage */
+    var metaRow = header.querySelector('.meta-row');
+    if (metaRow) { metaRow.insertAdjacentElement('afterend', bar); return; }
+    header.appendChild(bar);
   }
 
   function wireLikeButton() {
@@ -74,7 +65,7 @@
 
   function initCommunityBar() {
     var pid = pageId();
-    if (!pid) return;
+    if (!pid || !document.querySelector('.topic-header')) return; /* topic pages only */
     apiGet('/api/counters?pageId=' + encodeURIComponent(pid))
       .then(function (counts) {
         mountCommunityBar(renderCommunityBar(counts));

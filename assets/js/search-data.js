@@ -1,7 +1,7 @@
 /* Auto-generated search index — regenerate with gen_search_index.py */
 window.SEARCH_INDEX = [
   {
-    "title": "NeuralPath — Machine Learning → Modern AI, Revision Course",
+    "title": "KnowML — Machine Learning → Modern AI, Revision Course",
     "section": "Foundations",
     "url": "index.html",
     "tags": [
@@ -117,7 +117,7 @@ window.SEARCH_INDEX = [
       "Sequence, Attention & LLMs",
       "checklist"
     ],
-    "summary": "NLP Evolution — mapped section of the NeuralPath ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "NLP Evolution — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
     "color": "var(--c-nlp)"
   },
   {
@@ -201,7 +201,7 @@ window.SEARCH_INDEX = [
       "Decision & Retrieval Systems",
       "checklist"
     ],
-    "summary": "Recommenders, Ranking & Search — mapped section of the NeuralPath ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Recommenders, Ranking & Search — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
     "color": "var(--c-rec)"
   },
   {
@@ -213,7 +213,7 @@ window.SEARCH_INDEX = [
       "Decision & Retrieval Systems",
       "checklist"
     ],
-    "summary": "Time Series & Forecasting — mapped section of the NeuralPath ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Time Series & Forecasting — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
     "color": "var(--c-ts)"
   },
   {
@@ -225,7 +225,7 @@ window.SEARCH_INDEX = [
       "Decision & Retrieval Systems",
       "checklist"
     ],
-    "summary": "Graph ML — mapped section of the NeuralPath ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Graph ML — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
     "color": "var(--c-graph)"
   },
   {
@@ -237,7 +237,7 @@ window.SEARCH_INDEX = [
       "Embodied & Frontier",
       "checklist"
     ],
-    "summary": "Scientific & Structured AI — mapped section of the NeuralPath ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Scientific & Structured AI — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
     "color": "var(--c-sci)"
   },
   {
@@ -249,7 +249,7 @@ window.SEARCH_INDEX = [
       "Embodied & Frontier",
       "checklist"
     ],
-    "summary": "3D, Spatial AI & Autonomous Driving — mapped section of the NeuralPath ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "3D, Spatial AI & Autonomous Driving — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
     "color": "var(--c-3d)"
   },
   {
@@ -273,7 +273,7 @@ window.SEARCH_INDEX = [
       "Embodied & Frontier",
       "checklist"
     ],
-    "summary": "World Models — mapped section of the NeuralPath ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "World Models — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
     "color": "var(--c-world)"
   },
   {
@@ -297,7 +297,7 @@ window.SEARCH_INDEX = [
       "Systems, Safety & Interview",
       "checklist"
     ],
-    "summary": "ML Engineering & MLOps — mapped section of the NeuralPath ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "ML Engineering & MLOps — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
     "color": "var(--c-mlops)"
   },
   {
@@ -309,7 +309,7 @@ window.SEARCH_INDEX = [
       "Systems, Safety & Interview",
       "checklist"
     ],
-    "summary": "Evaluation, Reliability & Safety — mapped section of the NeuralPath ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Evaluation, Reliability & Safety — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
     "color": "var(--c-eval)"
   },
   {
@@ -321,7 +321,7 @@ window.SEARCH_INDEX = [
       "Systems, Safety & Interview",
       "checklist"
     ],
-    "summary": "2026 Frontier Map — mapped section of the NeuralPath ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "2026 Frontier Map — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
     "color": "var(--c-frontier)"
   },
   {

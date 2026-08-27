@@ -1,4 +1,4 @@
-/* NeuralPath — personal notes & highlights, persisted in localStorage per page */
+/* KnowML — personal notes & highlights, persisted in localStorage per page */
 (function () {
   'use strict';
 
@@ -155,7 +155,7 @@
 
   function exportMarkdown() {
     var title = document.querySelector('h1') ? document.querySelector('h1').textContent : document.title;
-    var md = '# ' + title + '\n\n_Exported from NeuralPath — ' + location.href + '_\n\n';
+    var md = '# ' + title + '\n\n_Exported from KnowML — ' + location.href + '_\n\n';
     if (state.freeNotes) md += '## My Notes\n\n' + state.freeNotes + '\n\n';
     if (state.highlights.length) {
       md += '## Highlights\n\n';

@@ -1,4 +1,4 @@
-/* NeuralPath — shell behavior: theme, nav, TOC, search, progress, KaTeX render */
+/* KnowML — shell behavior: theme, nav, TOC, search, progress, KaTeX render */
 (function () {
   'use strict';
 
