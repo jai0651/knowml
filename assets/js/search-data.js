@@ -13,6 +13,20 @@ window.SEARCH_INDEX = [
     "color": "var(--c-map)"
   },
   {
+    "title": "Technique Map",
+    "section": "Map & Timeline",
+    "url": "topics/technique-map.html",
+    "tags": [
+      "Technique Map",
+      "models",
+      "algorithms",
+      "architectures",
+      "full"
+    ],
+    "summary": "Every model, architecture and algorithm on this site, organized by the problem it solves — one expandable tree spanning all 28 sections.",
+    "color": "var(--c-map)"
+  },
+  {
     "title": "01 · Math & Stats Foundations",
     "section": "Foundations",
     "url": "topics/01-math-foundations.html",
@@ -115,9 +129,9 @@ window.SEARCH_INDEX = [
     "tags": [
       "NLP Evolution",
       "Sequence, Attention & LLMs",
-      "checklist"
+      "full"
     ],
-    "summary": "NLP Evolution — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Bag-of-words to TF-IDF to Word2Vec and GloVe to ELMo to BERT/GPT to T5 — how text representation evolved, term by term, and why each generation of embeddings existed only because the last one had exactly one crack in it.",
     "color": "var(--c-nlp)"
   },
   {
@@ -247,9 +261,9 @@ window.SEARCH_INDEX = [
     "tags": [
       "3D, Spatial AI & Autonomous Driving",
       "Embodied & Frontier",
-      "checklist"
+      "full"
     ],
-    "summary": "3D, Spatial AI & Autonomous Driving — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Camera geometry, SLAM, LiDAR detection, BEV transformers and occupancy networks, sensor fusion, trajectory prediction, and the modular-vs-end-to-end debate — how a self-driving stack turns 2D pixels and sparse point clouds into a safe plan.",
     "color": "var(--c-3d)"
   },
   {
@@ -295,9 +309,9 @@ window.SEARCH_INDEX = [
     "tags": [
       "ML Engineering & MLOps",
       "Systems, Safety & Interview",
-      "checklist"
+      "full"
     ],
-    "summary": "ML Engineering & MLOps — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "The production ML lifecycle as a system: feature stores and experiment tracking, shadow and canary deployments, drift monitoring with PSI, golden sets, rollback, and why models decay even when your code never changes.",
     "color": "var(--c-mlops)"
   },
   {
@@ -307,9 +321,9 @@ window.SEARCH_INDEX = [
     "tags": [
       "Evaluation, Reliability & Safety",
       "Systems, Safety & Interview",
-      "checklist"
+      "full"
     ],
-    "summary": "Evaluation, Reliability & Safety — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "LLM-as-judge, calibration, red-teaming, prompt injection, mechanistic interpretability — how to tell whether a model actually works, and what to do when you can't fully test the failure modes you haven't imagined yet.",
     "color": "var(--c-eval)"
   },
   {
@@ -319,9 +333,9 @@ window.SEARCH_INDEX = [
     "tags": [
       "2026 Frontier Map",
       "Systems, Safety & Interview",
-      "checklist"
+      "full"
     ],
-    "summary": "2026 Frontier Map — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Where the field is actually moving in 2026: inference-time compute and verifiers, agentic systems, native multimodality, efficiency, AI for science — and the persistent open problems nobody's solved yet.",
     "color": "var(--c-frontier)"
   },
   {
