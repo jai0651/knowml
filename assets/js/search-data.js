@@ -13,6 +13,21 @@ window.SEARCH_INDEX = [
     "color": "var(--c-map)"
   },
   {
+    "title": "Review & drill",
+    "section": "Map & Timeline",
+    "url": "review.html",
+    "tags": [
+      "Review",
+      "drill",
+      "flashcards",
+      "spaced repetition",
+      "interview questions",
+      "full"
+    ],
+    "summary": "Drill all 166 interview questions with spaced repetition — answer, rate yourself, and let the schedule bring each one back right before you forget it.",
+    "color": "var(--c-map)"
+  },
+  {
     "title": "Technique Map",
     "section": "Map & Timeline",
     "url": "topics/technique-map.html",
