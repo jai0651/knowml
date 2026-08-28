@@ -302,8 +302,119 @@
     <p>None of this is an exotic trick list — every item is a direct, mechanical consequence of an idea already covered above: fewer parameters per layer, one forward pass instead of two, and letting the network fold downsampling into a convolution it's already computing rather than paying for a separate operation.</p>
   </section>
 
+  <section id="taxonomy">
+    <h2><span class="num">08</span>Vision is not one task</h2>
+    <p class="lede">"Computer vision" names a dozen different problems that happen to share an input type. The backbone is often identical. What changes is the head, the shape of the label, and what counts as a failure.</p>
+
+    <p>Section §03 introduced detection and segmentation as families of task head. This is the practical version. For each problem: <strong>what goes in, what comes out, what makes it hard,</strong> and what you would reach for now.</p>
+
+    <ul>
+      <li><strong>Image classification.</strong> In: one image. Out: one label. The easiest member of the family, and the one where architecture choice matters least. The real decision is <em>which pretrained weights you start from</em>, not which backbone you pick.</li>
+      <li><strong>Object detection.</strong> Out: a variable-length list of boxes with labels. The variable length is the hard part: a network with a fixed-size output has to be coerced into emitting a set, and that coercion is the entire design problem.</li>
+      <li><strong>Semantic segmentation.</strong> Out: a class label for every pixel. Hard because you need pixel-exact boundaries from a backbone that threw spatial detail away while downsampling. Skip connections (§06) exist for exactly this.</li>
+      <li><strong>Instance segmentation.</strong> Out: one mask per object, plus a class. Two adjacent cats become two masks. Masks are allowed to overlap, and nothing requires you to label the background at all.</li>
+      <li><strong>Panoptic segmentation.</strong> Out: exactly one class and one instance id for every pixel, background included. This is not a union of the two above, for reasons that are worth a subsection of their own.</li>
+      <li><strong>Keypoint and pose estimation.</strong> Out: pixel coordinates for a fixed skeleton of joints. Joints get occluded constantly, and you still have to work out <em>which person</em> a detected elbow belongs to.</li>
+      <li><strong>Depth estimation.</strong> Out: distance from the camera, per pixel. A stereo pair lets you triangulate geometrically. A single image does not: absolute scale is genuinely unrecoverable, so a monocular model leans on learned priors about how big things usually are.</li>
+      <li><strong>Tracking.</strong> Out: detections plus a consistent identity across frames. Detection quality is rarely the bottleneck here; identity is, and the signature failure is the <em>ID switch</em>, where two objects cross paths and swap labels.</li>
+    </ul>
+
+    <h3>Why detection needed anchors, and then stopped</h3>
+    <p>A convolutional head emits a fixed grid of predictions. Objects arrive as a variable-length set. Something has to decide which output slot is responsible for which real object. That <em class="term">assignment problem</em> is the thing every generation of detector has been attacking.</p>
+
+    <p><strong>Anchors</strong> were the first answer: tile a set of predefined box shapes across every location, then assign each ground-truth object to whichever anchor overlaps it most. The network predicts an offset from that anchor rather than raw coordinates, and regressing a small correction is far easier than regressing an absolute box from nothing.</p>
+
+    <p>Anchors bought tractability and charged for it:</p>
+    <ul>
+      <li><strong>Hyperparameters.</strong> How many shapes, which aspect ratios, which scales. All tuned per dataset, none of them learned.</li>
+      <li><strong>Class imbalance.</strong> Most anchors match nothing, so easy background examples swamp the gradient. <a href="https://arxiv.org/abs/1708.02002" target="_blank" rel="noopener">Focal loss</a> was designed specifically to stop that drowning effect.</li>
+      <li><strong>Duplicate predictions.</strong> Several anchors fire on the same object, so you need non-maximum suppression afterwards to clean up.</li>
+    </ul>
+
+    <p><strong>Anchor-free</strong> detectors predict box edges straight from each spatial location, deleting the shape hyperparameters outright. <a href="https://arxiv.org/abs/2005.12872" target="_blank" rel="noopener">DETR</a> went further still, reframing detection as direct set prediction: it matches predictions to ground truth with the Hungarian algorithm during training, and so removes NMS by construction rather than by post-processing.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The thread running through all of it</span>
+      <p>Anchors, anchor-free heads and set prediction look like three unrelated architectures. They are three answers to one question: <strong>which prediction should be held responsible for which object?</strong></p>
+      <p>Anchors answer it with a hand-designed geometric prior. Anchor-free heads answer it with spatial position. DETR answers it by solving an explicit matching problem during training.</p>
+      <p>If an interviewer asks why detection is harder than classification, this is the answer. Classification has one output and one label. Detection has to invent a correspondence.</p>
+    </div>
+
+    <h3>Why panoptic is not semantic plus instance</h3>
+    <p><a href="https://arxiv.org/abs/1801.00868" target="_blank" rel="noopener">Kirillov et al. (2019)</a> defined panoptic segmentation with a hard constraint: every pixel gets exactly one class label and one instance id. No overlaps. No gaps.</p>
+
+    <p>You cannot reach that by running two models and merging their output:</p>
+    <ul>
+      <li><strong>Instance masks may overlap.</strong> Two predicted masks claiming the same pixel is perfectly legal in instance segmentation and illegal in panoptic. Something has to arbitrate.</li>
+      <li><strong>Instance segmentation ignores the background.</strong> Sky, road and grass have no countable instances, so an instance model has nothing to say about them.</li>
+      <li><strong>Semantic segmentation cannot split objects.</strong> It covers every pixel, but two touching cars come back as one undifferentiated "car" region.</li>
+    </ul>
+
+    <p>The vocabulary is the part worth keeping. <em class="term">Things</em> are countable: cars, people, bottles. <em class="term">Stuff</em> is not: road, sky, vegetation. Panoptic gives things an instance id and leaves stuff without one.</p>
+
+    <p><a href="https://arxiv.org/abs/2112.01527" target="_blank" rel="noopener">Mask2Former</a> resolved the split architecturally. Predict a set of binary masks, each carrying one class label. Semantic, instance and panoptic then become the same model output, read three different ways.</p>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">09</span>Where you meet this in the wild</h2>
+    <p class="lede">Almost none of these deployments look like ImageNet. The label format is usually the thing that changes, and the interesting engineering happens around the model rather than inside it.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card" style="--wc:var(--c-sci)">
+        <div class="wc-domain">Medical imaging</div>
+        <div class="wc-what">Segmenting an organ or a tumour in a CT volume</div>
+        <div class="wc-body">U-Net's home turf, and still competitive. <a href="https://www.nature.com/articles/s41592-020-01008-z" target="_blank" rel="noopener">nnU-Net</a> surpassed most existing approaches, including highly specialised ones, across 23 public datasets from international segmentation competitions — without a novel architecture. Its contribution was automatic configuration: preprocessing, patch size, and training schedule derived from the dataset itself. The lesson generalises well beyond medicine.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-mlops)">
+        <div class="wc-domain">Manufacturing</div>
+        <div class="wc-what">Catching a defect you have never seen before</div>
+        <div class="wc-body">The obvious framing fails here: you cannot train a defect classifier when defects are rare and the next one is a category nobody has photographed yet. So the task is usually inverted: train only on <em>normal</em> parts and flag deviation, as in the <a href="https://www.mvtec.com/company/research/datasets/mvtec-ad" target="_blank" rel="noopener">MVTec AD</a> benchmark. Anomaly detection, not classification.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-3d)">
+        <div class="wc-domain">Satellite and aerial</div>
+        <div class="wc-what">Finding small objects in enormous images</div>
+        <div class="wc-body">A single scene can run to tens of thousands of pixels a side, so images get tiled and stitched, and objects of interest are often a handful of pixels across. Sensors also give you more than three channels. A convolution does not care: change the input channel count and the rest of the network is untouched.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-nlp)">
+        <div class="wc-domain">Documents</div>
+        <div class="wc-what">Turning a scanned invoice into structured fields</div>
+        <div class="wc-body">Three problems wearing one coat: detection finds where the text is, sequence recognition reads it, and layout analysis works out what each block <em>means</em>, whether that is a total, a line item or a header. The vision half is usually the easy half.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-rec)">
+        <div class="wc-domain">Sports and retail</div>
+        <div class="wc-what">Following the same person across a whole video</div>
+        <div class="wc-body">Detection per frame is close to solved, but identity across frames is not. Players occlude each other, shoppers leave and re-enter the frame, and a single ID switch corrupts every downstream statistic. Most of the engineering budget goes to the association step, not the detector.</div>
+      </div>
+    </div>
+
+    <div class="reach">
+      <div class="reach-col reach-yes">
+        <div class="reach-head">Reach for a CNN when</div>
+        <ul>
+          <li><strong>Local texture or shape decides the answer.</strong> Defects, tissue boundaries, edges. Locality is a correct assumption here, and you get it for free.</li>
+          <li>You have <strong>modest labelled data</strong> and a pretrained backbone. The inductive bias substitutes for examples you do not have.</li>
+          <li><strong>Compute or latency is tight.</strong> Edge devices, real-time video, embedded hardware. The tooling is mature and the models are small.</li>
+          <li>Your input <strong>is not three-channel RGB</strong>. Multispectral, depth, or stacked medical slices all drop straight in.</li>
+        </ul>
+      </div>
+      <div class="reach-col reach-no">
+        <div class="reach-head">Look elsewhere when</div>
+        <ul>
+          <li>The answer depends on <strong>relating distant parts of the image</strong>. Attention models that assumption instead of fighting it. See <a href="./06-modern-vision-foundation-models.html">06</a>.</li>
+          <li>You have <strong>large-scale pretraining available</strong>. Past a certain data budget, fewer built-in assumptions scales further, which is the tradeoff §06 lays out.</li>
+          <li>The problem is <strong>geometric with known mathematics</strong>. Calibration, homographies, and stereo rectification are solved analytically. Learning them is a worse answer.</li>
+          <li><strong>Labels are the bottleneck, not the model.</strong> Promptable models like <a href="https://arxiv.org/abs/2304.02643" target="_blank" rel="noopener">SAM</a> can cut annotation cost far more than a better backbone would.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
   <section id="interview">
-    <h2><span class="num">08</span>Interview questions</h2>
+    <h2><span class="num">10</span>Interview questions</h2>
 
     <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What does a convolution actually compute, and why does weight sharing matter?</summary>
       <div class="qa-body"><p>A convolution slides a small learned filter over every position of the input, computing a dot product between the filter and the patch underneath at each position. Reusing the same filter (weight sharing) at every position gives two things: far fewer parameters than a fully-connected layer, since the filter's size doesn't depend on the image's size, and translation invariance, since a pattern learned in one position is automatically recognized in every other position.</p></div>
@@ -329,7 +440,7 @@
   </section>
 
   <section id="resources">
-    <h2><span class="num">09</span>Go deeper</h2>
+    <h2><span class="num">11</span>Go deeper</h2>
     <div class="resource-grid">
       <a class="resource-card" href="https://arxiv.org/abs/1512.03385" target="_blank" rel="noopener">
         <div class="r-icon">📄</div>
@@ -347,7 +458,7 @@
   </section>
 
   <section id="related">
-    <h2><span class="num">10</span>Related pages</h2>
+    <h2><span class="num">12</span>Related pages</h2>
     <div class="related-grid">
       <a class="related-card" href="./04-neural-network-fundamentals.html"><div class="rc-sec" style="color:var(--c-nn)">04 · Prerequisite</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">Backprop, ReLU, residual connections — the machinery every conv layer trains with.</div></a>
       <a class="related-card" href="./06-modern-vision-foundation-models.html"><div class="rc-sec" style="color:var(--c-visionfm)">06 · What changed next</div><div class="rc-title">Modern Vision Foundation Models</div><div class="rc-hook">CNNs plateaued at scale; ViT, CLIP, and DINO-style pretraining picked up from here.</div></a>

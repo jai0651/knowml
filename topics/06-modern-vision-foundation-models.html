@@ -346,8 +346,134 @@
     <p>Visual search and content moderation pipelines lean on CLIP embeddings directly: embed a large catalog of images once offline, store the embeddings in a vector index, and at query time embed either a text query or a reference image and run nearest-neighbor search over that index — "find images similar to this one" and "find images matching this text description" become the same operation, a similarity search over the same embedding space. Image-captioning and visual-QA products typically use the encoder + projector + LLM pattern from the previous section: a CLIP-style image encoder plus a small projector feeding an LLM that generates the caption, answer, or reasoning trace, letting the product team swap in incrementally better open-source encoders or LLMs as they ship without retraining the whole system from scratch.</p>
   </section>
 
+  <section id="nuances">
+    <h2><span class="num">10</span>The nuances a vision specialist needs</h2>
+    <p class="lede">Everything above is the standard story. This is the part that separates having read the papers from having shipped the models.</p>
+
+    <h3>What patchification actually throws away</h3>
+    <p>Cutting an image into 16&times;16 patches is not a neutral operation. Three things get given up at that exact moment:</p>
+    <ul>
+      <li><strong>Sub-patch detail.</strong> Everything inside a 16&times;16 block collapses into one vector. A ViT never sees structure finer than its patch size, and no later layer can recover what the projection discarded.</li>
+      <li><strong>Grid geometry.</strong> Position embeddings are <em>learned</em>, not geometric. The model is told "you are token 37", not "you sit two rows below token 23". Adjacency is something it has to infer.</li>
+      <li><strong>Scale.</strong> A plain ViT runs every layer at one resolution. A CNN gets a feature pyramid for free: fine detail early, coarse semantics late.</li>
+    </ul>
+
+    <p>That third loss is the one that bites hardest in practice. Detection and segmentation both want <strong>multi-scale features</strong>, and a single-resolution token sequence does not provide them.</p>
+
+    <p><a href="https://arxiv.org/abs/2103.14030" target="_blank" rel="noopener">Swin Transformer</a> is the standard answer. It computes attention inside local windows rather than globally, then shifts the window boundaries on alternating layers so information still crosses between them. Two things fall out of that design:</p>
+    <ul>
+      <li>Cost becomes <strong>linear</strong> in image size instead of quadratic, because each token only attends within its window.</li>
+      <li>The network can build a <strong>hierarchy</strong>, merging patches between stages. That produces exactly the pyramid an FPN or U-Net head expects.</li>
+    </ul>
+    <p>This is why hierarchical windowed designs, not plain ViTs, became the common backbone for dense prediction.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The "ViTs are data-hungry" claim has an expiry date</span>
+      <p>The original ViT result needed hundreds of millions of pretraining images to beat a ResNet. That number gets quoted as if it were a property of the architecture. It is not.</p>
+      <p><a href="https://arxiv.org/abs/2012.12877" target="_blank" rel="noopener">DeiT</a> trained a competitive ViT on ImageNet-1k alone, on a single machine in under three days. The fix was not more data. It was a stronger augmentation recipe plus a <strong>distillation token</strong>: an extra learnable token whose job is to match a CNN teacher's prediction.</p>
+      <p>So the honest version of the claim is narrower. <em>Naive</em> ViT training is data-hungry. The inductive bias a CNN gets from its architecture can instead be injected through the training recipe.</p>
+    </div>
+
+    <h3>How a VLM is actually wired</h3>
+    <p>Section 08 described the projector as a small MLP or a handful of cross-attention layers. That choice is not cosmetic. It decides how many tokens the LLM has to read, and how much visual detail survives the trip.</p>
+    <p>Two families dominate:</p>
+    <ul>
+      <li><strong>Projection connectors.</strong> <a href="https://arxiv.org/abs/2304.08485" target="_blank" rel="noopener">LLaVA</a> uses a single linear layer; LLaVA-1.5 uses a two-layer GELU MLP. Every patch token is kept and handed to the LLM. Maximum fidelity, maximum token count.</li>
+      <li><strong>Resampler connectors.</strong> <a href="https://arxiv.org/abs/2204.14198" target="_blank" rel="noopener">Flamingo</a> introduced the Perceiver Resampler: a fixed set of learned queries cross-attends to the visual grid and compresses it to a fixed budget, 64 tokens in Flamingo's case. <a href="https://arxiv.org/abs/2301.12597" target="_blank" rel="noopener">BLIP-2</a>'s Q-Former is the same idea.</li>
+    </ul>
+    <p>The trade is information fidelity against token efficiency. A resampler gives you a constant cost regardless of input size, which is what makes long video tractable. A projection connector keeps detail a resampler would have thrown away, which is what makes reading small text in a document possible.</p>
+    <p>Notice the second-order effect. Every visual token occupies LLM context. A high-resolution image through a projection connector can consume more context than the question being asked about it.</p>
+
+    <h3>Open vocabulary: replacing the class ID with a sentence</h3>
+    <p>A classical detector ends in a fixed-width classification layer. Eighty COCO classes means eighty output slots. Adding an eighty-first means retraining.</p>
+    <p>Open-vocabulary detectors delete that layer. Region features get scored against <strong>text embeddings</strong> instead of learned class IDs. The consequence is that the label set becomes a runtime argument rather than a training-time constant.</p>
+    <ul>
+      <li><strong>OWL-ViT</strong> keeps it minimal: take a ViT, drop the final token pooling, attach lightweight box heads directly to the output tokens, and align them with CLIP-style text embeddings.</li>
+      <li><strong><a href="https://arxiv.org/abs/2303.05499" target="_blank" rel="noopener">Grounding DINO</a></strong> fuses harder. Swin image features and BERT text features meet in a feature enhancer, text guides the object queries, and cross-attention decodes the boxes. Fusion happens at every layer rather than only at the scoring step.</li>
+    </ul>
+    <p>The practical payoff is querying for things nobody defined as a class: "cracked windshield", "the red backpack on the left". You are no longer limited to a vocabulary someone froze at annotation time.</p>
+
+    <h3>The other backbone worth knowing: supervision-free features</h3>
+    <p>CLIP learns from image-text pairs. <a href="https://arxiv.org/abs/2304.07193" target="_blank" rel="noopener">DINOv2</a> learns from images alone, through self-distillation across views, on a curated corpus of roughly 142 million images.</p>
+    <p>What makes it useful is where its features land. Freeze the backbone entirely, train only a linear probe or a small convolutional head, and it stays competitive on classification, semantic segmentation and depth estimation. No labels touched the backbone.</p>
+    <p>That is a genuinely different tool from CLIP. CLIP gives you a shared space with language, which is what you want for zero-shot and retrieval. DINOv2 gives you stronger <em>dense, patch-level</em> features, which is what you want when the task is spatial and your labelled data is thin.</p>
+
+    <h3>Where this still breaks</h3>
+    <p>The most useful failure result in this area is <a href="https://arxiv.org/abs/2401.06209" target="_blank" rel="noopener">Eyes Wide Shut?</a> (CVPR 2024). The method is worth understanding, because it isolates the problem cleanly.</p>
+    <p>The authors search for <em>CLIP-blind pairs</em>: two images CLIP embeds as near-identical despite an obvious visual difference. They then build the <strong>MMVP</strong> benchmark by asking simple questions about exactly those differences.</p>
+    <p>The result is uncomfortable. Every model tested except GPT-4V and Gemini scored <strong>below the 25% random-guess level</strong> on those questions. Those two did better, but the authors still report a large gap to human performance. The models also produce fluent, confident explanations for their wrong answers.</p>
+
+    <div class="callout callout-warn">
+      <span class="callout-label">Why this failure is structural, not incidental</span>
+      <p>If your VLM's eyes are a frozen CLIP encoder, then anything CLIP cannot distinguish is invisible to the LLM downstream. No amount of language-side scaling fixes it. The information was destroyed before the LLM was ever called.</p>
+      <p>This is the strongest argument for the architectural questions above being worth caring about: which encoder, which connector, how many tokens, at what resolution.</p>
+    </div>
+
+    <p>The open problems cluster where you would predict from that analysis: fine-grained localisation, counting, spatial relations such as left-versus-right and in-front-versus-behind, and dense high-resolution documents where the answer depends on small text.</p>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">11</span>Where you meet this in the wild</h2>
+    <p class="lede">The shift these models caused is less about accuracy than about who gets to define the task. The label set moved from training time to inference time.</p>
+
+    <p>Once the class list is a runtime argument, whole categories of project stop needing a training run at all. <strong>That is the change worth internalising</strong>, and it is what most of the uses below have in common.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card" style="--wc:var(--c-visionfm)">
+        <div class="wc-domain">Annotation tooling</div>
+        <div class="wc-what">Labelling a segmentation dataset without drawing outlines</div>
+        <div class="wc-body">SAM's split between a heavy image encoder and a tiny mask decoder exists for this. Encode once, then respond to each click at interactive speed. An annotator points instead of tracing, which is why promptable segmentation showed up inside labelling tools almost immediately.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-robot)">
+        <div class="wc-domain">Robotics perception</div>
+        <div class="wc-what">Finding an object the robot was never trained on</div>
+        <div class="wc-body">"Pick up the red mug" needs detection over an open vocabulary, because no fixed class list survives contact with a real kitchen. Open-vocabulary detectors supply the perception step, and an agent loop consumes the boxes. See <a href="./21-robotics-embodied-ai.html">21</a>.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-nlp)">
+        <div class="wc-domain">Documents and screens</div>
+        <div class="wc-what">Answering questions about a dense page or UI</div>
+        <div class="wc-body">This is where connector choice becomes a product decision. Small text survives only if enough visual tokens survive, so aggressive resampling that works fine for natural photos will quietly destroy a receipt or a spreadsheet.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-sci)">
+        <div class="wc-domain">Scientific and industrial imaging</div>
+        <div class="wc-what">Getting a strong model from a few hundred labels</div>
+        <div class="wc-body">Web-scale image-text pretraining does not cover cell microscopy or weld inspection. The workable pattern is a frozen self-supervised backbone such as DINOv2 plus a small trained head, which needs far fewer labels than training a backbone from scratch.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-eval)">
+        <div class="wc-domain">Moderation and retrieval</div>
+        <div class="wc-what">Policies that change faster than a training cycle</div>
+        <div class="wc-body">Embed the catalogue once into a vector index. New policy categories then become new text prompts compared against those embeddings, not a new labelled dataset and a retrain. The cost of changing your mind drops to near zero.</div>
+      </div>
+    </div>
+
+    <div class="reach">
+      <div class="reach-col reach-yes">
+        <div class="reach-head">Reach for a foundation model when</div>
+        <ul>
+          <li>The <strong>label set is unstable</strong>, or you cannot enumerate it up front. This is the single strongest signal.</li>
+          <li>You have <strong>very few labels</strong>. A frozen backbone plus a small head beats training from scratch on a thousand images.</li>
+          <li>You need <strong>language in the loop</strong>: query by description, explain a decision, follow an instruction about an image.</li>
+          <li>You are <strong>still exploring</strong>. Zero-shot gets you a baseline this afternoon instead of after an annotation contract.</li>
+        </ul>
+      </div>
+      <div class="reach-col reach-no">
+        <div class="reach-head">Fine-tune something small when</div>
+        <ul>
+          <li>The task is <strong>fixed and narrow</strong>. Five defect classes on one production line does not need open vocabulary.</li>
+          <li><strong>Latency or hardware is binding.</strong> A small CNN on an embedded device will beat a VLM API call, and it works offline.</li>
+          <li>You need <strong>high accuracy on a specialised domain</strong> and you have the labels. A fine-tuned specialist usually beats a generalist on its own narrow distribution.</li>
+          <li>The decision is <strong>fine-grained or spatial</strong>. Counting, precise localisation and small-detail discrimination are exactly the MMVP weaknesses above.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
   <section id="interview">
-    <h2><span class="num">10</span>Interview questions</h2>
+    <h2><span class="num">12</span>Interview questions</h2>
 
     <details class="qa"><summary><span class="qa-level beginner">Beginner</span>How does ViT turn an image into a transformer input?</summary>
       <div class="qa-body"><p>Cut the image into fixed-size, non-overlapping patches (16×16 is the common choice — for a 224×224 image that's 196 patches). Flatten each patch into a vector and pass it through one shared learned linear projection to get a token embedding. Prepend a learnable [CLS] token, add learned position embeddings so the model knows patch order, and feed the resulting sequence into a standard transformer encoder — identical to the one used for text.</p></div>
@@ -370,7 +496,7 @@
   </section>
 
   <section id="resources">
-    <h2><span class="num">11</span>Go deeper</h2>
+    <h2><span class="num">13</span>Go deeper</h2>
     <div class="resource-grid">
       <a class="resource-card" href="https://arxiv.org/abs/2010.11929" target="_blank" rel="noopener">
         <div class="r-icon">📄</div>
@@ -388,7 +514,7 @@
   </section>
 
   <section id="related">
-    <h2><span class="num">12</span>Related pages</h2>
+    <h2><span class="num">14</span>Related pages</h2>
     <div class="related-grid">
       <a class="related-card" href="./05-cnn-vision-foundations.html"><div class="rc-sec" style="color:var(--c-nn)">05 · Prerequisite</div><div class="rc-title">CNNs &amp; Vision Foundations</div><div class="rc-hook">The inductive bias ViT deliberately gives up.</div></a>
       <a class="related-card" href="./08-attention-transformers.html"><div class="rc-sec" style="color:var(--c-attention)">08 · Built on this</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">ViT and CLIP's encoders both reuse this block unmodified.</div></a>

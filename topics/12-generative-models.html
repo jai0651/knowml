@@ -373,8 +373,157 @@
     <p>Two approaches. Extend the denoising network with temporal attention or convolution layers that let it look across nearby frames. Or diffuse over a whole short clip's latent representation jointly, instead of generating each frame's noise independently. Both treat time as another axis the network has to get right, not an afterthought bolted onto single-image diffusion.</p>
   </section>
 
+  <section id="in-the-wild">
+    <h2><span class="num">08</span>Where you meet this in the wild</h2>
+    <p class="lede">Generative modelling stopped being about pretty pictures somewhere around 2022. The interesting uses now are the ones where the thing being sampled is not an image at all.</p>
+
+    <p>The pattern to notice: <strong>diffusion works wherever you can define a sensible way to add noise and a network that can undo it.</strong> Pixels were just the first domain where that was easy. Atoms, weather states, and robot trajectories turned out to work too.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card" style="--wc:var(--c-genai)">
+        <div class="wc-domain">Text-to-image</div>
+        <div class="wc-what">Turning a prompt into an image nobody has drawn</div>
+        <div class="wc-body">The canonical use, and the one that made latent diffusion famous. Stable Diffusion, Midjourney and DALL·E all sample from a learned image distribution conditioned on text. The VAE is what makes it affordable: diffusion runs in a compressed latent space, not on raw pixels.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-sci)">
+        <div class="wc-domain">Structural biology</div>
+        <div class="wc-what">Designing a protein that does not exist yet</div>
+        <div class="wc-body">Baker Lab's <a href="https://www.nature.com/articles/s41586-023-06415-8" target="_blank" rel="noopener">RFdiffusion</a> denoises protein backbones instead of pixels: add Gaussian noise to atom coordinates, train a network to reverse it, then sample entirely new structures. It produced experimentally validated binders and symmetric assemblies, not just plausible-looking output.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-3d)">
+        <div class="wc-domain">Weather</div>
+        <div class="wc-what">Forecasting a distribution, not a single future</div>
+        <div class="wc-body">DeepMind's <a href="https://www.nature.com/articles/s41586-024-08252-9" target="_blank" rel="noopener">GenCast</a> is a diffusion transformer that samples whole 15-day weather trajectories. Because it samples rather than predicts a point estimate, running it repeatedly gives a genuine ensemble — which is exactly what you need to talk about the <em>risk</em> of an extreme event.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-speech)">
+        <div class="wc-domain">Audio</div>
+        <div class="wc-what">Getting from a spectrogram to a waveform</div>
+        <div class="wc-body">This is where GANs are still the pragmatic answer rather than a historical footnote. HiFi-GAN generates a full waveform in one forward pass, which matters when a voice agent has a latency budget measured in milliseconds. See <a href="./13-speech-audio.html">13</a>.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-unsup)">
+        <div class="wc-domain">Quietly, everywhere</div>
+        <div class="wc-what">The VAE as a compressor, not a generator</div>
+        <div class="wc-body">Most production VAEs are not being used to generate anything. They are used for the latent space itself: a compact, smooth representation that something else operates in. That is precisely the job the VAE does inside Stable Diffusion.</div>
+      </div>
+    </div>
+
+    <div class="reach">
+      <div class="reach-col reach-yes">
+        <div class="reach-head">Reach for a generative model when</div>
+        <ul>
+          <li>You need <strong>plausible new samples</strong>, not a label. Data augmentation, simulation, design search.</li>
+          <li>The answer is genuinely <strong>one-to-many</strong>. Many valid images fit a prompt; many valid weather trajectories fit today's readings. A regressor forced to pick one will average them into mush.</li>
+          <li>You need <strong>calibrated uncertainty</strong> and can get it by sampling repeatedly, rather than from a single confidence score.</li>
+          <li>You want a <strong>learned latent space</strong> to work in, and generation is a side effect you may never use.</li>
+        </ul>
+      </div>
+      <div class="reach-col reach-no">
+        <div class="reach-head">Look elsewhere when</div>
+        <ul>
+          <li>You only need a <strong>decision boundary</strong>. A discriminative classifier will be smaller, faster and easier to evaluate.</li>
+          <li>You need <strong>exact likelihoods</strong>. Diffusion and GANs do not give them cleanly. Normalizing flows do, at a cost in expressiveness.</li>
+          <li><strong>Latency is tight and quality is negotiable.</strong> Iterative denoising is many forward passes; a one-shot model may be the better trade.</li>
+          <li>You cannot define what <strong>"realistic"</strong> means for your data well enough to evaluate it. If you cannot tell a good sample from a bad one, you cannot train or ship this.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="deep-dive">
+    <h2><span class="num">09</span>Going deeper: the decisions that change your output</h2>
+    <p class="lede">Everything above explains why diffusion works. This section is about the handful of choices that decide what you actually get out of it.</p>
+
+    <h3>Inside Stable Diffusion, at inference</h3>
+    <p>The pipeline above listed three components, but it did not say what each one costs you at generation time. The distribution is lopsided.</p>
+    <ul>
+      <li>The <strong>text encoder</strong> runs once. Cheap enough to ignore.</li>
+      <li>The <strong>denoising network</strong> runs once per step, and twice per step when guidance is on. This is the entire compute budget.</li>
+      <li>The <strong>VAE decoder</strong> runs once, at the end. Also cheap next to the loop.</li>
+    </ul>
+    <p>So a 30-step generation with classifier-free guidance is 60 forward passes of a large network. Everything else rounds to zero.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">Why the latent space matters more than it sounds</span>
+      <p>The compression is 8× in each spatial dimension: a 512×512 image becomes a 64×64 latent.</p>
+      <p>Eight times in each direction means <strong>64× fewer spatial positions</strong> to process. Every one of those 60 forward passes gets 64× cheaper.</p>
+      <p>That multiplier is the difference between a model that runs on a consumer GPU and one that does not.</p>
+    </div>
+
+    <p>The knobs worth knowing, roughly in order of how much they move the result:</p>
+    <ul>
+      <li><strong>Step count.</strong> Linear in cost. How low you can go depends entirely on the sampler.</li>
+      <li><strong>Guidance scale.</strong> Prompt adherence traded against diversity, covered above.</li>
+      <li><strong>Sampler.</strong> Changes the step floor by an order of magnitude, and costs nothing to swap.</li>
+      <li><strong>Resolution.</strong> Quadratic in cost. Quality also tends to degrade well away from the resolution the model was trained at.</li>
+    </ul>
+
+    <h3>Samplers: same weights, different arithmetic</h3>
+    <p>A <em class="term">sampler</em> is the rule for stepping from <span>$x_t$</span> to <span>$x_{t-1}$</span>, and it is not part of the trained model at all. Swap it whenever you like.</p>
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th>Sampler</th><th>Typical steps</th><th>Deterministic</th><th>Needs training</th></tr></thead>
+        <tbody>
+          <tr><td>DDPM (ancestral)</td><td>Hundreds to ~1000</td><td>No, injects fresh noise each step</td><td>No</td></tr>
+          <tr><td><a href="https://arxiv.org/abs/2010.02502" target="_blank" rel="noopener">DDIM</a></td><td>A few dozen</td><td>Yes</td><td>No</td></tr>
+          <tr><td><a href="https://arxiv.org/abs/2206.00927" target="_blank" rel="noopener">DPM-Solver</a></td><td>10 to 20</td><td>Yes</td><td>No</td></tr>
+          <tr><td>Distilled (e.g. LCM)</td><td>1 to 4</td><td>Yes</td><td>Yes, a distillation run</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><strong>DPM-Solver</strong> treats the reverse process as an ODE and applies a higher-order numerical solver to it. Same network, same weights, better integration. Its authors report high-quality samples in 10 to 20 network evaluations, a 4 to 16× speedup over previous training-free samplers.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The first three rows are the same model</span>
+      <p>DDPM, DDIM and DPM-Solver are not different models. They are different ways of numerically integrating the same learned reverse process.</p>
+      <p>You can download one checkpoint and get any of them. That is why sampler choice is the cheapest large speedup available to you.</p>
+      <p>The fourth row is different in kind. Getting below roughly ten steps means changing the weights.</p>
+    </div>
+
+    <h3>Adaptation without retraining</h3>
+    <p>Almost nobody trains one of these from scratch, so practical work is nearly all adaptation of a checkpoint someone else paid for. Five techniques cover most of what people do, and they differ mainly in how much of the model they are willing to disturb.</p>
+    <ul>
+      <li><strong><a href="https://arxiv.org/abs/2106.09685" target="_blank" rel="noopener">LoRA</a>.</strong> Freeze the base weights and learn a small low-rank update beside them. Proposed for language models, it transfers directly to diffusion. The files are small enough to swap and stack freely.</li>
+      <li><strong><a href="https://arxiv.org/abs/2208.12242" target="_blank" rel="noopener">DreamBooth</a>.</strong> Fine-tune the model on a handful of images of one subject, bound to a rare identifier token. Strong subject fidelity. Also the heaviest option, and the most prone to overfitting a small reference set.</li>
+      <li><strong><a href="https://arxiv.org/abs/2208.01618" target="_blank" rel="noopener">Textual inversion</a>.</strong> Keep the model entirely frozen and learn one new embedding vector for one new token. The smallest possible intervention, and correspondingly limited in what it can express.</li>
+      <li><strong><a href="https://arxiv.org/abs/2302.05543" target="_blank" rel="noopener">ControlNet</a>.</strong> Clone the encoder and train the copy on a spatial conditioning signal: edges, depth, pose, segmentation. This is how you control <em>composition</em> rather than content.</li>
+      <li><strong><a href="https://arxiv.org/abs/2308.06721" target="_blank" rel="noopener">IP-Adapter</a>.</strong> Add a separate cross-attention path for image features, so an image can act as a prompt alongside the text. Roughly 22M parameters, and it composes with the others.</li>
+    </ul>
+    <p>ControlNet has a detail worth stealing for your own work. The trained copy reconnects to the frozen base through <strong>zero-initialised convolutions</strong>. At the start of training those layers output nothing, so the branch is a no-op and cannot damage a working model. It grows its influence from zero as training proceeds.</p>
+
+    <h3>Where GANs still genuinely win</h3>
+    <p>Not many places. The ones that remain are real, though, and worth being precise about.</p>
+    <p>A GAN generator produces its output in <strong>one forward pass</strong>. Diffusion needs several at absolute minimum, usually dozens. When the latency budget is small and fixed, that gap decides the architecture on its own.</p>
+    <ul>
+      <li><strong>Neural vocoding.</strong> HiFi-GAN emits a waveform in a single pass. A voice agent replying in real time cannot afford a denoising loop. See <a href="./13-speech-audio.html">13</a>.</li>
+      <li><strong>Super-resolution and restoration.</strong> Real-ESRGAN-style models are still widely deployed for upscaling, where one pass is enough.</li>
+    </ul>
+    <p>Notice what those share. The output is tightly constrained by the input, so the one-to-many problem that drives mode collapse is much smaller to begin with. Add a hard latency budget and the trade tips toward the GAN.</p>
+
+    <h3>Few-step generation</h3>
+    <p>Better samplers took diffusion from a thousand steps down to roughly ten, which is where training-free cleverness runs out. Going lower means changing the weights, not just integrating them more carefully.</p>
+    <p><strong><a href="https://arxiv.org/abs/2303.01469" target="_blank" rel="noopener">Consistency models</a></strong> are trained so that every point along a trajectory maps directly to that trajectory's endpoint. If that property holds, you can jump straight to the answer instead of walking to it.</p>
+    <p><strong><a href="https://arxiv.org/abs/2310.04378" target="_blank" rel="noopener">Latent consistency models</a></strong> apply the idea to an existing latent diffusion model by distilling it. The authors report 2 to 4 step generation at 768×768, distilled in roughly 32 A100-hours.</p>
+    <p>The trade is consistent across the whole family. You give up some quality and some diversity, you gain a large cut in latency, and you pay a distillation run up front.</p>
+
+    <h3>Evaluation is the real bottleneck</h3>
+    <p>The failure-modes section introduced FID and human preference. Both are weaker than their ubiquity suggests.</p>
+    <p>The <a href="https://arxiv.org/abs/2401.09603" target="_blank" rel="noopener">Rethinking FID</a> analysis lays out the specific problems:</p>
+    <ul>
+      <li>Inception features were trained for classification. They represent the content of modern text-to-image output poorly.</li>
+      <li>FID compares only the first two moments, which assumes the feature distributions are Gaussian. Typically they are not.</li>
+      <li>Sample complexity is poor, so the number you get shifts with how many samples you scored.</li>
+      <li>It can contradict human raters, and does not reliably track gradual improvement in a model.</li>
+    </ul>
+    <p>That paper proposes CMMD instead, pairing CLIP embeddings with a maximum mean discrepancy distance.</p>
+    <p>This is the honest state of the field. Generative quality is easy to see and genuinely hard to measure, and no automated metric settles the question today.</p>
+  </section>
+
   <section id="interview">
-    <h2><span class="num">08</span>Interview questions</h2>
+    <h2><span class="num">10</span>Interview questions</h2>
 
     <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What's the difference between a generative and a discriminative model?</summary>
       <div class="qa-body"><p>A discriminative model learns <span>$P(\text{label}\mid\text{data})$</span> — it only needs a boundary that separates classes, and never has to represent what makes data plausible in the first place. A generative model learns <span>$P(\text{data})$</span> itself, well enough to sample brand-new, never-seen examples from that distribution.</p></div>
@@ -400,7 +549,7 @@
   </section>
 
   <section id="resources">
-    <h2><span class="num">09</span>Go deeper</h2>
+    <h2><span class="num">11</span>Go deeper</h2>
     <div class="resource-grid">
       <a class="resource-card" href="https://arxiv.org/abs/2006.11239" target="_blank" rel="noopener">
         <div class="r-icon">📄</div>
@@ -426,7 +575,7 @@
   </section>
 
   <section id="related">
-    <h2><span class="num">10</span>Related pages</h2>
+    <h2><span class="num">12</span>Related pages</h2>
     <div class="related-grid">
       <a class="related-card" href="./04-neural-network-fundamentals.html"><div class="rc-sec" style="color:var(--c-nn)">04 · Underpins this</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">U-Nets, encoders, decoders — all built from this machinery.</div></a>
       <a class="related-card" href="./08-attention-transformers.html"><div class="rc-sec" style="color:var(--c-attention)">08 · Powers DiT</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">The Diffusion Transformer is this exact block, denoising image patches.</div></a>
