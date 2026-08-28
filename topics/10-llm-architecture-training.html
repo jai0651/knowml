@@ -110,27 +110,27 @@
   <section id="tldr">
     <div class="tldr">
       <div class="tldr-label">TL;DR</div>
-      <p>An LLM is the decoder half of the 2017 Transformer, stacked deep, with one structural tweak — causal masking — trained on a deceptively simple objective: predict the next token. That alone, at internet scale, produces a model that implicitly knows grammar, facts, and a surprising amount of reasoning. Raw pretraining gets you a text completer, not an assistant — supervised fine-tuning (SFT) teaches it to answer in the right format, and preference optimization (RLHF or DPO) teaches it which of several plausible answers humans actually prefer. One sentence for an interview: an LLM is next-token prediction, scaled up and then aligned.</p>
+      <p>An LLM is the decoder half of the 2017 Transformer, stacked deep, with one structural tweak: <strong>causal masking</strong>. The training objective is deceptively simple. Predict the next token. That alone, at internet scale, produces a model that implicitly knows grammar, facts, and a surprising amount of reasoning. But raw pretraining gets you a text completer, not an assistant. <strong>Supervised fine-tuning (SFT)</strong> teaches it to answer in the right format. <strong>Preference optimization</strong> (RLHF or DPO) teaches it which of several plausible answers humans prefer. One sentence for an interview: an LLM is next-token prediction, scaled up and then aligned.</p>
     </div>
   </section>
 
   <section id="timeline">
     <h2><span class="num">01</span>Where this sits in the timeline</h2>
-    <p>Page 09 covers the slow build-up — word embeddings, ELMo, BERT — where NLP still meant picking or designing an architecture per task. This page is about the moment that stopped being necessary.</p>
+    <p>Page 09 covers the slow build-up: word embeddings, ELMo, BERT. Through all of it, NLP still meant picking or designing an architecture per task. This page is about the moment that stopped being necessary.</p>
     <div class="bia">
       <div class="bia-box">
         <div class="bia-label">Before</div>
-        <p>Task-specific models. Translation had its own seq2seq-plus-attention architecture, sentiment analysis had its own classifier, named-entity recognition had its own tagger — even after pretrained embeddings and BERT-style fine-tuning existed, you were still building or fine-tuning a separate architecture, or at least a separate model copy with its own head, per task.</p>
+        <p>Task-specific models. Translation had its own seq2seq-plus-attention architecture. Sentiment analysis had its own classifier. Named-entity recognition had its own tagger. Even after pretrained embeddings and BERT-style fine-tuning existed, you were still building a separate architecture per task, or at least a separate model copy with its own head.</p>
       </div>
       <div class="bia-arrow">→</div>
       <div class="bia-box innovation">
         <div class="bia-label">Innovation</div>
-        <p>GPT (2018) showed a single decoder-only transformer, pretrained with next-token prediction over huge unlabeled text and then lightly fine-tuned, could beat task-specific architectures across the board — one architecture, one objective, many tasks. GPT-3 (2020), 175B parameters, went further: at sufficient scale the model didn't need fine-tuning at all for many tasks — a handful of examples placed directly in the prompt (in-context, "few-shot" learning) was enough.</p>
+        <p>GPT (2018) showed a single decoder-only transformer could beat task-specific architectures across the board. Pretrain with next-token prediction over huge unlabeled text, then fine-tune lightly. <strong>One architecture, one objective, many tasks.</strong> GPT-3 (2020), 175B parameters, went further: at sufficient scale the model didn't need fine-tuning at all for many tasks. A handful of examples placed directly in the prompt (in-context, "few-shot" learning) was enough.</p>
       </div>
       <div class="bia-arrow">→</div>
       <div class="bia-box">
         <div class="bia-label">After</div>
-        <p>Two 2022 papers reset how the field builds and trains these models. InstructGPT showed that SFT followed by RLHF turns a raw pretrained completer into a model that actually follows instructions — the recipe behind the first wave of usable chat assistants. Chinchilla showed that most of those large models were trained wrong in a specific, measurable way — undertrained relative to their size — and corrected how labs allocate a fixed compute budget between model size and data.</p>
+        <p>Two 2022 papers reset how the field builds and trains these models. <strong>InstructGPT</strong> showed that SFT followed by RLHF turns a raw pretrained completer into a model that follows instructions. That was the recipe behind the first wave of usable chat assistants. <strong>Chinchilla</strong> showed that most large models were trained wrong in a specific, measurable way: undertrained relative to their size. It corrected how labs allocate a fixed compute budget between model size and data.</p>
       </div>
     </div>
   </section>
@@ -138,16 +138,48 @@
   <section id="intuition">
     <h2><span class="num">02</span>The intuition, before any math</h2>
     <p class="lede">An LLM is not a new architecture. It's the decoder half of the transformer you already know, with nothing else attached.</p>
-    <p>In 08 you met two flavors of transformer block: the encoder block, bidirectional, where every token sees every other token in both directions — the BERT half — and the decoder block, causal, where a token can only see itself and whatever came before it. The single structural change that makes a model into "an LLM" in the GPT/decoder-only sense is: keep only the causal block, stack it 12 to 100+ times, and put a vocabulary-sized output layer on top. That's it. No new attention mechanism, no new normalization trick — just delete the encoder, delete cross-attention, and stack the piece you already understand.</p>
-    <p>The training objective is almost insultingly simple: given some text, predict the next token. Given "The capital of France is", predict "Paris". That's next-token prediction, and the reason it works so well is that it's <em>free supervision</em> — every sentence that has ever been written is automatically a training example, no human needs to label anything. And here's the part that isn't obvious until you sit with it: to get good at predicting the next token across a large enough and diverse enough pile of text, the model is forced to implicitly learn far more than "what word comes next." Predicting the token after "The capital of France is" well requires actually encoding the fact that Paris is that capital. Predicting the next line of a step-by-step derivation requires tracking the intermediate state of the problem, not just mimicking surface style. Predicting the next token in grammatical text requires an implicit model of syntax. None of this is programmed in — it falls out as a side effect of being good at the one task the model was actually asked to do.</p>
-    <p>What next-token prediction alone does <em>not</em> give you is a model that behaves like an assistant. Left alone, a pretrained model just continues text plausibly — asked a question, it might answer, might restate the question, might trail off into a list of similar questions, because all of those are things that follow a question somewhere on the internet. Getting from "plausible continuation of internet text" to "helpful, on-format answer that stops in the right place" is the job of everything that happens after pretraining — SFT, then RLHF or DPO — which is most of the rest of this page.</p>
+    <p>In 08 you met two flavors of transformer block:</p>
+
+    <ul>
+      <li><strong>Encoder block.</strong> Bidirectional. Every token sees every other token in both directions. The BERT half.</li>
+      <li><strong>Decoder block.</strong> Causal. A token sees only itself and whatever came before it.</li>
+    </ul>
+
+    <p>Turning that into "an LLM" in the GPT/decoder-only sense takes one structural change:</p>
+
+    <ul>
+      <li>Keep only the <em class="term">causal block</em>.</li>
+      <li>Stack it 12 to 100+ times.</li>
+      <li>Put a vocabulary-sized output layer on top.</li>
+    </ul>
+
+    <p>That's it. No new attention mechanism, no new normalization trick. Delete the encoder, delete cross-attention, and stack the piece you already understand.</p>
+    <p>The training objective is almost insultingly simple. Given some text, predict the next token. Given "The capital of France is", predict "Paris".</p>
+
+    <p>That is <strong>next-token prediction</strong>. It works so well because it is <em class="term">free supervision</em>: every sentence ever written is automatically a training example. No human needs to label anything.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">Why predicting one word teaches far more than one word</span>
+      <p>To get good at next-token prediction across a large and diverse enough pile of text, the model is forced to implicitly learn much more than "what word comes next."</p>
+      <ul>
+        <li>Predicting the token after "The capital of France is" requires encoding the <strong>fact</strong> that Paris is that capital.</li>
+        <li>Predicting the next line of a step-by-step derivation requires tracking the <strong>intermediate state</strong> of the problem, not just mimicking surface style.</li>
+        <li>Predicting the next token in grammatical text requires an implicit model of <strong>syntax</strong>.</li>
+      </ul>
+      <p>None of this is programmed in. It falls out as a side effect of being good at the one task the model was asked to do.</p>
+    </div>
+    <p>What next-token prediction alone does <em>not</em> give you is a model that behaves like an assistant. Left alone, a pretrained model just continues text plausibly. Asked a question, it might answer. It might restate the question. It might trail off into a list of similar questions. All of those follow a question somewhere on the internet.</p>
+
+    <p>Getting from "plausible continuation of internet text" to "helpful, on-format answer that stops in the right place" is the job of everything after pretraining: SFT, then RLHF or DPO. That is most of the rest of this page.</p>
   </section>
 
   <section id="architecture">
     <h2><span class="num">03</span>Architecture: from decoder-only block to training pipeline</h2>
 
     <h3>The one structural change from 08: causal masking</h3>
-    <p>You can take the exact block-anatomy diagram from 08 — LayerNorm, multi-head self-attention, residual add, LayerNorm, feed-forward, residual add — and relabel it almost unchanged. The only thing that turns it into a GPT-style block is masking: before the softmax in <span>$QK^\top$</span>, every score for a key position after the query position gets set to <span>$-\infty$</span>, so position <span>$i$</span> can only attend to positions <span>$\le i$</span>. Stack that block <span>$N$</span> times, add a final LayerNorm and a linear projection from <span>$d_{model}$</span> back to vocabulary size, and you have a decoder-only LLM.</p>
+    <p>Take the exact block-anatomy diagram from 08 (LayerNorm, multi-head self-attention, residual add, LayerNorm, feed-forward, residual add) and relabel it almost unchanged. The only thing that turns it into a GPT-style block is <strong>masking</strong>. Before the softmax in <span>$QK^\top$</span>, every score for a key position after the query position gets set to <span>$-\infty$</span>. So position <span>$i$</span> can only attend to positions <span>$\le i$</span>.</p>
+
+    <p>Stack that block <span>$N$</span> times, add a final LayerNorm and a linear projection from <span>$d_{model}$</span> back to vocabulary size, and you have a decoder-only LLM.</p>
 
     <div class="diagram">
       <div class="diagram-title">Decoder-only stack — causal masking is the only structural addition
@@ -234,11 +266,19 @@
     </div>
 
     <h3>Tokenization: why vocabulary size is a real design tradeoff</h3>
-    <p>An LLM doesn't read characters or whole words — it reads tokens, chunks produced by a subword tokenizer, almost always something in the BPE (byte-pair encoding) family. The idea, conceptually: start from individual characters or bytes, then repeatedly merge the most frequent adjacent pair into a new token, building a vocabulary that mixes common whole words ("the" ends up as one token) with subword pieces for anything rarer. Any string can still be represented, because you can always fall back to individual characters or bytes — there's no "unknown token" escape hatch the way there was for whole-word vocabularies.</p>
-    <p>Vocabulary size is a genuine three-way tradeoff, not a free parameter to just crank up. A larger vocabulary packs more meaning per token, so the same text becomes a shorter sequence — less compute spent per unit of content, since attention cost grows with sequence length (08). But it also means a bigger embedding table and output projection (both scale with vocab size <span>$\times\ d_{model}$</span>), and rarer tokens see less training signal each, since the same corpus now spreads its counts across more distinct ids. A smaller vocabulary keeps those tables lean and gives every token plenty of signal, but burns more context budget on ordinary text, and shreds rare words — a chemical name, a low-resource language — into many small pieces just to represent them.</p>
+    <p>An LLM doesn't read characters or whole words. It reads <em class="term">tokens</em>: chunks produced by a subword tokenizer, almost always something in the BPE (byte-pair encoding) family. Conceptually, start from individual characters or bytes, then repeatedly merge the most frequent adjacent pair into a new token. The result is a vocabulary that mixes common whole words ("the" ends up as one token) with subword pieces for anything rarer. Any string can still be represented, because you can always fall back to individual characters or bytes. There's no "unknown token" escape hatch the way there was for whole-word vocabularies.</p>
+    <p>Vocabulary size is a genuine three-way tradeoff, not a free parameter to crank up.</p>
+
+    <ul>
+      <li><strong>Bigger vocabulary packs more meaning per token.</strong> The same text becomes a shorter sequence, so less compute is spent per unit of content, since attention cost grows with sequence length (08).</li>
+      <li><strong>But bigger costs you twice.</strong> A larger embedding table and output projection (both scale with vocab size <span>$\times\ d_{model}$</span>), and rarer tokens see less training signal each, since the same corpus spreads its counts across more distinct ids.</li>
+      <li><strong>Smaller vocabulary keeps those tables lean</strong> and gives every token plenty of signal. But it burns more context budget on ordinary text, and shreds rare words (a chemical name, a low-resource language) into many small pieces just to represent them.</li>
+    </ul>
 
     <h3>Embedding table, output projection, and weight tying</h3>
-    <p>The embedding table maps each of the <span>$V$</span> vocabulary ids to a learned <span>$d_{model}$</span>-dimensional vector — a <span>$(V, d_{model})$</span> lookup table, trained like any other weight. The output projection does the mirror-image job: map the final hidden state back to a <span>$V$</span>-dimensional vector of logits that softmax turns into the next-token distribution. Since both matrices are the same shape transposed, it's common to literally share the weights between them — weight tying — which cuts a real chunk of parameters (these tables can be a large fraction of total parameters in smaller models) and tends to regularize training, since the same vector now has to work both as "what this token means going in" and "what this token would mean coming out."</p>
+    <p>The embedding table maps each of the <span>$V$</span> vocabulary ids to a learned <span>$d_{model}$</span>-dimensional vector: a <span>$(V, d_{model})$</span> lookup table, trained like any other weight. The output projection does the mirror-image job. It maps the final hidden state back to a <span>$V$</span>-dimensional vector of logits, which softmax turns into the next-token distribution.</p>
+
+    <p>Both matrices are the same shape transposed, so it's common to share the weights between them. That is <strong>weight tying</strong>. It cuts a real chunk of parameters (these tables can be a large fraction of total parameters in smaller models) and tends to regularize training, since the same vector now has to work both as "what this token means going in" and "what this token would mean coming out."</p>
 
     <h3>The training pipeline, end to end</h3>
     <p>Pretraining alone gives you a next-token predictor with broad implicit knowledge and no idea how to behave like an assistant. Getting from there to a usable model is a pipeline, not a single step:</p>
@@ -291,28 +331,61 @@
     </div>
 
     <h3>Scaling laws: Chinchilla and the size/data tradeoff</h3>
-    <p>Training compute is well approximated by <span>$C \approx 6ND$</span> FLOPs, where <span>$N$</span> is parameter count and <span>$D$</span> is training tokens (roughly 2 FLOPs per parameter per token forward, another 4 backward). Before 2022, the implicit assumption behind most large-model training was "bigger model, better model" — pour a fixed budget mostly into <span>$N$</span> and train on whatever <span>$D$</span> happens to fit the schedule. Hoffmann et al.'s Chinchilla paper (2022) tested that directly, training over 400 models across a range of sizes and token counts and fitting how loss depends on both under a fixed compute budget. Their finding: loss is minimized when <span>$N$</span> and <span>$D$</span> scale together, roughly proportionally — about 20 training tokens per parameter in their fitted regime — not by maximizing <span>$N$</span> alone. Fix <span>$C$</span>, and this is a genuine tradeoff: spend the budget on a bigger model and <span>$D$</span> must shrink; spend it on more data and <span>$N$</span> must shrink.</p>
-    <p>Chinchilla itself was 70B parameters trained on roughly 4x more tokens than Gopher (280B parameters) for the same training compute — and it beat Gopher, GPT-3, and other larger contemporaries trained on that older, size-heavy recipe. The practical consequence for anyone making a real training-budget decision: model size and data budget aren't separable choices you pick in isolation — a model that's "big enough" but starved of tokens for its size is, in Chinchilla's own framing, substantially undertrained.</p>
+    <p>Training compute is well approximated by <span>$C \approx 6ND$</span> FLOPs, where <span>$N$</span> is parameter count and <span>$D$</span> is training tokens (roughly 2 FLOPs per parameter per token forward, another 4 backward).</p>
+
+    <p>Before 2022, the implicit assumption behind most large-model training was "bigger model, better model": pour a fixed budget mostly into <span>$N$</span> and train on whatever <span>$D$</span> happens to fit the schedule. Hoffmann et al.'s <strong>Chinchilla</strong> paper (2022) tested that directly, training over 400 models across a range of sizes and token counts and fitting how loss depends on both under a fixed compute budget.</p>
+
+    <p>Their finding: loss is minimized when <span>$N$</span> and <span>$D$</span> scale together, roughly proportionally. About 20 training tokens per parameter in their fitted regime, not by maximizing <span>$N$</span> alone. Fix <span>$C$</span> and this becomes a genuine tradeoff. Spend the budget on a bigger model and <span>$D$</span> must shrink. Spend it on more data and <span>$N$</span> must shrink.</p>
+    <p>Chinchilla itself was 70B parameters trained on roughly 4x more tokens than Gopher (280B parameters) for the same training compute. It beat Gopher, GPT-3, and other larger contemporaries trained on that older, size-heavy recipe. The practical consequence: model size and data budget aren't separable choices you pick in isolation. A model that is "big enough" but starved of tokens for its size is, in Chinchilla's own framing, <strong>substantially undertrained</strong>.</p>
 
     <h3>Supervised fine-tuning (SFT)</h3>
-    <p>A freshly pretrained model is a very good predictor of "whatever plausibly follows this text" — which includes answering your question, but also restating it, imitating a bad forum reply, or trailing off, because all of those are plausible continuations of internet text too. SFT fixes this with the exact same next-token-prediction loss you already know, just on a different, much smaller, curated dataset: (instruction, ideal response) pairs, usually written or vetted by humans, in a consistent template. The model is trained to predict the response tokens given the instruction — no new architecture, no new loss, just a distribution shift in what "plausible continuation" means. This step alone is what turns a raw completer into something that reliably answers in the right format and stops in the right place; the alignment stages that follow refine which of several plausible SFT-style answers humans actually prefer, they don't teach instruction-following from scratch.</p>
+    <p>A freshly pretrained model is a very good predictor of "whatever plausibly follows this text." That includes answering your question. It also includes restating it, imitating a bad forum reply, or trailing off, because all of those are plausible continuations of internet text too.</p>
+
+    <p><strong>SFT</strong> fixes this with the exact same next-token-prediction loss you already know, on a different and much smaller curated dataset: (instruction, ideal response) pairs, usually written or vetted by humans, in a consistent template. The model is trained to predict the response tokens given the instruction. No new architecture, no new loss. Just a distribution shift in what "plausible continuation" means.</p>
+
+    <p>This step alone turns a raw completer into something that reliably answers in the right format and stops in the right place. The alignment stages that follow refine which of several plausible SFT-style answers humans prefer. They don't teach instruction-following from scratch.</p>
 
     <h3>Preference optimization: RLHF vs DPO</h3>
-    <p>SFT teaches a plausible, on-format response. It doesn't teach the model which of several plausible responses people actually prefer — more concise vs. more thorough, direct vs. hedged, correct-but-blunt vs. correct-and-tactful. That's a preference, not a fact you can supervise with one correct label, and it's what the stage after SFT is for. Two recipes dominate. RLHF, used for InstructGPT (2022), trains a separate reward model on human-labeled comparisons ("given two responses to this prompt, which do you prefer?"), then runs an actual reinforcement-learning loop (PPO) that updates the SFT model to produce higher-reward outputs, with a KL penalty holding it close to the SFT starting point so it doesn't drift into degenerate, reward-hacking territory. DPO (2023) reaches the same alignment objective through a mathematical shortcut, spelled out term by term in the Math section below: skip the reward model, skip the RL loop, and optimize directly on the preference pairs with a single supervised-style loss.</p>
+    <p>SFT teaches a plausible, on-format response. It doesn't teach the model which of several plausible responses people prefer: more concise vs. more thorough, direct vs. hedged, correct-but-blunt vs. correct-and-tactful. That is a preference, not a fact you can supervise with one correct label. It is what the stage after SFT is for.</p>
+
+    <p>Two recipes dominate:</p>
+
+    <ul>
+      <li><strong>RLHF</strong>, used for InstructGPT (2022). Train a separate reward model on human-labeled comparisons ("given two responses to this prompt, which do you prefer?"). Then run an actual reinforcement-learning loop (PPO) that updates the SFT model toward higher-reward outputs, with a KL penalty holding it close to the SFT starting point so it doesn't drift into degenerate, reward-hacking territory.</li>
+      <li><strong>DPO</strong> (2023). Reaches the same alignment objective through a mathematical shortcut, spelled out term by term in the Math section below. Skip the reward model, skip the RL loop, and optimize directly on the preference pairs with a single supervised-style loss.</li>
+    </ul>
 
     <h3>Quantization and LoRA/QLoRA: the two big levers for cheap adaptation and deployment</h3>
-    <p>These solve two different problems that get conflated because they're often used together. Quantization is a deployment lever: take an already-trained model's weights, stored in 16-bit floating point, and represent them with fewer bits — 8-bit, 4-bit, sometimes lower — shrinking memory footprint and often speeding up inference, at the cost of some numerical precision. Post-training quantization (PTQ) does this after training with no gradient updates, just a calibration pass to pick good quantization ranges — cheap, with usually small but non-uniform quality loss (arithmetic and rare factual recall tend to degrade first). Quantization-aware training (QAT) simulates the quantization <em>during</em> training, so the weights adapt to the precision loss as they're learned — better accuracy at the target precision, at the cost of an actual training run.</p>
-    <p>LoRA is an adaptation lever, not a deployment one. Instead of updating all of a pretrained model's weights during fine-tuning, freeze the base weight matrix <span>$W_0$</span> entirely and learn a small low-rank update alongside it: <span>$W = W_0 + BA$</span>, where <span>$B \in \mathbb{R}^{d\times r}$</span>, <span>$A \in \mathbb{R}^{r\times k}$</span>, and the rank <span>$r$</span> is tiny compared to <span>$d$</span> and <span>$k$</span>. You back-propagate into only <span>$B$</span> and <span>$A$</span> — a tiny fraction of the parameter count — which drastically cuts optimizer memory and lets you store and swap many task-specific adapters against one shared frozen base. QLoRA combines both levers: quantize the frozen base to 4-bit to shrink memory further, then run LoRA fine-tuning on top of that quantized base, which is what makes fine-tuning a large model feasible on a single consumer-class GPU.</p>
+    <p>These solve two different problems that get conflated because they are often used together.</p>
+
+    <p><strong>Quantization</strong> is a deployment lever. Take an already-trained model's weights, stored in 16-bit floating point, and represent them with fewer bits: 8-bit, 4-bit, sometimes lower. That shrinks memory footprint and often speeds up inference, at the cost of some numerical precision. Two variants:</p>
+
+    <ul>
+      <li><strong>Post-training quantization (PTQ).</strong> Done after training with no gradient updates, just a calibration pass to pick good quantization ranges. Cheap, with usually small but non-uniform quality loss (arithmetic and rare factual recall tend to degrade first).</li>
+      <li><strong>Quantization-aware training (QAT).</strong> Simulates the quantization <em>during</em> training, so the weights adapt to the precision loss as they are learned. Better accuracy at the target precision, at the cost of an actual training run.</li>
+    </ul>
+    <p><strong>LoRA</strong> is an adaptation lever, not a deployment one. Instead of updating all of a pretrained model's weights during fine-tuning, freeze the base weight matrix <span>$W_0$</span> entirely and learn a small low-rank update alongside it: <span>$W = W_0 + BA$</span>, where <span>$B \in \mathbb{R}^{d\times r}$</span>, <span>$A \in \mathbb{R}^{r\times k}$</span>, and the rank <span>$r$</span> is tiny compared to <span>$d$</span> and <span>$k$</span>.</p>
+
+    <p>You back-propagate into only <span>$B$</span> and <span>$A$</span>, a tiny fraction of the parameter count. That drastically cuts optimizer memory and lets you store and swap many task-specific adapters against one shared frozen base. <strong>QLoRA</strong> combines both levers: quantize the frozen base to 4-bit to shrink memory further, then run LoRA fine-tuning on top of that quantized base. That is what makes fine-tuning a large model feasible on a single consumer-class GPU.</p>
 
     <h3>Mixture-of-experts: decoupling parameter count from compute-per-token</h3>
-    <p>A dense transformer's feed-forward layer runs every token through the same weights — more parameters there means more compute for every token, no exceptions. MoE breaks that coupling: replace the single FFN with a bank of <span>$E$</span> parallel expert FFNs plus a small learned router, and for each token the router selects only the top-<span>$k$</span> experts (commonly 1 or 2) to actually run.</p>
+    <p>A dense transformer's feed-forward layer runs every token through the same weights. More parameters there means more compute for every token, no exceptions. <strong>MoE</strong> breaks that coupling. Replace the single FFN with a bank of <span>$E$</span> parallel expert FFNs plus a small learned router. For each token, the router selects only the top-<span>$k$</span> experts (commonly 1 or 2) to run.</p>
     <div class="eq-block">
       <span>$$y = \sum_{i \,\in\, \text{TopK}(x)} g_i(x)\, E_i(x)$$</span>
     </div>
-    <p>Here <span>$g_i(x)$</span> is the router's weight for expert <span>$i$</span> on input <span>$x$</span>, and only the selected experts do any compute — the rest cost nothing for that token. The result: a model can have an enormous total parameter count spread across all its experts, while compute per forward pass reflects only the handful actually activated — more total capacity without paying its full compute cost every token. The real cost shows up in training: without an auxiliary load-balancing loss encouraging the router to spread tokens evenly, it collapses onto a favorite few experts and you lose the benefit you paid to build.</p>
+    <p>Here <span>$g_i(x)$</span> is the router's weight for expert <span>$i$</span> on input <span>$x$</span>. Only the selected experts do any compute; the rest cost nothing for that token. The result: a model can have an enormous total parameter count spread across all its experts, while compute per forward pass reflects only the handful activated. More total capacity, without paying its full compute cost on every token.</p>
+
+    <p>The real cost shows up in training. Without an auxiliary load-balancing loss encouraging the router to spread tokens evenly, it collapses onto a favorite few experts, and you lose the benefit you paid to build.</p>
 
     <h3>Serving basics, briefly — the rest lives in 23</h3>
-    <p>Two things matter at a conceptual level because they shape how you reason about training and architecture choices, even though the deep systems treatment belongs elsewhere. The KV cache (introduced in 08): during autoregressive generation the model caches every past token's key and value vectors instead of recomputing attention over the whole prefix at every step — it's now a first-class cost of running an LLM product, often the dominant memory consumer on a serving GPU for long conversations. Batching: a serving system groups multiple requests together so the GPU processes them in parallel, trading a little per-request latency for much higher throughput. The deep systems treatment of this — paged attention, continuous batching, tensor/pipeline parallelism, and quantization-for-serving tradeoffs — lives in 23 (Efficient AI &amp; Systems); this page only covers what you need to reason about training and architecture tradeoffs, not how to operate a serving fleet.</p>
+    <p>Two things matter at a conceptual level, because they shape how you reason about training and architecture choices:</p>
+
+    <ul>
+      <li><strong>The KV cache</strong> (introduced in 08). During autoregressive generation the model caches every past token's key and value vectors instead of recomputing attention over the whole prefix at every step. It is now a first-class cost of running an LLM product, often the dominant memory consumer on a serving GPU for long conversations.</li>
+      <li><strong>Batching.</strong> A serving system groups multiple requests together so the GPU processes them in parallel, trading a little per-request latency for much higher throughput.</li>
+    </ul>
+
+    <p>The deep systems treatment (paged attention, continuous batching, tensor/pipeline parallelism, and quantization-for-serving tradeoffs) lives in 23 (Efficient AI &amp; Systems). This page covers only what you need to reason about training and architecture tradeoffs, not how to operate a serving fleet.</p>
 
     <h3>The long tail, briefly</h3>
     <ul>
@@ -355,9 +428,23 @@
   <section id="why">
     <h2><span class="num">05</span>Why these choices, not the obvious alternatives</h2>
     <h3>Why decoder-only won over encoder-decoder for general-purpose LLMs</h3>
-    <p>Encoder-decoder makes sense when input and output are structurally different sequences with a clean split — a source sentence and a target sentence in translation, a document and its summary. A general-purpose assistant doesn't have that clean split: the "task" might be a question, a document to summarize, code to complete, or a partial conversation, and the boundary between prompt and completion is just wherever generation happens to start, not a structural property baked into the task. Decoder-only treats the prompt as a prefix in the same sequence as the completion, processed by the exact same weights and the exact same causal-attention mechanism as the response — no architectural commitment to a fixed input/output split, so one model handles completion, question-answering, chat, and code without changing shape. It also composes naturally with in-context learning: since the whole context — instructions, examples, new query — is one sequence attended to causally, the model reads a few examples immediately before generating, which is exactly what GPT-3's few-shot prompting exploits.</p>
+    <p>Encoder-decoder makes sense when input and output are structurally different sequences with a clean split: a source sentence and a target sentence in translation, a document and its summary.</p>
+
+    <p>A general-purpose assistant has no such split. The "task" might be a question, a document to summarize, code to complete, or a partial conversation. The boundary between prompt and completion is just wherever generation happens to start, not a structural property baked into the task.</p>
+
+    <p>Decoder-only treats the prompt as a prefix in the same sequence as the completion, processed by the exact same weights and the exact same causal-attention mechanism as the response. There is no architectural commitment to a fixed input/output split, so <strong>one model handles completion, question-answering, chat, and code without changing shape</strong>.</p>
+
+    <p>It also composes naturally with in-context learning. The whole context (instructions, examples, new query) is one sequence attended to causally, so the model reads a few examples immediately before generating. That is exactly what GPT-3's few-shot prompting exploits.</p>
     <h3>Why DPO gained adoption alongside — and often instead of — full RLHF</h3>
-    <p>Standard RLHF needs three models trained in sequence: the SFT model, a reward model trained on human preference pairs, and a policy optimized against that reward model with PPO — a genuine RL loop, with rollouts, a value function, clipping, and the usual RL instability and reward-hacking risk. DPO shows a shortcut: the optimal policy for that same KL-constrained RLHF objective has a closed form directly in terms of the reward function. Substitute that closed form into the Bradley-Terry preference model already used to train the reward model, and the reward model cancels out algebraically — you're left with a loss defined purely on the policy's own likelihoods for preferred vs. dispreferred responses. Same alignment objective in theory, reached with one supervised-style training loop instead of three sequential stages, no reward model to maintain separately, no PPO rollouts. That's the actual selling point, and it's why DPO and its descendants spread quickly through open-source and production fine-tuning pipelines after 2023.</p>
+    <p>Standard RLHF needs three models trained in sequence: the SFT model, a reward model trained on human preference pairs, and a policy optimized against that reward model with PPO. That last stage is a genuine RL loop, with rollouts, a value function, clipping, and the usual RL instability and reward-hacking risk.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">Where the reward model disappears</span>
+      <p>The optimal policy for that same KL-constrained RLHF objective has a <strong>closed form</strong> directly in terms of the reward function.</p>
+      <p>Substitute that closed form into the Bradley-Terry preference model already used to train the reward model, and the reward model <em>cancels out algebraically</em>. What is left is a loss defined purely on the policy's own likelihoods for preferred vs. dispreferred responses.</p>
+    </div>
+
+    <p>Same alignment objective in theory, reached with one supervised-style training loop instead of three sequential stages. No reward model to maintain separately, no PPO rollouts. That is the selling point, and it is why DPO and its descendants spread quickly through open-source and production fine-tuning pipelines after 2023.</p>
   </section>
 
   <section id="tradeoffs">
@@ -384,16 +471,32 @@
 
     <div class="callout callout-status">
       <span class="callout-label">2026 status</span>
-      <p>Reasoning-focused post-training — extra RL or search-based training aimed specifically at multi-step problem solving, on top of the SFT/RLHF/DPO recipe described here — is an active, fast-moving research area, as are preference-optimization variants that go beyond vanilla DPO. Treat the exact recipe used by any specific current model as a moving target rather than something this page can pin down precisely; the underlying building blocks (pretraining, SFT, preference optimization, quantized deployment) are stable enough to be worth knowing cold regardless of which variant is fashionable this quarter.</p>
+      <p>Reasoning-focused post-training is an active, fast-moving research area: extra RL or search-based training aimed specifically at multi-step problem solving, layered on top of the SFT/RLHF/DPO recipe described here. So are preference-optimization variants that go beyond vanilla DPO.</p>
+      <p>Treat the exact recipe used by any specific current model as a moving target. The underlying building blocks (pretraining, SFT, preference optimization, quantized deployment) are stable enough to be worth knowing cold, whichever variant is fashionable this quarter.</p>
     </div>
   </section>
 
   <section id="applications">
     <h2><span class="num">07</span>Worked example and a production use case</h2>
     <h3>Scaling-law arithmetic (illustrative)</h3>
-    <p>Fix a compute budget and use <span>$C \approx 6ND$</span>. Say, purely for clean arithmetic, <span>$C = 6\times10^{22}$</span> FLOPs (illustrative — not a real training run). Chinchilla's fitted rule of thumb says the compute-optimal split is roughly <span>$D \approx 20N$</span> tokens per parameter. Substitute: <span>$6\times10^{22} = 6\cdot N\cdot(20N) = 120N^2 \Rightarrow N^2 \approx 5\times10^{20} \Rightarrow N \approx 22\text{B parameters}$</span>, trained on <span>$D \approx 20\times22\text{B} \approx 440\text{B tokens}$</span>. Compare that to what many pre-Chinchilla efforts actually did: fix a large <span>$N$</span> (GPT-3-scale, 175B) and train on however many tokens the schedule allowed, often far fewer than 20 per parameter — those models were, by Chinchilla's own framing, substantially undertrained for their size. The verified headline result behind this reasoning: Chinchilla, 70B parameters trained on roughly 1.4 trillion tokens, compute-matched to Gopher's 280B parameters and 300B tokens, outperformed Gopher, GPT-3, and several other larger contemporaries trained on the same compute budget.</p>
+    <p>Fix a compute budget and use <span>$C \approx 6ND$</span>. Say, purely for clean arithmetic, <span>$C = 6\times10^{22}$</span> FLOPs (illustrative, not a real training run). Chinchilla's fitted rule of thumb says the compute-optimal split is roughly <span>$D \approx 20N$</span> tokens per parameter.</p>
+
+    <p>Substitute: <span>$6\times10^{22} = 6\cdot N\cdot(20N) = 120N^2 \Rightarrow N^2 \approx 5\times10^{20} \Rightarrow N \approx 22\text{B parameters}$</span>, trained on <span>$D \approx 20\times22\text{B} \approx 440\text{B tokens}$</span>.</p>
+
+    <p>Compare that to what many pre-Chinchilla efforts did. Fix a large <span>$N$</span> (GPT-3-scale, 175B), then train on however many tokens the schedule allowed, often far fewer than 20 per parameter. Those models were, by Chinchilla's own framing, <strong>substantially undertrained for their size</strong>.</p>
+
+    <p>The verified headline result behind this reasoning: Chinchilla, 70B parameters trained on roughly 1.4 trillion tokens, compute-matched to Gopher's 280B parameters and 300B tokens, outperformed Gopher, GPT-3, and several other larger contemporaries trained on the same compute budget.</p>
     <h3>Production use case</h3>
-    <p>A modern assistant product's pipeline maps onto this page almost exactly. Web-scale pretraining (next-token prediction) builds the base model's broad knowledge and language competence. SFT on curated instruction-response pairs teaches it to answer on-format. Preference optimization — RLHF or DPO, using human or model-assisted preference judgments — teaches it which of several plausible answers people actually want. The resulting weights are then quantized, and sometimes distilled into a smaller model, to make serving affordable — with KV-cache and batching handling request-level efficiency (full treatment in 23). Everything sitting on top at inference time — a system prompt, tool/function-calling scaffolding, retrieval — is applied to this already-trained stack, not baked into training itself; that's exactly where 11 picks up.</p>
+    <p>A modern assistant product's pipeline maps onto this page almost exactly:</p>
+
+    <ul>
+      <li><strong>Pretraining.</strong> Web-scale next-token prediction builds the base model's broad knowledge and language competence.</li>
+      <li><strong>SFT.</strong> Curated instruction-response pairs teach it to answer on-format.</li>
+      <li><strong>Preference optimization.</strong> RLHF or DPO, using human or model-assisted preference judgments, teaches it which of several plausible answers people want.</li>
+      <li><strong>Deployment.</strong> The resulting weights are quantized, and sometimes distilled into a smaller model, to make serving affordable, with KV-cache and batching handling request-level efficiency (full treatment in 23).</li>
+    </ul>
+
+    <p>Everything sitting on top at inference time (a system prompt, tool/function-calling scaffolding, retrieval) is applied to this already-trained stack, not baked into training itself. That is exactly where 11 picks up.</p>
   </section>
 
   <section id="interview">

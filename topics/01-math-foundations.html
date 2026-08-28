@@ -110,14 +110,23 @@
   <section id="tldr">
     <div class="tldr">
       <div class="tldr-label">TL;DR</div>
-      <p>Every model you train is three things wearing a trench coat: a function with parameters, a loss function that scores how wrong its outputs are, and an optimizer that uses gradients to nudge the parameters toward lower loss. Probability tells you which loss is the right one for a given kind of output — cross-entropy for classification, not MSE — and how to reason about uncertainty once the model exists. Almost everything below is in service of one loop: predict → measure error → compute a gradient via the chain rule → step downhill → repeat. One line for an interview: training is optimization, and the loss function is where your probabilistic assumptions about the data actually live.</p>
+      <p>Every model you train is three things wearing a trench coat: a <strong>function</strong> with parameters, a <strong>loss function</strong> that scores how wrong its outputs are, and an <strong>optimizer</strong> that uses gradients to nudge the parameters toward lower loss.</p>
+      <p>Probability decides which loss is right for a given kind of output (cross-entropy for classification, not MSE), and how to reason about uncertainty once the model exists. Almost everything below serves one loop: predict → measure error → compute a gradient via the chain rule → step downhill → repeat.</p>
+      <p>One line for an interview: training is optimization, and the loss function is where your probabilistic assumptions about the data live.</p>
     </div>
   </section>
 
   <section id="timeline">
     <h2><span class="num">01</span>Why interviewers test this, and where it comes from</h2>
-    <p>This page isn't one architecture with one origin story — it's the toolkit underneath all of them. That's exactly why it gets tested constantly: an interviewer can ask you to derive a gradient, state Bayes' theorem, or explain why cross-entropy beats MSE at any point in a loop, regardless of whether the role is LLMs, recommenders, or computer vision. If this layer is shaky, it shows up as hesitation on questions that have nothing to do with your specialization.</p>
-    <p>None of these ideas were invented for deep learning. Deep learning borrowed all of them from centuries of math and statistics and wired them together into one training loop.</p>
+    <p>This page isn't one architecture with one origin story. It's the toolkit underneath all of them.</p>
+    <p>That's why it gets tested constantly. Whatever the role, an interviewer can drop one of these at any point in a loop:</p>
+    <ul>
+      <li>Derive a gradient.</li>
+      <li>State Bayes' theorem.</li>
+      <li>Explain why cross-entropy beats MSE.</li>
+    </ul>
+    <p>None of those questions care whether you work on LLMs, recommenders, or computer vision. If this layer is shaky, it shows up as hesitation on questions that have nothing to do with your specialization.</p>
+    <p>None of these ideas were invented for deep learning. Deep learning borrowed all of them from centuries of math and statistics, then wired them together into one training loop.</p>
     <div class="callout callout-teach">
       <span class="callout-label">Where these ideas actually entered the timeline</span>
       <ul>
@@ -133,32 +142,82 @@
   <section id="intuition">
     <h2><span class="num">02</span>The intuition, before any math</h2>
     <p class="lede">Nearly everything below is answering one of two questions: "which direction makes this number smaller?" or "how confident should I be, given what I've seen?"</p>
-    <p>Gradient descent answers the first question. Imagine standing on a hilly, fog-covered landscape, trying to reach the lowest point, but you can't see more than a foot in any direction. The only thing you can sense is the slope under your feet right now. So you feel which way is downhill, take a step, and repeat. The gradient is that local slope — a vector pointing in the direction of steepest <em>increase</em> — so you walk the opposite way. That's the whole idea. Momentum, Adam, learning-rate schedules — all of it is refinement on "how big a step, and should I remember which way I was already moving."</p>
-    <p>Bayes' theorem answers the second question. You start with a belief — the prior — say, how likely you think an email is spam before reading it. You see evidence: the words in the email. Bayes' theorem tells you exactly how to turn that into an updated belief — the posterior — by asking: how much more likely is this evidence if your hypothesis were true, versus if it weren't? That ratio does all the work. It isn't about the evidence in isolation; it's about how <em>surprising</em> the evidence would be under each hypothesis.</p>
-    <p>Entropy and cross-entropy measure something adjacent: how spread out or surprising a distribution is, and how badly one distribution — your model's guess — fails to describe another — the truth. A model that's confidently right pays almost no penalty; a model that's confidently <em>wrong</em> pays a huge one. That asymmetry is exactly the training signal you want.</p>
+
+    <p><strong>Gradient descent</strong> answers the first one.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The picture behind gradient descent</span>
+      <p>You're standing on a hilly landscape covered in fog, trying to reach the lowest point. You can't see more than a foot in any direction. The only thing you can sense is the slope under your feet.</p>
+      <p>So you feel which way is downhill, take a step, and repeat.</p>
+      <p>The <em class="term">gradient</em> is that local slope: a vector pointing in the direction of steepest <em>increase</em>. You walk the opposite way. That's the whole idea.</p>
+    </div>
+
+    <p>Momentum, Adam, learning-rate schedules: all of it refines two questions. How big a step? And should I remember which way I was already moving?</p>
+
+    <p>Bayes' theorem answers the other one: how confident should I be, given what I've seen? You start with a belief, the <strong>prior</strong>. Say, how likely you think an email is spam before reading it. Then you see evidence: the words in the email.</p>
+    <p>Bayes' theorem tells you how to turn that into an updated belief, the <strong>posterior</strong>. It asks one thing. How much more likely is this evidence if your hypothesis were true, versus if it weren't?</p>
+    <p>That ratio does all the work. It isn't about the evidence in isolation. It's about how <em>surprising</em> the evidence would be under each hypothesis.</p>
+    <p>Entropy and cross-entropy measure something adjacent. How spread out or surprising a distribution is, and how badly your model's guess fails to describe the truth. A model that's confidently right pays almost no penalty. A model that's confidently <em>wrong</em> pays a huge one. That asymmetry is the training signal you want.</p>
   </section>
 
   <section id="architecture">
     <h2><span class="num">03</span>The core toolkit, in five buckets</h2>
-    <p>You don't need to memorize proofs for any of this. You need this map, so whatever gets thrown at you in an interview, you instantly know which bucket it's from and what it connects to.</p>
+    <p>You don't need to memorize proofs for any of this. You need this map. Then whatever gets thrown at you in an interview, you instantly know which bucket it's from and what it connects to.</p>
 
     <h3>Linear algebra — the language data is stored in</h3>
-    <p>A vector is a list of numbers; a matrix is a table of them; a tensor is the general N-dimensional version — a batch of images is a 4D tensor <code>(batch, height, width, channels)</code>, nothing more mystical than that. A norm measures a vector's size — <span>$\|x\|_2 = \sqrt{\sum_i x_i^2}$</span> (Euclidean length) and <span>$\|x\|_1 = \sum_i |x_i|$</span> (sum of absolute values) are the two you'll use constantly, and they resurface the moment you add L1 or L2 regularization to a loss. A projection — how much of one vector points along another — is just a scaled dot product, and it's the entire mechanism behind attention (see 08).</p>
-    <p>Eigenvalues and eigenvectors answer: for a given matrix, which directions does it only stretch or shrink, without rotating? <span>$Av = \lambda v$</span> — apply the matrix to eigenvector <span>$v$</span> and you get the same vector back, scaled by <span>$\lambda$</span>. SVD generalizes this to any matrix, even non-square ones: <span>$A = U\Sigma V^\top$</span>, factoring any matrix into a rotation, a scaling, and another rotation. PCA is SVD applied to a mean-centered data matrix — the top eigenvectors of the data's covariance matrix are the directions of maximum variance, and projecting onto the top few gives the best possible lower-dimensional linear summary of the data. One sentence to remember: PCA finds the directions your data actually varies along, and lets you discard the rest.</p>
+    <p>Start with the containers:</p>
+    <ul>
+      <li>A <strong>vector</strong> is a list of numbers.</li>
+      <li>A <strong>matrix</strong> is a table of them.</li>
+      <li>A <strong>tensor</strong> is the general N-dimensional version. A batch of images is a 4D tensor <code>(batch, height, width, channels)</code>, nothing more mystical than that.</li>
+    </ul>
+    <p>A <strong>norm</strong> measures a vector's size. Two show up constantly: <span>$\|x\|_2 = \sqrt{\sum_i x_i^2}$</span> (Euclidean length) and <span>$\|x\|_1 = \sum_i |x_i|$</span> (sum of absolute values). Both resurface the moment you add L1 or L2 regularization to a loss.</p>
+    <p>A <strong>projection</strong> measures how much of one vector points along another. It's a scaled dot product, and it's the entire mechanism behind attention (see 08).</p>
+    <p><strong>Eigenvectors</strong> answer one question: for a given matrix, which directions does it only stretch or shrink, without rotating? That's <span>$Av = \lambda v$</span>. Apply the matrix to eigenvector <span>$v$</span> and you get the same vector back, scaled by <span>$\lambda$</span>.</p>
+    <p><strong>SVD</strong> generalizes this to any matrix, even non-square ones: <span>$A = U\Sigma V^\top$</span> factors it into a rotation, a scaling, and another rotation.</p>
+    <p><strong>PCA</strong> is SVD applied to a mean-centered data matrix. The top eigenvectors of the covariance matrix are the directions of maximum variance, so projecting onto the top few gives the best possible lower-dimensional linear summary. One sentence to remember: PCA finds the directions your data varies along, and lets you discard the rest.</p>
 
     <h3>Calculus — how you find "better"</h3>
-    <p>A derivative is a local slope: how much the output changes for a tiny change in input. A partial derivative is the same idea holding every other input fixed. Stack all the partial derivatives of a scalar function into one vector and you get the gradient — it points toward steepest increase, which is why you walk the negative gradient to minimize a loss. The chain rule — <span>$\frac{d}{dx}f(g(x)) = f'(g(x))\cdot g'(x)$</span> — is the single idea that makes deep learning trainable: a network is nothing but functions composed inside functions, and the chain rule says exactly how to differentiate through that whole stack, layer by layer. That <em>is</em> backprop; there's no separate algorithm to memorize beyond "apply the chain rule systematically, and cache intermediate results so you never recompute them." When a function outputs a vector instead of a scalar — one layer's activations, say — the derivative generalizes to a Jacobian, a matrix of every output's partial derivative with respect to every input. The Hessian goes one derivative further: the matrix of second partial derivatives, describing curvature. Its eigenvalues tell you what kind of point you're standing on — all positive means a bowl (local minimum), mixed signs mean a saddle point, all negative means a local maximum. A directional derivative is just the gradient dotted with a unit vector — the rate of change if you walk in that specific direction instead of the steepest one.</p>
+    <p>A <strong>derivative</strong> is a local slope: how much the output changes for a tiny change in input. A <strong>partial derivative</strong> is the same idea, holding every other input fixed. Stack all the partial derivatives of a scalar function into one vector and you get the <strong>gradient</strong>. It points toward steepest increase, which is why you walk the negative gradient to minimize a loss.</p>
+    <p>The <em class="term">chain rule</em>, <span>$\frac{d}{dx}f(g(x)) = f'(g(x))\cdot g'(x)$</span>, is the single idea that makes deep learning trainable. A network is nothing but functions composed inside functions. The chain rule says exactly how to differentiate through that whole stack, layer by layer.</p>
+    <p>That <em>is</em> backprop. There's no separate algorithm to memorize beyond "apply the chain rule systematically, and cache intermediate results so you never recompute them."</p>
+    <p>Three generalizations are worth knowing by name:</p>
+    <ul>
+      <li><strong>Jacobian.</strong> When a function outputs a vector instead of a scalar (one layer's activations, say), the derivative becomes a matrix of every output's partial derivative with respect to every input.</li>
+      <li><strong>Hessian.</strong> One derivative further: the matrix of second partial derivatives, describing curvature. Its eigenvalues tell you what kind of point you're standing on. All positive means a bowl (local minimum), mixed signs mean a saddle point, all negative means a local maximum.</li>
+      <li><strong>Directional derivative.</strong> The gradient dotted with a unit vector. The rate of change if you walk in that specific direction instead of the steepest one.</li>
+    </ul>
 
     <h3>Probability — reasoning under uncertainty</h3>
-    <p>A random variable maps outcomes to numbers; conditional probability, <span>$P(A\mid B) = P(A \cap B)/P(B)$</span>, asks how likely A is once you already know B happened. Expectation is a probability-weighted average — the value you'd get on average if you repeated the random process forever. Variance, <span>$\mathrm{Var}(X) = \mathbb{E}[(X-\mathbb{E}[X])^2]$</span>, measures spread around that average. Covariance extends this to two variables — positive means they tend to move together, negative means opposite, and its magnitude depends on the scale of the variables, which is why correlation exists: covariance normalized to sit in <span>$[-1,1]$</span>.</p>
-    <p>A handful of distributions cover most of what you'll model. Bernoulli is a single yes/no trial (a binary label). Categorical generalizes it to K discrete outcomes — exactly what a softmax layer outputs. Multinomial is what you get counting outcomes over many independent categorical trials. Gaussian is the default continuous assumption, justified by the Central Limit Theorem, and it's also the hidden assumption behind mean-squared-error loss, covered below. Poisson models counts of rare, independent events over a fixed interval — requests per second on a server. Exponential models the waiting time between them and is memoryless: the probability of waiting five more minutes doesn't depend on how long you've already waited.</p>
-    <p>Once a model is trained, the reasoning doesn't stop. A confidence interval is a range of plausible values for a quantity given your data and a chosen confidence level — not, despite the name, "a 95% probability the true value sits in this exact range," which is a common misstatement of what the interval actually guarantees. Hypothesis testing and p-values ask whether an observed effect is surprising enough to reject a "nothing's going on" baseline. And calibration asks whether a model's stated confidence matches its actual accuracy — a model that says "90% confident" should be right about 90% of the time it says that, and most deep nets, straight out of training, are not (see Failure modes below).</p>
+    <p>A <strong>random variable</strong> maps outcomes to numbers. <strong>Conditional probability</strong>, <span>$P(A\mid B) = P(A \cap B)/P(B)$</span>, asks how likely A is once you already know B happened.</p>
+    <p><strong>Expectation</strong> is a probability-weighted average: the value you'd get on average if you repeated the process forever. <strong>Variance</strong>, <span>$\mathrm{Var}(X) = \mathbb{E}[(X-\mathbb{E}[X])^2]$</span>, measures spread around that average. <strong>Covariance</strong> extends it to two variables. Positive means they tend to move together, negative means opposite. Its magnitude depends on the scale of the variables, which is why correlation exists: covariance normalized to sit in <span>$[-1,1]$</span>.</p>
+    <p>A handful of distributions cover most of what you'll model:</p>
+    <ul>
+      <li><strong>Bernoulli.</strong> A single yes/no trial (a binary label).</li>
+      <li><strong>Categorical.</strong> Generalizes it to K discrete outcomes, exactly what a softmax layer outputs.</li>
+      <li><strong>Multinomial.</strong> Counting outcomes over many independent categorical trials.</li>
+      <li><strong>Gaussian.</strong> The default continuous assumption, justified by the Central Limit Theorem. Also the hidden assumption behind mean-squared-error loss, covered below.</li>
+      <li><strong>Poisson.</strong> Counts of rare, independent events over a fixed interval. Requests per second on a server.</li>
+      <li><strong>Exponential.</strong> The waiting time between those events. It's memoryless: the probability of waiting five more minutes doesn't depend on how long you've already waited.</li>
+    </ul>
+    <p>Once a model is trained, the reasoning doesn't stop.</p>
+    <p>A <strong>confidence interval</strong> is a range of plausible values for a quantity, given your data and a chosen confidence level. Despite the name, it is <em>not</em> "a 95% probability the true value sits in this exact range." That's a common misstatement of what the interval guarantees.</p>
+    <p><strong>Hypothesis testing</strong> and p-values ask whether an observed effect is surprising enough to reject a "nothing's going on" baseline.</p>
+    <p><strong>Calibration</strong> asks whether a model's stated confidence matches its accuracy. A model that says "90% confident" should be right about 90% of the time it says that. Most deep nets, straight out of training, are not (see Failure modes below).</p>
 
     <h3>Information theory — measuring surprise</h3>
-    <p>Entropy, <span>$H(p) = -\sum_i p_i \log p_i$</span>, measures how spread out — unpredictable — a distribution is: a coin that's always heads has zero entropy, a fair coin has maximum entropy for two outcomes. Cross-entropy and KL divergence (full equations below) measure the mismatch between two distributions — one of them is your model's loss function, literally. Mutual information, <span>$I(X;Y)$</span>, measures how much observing <span>$Y$</span> reduces your uncertainty about <span>$X$</span>. That last one is the information-theoretic lens on representation learning: a good learned representation keeps high mutual information with whatever you actually care about — the label, the next token, the future frame — while discarding nuisance variation, sensor noise, irrelevant detail. Self-supervised objectives (see 03 · Unsupervised &amp; Self-Supervised) are, in this framing, different strategies for maximizing exactly that.</p>
+    <p><strong>Entropy</strong>, <span>$H(p) = -\sum_i p_i \log p_i$</span>, measures how unpredictable a distribution is. A coin that's always heads has zero entropy. A fair coin has maximum entropy for two outcomes.</p>
+    <p><strong>Cross-entropy</strong> and <strong>KL divergence</strong> (full equations below) measure the mismatch between two distributions. One of them is your model's loss function, literally.</p>
+    <p><strong>Mutual information</strong>, <span>$I(X;Y)$</span>, measures how much observing <span>$Y$</span> reduces your uncertainty about <span>$X$</span>. That one is the information-theoretic lens on representation learning. A good representation keeps high mutual information with whatever you care about (the label, the next token, the future frame) while discarding nuisance variation and sensor noise. Self-supervised objectives (see 03 · Unsupervised &amp; Self-Supervised) are, in this framing, different strategies for maximizing exactly that.</p>
 
     <h3>Optimization — actually finding the answer</h3>
-    <p>A convex loss surface has exactly one bowl — any local search that always goes downhill is guaranteed to find the global minimum. Neural network losses are non-convex: full of bumps, ridges, and flat stretches, with no such guarantee. In practice this matters less than it sounds. The real obstacles usually aren't "bad" local minima — in high dimensions, a point where <em>every</em> direction curves upward is statistically rare — they're saddle points, where the gradient is zero but some directions curve up and others curve down, and poor conditioning, where the loss surface is shaped like a narrow, elongated valley rather than a round bowl. Plain gradient descent zigzags across a valley like that instead of heading straight for the bottom, because the gradient keeps pointing partly across the valley, not just along it. That single picture — a badly conditioned bowl — is the actual justification for momentum and Adam, shown below.</p>
+    <p>A <strong>convex</strong> loss surface has exactly one bowl. Any local search that always goes downhill is guaranteed to find the global minimum. Neural network losses are <strong>non-convex</strong>: full of bumps, ridges, and flat stretches, with no such guarantee.</p>
+    <p>In practice this matters less than it sounds. The real obstacles usually aren't bad local minima. In high dimensions, a point where <em>every</em> direction curves upward is statistically rare. Two other things cause the trouble:</p>
+    <ul>
+      <li><strong>Saddle points</strong>, where the gradient is zero but some directions curve up and others curve down.</li>
+      <li><strong>Poor conditioning</strong>, where the loss surface is a narrow, elongated valley rather than a round bowl.</li>
+    </ul>
+    <p>Plain gradient descent zigzags across a valley like that instead of heading straight for the bottom, because the gradient keeps pointing partly across the valley, not just along it. That single picture, a badly conditioned bowl, is the justification for momentum and Adam.</p>
 
     <div class="diagram">
       <div class="diagram-title">Gradient descent zigzagging down a poorly conditioned loss surface
@@ -195,7 +254,7 @@
       <li><span class="sym">ŷ, z</span> the model's output and the pre-activation input to whichever layer <span>$w$</span> lives in — every layer in between contributes its own link in this chain.</li>
       <li><span class="sym">∂L/∂w</span> what you actually need: how much nudging this one weight changes the loss. Backprop computes this for every weight in the network with one forward pass and one backward pass, by repeatedly multiplying local derivatives layer by layer instead of re-deriving each weight's gradient from scratch.</li>
     </ul>
-    <p>That's the entire idea. A 96-layer network is just a longer product of local derivatives — which is also exactly why gradients can vanish or explode (see Failure modes).</p>
+    <p>That's the entire idea. A 96-layer network is just a longer product of local derivatives. Which is also exactly why gradients can vanish or explode (see Failure modes).</p>
 
     <h3>Gradient descent, momentum, and Adam</h3>
     <div class="eq-block"><span>$$\theta_{t+1} = \theta_t - \eta \, \nabla_\theta L(\theta_t)$$</span></div>
@@ -206,7 +265,7 @@
     </ul>
     <p>Plain SGD treats every step independently, which is exactly what causes the zigzag in the diagram above. Momentum fixes this by keeping a running average of past gradients:</p>
     <div class="eq-block"><span>$$v_{t} = \beta v_{t-1} + \nabla_\theta L(\theta_{t}), \qquad \theta_{t+1} = \theta_t - \eta\, v_t$$</span></div>
-    <p><span>$\beta$</span> (typically around 0.9) controls how much past velocity survives each step. Consistent directions accumulate speed; directions that keep flipping sign — the zigzag — cancel out. Momentum is a low-pass filter on the gradient signal.</p>
+    <p><span>$\beta$</span> (typically around 0.9) controls how much past velocity survives each step. Consistent directions accumulate speed. Directions that keep flipping sign, the zigzag, cancel out. <strong>Momentum is a low-pass filter on the gradient signal.</strong></p>
     <p>Adam goes further: it keeps a momentum-like average of the gradient <em>and</em> a running average of the squared gradient, then uses the second one to scale each parameter's step individually:</p>
     <div class="eq-block"><span>$$m_t = \beta_1 m_{t-1} + (1-\beta_1)g_t, \qquad v_t = \beta_2 v_{t-1} + (1-\beta_2)g_t^2$$ $$\hat{m}_t = \frac{m_t}{1-\beta_1^t}, \qquad \hat{v}_t = \frac{v_t}{1-\beta_2^t}, \qquad \theta_{t+1} = \theta_t - \eta\,\frac{\hat{m}_t}{\sqrt{\hat{v}_t}+\epsilon}$$</span></div>
     <ul class="eq-explain">
@@ -215,7 +274,8 @@
       <li><span class="sym">m̂, v̂</span> bias-corrected versions of the above. Both are initialized at zero, which biases early estimates toward zero too — this correction compensates, and matters most in the first few steps.</li>
       <li><span class="sym">√v̂ + ε</span> dividing by this means parameters with consistently large or noisy gradients get a smaller effective step, and parameters with small, quiet gradients get a relatively larger one — a per-parameter adaptive learning rate, computed automatically. <span>$\epsilon$</span> just stops division by zero.</li>
     </ul>
-    <p>AdamW makes one more change. Standard L2 regularization adds <span>$\lambda\theta$</span> to the gradient before all that adaptive scaling happens, which means the regularization strength gets warped by the same per-parameter scaling meant for the loss gradient — not what you want. AdamW decouples it, subtracting <span>$\eta\lambda\theta$</span> directly in the parameter update instead of folding it into <span>$g_t$</span>. A small change with an outsized effect on final model quality, which is why it's the default in most modern training recipes.</p>
+    <p>AdamW makes one more change. Standard L2 regularization adds <span>$\lambda\theta$</span> to the gradient <em>before</em> all that adaptive scaling happens. So the regularization strength gets warped by the same per-parameter scaling meant for the loss gradient. Not what you want.</p>
+    <p>AdamW decouples it, subtracting <span>$\eta\lambda\theta$</span> directly in the parameter update instead of folding it into <span>$g_t$</span>. A small change with an outsized effect on final model quality, which is why it's the default in most modern training recipes.</p>
 
     <h3>Bayes' theorem, MLE, MAP</h3>
     <div class="eq-block"><span>$$P(\theta \mid D) = \frac{P(D \mid \theta)\,P(\theta)}{P(D)}$$</span></div>
@@ -225,14 +285,19 @@
       <li><span class="sym">P(θ|D)</span> the posterior — updated belief about <span>$\theta$</span> after seeing the data. This is what you actually want.</li>
       <li><span class="sym">P(D)</span> the evidence — total probability of the data, marginalized over every possible <span>$\theta$</span>. Usually intractable to compute exactly, which is the whole reason approximate Bayesian inference exists as a field.</li>
     </ul>
-    <p>Three things people call "training a model" are really three different amounts of this equation you're willing to compute. MLE (maximum likelihood estimation) ignores the prior entirely and maximizes <span>$P(D\mid\theta)$</span> — this is what plain loss minimization with no regularization is doing. MAP (maximum a posteriori) maximizes <span>$P(D\mid\theta)P(\theta)$</span> instead — add a prior, and it turns out L2 regularization is <em>exactly</em> MAP estimation with a Gaussian prior on the weights, and L1 regularization corresponds to a Laplace prior. Full Bayesian inference doesn't stop at a single "best" <span>$\theta$</span> at all — it keeps the entire posterior distribution, so predictions come with calibrated uncertainty baked in, at the cost of usually being far more expensive to compute.</p>
+    <p>Three things people call "training a model" are really three different amounts of this equation you're willing to compute:</p>
+    <ul>
+      <li><strong>MLE</strong> (maximum likelihood estimation) ignores the prior entirely and maximizes <span>$P(D\mid\theta)$</span>. This is what plain loss minimization with no regularization is doing.</li>
+      <li><strong>MAP</strong> (maximum a posteriori) maximizes <span>$P(D\mid\theta)P(\theta)$</span> instead. Add a prior, and it turns out L2 regularization is <em>exactly</em> MAP estimation with a Gaussian prior on the weights. L1 corresponds to a Laplace prior.</li>
+      <li><strong>Full Bayesian inference</strong> doesn't stop at a single best <span>$\theta$</span> at all. It keeps the entire posterior distribution, so predictions come with calibrated uncertainty baked in. The cost is that it's usually far more expensive to compute.</li>
+    </ul>
 
     <h3>Entropy, cross-entropy, KL divergence</h3>
     <div class="eq-block"><span>$$H(p) = -\sum_i p_i \log p_i \qquad\qquad H(p,q) = -\sum_i p_i \log q_i$$</span></div>
-    <p><span>$H(p)$</span> is the entropy of the true distribution — how unpredictable the data itself is, a fixed property of the data, independent of your model. <span>$H(p,q)$</span>, cross-entropy, measures the same thing but scored using your model's distribution <span>$q$</span> instead of the true one <span>$p$</span> — extra bits, or nats, you pay whenever <span>$q$</span> disagrees with <span>$p$</span>. The gap between them is exactly the KL divergence:</p>
+    <p><span>$H(p)$</span> is the entropy of the true distribution: how unpredictable the data itself is. It's a fixed property of the data, independent of your model. <span>$H(p,q)$</span>, cross-entropy, measures the same thing but scored using your model's distribution <span>$q$</span> instead of the true one <span>$p$</span>. Those are the extra bits (or nats) you pay whenever <span>$q$</span> disagrees with <span>$p$</span>. The gap between them is exactly the KL divergence:</p>
     <div class="eq-block"><span>$$D_{KL}(p \,\|\, q) = \sum_i p_i \log \frac{p_i}{q_i} = H(p,q) - H(p)$$</span></div>
-    <p>Since <span>$H(p)$</span> doesn't depend on your model at all — the data doesn't change while you train — minimizing cross-entropy and minimizing KL divergence are the exact same optimization problem: you're minimizing the gap between what your model believes and what's actually true. That's the justification for cross-entropy as a loss function, in one sentence.</p>
-    <p>Note this is not symmetric: <span>$D_{KL}(p\|q) \neq D_{KL}(q\|p)$</span> in general, so KL divergence isn't a true distance metric — which distribution you designate "true" changes what gets penalized, and it matters (see the worked example below).</p>
+    <p><span>$H(p)$</span> doesn't depend on your model at all, because the data doesn't change while you train. So minimizing cross-entropy and minimizing KL divergence are <strong>the same optimization problem</strong>. You're minimizing the gap between what your model believes and what's true. That's the justification for cross-entropy as a loss function, in one sentence.</p>
+    <p>One caveat: this is not symmetric. <span>$D_{KL}(p\|q) \neq D_{KL}(q\|p)$</span> in general, so KL divergence isn't a true distance metric. Which distribution you designate "true" changes what gets penalized, and it matters (see the worked example below).</p>
 
     <div class="diagram">
       <div class="diagram-title">Cross-entropy loss as a function of the probability assigned to the true class
@@ -264,18 +329,22 @@
       <li><span class="sym">Variance</span> error from a model too sensitive to exactly which training sample it saw — retrain on a different sample from the same distribution and predictions swing wildly. High variance looks like overfitting.</li>
       <li><span class="sym">σ²</span> irreducible error — noise inherent to the data itself. No model, however good, gets below this.</li>
     </ul>
-    <p>Every regularization technique you've used — L2 weight decay, dropout, early stopping, data augmentation, a smaller architecture — is trading some bias for less variance, on the bet that the variance removed outweighs the bias added. That trade, not any specific technique, is the concept an interviewer is actually checking for.</p>
+    <p>Every regularization technique you've used is the same trade. L2 weight decay, dropout, early stopping, data augmentation, a smaller architecture: each one buys less variance by accepting more bias, betting the variance removed outweighs the bias added. <strong>That trade, not any specific technique, is the concept an interviewer is checking for.</strong></p>
   </section>
 
   <section id="why">
     <h2><span class="num">05</span>Why these specific tools, not the obvious alternatives</h2>
     <h3>Why cross-entropy, not MSE, for classification</h3>
-    <p>You could, technically, train a classifier by treating each class probability as a regression target and minimizing squared error. Two things go wrong. First, it's the wrong probabilistic assumption: minimizing MSE is exactly maximum likelihood estimation under the assumption that errors are Gaussian-distributed — a fine assumption for continuous regression targets, a strange one for a discrete class label. Cross-entropy <em>is</em> the maximum-likelihood loss for a categorical or Bernoulli target — it falls directly out of "maximize the probability the model assigns to the correct label," no extra assumption needed.</p>
-    <p>Second, and more practically: combine MSE with a sigmoid or softmax output and the gradient saturates exactly when you need it most. When the model is confidently wrong, a sigmoid sits in its flat region, its local derivative is near zero, and that near-zero term gets multiplied straight into the gradient by the chain rule — the update shrinks to almost nothing right when the model most needs a large correction. Cross-entropy paired with softmax sidesteps this cleanly: the gradient of the loss with respect to the logits works out to just <span>$\hat{y} - y$</span> (see the interview questions below for the derivation) — large and well-behaved exactly when the prediction is wrong, shrinking smoothly as it improves.</p>
+    <p>You could, technically, train a classifier by treating each class probability as a regression target and minimizing squared error. Two things go wrong.</p>
+    <p><strong>First, it's the wrong probabilistic assumption.</strong> Minimizing MSE is exactly maximum likelihood estimation under the assumption that errors are Gaussian-distributed. That's fine for continuous regression targets. It's strange for a discrete class label. Cross-entropy <em>is</em> the maximum-likelihood loss for a categorical or Bernoulli target. It falls directly out of "maximize the probability the model assigns to the correct label," with no extra assumption needed.</p>
+    <p><strong>Second, and more practically, the gradient saturates.</strong> Combine MSE with a sigmoid or softmax output and it dies exactly when you need it most. When the model is confidently wrong, the sigmoid sits in its flat region and its local derivative is near zero. The chain rule multiplies that near-zero term straight into the gradient. So the update shrinks to almost nothing precisely when the model most needs a large correction.</p>
+    <p>Cross-entropy paired with softmax sidesteps this cleanly. The gradient of the loss with respect to the logits works out to just <span>$\hat{y} - y$</span> (see the interview questions below for the derivation). Large and well-behaved when the prediction is wrong, shrinking smoothly as it improves.</p>
 
     <h3>Why Adam over vanilla SGD</h3>
-    <p>Vanilla SGD uses one global learning rate for every parameter, but different parameters — different layers, different weight matrices — routinely need very different step sizes to make comparable progress. Adam's per-parameter scaling handles that automatically, and its momentum term smooths out the noise inherent in minibatch gradient estimates. In practice this means Adam is far more forgiving of a poorly tuned learning rate and converges quickly with little tuning — exactly what you want when training a model too large to afford much hyperparameter search, which is why it's the default for transformers and LLMs.</p>
-    <p>It isn't a free lunch. A well-tuned SGD-with-momentum schedule frequently matches or beats Adam on final generalization for some vision architectures — a long-running, genuinely unsettled empirical debate, not folklore to state as fact either way. What's not in dispute is the practical tradeoff: Adam gets you a working model faster with less tuning; SGD, tuned carefully, sometimes gets you a slightly better one. For most large-scale, compute-constrained "get this run to converge reliably" situations, that trade favors Adam or AdamW by default.</p>
+    <p>Vanilla SGD uses one global learning rate for every parameter. But different layers and different weight matrices routinely need very different step sizes to make comparable progress. Adam's per-parameter scaling handles that automatically, and its momentum term smooths out the noise inherent in minibatch gradient estimates.</p>
+    <p>So Adam is far more forgiving of a poorly tuned learning rate, and converges quickly with little tuning. Exactly what you want when a model is too large to afford much hyperparameter search, which is why it's the default for transformers and LLMs.</p>
+    <p>It isn't a free lunch. A well-tuned SGD-with-momentum schedule frequently matches or beats Adam on final generalization for some vision architectures. That's a long-running, genuinely unsettled empirical debate, not folklore to state as fact either way.</p>
+    <p>What's not in dispute is the practical tradeoff. <strong>Adam gets you a working model faster with less tuning. SGD, tuned carefully, sometimes gets you a slightly better one.</strong> For most large-scale, compute-constrained "get this run to converge reliably" situations, that trade favors Adam or AdamW by default.</p>
 
     <div class="tbl-wrap">
       <table class="cmp">
@@ -293,37 +362,53 @@
   <section id="tradeoffs">
     <h2><span class="num">06</span>Failure modes — what actually breaks</h2>
     <h3>Vanishing and exploding gradients</h3>
-    <p>Backprop's chain rule multiplies local derivatives together, one per layer. If those derivatives are consistently a bit less than 1, the product shrinks toward zero as it travels back through many layers — early layers get a gradient signal too tiny to learn from at all. If they're consistently greater than 1, the product blows up instead, and updates become huge and unstable. This single fact is why plain deep networks, and especially plain RNNs unrolled over many timesteps, were notoriously hard to train, and it's the direct motivation for residual connections, careful weight initialization, and normalization layers — see 04 · Neural Network Fundamentals for exactly how those fixes work.</p>
+    <p>Backprop's chain rule multiplies local derivatives together, one per layer. That product is the whole problem:</p>
+    <ul>
+      <li>Consistently a bit <strong>less than 1</strong>? The product shrinks toward zero as it travels back through many layers. Early layers get a gradient signal too tiny to learn from at all.</li>
+      <li>Consistently <strong>greater than 1</strong>? The product blows up instead, and updates become huge and unstable.</li>
+    </ul>
+    <p>This single fact is why plain deep networks, and especially plain RNNs unrolled over many timesteps, were notoriously hard to train. It's the direct motivation for residual connections, careful weight initialization, and normalization layers. See 04 · Neural Network Fundamentals for how those fixes work.</p>
     <h3>Numerical instability</h3>
-    <p>Softmax and cross-entropy both involve exponentials and logs of small numbers, which overflow or underflow in floating point long before they're mathematically "wrong." A predicted probability of exactly 0 for the true class sends <span>$-\log(q)$</span> to infinity. Production implementations never compute softmax and log separately for this reason — they use a fused, numerically stable log-softmax that subtracts the maximum logit before exponentiating, mathematically identical but never computing a huge exponential.</p>
+    <p>Softmax and cross-entropy both involve exponentials and logs of small numbers. Those overflow or underflow in floating point long before they're mathematically "wrong." A predicted probability of exactly 0 for the true class sends <span>$-\log(q)$</span> to infinity.</p>
+    <p>Production implementations never compute softmax and log separately for this reason. They use a fused, numerically stable <strong>log-softmax</strong> that subtracts the maximum logit before exponentiating. Mathematically identical, but it never computes a huge exponential.</p>
     <h3>Overfitting, underfitting, miscalibration</h3>
-    <p>Underfitting is high bias wearing a different name; overfitting is high variance wearing a different name — same decomposition from the math section, just applied. Both are diagnosable from the same simple check: is training error itself high (underfitting), or is there a large gap between training and validation error (overfitting)?</p>
-    <p>A subtler failure that accuracy alone won't catch is miscalibration. A model can be highly accurate and still badly overconfident — modern deep nets reliably are, straight out of training, without correction. A model that's "90% confident" across a set of predictions should be right roughly 90% of the time on those; if it's actually right only 70% of the time, its confidence scores are unusable for any downstream decision that relies on them — routing to a human reviewer, setting a threshold, combining with other models. Temperature scaling — dividing logits by a single learned scalar before the softmax — is a common, cheap fix that doesn't even change the model's ranking of predictions, only how confident it sounds. See 25 · Evaluation, Reliability &amp; Safety for the full treatment.</p>
+    <p><strong>Underfitting is high bias wearing a different name. Overfitting is high variance wearing a different name.</strong> Same decomposition from the math section, just applied. Both are diagnosable from one check. Is training error itself high (underfitting), or is there a large gap between training and validation error (overfitting)?</p>
+    <p>A subtler failure that accuracy alone won't catch is <em class="term">miscalibration</em>. A model can be highly accurate and still badly overconfident. Modern deep nets reliably are, straight out of training, without correction.</p>
+    <p>A model that's "90% confident" across a set of predictions should be right roughly 90% of the time on those. If it's right only 70% of the time, its confidence scores are unusable for any downstream decision that depends on them: routing to a human reviewer, setting a threshold, combining with other models.</p>
+    <p><strong>Temperature scaling</strong> is the common, cheap fix. Divide logits by a single learned scalar before the softmax. It doesn't even change the model's ranking of predictions, only how confident it sounds. See 25 · Evaluation, Reliability &amp; Safety for the full treatment.</p>
 
     <div class="callout callout-warn">
       <span class="callout-label">Common misconception</span>
-      <p>"Training gets stuck in a bad local minimum" is usually not what's actually happening. In the high-dimensional, non-convex loss surfaces of real neural networks, a point where <em>every</em> direction curves upward — a true local minimum — is statistically rare; saddle points, where some directions curve up and others curve down, vastly outnumber them, and it's slow progress across saddle regions and plateaus that more often looks like "stuck." Separately, empirical results across many overparameterized networks show that most of the minima SGD actually converges to end up close in loss value and generalize comparably — the "many roughly-equally-good minima" picture, not "one true minimum you might miss."</p>
+      <p>"Training gets stuck in a bad local minimum" is usually not what's happening. In the high-dimensional, non-convex loss surfaces of real neural networks, a true local minimum (a point where <em>every</em> direction curves upward) is statistically rare. Saddle points vastly outnumber them, and it's slow progress across saddle regions and plateaus that more often looks like "stuck."</p>
+      <p>Separately, empirical results across many overparameterized networks show that most of the minima SGD converges to end up close in loss value and generalize comparably. The picture is <em>many roughly-equally-good minima</em>, not <em>one true minimum you might miss</em>.</p>
     </div>
   </section>
 
   <section id="applications">
     <h2><span class="num">07</span>Two worked examples, by hand</h2>
     <h3>Cross-entropy loss for a 3-class prediction</h3>
-    <p>Say the true label is cat, out of {cat, dog, bird} — one-hot target <span>$y=[1,0,0]$</span>. Illustrative model output, a softmax distribution: <span>$\hat{y} = [0.9,\ 0.07,\ 0.03]$</span>. Cross-entropy only ever looks at the probability assigned to the true class, because every other term in the sum is multiplied by a zero from the one-hot target:</p>
+    <p>Say the true label is cat, out of {cat, dog, bird}. That's a one-hot target <span>$y=[1,0,0]$</span>. Illustrative model output, a softmax distribution: <span>$\hat{y} = [0.9,\ 0.07,\ 0.03]$</span>.</p>
+    <p>Cross-entropy only ever looks at the probability assigned to the <strong>true</strong> class, because every other term in the sum is multiplied by a zero from the one-hot target:</p>
     <div class="eq-block"><span>$$H(y,\hat{y}) = -\big(1\cdot\log 0.9 + 0\cdot\log 0.07 + 0\cdot\log 0.03\big) = -\log(0.9) \approx 0.105 \text{ nats}$$</span></div>
     <p>Now the same true label, but an illustrative model that guessed confidently wrong: <span>$\hat{y}' = [0.05,\ 0.9,\ 0.05]$</span>.</p>
     <div class="eq-block"><span>$$H(y,\hat{y}') = -\log(0.05) \approx 3.0 \text{ nats}$$</span></div>
-    <p>Same true label, roughly 30x more loss, just for going from confidently right to confidently wrong. That gap is the entire point of the loss function's shape — see the diagram above.</p>
+    <p>Same true label, roughly 30x more loss, just for going from confidently right to confidently wrong. <strong>That gap is the entire point of the loss function's shape.</strong> See the diagram above.</p>
 
     <h3>KL divergence between two tiny distributions</h3>
     <p>Illustrative true/reference distribution over 3 outcomes: <span>$p=[0.5,\ 0.3,\ 0.2]$</span>. Illustrative predicted distribution: <span>$q=[0.6,\ 0.2,\ 0.2]$</span>.</p>
     <div class="eq-block"><span>$$D_{KL}(p\|q) = 0.5\log\frac{0.5}{0.6} + 0.3\log\frac{0.3}{0.2} + 0.2\log\frac{0.2}{0.2} \approx -0.091 + 0.122 + 0 \approx 0.030 \text{ nats}$$</span></div>
     <p>Small, because the two distributions are close. Now swap which one is called "true" and compute <span>$D_{KL}(q\|p)$</span> instead:</p>
     <div class="eq-block"><span>$$D_{KL}(q\|p) = 0.6\log\frac{0.6}{0.5} + 0.2\log\frac{0.2}{0.3} + 0.2\log\frac{0.2}{0.2} \approx 0.109 - 0.081 + 0 \approx 0.028 \text{ nats}$$</span></div>
-    <p>A different number — 0.030 vs 0.028 nats, close in this illustrative case but not equal, and in general they can diverge much further. That's the asymmetry mentioned above: KL divergence penalizes "my model is confident about something the truth says is unlikely" differently than "my model is unsure about something the truth says is certain."</p>
+    <p>A different number: 0.030 vs 0.028 nats. Close in this illustrative case, but not equal, and in general they can diverge much further. That's the asymmetry mentioned above. KL divergence penalizes <em>"my model is confident about something the truth says is unlikely"</em> differently than <em>"my model is unsure about something the truth says is certain."</em></p>
 
     <h3>Where this shows up in production</h3>
-    <p>Cross-entropy is the default loss for essentially every classifier and every next-token predictor in every LLM you've used — the entire pretraining objective of GPT-style models is cross-entropy loss on the next token, applied one position at a time across trillions of tokens. KL divergence shows up constantly outside plain supervised training too: it's the regularization term in a VAE's loss, pulling the learned latent distribution toward a simple prior (see 12); it's the term RLHF-style fine-tuning uses to stop a policy from drifting too far from its reference model (see 15); and it's the core quantity behind knowledge distillation, where a small model is trained to match a large model's output distribution rather than just its hard labels.</p>
+    <p><strong>Cross-entropy</strong> is the default loss for essentially every classifier and every next-token predictor in every LLM you've used. The entire pretraining objective of GPT-style models is cross-entropy loss on the next token, applied one position at a time across trillions of tokens.</p>
+    <p><strong>KL divergence</strong> shows up constantly outside plain supervised training too:</p>
+    <ul>
+      <li>The regularization term in a VAE's loss, pulling the learned latent distribution toward a simple prior (see 12).</li>
+      <li>The term RLHF-style fine-tuning uses to stop a policy drifting too far from its reference model (see 15).</li>
+      <li>The core quantity behind knowledge distillation, where a small model matches a large model's output distribution rather than just its hard labels.</li>
+    </ul>
   </section>
 
   <section id="interview">

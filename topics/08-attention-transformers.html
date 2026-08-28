@@ -100,7 +100,7 @@
   <div class="topic-header">
     <div class="crumbs"><a href="../index.html">Map &amp; Timeline</a> / Sequence, Attention &amp; LLMs / 08</div>
     <h1>Attention &amp; Transformers</h1>
-    <p class="dek">The mechanism that let every token look directly at every other token, no matter how far apart — and the single most interview-relevant idea in modern AI.</p>
+    <p class="dek">The mechanism that let every token look directly at every other token, no matter how far apart. The single most interview-relevant idea in modern AI.</p>
     <div class="meta-row">
       <span class="tag tag-cold">Know cold</span>
       <span class="reading-time">~22 min · prerequisites: dot products &amp; softmax (01), RNN/seq2seq bottleneck (07)</span>
@@ -110,13 +110,13 @@
   <section id="tldr">
     <div class="tldr">
       <div class="tldr-label">TL;DR</div>
-      <p>Attention computes, for every token, a weighted average of every other token's representation — where the weights come from how relevant those tokens are to each other, and "relevant" is learned, not hand-coded. Drop recurrence entirely, stack blocks of attention + a feed-forward layer with residual connections and normalization, and you get the Transformer: the architecture behind BERT, GPT, ViT, Whisper, and almost everything trained since 2018. One sentence for an interview: attention is a soft, differentiable, content-based lookup.</p>
+      <p>Attention computes, for every token, a weighted average of every other token's representation. The weights come from how relevant those tokens are to each other, and <strong>"relevant" is learned, not hand-coded</strong>. Drop recurrence entirely. Stack blocks of attention + a feed-forward layer with residual connections and normalization, and you get the Transformer: the architecture behind BERT, GPT, ViT, Whisper, and almost everything trained since 2018. One sentence for an interview: attention is a <strong>soft, differentiable, content-based lookup</strong>.</p>
     </div>
   </section>
 
   <section id="timeline">
     <h2><span class="num">01</span>Where this sits in the timeline</h2>
-    <p>Attention didn't appear out of nowhere in 2017 — it was already patched onto RNNs three years earlier to fix a specific, well-understood failure. The 2017 contribution was deleting the RNN and keeping only the patch.</p>
+    <p>Attention didn't appear out of nowhere in 2017. It was already patched onto RNNs three years earlier, to fix a specific and well-understood failure. The 2017 contribution was deleting the RNN and keeping only the patch.</p>
     <div class="bia">
       <div class="bia-box">
         <div class="bia-label">Before</div>
@@ -137,15 +137,42 @@
 
   <section id="intuition">
     <h2><span class="num">02</span>The intuition, before any math</h2>
-    <p class="lede">Think of attention as a soft dictionary lookup.</p>
-    <p>A normal Python dictionary matches a query key exactly: <code>d["cat"]</code> returns one value, full stop. Attention asks a fuzzier question: "how similar is my query to <em>each</em> key in the dictionary?" — turns those similarities into a probability distribution with softmax — and returns the weighted blend of <em>every</em> value, weighted by how relevant its key was. Nothing is discarded; everything contributes, just by different amounts.</p>
-    <p>Concretely: take the sentence <em>"The animal didn't cross the street because it was too tired."</em> When the model processes the word it, that word alone is ambiguous — it could refer to "the animal" or "the street." Self-attention lets the representation of it act as a query, compare itself against every other word's key, and discover that animal scores far higher than street (tiredness is a property of animals, not streets). The output representation for "it" then becomes mostly "it" blended heavily with "animal" — the ambiguity gets resolved <em>inside the representation itself</em>, before any downstream layer even sees it. This exact sentence is the one Jay Alammar uses in <a href="https://jalammar.github.io/illustrated-transformer/">The Illustrated Transformer</a> — worth the 20 minutes if diagrams click for you faster than equations.</p>
-    <p>Every self-attention layer is doing this, in parallel, for every token against every other token, simultaneously. That's the whole idea. Everything else — queries, keys, values, multiple heads, scaling by <span>$\sqrt{d_k}$</span> — is machinery to make that one idea learnable and numerically well-behaved.</p>
+    <p class="lede">Attention is a soft dictionary lookup.</p>
+
+    <p>A Python dictionary matches one key exactly. <code>d["cat"]</code> hands back a single value and ignores everything else it holds.</p>
+
+    <p>Attention asks a fuzzier question. Not <em>"which key matches?"</em> but <em>"how similar is my query to every key?"</em> It then returns a blend of all the values, weighted by that similarity. Three steps:</p>
+
+    <ul>
+      <li><strong>Score.</strong> Compare the query against every key. One similarity number per key.</li>
+      <li><strong>Normalize.</strong> Push those scores through a softmax so they sum to one.</li>
+      <li><strong>Blend.</strong> Take the weighted average of every value, using those weights.</li>
+    </ul>
+
+    <p>Nothing is discarded. Everything contributes, just by different amounts.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The sentence that makes it click</span>
+      <p><em>"The animal didn't cross the street because it was too tired."</em></p>
+      <p>What does <strong>it</strong> refer to? On its own, the word is ambiguous. The animal, or the street.</p>
+      <p>Self-attention lets the representation of <strong>it</strong> act as a query and compare itself against every other word in the sentence. <em>Animal</em> scores far higher than <em>street</em>, because tiredness is a property of animals. So the output vector for "it" becomes mostly "it", blended heavily with "animal".</p>
+      <p>The ambiguity is resolved <strong>inside the representation itself</strong>, before any downstream layer ever sees it.</p>
+    </div>
+
+    <p>That example is Jay Alammar's, from <a href="https://jalammar.github.io/illustrated-transformer/">The Illustrated Transformer</a>. Worth twenty minutes if diagrams land faster for you than equations.</p>
+
+    <p>Every self-attention layer does this for every token against every other token, all at once. <strong>That is the whole idea.</strong> Queries, keys, values, multiple heads, the <span>$\sqrt{d_k}$</span> scaling: all of it is machinery to make that one idea learnable and numerically well-behaved.</p>
   </section>
 
   <section id="architecture">
     <h2><span class="num">03</span>Architecture: how the data actually flows</h2>
-    <p>Every token's embedding is linearly projected three different ways, into a Query, a Key, and a Value vector — three learned lenses on the same token. The query asks "what am I looking for?"; the key advertises "here's what I contain"; the value carries "here's what I'll actually give you if you attend to me."</p>
+    <p>Every token's embedding is linearly projected three different ways: into a Query, a Key, and a Value vector. Three learned lenses on the same token.</p>
+
+    <ul>
+      <li><strong>Query.</strong> "What am I looking for?"</li>
+      <li><strong>Key.</strong> "Here's what I contain."</li>
+      <li><strong>Value.</strong> "Here's what I'll give you if you attend to me."</li>
+    </ul>
 
     <div class="diagram">
       <div class="diagram-title">Scaled dot-product attention — one query attending over four keys/values
@@ -203,7 +230,7 @@
       <div class="diagram-caption">Q·K similarity → softmax turns 4 raw scores into weights that sum to 1 (here 0.09 / 0.62 / 0.21 / 0.08) → those same weights blend V1..V4 into the output Z. Notice K2/V2 dominates — that token is "the answer" this query cared about most. Every token in the sequence runs this simultaneously, as its own query.</div>
     </div>
 
-    <p>Stack this inside a block with a residual connection, a normalization layer, and a position-wise feed-forward network, repeat 12–96+ times, and you have a Transformer stack:</p>
+    <p>Now wrap that in a block: a residual connection, a normalization layer, and a position-wise feed-forward network. Repeat 12–96+ times. That is a Transformer stack:</p>
 
     <div class="diagram">
       <div class="diagram-title">One pre-norm transformer block — residual stream flowing bottom to top
@@ -240,16 +267,31 @@
       <div class="diagram-caption">The residual stream (dashed vertical line) is the through-line: attention and the feed-forward layer each <em>read</em> from it, compute something, and <em>add back into it</em> — they never overwrite it. This is why 96-layer transformers train at all; gradients have a direct highway back to the input, same reason ResNet works (see 04).</div>
     </div>
 
-    <p>That block, stacked, is the whole architecture. Here's how the original paper drew the full encoder-decoder picture — an encoder stack on the left feeding a decoder stack on the right through cross-attention:</p>
+    <p>That block, stacked, is the whole architecture. Here is how the original paper drew the full encoder-decoder picture: an encoder stack on the left, feeding a decoder stack on the right through cross-attention.</p>
 
     <div class="ref-figure">
       <div class="rf-img-wrap"><img src="https://jalammar.github.io/images/t/The_transformer_encoder_decoder_stack.png" alt="The Transformer encoder-decoder stack — N encoder blocks feeding N decoder blocks" loading="lazy"></div>
       <div class="rf-caption"><span class="rf-label">Reference figure</span>The full encoder-decoder Transformer stack. Source: Jay Alammar, <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener">The Illustrated Transformer</a>.</div>
     </div>
 
-    <p>Shapes, concretely. Input token ids: <code>(batch, seq_len)</code>. After the embedding table: <code>(batch, seq_len, d_model)</code>. Every attention and feed-forward layer preserves that shape — attention <em>mixes information across the seq_len axis</em> but never changes it. A decoder-only LM head finally projects <code>d_model → vocab_size</code>, giving <code>(batch, seq_len, vocab_size)</code> logits, one distribution per position predicting the next token.</p>
+    <p>Shapes, concretely:</p>
 
-    <p>The encoder (bidirectional, sees the whole input at once — used in BERT) and the decoder (causal, each position can only see itself and earlier positions, used in GPT) differ only in one line: the decoder masks out future positions before the softmax by setting their scores to <span>$-\infty$</span>. Same mechanism, one masking triangle.</p>
+    <ul>
+      <li>Input token ids: <code>(batch, seq_len)</code></li>
+      <li>After the embedding table: <code>(batch, seq_len, d_model)</code></li>
+      <li>After a decoder-only LM head: <code>(batch, seq_len, vocab_size)</code> logits, one distribution per position predicting the next token</li>
+    </ul>
+
+    <p>Every attention and feed-forward layer preserves that middle shape. Attention <em>mixes information across the seq_len axis</em> but never changes it. Only the final LM head projects <code>d_model → vocab_size</code>.</p>
+
+    <p>Encoder and decoder stacks differ in exactly one line.</p>
+
+    <ul>
+      <li><strong>Encoder</strong> (used in BERT). Bidirectional: every position sees the whole input at once.</li>
+      <li><strong>Decoder</strong> (used in GPT). Causal: each position sees only itself and earlier positions.</li>
+    </ul>
+
+    <p>The decoder gets there by masking out future positions before the softmax, setting their scores to <span>$-\infty$</span>. Same mechanism, one masking triangle.</p>
   </section>
 
   <section id="math">
@@ -266,11 +308,11 @@
     </ul>
 
     <h3>Multi-head attention</h3>
-    <p>Running one attention function gives the model exactly one notion of "relevance." In practice you want several — one head might learn to track subject-verb agreement, another coreference, another local syntax. Multi-head attention just runs <span>$h$</span> independent, smaller attention operations in parallel and concatenates the results:</p>
+    <p>Running one attention function gives the model exactly one notion of "relevance." In practice you want several. One head might learn to track subject-verb agreement, another coreference, another local syntax. Multi-head attention runs <span>$h$</span> independent, smaller attention operations in parallel and concatenates the results:</p>
     <div class="eq-block">
       <span>$$\text{MultiHead}(Q,K,V) = \text{Concat}(\text{head}_1, \dots, \text{head}_h)\,W^{O}, \qquad \text{head}_i = \text{Attention}(QW_i^{Q}, KW_i^{K}, VW_i^{V})$$</span>
     </div>
-    <p>If <span>$d_{model}=512$</span> and <span>$h=8$</span>, each head works in <span>$d_k = 64$</span> dimensions — same total compute as one 512-dim head, but the model gets 8 independent subspaces to specialize in instead of one that has to average everything together.</p>
+    <p>If <span>$d_{model}=512$</span> and <span>$h=8$</span>, each head works in <span>$d_k = 64$</span> dimensions. That is the same total compute as one 512-dim head. The difference is what you get for it: <strong>8 independent subspaces</strong> to specialize in, instead of one that has to average everything together.</p>
 
     <div class="ref-figure">
       <div class="rf-img-wrap"><img src="https://jalammar.github.io/images/t/transformer_attention_heads_qkv.png" alt="Multiple attention heads each producing their own Q, K, V projections" loading="lazy"></div>
@@ -278,12 +320,24 @@
     </div>
 
     <h3>Positional information</h3>
-    <p>Attention itself is permutation-invariant — shuffle the input tokens and you get the same set of outputs, shuffled the same way. No sense of order at all. The original paper injects order with fixed sinusoidal position vectors added to the input embeddings, one frequency per dimension. Modern LLMs almost universally use RoPE (Rotary Position Embedding) instead: rotate each query/key vector by an angle proportional to its position, so that the dot product between a query at position <span>$m$</span> and a key at position <span>$n$</span> naturally depends on the relative distance <span>$m-n$</span> rather than the absolute positions. That relative-distance property is what makes RoPE extrapolate more gracefully to longer sequences than fixed sinusoidal or learned absolute embeddings.</p>
+    <p>Attention itself is <em class="term">permutation-invariant</em>. Shuffle the input tokens and you get the same set of outputs, shuffled the same way. No sense of order at all. Order has to be injected, and there are two standard ways to do it:</p>
+
+    <ul>
+      <li><strong>Sinusoidal (original paper).</strong> Fixed position vectors added to the input embeddings, one frequency per dimension.</li>
+      <li><strong>RoPE, Rotary Position Embedding (modern default).</strong> Rotate each query/key vector by an angle proportional to its position.</li>
+    </ul>
+
+    <p>RoPE's payoff is subtle but large. The dot product between a query at position <span>$m$</span> and a key at position <span>$n$</span> ends up depending on the <em>relative</em> distance <span>$m-n$</span>, not on the absolute positions. That relative-distance property is what makes RoPE extrapolate more gracefully to longer sequences than fixed sinusoidal or learned absolute embeddings.</p>
   </section>
 
   <section id="why">
     <h2><span class="num">05</span>Why this architecture, not the obvious alternatives</h2>
-    <p>The obvious alternatives were "keep the RNN" and "use a CNN." Attention wins on the two axes that matter most for training at scale: how much of the computation can run in parallel, and how long the path is between any two related tokens.</p>
+    <p>The obvious alternatives were "keep the RNN" and "use a CNN." Attention wins on the two axes that matter most for training at scale:</p>
+
+    <ul>
+      <li><strong>Parallelism.</strong> How much of the computation can run at the same time.</li>
+      <li><strong>Path length.</strong> How many steps separate any two related tokens.</li>
+    </ul>
     <div class="tbl-wrap">
       <table class="cmp">
         <thead><tr><th></th><th>RNN / LSTM</th><th>CNN (dilated)</th><th>Self-Attention</th></tr></thead>
@@ -295,29 +349,35 @@
         </tbody>
       </table>
     </div>
-    <p>The <span>$O(1)$</span> path length is the real prize: in an RNN, information from token 1 has to survive <span>$n{-}1$</span> sequential updates to influence token <span>$n$</span> — that's exactly where vanishing gradients bite (see 07). In self-attention, token 1 and token <span>$n$</span> are one dot product apart, always, regardless of distance. The tradeoff is that per-layer compute is now quadratic in sequence length instead of linear — you're trading a hard optimization problem (long-range gradients) for an engineering problem (quadratic cost), and engineering problems are usually easier to throw hardware at.</p>
+    <p>The <span>$O(1)$</span> path length is the real prize. In an RNN, information from token 1 has to survive <span>$n{-}1$</span> sequential updates before it can influence token <span>$n$</span>. That is exactly where vanishing gradients bite (see 07). In self-attention, token 1 and token <span>$n$</span> are one dot product apart. Always, regardless of distance.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The trade the Transformer actually makes</span>
+      <p>Per-layer compute goes from linear in sequence length to <strong>quadratic</strong>. On its face, that is a step backwards.</p>
+      <p>But look at what is being swapped. You take on an <em>engineering problem</em> (quadratic cost) in order to eliminate a <em>hard optimization problem</em> (long-range gradients). Engineering problems are usually easier to throw hardware at. That is why the trade was worth making.</p>
+    </div>
   </section>
 
   <section id="tradeoffs">
     <h2><span class="num">06</span>Complexity, failure modes, and what actually breaks</h2>
-    <p>Self-attention costs <span>$O(n^2 \cdot d)$</span> time and, naively, <span>$O(n^2)$</span> memory to materialize the full attention matrix, where <span>$n$</span> is sequence length. Double the context window and compute roughly quadruples. This single fact drives a huge amount of LLM systems engineering — it's why 23 (Efficient AI &amp; Systems) exists as its own section.</p>
+    <p>Self-attention costs <span>$O(n^2 \cdot d)$</span> time and, naively, <span>$O(n^2)$</span> memory to materialize the full attention matrix, where <span>$n$</span> is sequence length. <strong>Double the context window and compute roughly quadruples.</strong> That single fact drives a huge amount of LLM systems engineering. It is why 23 (Efficient AI &amp; Systems) exists as its own section.</p>
 
     <h3>What actually shows up in production</h3>
     <ul>
-      <li>KV cache growth. During autoregressive generation you don't recompute attention from scratch each step — you cache every past token's K and V vectors. Cache size grows linearly with tokens generated × layers × heads × head_dim, and for long conversations this becomes the dominant memory cost on the serving GPU, often larger than the model weights themselves.</li>
-      <li>FlashAttention doesn't reduce the <span>$O(n^2)$</span> FLOPs — it restructures the computation to avoid ever writing the full <span>$n \times n$</span> attention matrix to slow GPU memory, computing softmax in fused tiles instead. Same math, dramatically less memory traffic, which is usually the actual bottleneck on modern GPUs.</li>
-      <li>Grouped-query / multi-query attention shrinks the KV cache by having multiple query heads share one set of K/V heads — a direct, deliberate quality-for-memory tradeoff used in essentially every modern serving-optimized LLM.</li>
-      <li>Attention sink / long-context dilution. Models reliably show a strong bias toward attending heavily to the first few tokens regardless of relevance ("attention sinks"), and needle-in-a-haystack evaluations show retrieval accuracy dropping for facts placed in the middle of very long contexts — a model that technically <em>can</em> attend anywhere doesn't mean it attends <em>usefully</em> everywhere.</li>
+      <li><strong>KV cache growth.</strong> During autoregressive generation you don't recompute attention from scratch each step. You cache every past token's K and V vectors. Cache size grows linearly with tokens generated × layers × heads × head_dim. For long conversations this becomes the dominant memory cost on the serving GPU, often larger than the model weights themselves.</li>
+      <li><strong>FlashAttention</strong> doesn't reduce the <span>$O(n^2)$</span> FLOPs. It restructures the computation to avoid ever writing the full <span>$n \times n$</span> attention matrix to slow GPU memory, computing softmax in fused tiles instead. Same math, dramatically less memory traffic. Memory traffic is usually the real bottleneck on modern GPUs.</li>
+      <li><strong>Grouped-query / multi-query attention</strong> shrinks the KV cache by having multiple query heads share one set of K/V heads. A deliberate quality-for-memory tradeoff, used in essentially every modern serving-optimized LLM.</li>
+      <li><strong>Attention sinks and long-context dilution.</strong> Models reliably show a strong bias toward attending heavily to the first few tokens, regardless of relevance. Needle-in-a-haystack evaluations show retrieval accuracy dropping for facts placed in the middle of very long contexts. A model that technically <em>can</em> attend anywhere does not mean it attends <em>usefully</em> everywhere.</li>
     </ul>
 
     <div class="callout callout-warn">
       <span class="callout-label">Common misconception</span>
-      <p>"High attention weight on token X means the model is using X to make its decision, so attention weights explain the model's reasoning." This is contested and often false — attention weights show where information is <em>gathered from</em>, not how it's <em>used</em> downstream by the feed-forward layers and later blocks. Treat attention maps as a debugging hint, not a certified explanation. If asked about interpretability in an interview, this distinction is the answer they're checking for.</p>
+      <p>"High attention weight on token X means the model is using X to make its decision, so attention weights explain the model's reasoning." This is contested and often false. Attention weights show where information is <em>gathered from</em>, not how it is <em>used</em> downstream by the feed-forward layers and later blocks. Treat attention maps as a debugging hint, not a certified explanation. If asked about interpretability in an interview, this distinction is the answer they're checking for.</p>
     </div>
 
     <div class="callout callout-status">
       <span class="callout-label">2026 status</span>
-      <p>Quadratic full attention is still the standard for the vast majority of production LLMs, made tractable through engineering (FlashAttention-class kernels, paged/GQA KV caches, sliding-window + occasional global-attention hybrids) rather than replaced outright. Linear-attention and state-space alternatives (Mamba-style) remain an active, promising research direction for very long context but have not displaced attention as the default at frontier scale — treat "attention is dead, SSMs won" as an overclaim if you see it stated flatly.</p>
+      <p>Quadratic full attention is still the standard for the vast majority of production LLMs. It was made tractable through engineering (FlashAttention-class kernels, paged/GQA KV caches, sliding-window + occasional global-attention hybrids) rather than replaced outright. Linear-attention and state-space alternatives (Mamba-style) remain an active, promising research direction for very long context, but they have not displaced attention as the default at frontier scale. Treat "attention is dead, SSMs won" as an overclaim if you see it stated flatly.</p>
     </div>
   </section>
 
@@ -326,9 +386,11 @@
     <h3>Tiny worked example</h3>
     <p>Say a 4-token sentence produces these (illustrative, hand-picked) raw dot-product scores for one query against its 4 keys, before scaling: <code>[2.1, 0.4, -1.0, 3.6]</code>. Divide by <span>$\sqrt{d_k}=8$</span> (a common head dimension): <code>[0.26, 0.05, -0.13, 0.45]</code>. Apply softmax:</p>
     <div class="eq-block"><span>$$\text{softmax} \approx [0.24,\ 0.19,\ 0.16,\ 0.28] \cdot \text{scale} \rightarrow [0.24, 0.19, 0.16, 0.28]$$</span></div>
-    <p>Even a small gap in raw scores produces a visible but not extreme skew after softmax — this is <em>why</em> the <span>$\sqrt{d_k}$</span> scaling matters: without it, scores 10× larger would push softmax toward one-hot outputs (essentially just copying one token, defeating the point of a soft blend) and gradients through the flat parts of softmax would vanish.</p>
+    <p>Even a small gap in raw scores produces a visible but not extreme skew after softmax. This is <em>why</em> the <span>$\sqrt{d_k}$</span> scaling matters. Without it, scores 10× larger would push softmax toward one-hot outputs, copying a single token and defeating the point of a soft blend. Gradients through the flat parts of softmax would vanish along with it.</p>
     <h3>Production use case</h3>
-    <p>Every long-running chat assistant relies on this directly: causal self-attention lets today's question attend straight back to something you said 50 turns ago, in one hop, with a weight the model learned to assign based on relevance — not filtered through a shrinking, decaying RNN memory state. Separately, cross-attention (query from one sequence, key/value from another) is the mechanism a retrieval-augmented system or a translation decoder uses to let generated output directly consult retrieved documents or the source sentence at every single generation step — see 11 for how this composes with a retrieval pipeline.</p>
+    <p>Every long-running chat assistant relies on this directly. Causal self-attention lets today's question attend straight back to something you said 50 turns ago, in one hop, with a weight the model learned to assign based on relevance. It is not filtered through a shrinking, decaying RNN memory state.</p>
+
+    <p><em class="term">Cross-attention</em> does the other half of the work: query from one sequence, key and value from another. It is the mechanism a retrieval-augmented system or a translation decoder uses to let generated output consult retrieved documents or the source sentence, at every single generation step. See 11 for how this composes with a retrieval pipeline.</p>
   </section>
 
   <section id="interview">
