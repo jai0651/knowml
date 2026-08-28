@@ -2,6 +2,7 @@ import { getSql, isValidPageId, setCors } from "./_db.js";
 
 const MAX_NAME = 60;
 const MAX_BODY = 2000;
+const MAX_ANCHOR = 400;
 
 export default async function handler(req, res) {
   setCors(res);
@@ -15,7 +16,7 @@ export default async function handler(req, res) {
       }
       const sql = getSql();
       const rows = await sql`
-        SELECT id, author_name, body, created_at
+        SELECT id, author_name, body, anchor_text, anchor_occurrence, created_at
         FROM comments
         WHERE page_id = ${pageId}
         ORDER BY created_at ASC
@@ -27,6 +28,8 @@ export default async function handler(req, res) {
           id: r.id,
           authorName: r.author_name,
           body: r.body,
+          anchorText: r.anchor_text,
+          anchorOccurrence: r.anchor_occurrence,
           createdAt: r.created_at,
         })),
       });
@@ -38,6 +41,9 @@ export default async function handler(req, res) {
       const pageId = body.pageId;
       const authorName = (body.authorName || "").toString().trim().slice(0, MAX_NAME);
       const commentBody = (body.body || "").toString().trim().slice(0, MAX_BODY);
+      const anchorTextRaw = (body.anchorText || "").toString().trim().slice(0, MAX_ANCHOR);
+      const anchorText = anchorTextRaw || null;
+      const anchorOccurrence = anchorText && Number.isInteger(body.anchorOccurrence) ? body.anchorOccurrence : null;
 
       if (!isValidPageId(pageId)) {
         res.status(400).json({ error: "invalid or missing pageId" });
@@ -54,13 +60,20 @@ export default async function handler(req, res) {
 
       const sql = getSql();
       const rows = await sql`
-        INSERT INTO comments (page_id, author_name, body)
-        VALUES (${pageId}, ${authorName}, ${commentBody})
-        RETURNING id, author_name, body, created_at
+        INSERT INTO comments (page_id, author_name, body, anchor_text, anchor_occurrence)
+        VALUES (${pageId}, ${authorName}, ${commentBody}, ${anchorText}, ${anchorOccurrence})
+        RETURNING id, author_name, body, anchor_text, anchor_occurrence, created_at
       `;
       const r = rows[0];
       res.status(201).json({
-        comment: { id: r.id, authorName: r.author_name, body: r.body, createdAt: r.created_at },
+        comment: {
+          id: r.id,
+          authorName: r.author_name,
+          body: r.body,
+          anchorText: r.anchor_text,
+          anchorOccurrence: r.anchor_occurrence,
+          createdAt: r.created_at,
+        },
       });
       return;
     }

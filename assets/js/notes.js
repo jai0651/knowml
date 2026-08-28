@@ -11,34 +11,23 @@
 
   var state = load();
   var content;
+  var toolbar;
 
   function uid() { return 'h' + Math.random().toString(36).slice(2, 10); }
 
-  /* wrap first unwrapped occurrence of text in a text node under .content */
-  function wrapText(root, text, color, hid) {
-    if (!text || text.length < 2) return false;
-    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode: function (n) {
-        if (n.parentElement.closest('mark.hl')) return NodeFilter.FILTER_REJECT;
-        if (n.parentElement.closest('script,style')) return NodeFilter.FILTER_REJECT;
-        return n.nodeValue.indexOf(text) > -1 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
-      }
+  function markClass(color, note) { return 'hl hl-' + color + (note ? ' has-note' : ''); }
+
+  function wrapHighlight(h) {
+    return window.KMLAnchor.wrapOccurrence(content, h.text, h.occurrence || 0, function () {
+      var mark = document.createElement('mark');
+      mark.className = markClass(h.color, h.note);
+      mark.dataset.hid = h.id;
+      return mark;
     });
-    var node = walker.nextNode();
-    if (!node) return false;
-    var idx = node.nodeValue.indexOf(text);
-    var range = document.createRange();
-    range.setStart(node, idx);
-    range.setEnd(node, idx + text.length);
-    var mark = document.createElement('mark');
-    mark.className = 'hl hl-' + color;
-    mark.dataset.hid = hid;
-    range.surroundContents(mark);
-    return true;
   }
 
   function restoreHighlights() {
-    state.highlights.forEach(function (h) { wrapText(content, h.text, h.color, h.id); });
+    state.highlights.forEach(wrapHighlight);
   }
 
   function renderDrawer() {
@@ -65,66 +54,154 @@
     });
   }
 
+  function unwrapMark(mark) {
+    var parent = mark.parentNode;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    parent.removeChild(mark);
+    parent.normalize();
+  }
+
   function removeHighlight(id) {
     state.highlights = state.highlights.filter(function (h) { return h.id !== id; });
     save(state);
-    var mark = content.querySelector('mark[data-hid="' + id + '"]');
-    if (mark) {
-      var parent = mark.parentNode;
-      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-      parent.removeChild(mark);
-      parent.normalize();
-    }
+    var mark = content.querySelector('mark.hl[data-hid="' + id + '"]');
+    if (mark) unwrapMark(mark);
     renderDrawer();
   }
 
-  function addHighlight(text, color, note) {
-    var h = { id: uid(), text: text, color: color, note: note || '', createdAt: Date.now() };
+  function addHighlight(text, color, note, occurrence) {
+    var h = { id: uid(), text: text, color: color, note: note || '', occurrence: occurrence || 0, createdAt: Date.now() };
     state.highlights.push(h);
     save(state);
-    wrapText(content, text, color, h.id);
+    wrapHighlight(h);
     renderDrawer();
   }
 
-  /* ---------- selection toolbar ---------- */
+  function changeHighlightColor(id, color) {
+    var h = state.highlights.filter(function (x) { return x.id === id; })[0];
+    if (!h) return;
+    h.color = color;
+    save(state);
+    var mark = content.querySelector('mark.hl[data-hid="' + id + '"]');
+    if (mark) mark.className = markClass(h.color, h.note);
+    renderDrawer();
+  }
+
+  function editHighlightNote(id) {
+    var h = state.highlights.filter(function (x) { return x.id === id; })[0];
+    if (!h) return;
+    var note = prompt('Edit note:', h.note || '');
+    if (note === null) return;
+    h.note = note;
+    save(state);
+    var mark = content.querySelector('mark.hl[data-hid="' + id + '"]');
+    if (mark) mark.className = markClass(h.color, h.note);
+    renderDrawer();
+  }
+
+  /* ---------- selection toolbar: new selections + click-to-edit existing highlights ---------- */
+  function closeToolbar() {
+    toolbar.style.display = 'none';
+    toolbar.removeAttribute('data-mode');
+    delete toolbar.dataset.editHid;
+    delete toolbar.dataset.pendingText;
+    delete toolbar.dataset.pendingOccurrence;
+  }
+
+  function positionToolbarAt(rect) {
+    toolbar.style.display = 'flex';
+    toolbar.style.top = (window.scrollY + rect.top - 42) + 'px';
+    toolbar.style.left = Math.max(8, window.scrollX + rect.left + rect.width / 2 - 70) + 'px';
+  }
+
+  function openEditPopover(mark) {
+    var h = state.highlights.filter(function (x) { return x.id === mark.dataset.hid; })[0];
+    if (!h) return;
+    toolbar.dataset.mode = 'edit';
+    toolbar.dataset.editHid = h.id;
+    positionToolbarAt(mark.getBoundingClientRect());
+  }
+
   function initToolbar() {
-    var toolbar = document.getElementById('selectToolbar');
+    toolbar = document.getElementById('selectToolbar');
     if (!toolbar) return;
+
+    if (!document.querySelector('.topic-header')) {
+      var commentBtn0 = toolbar.querySelector('[data-comment]');
+      if (commentBtn0) commentBtn0.style.display = 'none'; /* discussion only exists on topic pages */
+    }
+
     document.addEventListener('mouseup', function (e) {
       if (toolbar.contains(e.target)) return;
       var sel = window.getSelection();
       var text = sel.toString().trim();
       if (!text || !content.contains(sel.anchorNode) || text.length > 400) {
-        toolbar.style.display = 'none';
+        if (!e.target.closest('mark.hl')) closeToolbar();
         return;
       }
       var range = sel.getRangeAt(0);
-      var rect = range.getBoundingClientRect();
-      toolbar.style.display = 'flex';
-      toolbar.style.top = (window.scrollY + rect.top - 42) + 'px';
-      toolbar.style.left = Math.max(8, window.scrollX + rect.left + rect.width / 2 - 70) + 'px';
+      toolbar.dataset.mode = 'select';
       toolbar.dataset.pendingText = text;
+      toolbar.dataset.pendingOccurrence = window.KMLAnchor.computeOccurrence(content, range, text);
+      positionToolbarAt(range.getBoundingClientRect());
     });
+
+    /* plain click (not a drag-selection) on an existing highlight opens the edit popover */
+    content.addEventListener('click', function (e) {
+      var mark = e.target.closest('mark.hl');
+      if (!mark) return;
+      var sel = window.getSelection();
+      if (sel && sel.toString().trim()) return;
+      openEditPopover(mark);
+    });
+
     toolbar.querySelectorAll('[data-color]').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        var text = toolbar.dataset.pendingText;
-        if (text) addHighlight(text, btn.dataset.color, '');
-        toolbar.style.display = 'none';
+        if (toolbar.dataset.mode === 'edit') {
+          changeHighlightColor(toolbar.dataset.editHid, btn.dataset.color);
+        } else {
+          var text = toolbar.dataset.pendingText;
+          if (text) addHighlight(text, btn.dataset.color, '', +toolbar.dataset.pendingOccurrence || 0);
+        }
+        closeToolbar();
         window.getSelection().removeAllRanges();
       });
     });
+
     var noteBtn = toolbar.querySelector('[data-note]');
     if (noteBtn) noteBtn.addEventListener('click', function () {
+      if (toolbar.dataset.mode === 'edit') {
+        editHighlightNote(toolbar.dataset.editHid);
+        closeToolbar();
+        return;
+      }
       var text = toolbar.dataset.pendingText;
       if (!text) return;
       var note = prompt('Add a note to this highlight:', '');
-      if (note !== null) addHighlight(text, 'yellow', note);
-      toolbar.style.display = 'none';
+      if (note !== null) addHighlight(text, 'yellow', note, +toolbar.dataset.pendingOccurrence || 0);
+      closeToolbar();
       window.getSelection().removeAllRanges();
       openDrawer();
     });
+
+    var removeBtn = toolbar.querySelector('[data-remove]');
+    if (removeBtn) removeBtn.addEventListener('click', function () {
+      if (toolbar.dataset.mode === 'edit' && toolbar.dataset.editHid) removeHighlight(toolbar.dataset.editHid);
+      closeToolbar();
+    });
+
+    var commentBtn = toolbar.querySelector('[data-comment]');
+    if (commentBtn) commentBtn.addEventListener('click', function () {
+      if (toolbar.dataset.mode === 'edit') { closeToolbar(); return; }
+      var text = toolbar.dataset.pendingText;
+      var occurrence = +toolbar.dataset.pendingOccurrence || 0;
+      closeToolbar();
+      window.getSelection().removeAllRanges();
+      if (text) document.dispatchEvent(new CustomEvent('kml:comment-request', { detail: { text: text, occurrence: occurrence } }));
+    });
+
     document.addEventListener('mousedown', function (e) {
-      if (!toolbar.contains(e.target)) toolbar.style.display = 'none';
+      if (!toolbar.contains(e.target) && !e.target.closest('mark.hl')) closeToolbar();
     });
   }
 
