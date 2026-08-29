@@ -421,13 +421,29 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
-    <h3>Tiny worked example</h3>
-    <p>Say a 4-token sentence produces these (illustrative, hand-picked) raw dot-product scores for one query against its 4 keys, before scaling: <code>[2.1, 0.4, -1.0, 3.6]</code>. Divide by <span>$\sqrt{d_k}=8$</span> (a common head dimension): <code>[0.26, 0.05, -0.13, 0.45]</code>. Apply softmax:</p>
-    <div class="eq-block"><span>$$\text{softmax} \approx [0.24,\ 0.19,\ 0.16,\ 0.28] \cdot \text{scale} \rightarrow [0.24, 0.19, 0.16, 0.28]$$</span></div>
-    <p>Even a small gap in raw scores produces a visible but not extreme skew after softmax. This is <em>why</em> the <span>$\sqrt{d_k}$</span> scaling matters. Without it, scores 10× larger would push softmax toward one-hot outputs, copying a single token and defeating the point of a soft blend. Gradients through the flat parts of softmax would vanish along with it.</p>
-    <h3>Production use case</h3>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">You can read the attention equation twenty times and still not believe it works. Building the smallest thing that uses it fixes that in an afternoon.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Make attention visibly learn to copy</span>
+        <span class="proj-meta">~3 hours · PyTorch</span>
+      </div>
+      <p>Train a single attention layer on the <strong>copy task</strong>: given a random sequence, output the same sequence. It is deliberately trivial as a task. The point is that the attention matrix has exactly one correct shape, so you can look at it and immediately tell whether the mechanism is doing what the equation says.</p>
+      <ol class="proj-steps">
+        <li>Generate random integer sequences, length 10, vocabulary of 20. Input is the sequence, target is the same sequence.</li>
+        <li>Build <strong>one</strong> attention layer by hand from the equation. Three linear layers for Q, K, V, then <code>softmax(QKᵀ/√d_k)V</code>. No library attention module, no multi-head, no feed-forward block.</li>
+        <li>Add sinusoidal position embeddings. Train to convergence, which should take a couple of minutes on CPU.</li>
+        <li>Plot the attention matrix as a heatmap with <code>matplotlib.imshow</code>.</li>
+        <li>Now break it deliberately. Remove the position embeddings and retrain. Then restore them and remove the <span>$\sqrt{d_k}$</span> scaling, using a large <span>$d_k$</span> like 256.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the heatmap shows a clean bright diagonal: position <span>$i$</span> attending almost entirely to position <span>$i$</span>. That diagonal is the model discovering the copy rule on its own. Nobody coded it.</div>
+      <div class="proj-stretch"><strong>What the two breakages teach.</strong> Without positions, the diagonal never forms: attention is permutation-invariant, so the model literally cannot tell position 3 from position 7. Without the <span>$\sqrt{d_k}$</span> scaling at large <span>$d_k$</span>, the heatmap goes hard one-hot early and training stalls, which is the vanishing-gradient argument from section 04 showing up as a picture instead of an equation.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>Every long-running chat assistant relies on this directly. Causal self-attention lets today's question attend straight back to something you said 50 turns ago, in one hop, with a weight the model learned to assign based on relevance. It is not filtered through a shrinking, decaying RNN memory state.</p>
 
     <p><em class="term">Cross-attention</em> does the other half of the work: query from one sequence, key and value from another. It is the mechanism a retrieval-augmented system or a translation decoder uses to let generated output consult retrieved documents or the source sentence, at every single generation step. See 11 for how this composes with a retrieval pipeline.</p>

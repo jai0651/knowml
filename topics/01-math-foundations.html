@@ -304,7 +304,7 @@
     <p><span>$H(p)$</span> is the entropy of the true distribution: how unpredictable the data itself is. It's a fixed property of the data, independent of your model. <span>$H(p,q)$</span>, cross-entropy, measures the same thing but scored using your model's distribution <span>$q$</span> instead of the true one <span>$p$</span>. Those are the extra bits (or nats) you pay whenever <span>$q$</span> disagrees with <span>$p$</span>. The gap between them is exactly the KL divergence:</p>
     <div class="eq-block"><span>$$D_{KL}(p \,\|\, q) = \sum_i p_i \log \frac{p_i}{q_i} = H(p,q) - H(p)$$</span></div>
     <p><span>$H(p)$</span> doesn't depend on your model at all, because the data doesn't change while you train. So minimizing cross-entropy and minimizing KL divergence are <strong>the same optimization problem</strong>. You're minimizing the gap between what your model believes and what's true. That's the justification for cross-entropy as a loss function, in one sentence.</p>
-    <p>One caveat: this is not symmetric. <span>$D_{KL}(p\|q) \neq D_{KL}(q\|p)$</span> in general, so KL divergence isn't a true distance metric. Which distribution you designate "true" changes what gets penalized, and it matters (see the worked example below).</p>
+    <p>One caveat: this is not symmetric. <span>$D_{KL}(p\|q) \neq D_{KL}(q\|p)$</span> in general, so KL divergence isn't a true distance metric. Which distribution you designate "true" changes what gets penalized, and it matters. The project in section 07 makes that choice visible: the same target, fitted in both directions, gives two completely different answers.</p>
 
     <details class="derivation">
       <summary>
@@ -498,24 +498,30 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Two worked examples, by hand</h2>
-    <h3>Cross-entropy loss for a 3-class prediction</h3>
-    <p>Say the true label is cat, out of {cat, dog, bird}. That's a one-hot target <span>$y=[1,0,0]$</span>. Illustrative model output, a softmax distribution: <span>$\hat{y} = [0.9,\ 0.07,\ 0.03]$</span>.</p>
-    <p>Cross-entropy only ever looks at the probability assigned to the <strong>true</strong> class, because every other term in the sum is multiplied by a zero from the one-hot target:</p>
-    <div class="eq-block"><span>$$\begin{aligned}H(y,\hat{y}) &= -\big(1\cdot\log 0.9 + 0\cdot\log 0.07 + 0\cdot\log 0.03\big) \\ &= -\log(0.9) \approx 0.105 \text{ nats}\end{aligned}$$</span></div>
-    <p>Now the same true label, but an illustrative model that guessed confidently wrong: <span>$\hat{y}' = [0.05,\ 0.9,\ 0.05]$</span>.</p>
-    <div class="eq-block"><span>$$H(y,\hat{y}') = -\log(0.05) \approx 3.0 \text{ nats}$$</span></div>
-    <p>Same true label, roughly 30x more loss, just for going from confidently right to confidently wrong. <strong>That gap is the entire point of the loss function's shape.</strong> See the diagram above.</p>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">Section 04 says KL divergence is not symmetric, and that the direction you pick changes what gets penalized. That is easy to nod at and hard to believe. Two plots settle it.</p>
 
-    <h3>KL divergence between two tiny distributions</h3>
-    <p>Illustrative true/reference distribution over 3 outcomes: <span>$p=[0.5,\ 0.3,\ 0.2]$</span>. Illustrative predicted distribution: <span>$q=[0.6,\ 0.2,\ 0.2]$</span>.</p>
-    <div class="eq-block"><span>$$\begin{aligned}D_{KL}(p\|q) &= 0.5\log\frac{0.5}{0.6} + 0.3\log\frac{0.3}{0.2} + 0.2\log\frac{0.2}{0.2} \\ &\approx -0.091 + 0.122 + 0 \approx 0.030 \text{ nats}\end{aligned}$$</span></div>
-    <p>Small, because the two distributions are close. Now swap which one is called "true" and compute <span>$D_{KL}(q\|p)$</span> instead:</p>
-    <div class="eq-block"><span>$$\begin{aligned}D_{KL}(q\|p) &= 0.6\log\frac{0.6}{0.5} + 0.2\log\frac{0.2}{0.3} + 0.2\log\frac{0.2}{0.2} \\ &\approx 0.109 - 0.081 + 0 \approx 0.028 \text{ nats}\end{aligned}$$</span></div>
-    <p>A different number: 0.030 vs 0.028 nats. Close in this illustrative case, but not equal, and in general they can diverge much further. That's the asymmetry mentioned above. KL divergence penalizes <em>"my model is confident about something the truth says is unlikely"</em> differently than <em>"my model is unsure about something the truth says is certain."</em></p>
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Fit one Gaussian to two bumps, in both KL directions</span>
+        <span class="proj-meta">~2 hours · PyTorch</span>
+      </div>
+      <p>Build a target <span>$p$</span> with two separated bumps. Fit a single Gaussian <span>$q$</span> to it twice: once minimizing <span>$D_{KL}(p\|q)$</span>, once minimizing <span>$D_{KL}(q\|p)$</span>. Same target, same optimizer, same initialization. Only the argument order changes. One dimension is the point here, because the fitted Gaussian has nowhere to hide. You read the answer straight off the picture.</p>
+      <ol class="proj-steps">
+        <li>Lay a grid of a few hundred points across the real line. Define <span>$p$</span> on it as a mixture of two Gaussians with well-separated means, normalized to sum to 1.</li>
+        <li>Parameterize <span>$q$</span> by a mean and a log standard deviation, two scalars, evaluated on the same grid and normalized the same way.</li>
+        <li>Write the KL sum <strong>by hand</strong> from the equation in section 04, <span>$\sum_i p_i \log(p_i/q_i)$</span>. No <code>kl_div</code>, no distribution class. Add a small floor inside the log, since section 04's derivation needs <span>$q_i > 0$</span> wherever <span>$p_i > 0$</span>.</li>
+        <li>Minimize <span>$D_{KL}(p\|q)$</span> with Adam. Plot the fitted <span>$q$</span> on top of <span>$p$</span>.</li>
+        <li>Swap the arguments to <span>$D_{KL}(q\|p)$</span>, refit from the same initialization, and plot it on the same axes. Then refit it again starting near the other bump.</li>
+        <li>Now remove the asymmetry. Replace the two-bump target with a single Gaussian and fit both directions again.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the two fitted curves are visibly different shapes. <strong>Forward KL</strong> spreads one wide Gaussian across both bumps and puts real mass in the empty valley between them, where <span>$p$</span> has almost none. <strong>Reverse KL</strong> narrows onto a single bump and writes off the other. Which bump it picks depends on where you started, which is what the second run in step 5 is for.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> Against a single-Gaussian target, both directions land in the same place. So the asymmetry is not really a property of KL on its own. It only bites when <span>$q$</span> cannot represent <span>$p$</span>. Then it decides <em>how</em> the model fails: cover everything badly, or commit to one region and ignore the rest. That choice is sitting inside every KL term below, including the VAE's prior penalty and the drift penalty in RLHF.</div>
+    </div>
 
-    <h3>Where this shows up in production</h3>
+    <h3>Where this runs in production</h3>
     <p><strong>Cross-entropy</strong> is the default loss for essentially every classifier and every next-token predictor in every LLM you've used. The entire pretraining objective of GPT-style models is cross-entropy loss on the next token, applied one position at a time across trillions of tokens.</p>
     <p><strong>KL divergence</strong> shows up constantly outside plain supervised training too:</p>
     <ul>

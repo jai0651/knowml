@@ -343,18 +343,30 @@
     <p>RNNs lost on <em>trainability</em> and <em>parallelism</em> at scale. That tradeoff is exactly why state-space models (Mamba-style) resurfaced in the 2020s as a research direction. See the 2026 status note on page 08.</p>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and production use cases</h2>
-    <h3>Tracing a gradient signal over 20 steps (illustrative)</h3>
-    <p>Suppose, for illustration, that the dominant term in a vanilla RNN's per-step Jacobian averages out to about 0.7. That's a plausible, deliberately mid-range number. Real values depend entirely on the trained weights and are usually worse than this for tanh-saturated units.</p>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">This page claims a vanilla RNN gives up somewhere around 10 to 20 steps, and that gating stretches that to several hundred. Both of those are numbers you can measure yourself, on a laptop CPU.</p>
 
-    <p>After 20 timesteps, the surviving fraction of gradient signal is roughly <span>$0.7^{20} \approx 0.0008$</span>. About 0.08% of the original signal reaches the start of the sequence. A word at position 1 that mattered for the prediction at position 21 gets essentially no learning signal. The network has no way to know it should have paid attention to that word.</p>
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Find the exact gap length where an RNN forgets</span>
+        <span class="proj-meta">~4 hours · PyTorch</span>
+      </div>
+      <p>Train a recurrent network on the <strong>remember-one-bit task</strong>. The first element of the sequence is 0 or 1. Then come <span>$T$</span> steps of noise, and the model must output that first bit at the end. Guessing scores 50%, so there is exactly one thing to look at. Sweep <span>$T$</span> and find where the model stops beating a coin.</p>
+      <ol class="proj-steps">
+        <li>Write the vanilla RNN cell by hand from the update rule in section 04, plus one linear head on the final hidden state. No <code>nn.RNN</code>.</li>
+        <li>Generate the task on the fly. Train a fresh model for each gap length <span>$T$</span> in 5, 10, 20, 40, 80, 160.</li>
+        <li>Plot final accuracy against <span>$T$</span>. Mark the length where the curve drops to chance and stays there.</li>
+        <li>Log the gradient norm at the first timestep, <span>$\lVert \partial \mathcal{L} / \partial h_1 \rVert$</span>, for every <span>$T$</span>. Plot it on a log axis beside the accuracy curve.</li>
+        <li>Swap in an LSTM cell, also written by hand from the six equations in section 04. Rerun the identical sweep, extending it to longer <span>$T$</span> until this one fails too.</li>
+        <li>Now break the LSTM on purpose. Initialise the forget-gate bias to a large negative value, so <span>$f_t$</span> starts near 0, and rerun the sweep.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> both accuracy curves show a cliff rather than a slope. The vanilla RNN's cliff arrives first and the LSTM's much later. The gradient-norm plot collapses toward zero at the same gap length where the RNN's accuracy does. Those two curves, side by side, are the argument this whole page makes.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> Forcing the forget gate shut drags the LSTM's cliff back toward the vanilla RNN's. No architecture changed. One bias did. That isolates the claim in section 05: the gates are not what buys you range. <span>$f_t$</span> sitting near 1 is, because that is what keeps each step of the gradient path close to an identity.</div>
+    </div>
 
-    <p>Now compare an LSTM whose forget gate learns to sit near <span>$f_t \approx 0.98$</span> for a dimension carrying important information. <span>$0.98^{20} \approx 0.67$</span>. Two-thirds of the signal survives the same 20 steps.</p>
-
-    <p>This is a toy example with hand-picked numbers, not a benchmark result. But it's the correct qualitative shape of why gating matters. Multiplicative decay through a shared weight matrix is brutal over even moderate lengths. A learned near-identity gate is not.</p>
-
-    <h3>Production use case: seq2seq machine translation, pre-attention</h3>
+    <h3>Where this runs in production: seq2seq machine translation, pre-attention</h3>
     <p>Sutskever, Vinyals &amp; Le's 2014 "Sequence to Sequence Learning with Neural Networks" set up the architecture that dominated neural machine translation until attention arrived. Two pieces:</p>
 
     <ul>
@@ -368,7 +380,7 @@
 
     <p>Sentences got noticeably worse as they got longer, for exactly the reason you'd expect. Everything the decoder knows about the source has to fit through one fixed-size vector, and the pressure on that vector only grows with sentence length. That's the precise, named problem Bahdanau attention was built to solve, and the one page 08 picks up from here.</p>
 
-    <h3>Production use case: CTC in speech recognition</h3>
+    <h3>Where this runs in production: CTC in speech recognition</h3>
     <p>Speech recognition has a labeling problem seq2seq doesn't directly solve. An audio signal sampled into, say, 200 frames needs to map to a transcript of maybe 12 words. You don't know in advance which frames correspond to which letters. There's no frame-level alignment in the training data.</p>
 
     <p><em class="term">Connectionist Temporal Classification</em> (CTC) solves this in two moves:</p>

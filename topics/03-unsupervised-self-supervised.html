@@ -332,7 +332,7 @@
     <ul class="eq-explain">
       <li><span class="sym">z_i, z_j</span> the two embeddings of the positive pair — same source image, two different augmentations — both L2-normalized so their dot product is a cosine similarity.</li>
       <li><span class="sym">sim(·,·)</span> cosine similarity between two embeddings, ranging from -1 to 1: how aligned the two vectors are.</li>
-      <li><span class="sym">τ</span> temperature, a scalar that rescales similarities before the softmax. Small τ sharpens the distribution so the loss reacts much more strongly to hard, nearby negatives; large τ flattens it so every negative contributes more evenly. The worked example below makes this concrete with numbers.</li>
+      <li><span class="sym">τ</span> temperature, a scalar that rescales similarities before the softmax. Small τ sharpens the distribution so the loss reacts much more strongly to hard, nearby negatives; large τ flattens it so every negative contributes more evenly. The project in section 07 has you sweep τ and watch the embedding clusters tighten or smear.</li>
       <li><span class="sym">numerator</span> the positive pair's similarity, exponentiated — the one term gradient descent is trying to make as large as possible relative to everything else.</li>
       <li><span class="sym">denominator</span> the sum over every other embedding in the batch except i itself — normalizing against the whole batch is what pushes every negative's similarity down, since increasing the numerator's share of that sum requires decreasing everyone else's relative share.</li>
     </ul>
@@ -411,15 +411,30 @@
     <p>The linear probe is literally the evaluation protocol SimCLR, and nearly every contrastive-learning paper since, uses to report results. There is no other honest way to say "these representations are good" without eventually testing them against a real task.</p>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
-    <h3>Tiny worked example: one InfoNCE step, by hand</h3>
-    <p>Say a batch produces these (illustrative, hand-picked) cosine similarities for one image's embedding z₁ against everything else: the positive pair z₂ at 0.82, and three negatives at 0.10, -0.05, and 0.30. At a common contrastive-learning temperature of τ = 0.1, divide every similarity by τ to get <code>8.2, 1.0, -0.5, 3.0</code>. Exponentiate: <code>e^8.2 ≈ 3641, e^1.0 ≈ 2.72, e^-0.5 ≈ 0.61, e^3.0 ≈ 20.1</code>. The loss for this anchor:</p>
-    <div class="eq-block"><span>$$\ell = -\log\frac{3641}{3641 + 2.72 + 0.61 + 20.1} = -\log(0.9936) \approx 0.0064$$</span></div>
-    <p>A tiny loss. At this temperature the positive pair's similarity already dominates the sum overwhelmingly, so the model is doing well on this anchor and gets only a small gradient nudge. Now redo the exact same embeddings with τ = 1.0 instead of 0.1. Dividing by 1 leaves the raw similarities unchanged, and exponentiating gives <code>2.27, 1.11, 0.95, 1.35</code>:</p>
-    <div class="eq-block"><span>$$\ell = -\log\frac{2.27}{2.27 + 1.11 + 0.95 + 1.35} = -\log(0.40) \approx 0.92$$</span></div>
-    <p>Same embeddings, same model, wildly different loss. Purely because of how much <strong>temperature</strong> sharpens or flattens the softmax. That is why temperature is a real hyperparameter worth tuning rather than an afterthought. It directly controls how much of the gradient budget gets spent separating hard, nearby negatives versus negatives that were never going to be confused anyway.</p>
-    <h3>Production use case: self-supervised pretraining before a small fine-tune</h3>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">Representation collapse is the failure this whole family of methods is designed around. Reading about it is one thing. Watching every embedding in your batch slide onto the same point is another.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Collapse a contrastive encoder on purpose</span>
+        <span class="proj-meta">~3 hours · PyTorch</span>
+      </div>
+      <p>Train a SimCLR-style encoder on a toy image set where you already know what the right answer looks like. Then delete the negatives and watch the representation die. The embedding is two-dimensional, so it plots directly. No t-SNE, deliberately. Section 06 warns that distances in a t-SNE plot are not distances in your data. This project needs a picture you can trust.</p>
+      <ol class="proj-steps">
+        <li>Generate the data: a few hundred 32×32 images, each one solid shape on a black background, in one of four colors. Color is the only semantic content. Keep the color labels aside, for plotting and nothing else.</li>
+        <li>Define two augmentations that preserve color: random resized crop and horizontal flip. Two views per image, one shared encoder, exactly the diagram in section 03.</li>
+        <li>Encoder: three small conv layers down to a 2-D output, L2-normalized. Two dimensions means every embedding is plottable with no projection step in between.</li>
+        <li>Write <strong>InfoNCE by hand</strong> from the equation in section 04. Cosine similarity matrix over the 2N views, mask the diagonal, divide by <span>$\tau$</span>, cross-entropy against the index of the matching view. Train at <span>$\tau = 0.1$</span>, then again at <span>$\tau = 1.0$</span>.</li>
+        <li>Plot the trained embeddings on the unit circle, colored by the labels you set aside. Log the standard deviation of the embeddings across each batch as training runs.</li>
+        <li>Now break it. Drop the negatives entirely: replace the loss with the negative cosine similarity of the positive pair alone, and retrain from scratch.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the embeddings sit in four separated clumps on the circle, one per color. The encoder was never shown a single color label. Put the two temperatures side by side too. They should not produce the same picture, because <span>$\tau$</span> decides how much of the gradient goes into separating nearby negatives (section 04).</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> With the negatives gone, the constant-output encoder is a perfect solution, and gradient descent finds it. The clumps drift together, the batch standard deviation you logged falls toward zero, and every image lands on the same point. That is <strong>representation collapse</strong> from section 06, reproduced by deleting one term. It also makes the BYOL and SimSiam result legible. They drop the negatives too, and the stop-gradient is the only thing standing between them and this plot.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>A common real pipeline. You have a large pool of unlabeled images from your own domain (product photos, medical scans, satellite imagery, whatever is abundant) and only a small, expensive-to-produce labeled set for the task you care about, say defect classification. Three steps:</p>
     <ul>
       <li><strong>Pretrain</strong> a vision encoder on the full unlabeled pool, using a contrastive objective (SimCLR/MoCo-style) or a masked-reconstruction objective (MAE-style). No labels touched yet.</li>

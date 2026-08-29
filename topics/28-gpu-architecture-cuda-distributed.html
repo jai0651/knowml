@@ -427,23 +427,30 @@
     </ul>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">14</span>Worked example and a production use case</h2>
-    <h3>Illustrative ring all-reduce walkthrough — 4 GPUs, toy numbers</h3>
-    <p>Take 4 GPUs in a ring: GPU0 → GPU1 → GPU2 → GPU3 → back to GPU0. Each GPU's gradient vector is split into 4 chunks (N=4). Follow just one chunk index through the scatter-reduce phase.</p>
+  <section id="build">
+    <h2><span class="num">14</span>Build this</h2>
+    <p class="lede">You can read about coalesced memory access and still not believe layout beats arithmetic. Write one kernel that does no arithmetic at all, and the argument settles itself.</p>
 
-    <p>Say GPU0 holds the value 2 for this chunk, GPU1 holds 5, GPU2 holds 3, GPU3 holds 8 (illustrative, made up for this walkthrough).</p>
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Write a naive transpose kernel, then profile your way out of it</span>
+        <span class="proj-meta">~4 hours · CUDA C + Nsight Compute</span>
+      </div>
+      <p>Transpose a square matrix. The task is chosen for one property: a transpose performs <strong>zero floating-point operations</strong>. It only moves bytes. So any distance between what you measure and your GPU's bandwidth roof has to come from how those bytes are laid out. There is no arithmetic there to blame. You need an NVIDIA GPU for this. Colab's free tier is fine, and <code>ncu</code> runs there.</p>
+      <ol class="proj-steps">
+        <li>Write the obvious kernel in CUDA C: one thread per element, <code>out[x*N + y] = in[y*N + x]</code>. Check it against NumPy before you time anything. A fast wrong kernel teaches nothing.</li>
+        <li>Compute <strong>effective bandwidth</strong> by hand: bytes read plus bytes written, divided by measured time. Put it next to the peak bandwidth on your GPU's datasheet.</li>
+        <li>Profile with <code>ncu</code> and go straight to the memory chart. Compare sectors requested per warp for the load against the same figure for the store. One of them is much worse than the other.</li>
+        <li>Apply the single optimisation. Stage a tile in <code>__shared__</code> memory: coalesced loads in, transpose inside the tile, coalesced stores out. Identical bytes, identical zero FLOPs, different order.</li>
+        <li>Re-measure bandwidth and re-run <code>ncu</code>. Put the two sector counts side by side with the ones you started from.</li>
+        <li>Now break the fix while keeping the shared memory. Leave the <code>__shared__</code> tile in place, but restore the strided global writes so the tile buys you nothing. Measure a third time.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the two sector-per-warp figures, badly mismatched in the naive kernel, come out matched after tiling. Your measured bandwidth moves toward the datasheet roof by roughly the amount the profiler said it should. Track the gap you closed against the roof rather than the raw timings. A transpose computes nothing, so that gap was never arithmetic. It was warps asking HBM for scattered addresses when they could have asked for contiguous ones.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> Shared memory on its own is not the optimisation. Keep the tile and reintroduce the strided writes, and the win largely evaporates, because the lever was always the <em>global</em> access pattern that section 08 lists first. Shared memory is only the scratch space that lets you reorder before touching HBM. Once you are convinced, pad the shared tile by one extra column and measure again. Threads reading down a column of an unpadded tile land in the same bank, which is the shared-memory analogue of the problem you just fixed one tier down.</div>
+    </div>
 
-    <ul>
-      <li><strong>Step 1.</strong> GPU0 sends its 2 to GPU1, which adds it to its own 5, holding 7.</li>
-      <li><strong>Step 2.</strong> GPU1 sends that 7 to GPU2, which adds it to its own 3, holding 10.</li>
-      <li><strong>Step 3.</strong> GPU2 sends that 10 to GPU3, which adds it to its own 8, holding 18. The true sum, 2+5+3+8=18, and for now it lives only on GPU3.</li>
-    </ul>
-
-    <p>That is 3 steps, N−1 for N=4, exactly as the formula predicts. Meanwhile the other 3 chunk indices are rotating through the exact same pattern simultaneously, each one fully reducing onto a different GPU by the end of its own 3 steps. Scatter-reduce is done, and each of the 4 GPUs now holds the true sum for exactly one of the 4 chunks.</p>
-
-    <p>All-gather then runs the same ring pattern for 3 more steps, except each GPU now just relays its already-final chunk onward instead of adding to it. At the end all 4 GPUs hold all 4 fully-reduced chunks: the complete, synchronized gradient on every GPU, with no GPU ever having sent or received more than 3 chunks' worth of data in total across the whole process.</p>
-    <h3>Production use case: designing GPU cluster topology for a large training run</h3>
+    <h3>Where this runs in production</h3>
     <p>Say you are laying out a training job across a cluster with several GPUs per node, connected by NVLink within a node and InfiniBand between nodes. The placement decision follows directly from the communication-frequency argument on this page.</p>
 
     <ul>

@@ -427,14 +427,30 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
-    <h3>Illustrative worked example: what action chunking buys you</h3>
-    <p>Say a manipulation task takes <strong>100 individual timesteps</strong>. Illustratively, each individual predicted action has some small independent chance of drifting far enough off-distribution to start compounding error.</p>
-    <p>Predicting one action at a time gives the policy 100 independent chances for that failure to trigger somewhere along the trajectory.</p>
-    <p>Predicting in chunks of, say, 10 actions at a time cuts that to <strong>10 independent decision points</strong>. Each chunk is generated jointly and conditioned on one observation, so the actions inside a chunk are consistent with each other by construction. They aren't 10 separate, independently-erring single-step guesses stitched together after the fact.</p>
-    <p>This doesn't eliminate compounding error. The robot still re-observes and re-plans between chunks. But it meaningfully shrinks how many independent places, per unit of task progress, an error can get started.</p>
-    <h3>Production use case: warehouse pick-and-place</h3>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">Action chunking reads like a batching trick. Plot the actions a chunked policy actually executes next to a single-step one, and it stops looking like plumbing.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Watch action chunking take the jitter out of a reach</span>
+        <span class="proj-meta">~4 hours · PyTorch + Gymnasium</span>
+      </div>
+      <p>Clone the same expert twice on a simulated reach task. One policy predicts the next action. The other predicts a chunk of the next several. Same data, same loss, same network, one difference. A reach is the right task here because there is exactly one sensible motion. Anything ugly in the executed trajectory came from the policy, not from the task being hard.</p>
+      <ol class="proj-steps">
+        <li>Pick a reach task with a low-dimensional state, such as Gymnasium's <code>Reacher</code>. Write the expert as a simple PD controller driving the tip toward the target, then record a few hundred episodes of <code>(observation, action)</code>. That expert is the classical control layer from section 03, and it costs you nothing to write.</li>
+        <li>Train policy A straight from the behavioural-cloning loss in section 04. An MLP maps the observation to the single next action, squared error against the expert's.</li>
+        <li>Train policy B. Same MLP, same data, same loss, except the output layer emits the next <span>$K$</span> actions at once. Read the targets off each demonstration as a sliding window. Try <span>$K$</span> around 8 or 16.</li>
+        <li>Roll both out closed-loop. A acts once per observation. B executes its whole chunk, then re-observes and predicts the next one. Record every action that actually reached the simulator.</li>
+        <li>Plot the executed action for each joint against time, A and B on the same axes. Plot the two tip paths beside them.</li>
+        <li>Now break it deliberately. Rewrite the expert so it reaches the target two different ways at random, swinging clockwise or anticlockwise around the midpoint. Retrain both policies on that data and plot again.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the two traces differ in a way you can see without computing a metric. A's line tends to chatter between adjacent steps. B's is smooth inside each chunk, with a visible step at every boundary where the robot re-observed. If A comes out smooth, add a little noise to the observations during rollout, which is the realistic case anyway, and look again. Each of A's actions is an independent guess conditioned on one noisy observation. B commits to a whole window from one.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> With two valid routes in the demonstrations, squared error puts the prediction between them. Between them is the one place neither demonstrator ever went. Expect both policies to head for the midpoint. Chunking does not rescue B here, and that is the point. <strong>Averaging is a property of the loss, not of the horizon.</strong> It is why section 05 lists diffusion policies and action chunking as separate fixes. They repair different failures.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>A common real deployment pattern runs in three layers:</p>
     <ul>
       <li>A <strong>learned perception-and-policy module</strong> looks at a bin of mixed, previously-unseen items and outputs where and how to grasp: position, approach angle, gripper width. That's a high-level decision that genuinely needs generalization.</li>

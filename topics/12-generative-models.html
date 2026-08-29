@@ -469,8 +469,8 @@
     <p>Treat both as proxies you triangulate with, not ground truth. A model can win on FID and still look worse to people, or the reverse.</p>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
     <h3>Classifier-free guidance</h3>
     <p>This is the single most practically important diffusion concept if you are using these models. It is also simpler than it sounds.</p>
     <p>During training, the conditioning signal (a text prompt's embedding, say) is randomly dropped and replaced with a fixed "empty" token some fraction of the time. A common choice is around 10%. So the exact same network learns to predict noise two ways:</p>
@@ -485,7 +485,28 @@
     <p>where <span>$w$</span> is the <strong>guidance scale</strong>. Illustrative: at <span>$w{=}1$</span> you get the plain conditional prediction, with no extrapolation.</p>
     <p>Push <span>$w$</span> higher and you exaggerate the direction the prompt is already pulling the prediction, which produces images that adhere to the prompt much more strongly. Values in roughly the 7–15 range are commonly used defaults in practice; Stable Diffusion's original default sat around 7.5.</p>
     <p>Push it too far and you trade away diversity, and start seeing oversaturated colors and artifacts. Guidance scale is a real dial with a real quality/adherence tradeoff, not a free lunch.</p>
-    <h3>Production use case: a text-to-image pipeline</h3>
+
+    <p class="lede">Guidance is the dial. The reverse process is the thing being steered, and it is small enough to build from scratch in an afternoon.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Denoise a Gaussian blob back into two moons</span>
+        <span class="proj-meta">~2 hours · PyTorch + scikit-learn</span>
+      </div>
+      <p>Train a diffusion model on 2D points instead of images. The data is <code>make_moons</code>: two interleaved crescents. Two dimensions means you can plot the <em>entire</em> distribution at every timestep. The reverse process stops being a diagram and becomes something you watch happen. It also means no U-Net, no latent space, and no GPU.</p>
+      <ol class="proj-steps">
+        <li>Sample a few thousand points from <code>make_moons</code> with a little noise. Scatter-plot them. That plot is your ground truth for the rest of the project.</li>
+        <li>Write the forward process <strong>straight from section 04</strong>: a linear <span>$\beta$</span> schedule over a few hundred timesteps, precomputed <span>$\bar\alpha_t$</span>, then <span>$x_t = \sqrt{\bar\alpha_t}\,x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon$</span>. Plot the cloud at several values of <span>$t$</span> and watch the crescents dissolve.</li>
+        <li>Make <span>$\epsilon_\theta$</span> a small MLP. Input is the 2D point plus a sinusoidal embedding of <span>$t$</span>; output is a 2-vector, the predicted noise. Train with the plain L2 loss from section 04.</li>
+        <li>Sample. Draw <span>$x_T$</span> from <span>$\mathcal{N}(0, I)$</span>, run the reverse loop down to <span>$x_0$</span>, and scatter-plot the whole cloud every twenty steps. Stack the frames into an animation or a grid.</li>
+        <li>Now break it twice. Keep the trained weights and cut the reverse loop to a handful of steps. Then retrain with the timestep input removed from the network entirely.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the frames show a round blob stretching, then splitting, with the gap between the two crescents opening late in the run. Nothing in your code describes a crescent. The network only ever saw noisy points and was only ever asked to predict noise.</div>
+      <div class="proj-stretch"><strong>What the two breakages teach.</strong> With only a handful of reverse steps the cloud lands in a smeared version of the moons, and the gap tends to fill in. Each step assumes the correction it makes is small, and that assumption fails when the steps get large. That is the sampling cost from section 06, and what DDIM attacks. Dropping the timestep input fails harder. The network can no longer tell the start of the trajectory from the end, so it applies one average correction everywhere and the shape never resolves.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>Three distinct pretrained components, chained together, each doing one well-scoped job:</p>
     <ol>
       <li><strong>Text encoder.</strong> A pretrained language model or CLIP-style text tower turns the prompt string into a conditioning embedding.</li>

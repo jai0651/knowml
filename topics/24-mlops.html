@@ -336,11 +336,30 @@
     <p>Getting this wrong isn't a performance failure. It's a compliance and trust failure, and it needs designing into the data layer from the start rather than retrofitting after an incident.</p>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">09</span>Worked example and a production use case</h2>
-    <h3>Illustrative PSI walkthrough</h3>
-    <p>Say a lending model's "monthly income" feature was binned into 5 buckets during training, with reference proportions <span>$q = [0.30, 0.30, 0.20, 0.15, 0.05]$</span> (illustrative). Six months later, the current production traffic falls into those same bins at <span>$p = [0.15, 0.25, 0.25, 0.20, 0.15]$</span> (illustrative) — noticeably more mass in the higher-income bins than the model ever saw in training. Computing <span>$\sum (p_i - q_i)\ln(p_i/q_i)$</span> bucket by bucket and summing gives a PSI in the moderate-to-significant range (illustrative arithmetic, not a real dataset) — the kind of result that should trigger investigating whether this is a temporary shift (a marketing campaign that attracted a different customer segment this month) or a durable one worth retraining for, rather than auto-triggering a retrain on the number alone.</p>
-    <h3>Production use case: rolling out a new fraud model safely</h3>
+  <section id="build">
+    <h2><span class="num">09</span>Build this</h2>
+    <p class="lede">The whole argument for monitoring inputs is that inputs move before accuracy does. You do not have to take that on faith. Simulate months of drift in an afternoon and read the lead time off your own plot.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Make a drift monitor fire before the accuracy metric does</span>
+        <span class="proj-meta">~2 hours · scikit-learn, CPU only</span>
+      </div>
+      <p>Train a small classifier, freeze it, then push its input distribution away from training data one simulated week at a time. The entire dataset is two overlapping Gaussian blobs, deliberately. It is trivial enough that you can see exactly what you moved and by how much. That is the point. The interesting object here is not the model, it is the two curves you plot against each other.</p>
+      <ol class="proj-steps">
+        <li>Generate two overlapping Gaussian classes in 2-D. Train logistic regression on a reference window, then freeze it. Production models do not get to keep learning.</li>
+        <li>Simulate 30 weekly windows. In each one, sample fresh data with one feature's mean nudged a little further from where it started.</li>
+        <li>Implement <strong>PSI</strong> by hand from the equation in section 05. Bin the reference window, freeze those bin edges, and score every later window against them.</li>
+        <li>Record accuracy per window too, pretending its labels only arrive at the end of that window. That lag is the realistic part.</li>
+        <li>Plot PSI and accuracy on one shared time axis. Mark the conventional 0.1 and 0.25 PSI lines from section 05.</li>
+        <li>Now break the assumption. Hold the input distribution completely still and move the labels instead, rotating the true decision boundary a little each week. Rerun both curves.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the PSI curve lifts off its floor and crosses a threshold while the accuracy curve is still flat inside its own noise. Measure the gap between the two crossings in windows. That gap is the <strong>lead time</strong>, and it is the entire commercial argument for input monitoring, stated in a unit you just measured rather than asserted.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> With the inputs frozen and only the labels moving, PSI stays pinned to the floor while accuracy falls away underneath it. The monitor is not broken. It is blind by construction. PSI watches <span>$p(x)$</span>, and what changed was <span>$p(y \mid x)$</span>. This is why the page names three kinds of drift instead of one. Input monitoring buys you lead time on <em>data</em> drift and nothing whatsoever on <em>concept</em> drift, so it complements label-based monitoring rather than replacing it.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>A team retrains a fraud-detection model with a new feature set. It first runs in <strong>shadow</strong> for a week: real transactions, real predictions computed, nothing acted on. They compare its flagged-transaction set against the current model's, and against actual chargebacks that arrive during that week.</p>
 
     <p>Satisfied it's not obviously worse, they move to a <strong>2% canary</strong>. Real users, real blocking decisions, capped blast radius. Online metrics (false-positive rate on real customers, actual fraud losses prevented) are tracked against the incumbent's matched traffic.</p>

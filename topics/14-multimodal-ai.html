@@ -330,24 +330,36 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">Cross-attention is the same formula as section 04, wired differently. What the formula cannot show you is a single word picking out the patch it belongs to.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Make one word attend to one patch</span>
+        <span class="proj-meta">~3 hours · PyTorch</span>
+      </div>
+      <p>Train a tiny <strong>image-text matching</strong> model on shapes you draw yourself, then plot what each caption word attends to. The task is deliberately trivial: two coloured shapes per image, a template caption naming both. Because you drew the shapes, you can look at one attention map and say immediately whether the alignment is real or wishful.</p>
+      <ol class="proj-steps">
+        <li>Draw the dataset with NumPy. Each 64×64 image gets two solid shapes of different colours in two random quadrants. The caption is a template string: <code>"a red square and a blue circle"</code>. A few thousand images is plenty.</li>
+        <li>Cut each image into a 4×4 grid of 16 patches and push each patch through one linear layer. On the text side, an embedding table plus one small transformer block. Keep both towers deliberately small.</li>
+        <li>Write the cross-attention layer <strong>by hand</strong> from the equation in section 04. Q from the text tokens, K and V from the patch tokens, <code>softmax(QKᵀ/√d_k)V</code>. No <code>nn.MultiheadAttention</code>.</li>
+        <li>Pool the fused text tokens and score the pair with a linear head. Train it to separate true image-caption pairs from pairs made by shuffling the captions within a batch. A few minutes on CPU.</li>
+        <li>Keep the attention weights from that layer for one pair. For each caption word, reshape its 16 weights into a 4×4 grid and draw it over the image.</li>
+        <li>Now break it deliberately. Re-initialise the text tower randomly, freeze it, retrain everything else on the same data, and plot the same words again.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the map for <code>red</code> brightens over the quadrant holding the red shape, and <code>circle</code> brightens over the circle. No patch was ever labelled. The only supervision was whether a whole caption matched a whole image, and the grounding fell out of that.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> An untrained transformer block mixes positions indiscriminately, so its per-token outputs tend to come out close to parallel. The word queries stop differing in any useful direction. Expect the per-word maps to stop separating, with every word pointing at roughly the same patches. Cross-attention is a <strong>wiring pattern</strong>, not a representation learner. It relates two spaces that already mean something. It cannot manufacture meaning inside a tower that was never trained, which is the whole reason section 05 starts from strong pretrained encoders.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>Two applications are worth calling out first, since they show up constantly in real systems and in interviews.</p>
 
     <p><strong>Multimodal retrieval</strong> takes the shared embedding space from the intuition section and uses it directly. A query in any modality (text, an image, a voice clip) gets embedded and compared against a database of embeddings from any other modality. So "find images similar to this description" and "find documents containing a chart like this one" are the same nearest-neighbor operation with different inputs. This is exactly the retrieval half of 11's RAG pipeline, with the embedding space extended past text.</p>
 
     <p><strong>Multimodal agents</strong> extend 11's tool-use loop with a perception step. An agent that can look at a screenshot, decide in text what action to take, call a tool (click a button, run OCR on a region, zoom into part of an image), then look again at the result before deciding the next step. The loop is identical to a text-only agent's plan-act-observe cycle. The only difference is that "observe" can now mean <em>look</em>, not just read a tool's text output.</p>
 
-    <h3>Worked example: one cross-attention step</h3>
-    <p>Say a VLM is answering "what color is the car?" about an image split into 16 patch tokens. The query built from the running context ("what color is the ___") computes a dot product against all 16 patch keys.</p>
-
-    <p>Illustrative scores, after scaling by <span>$\sqrt{d_k}$</span>: three patches that actually contain the car score highest, say <code>2.1, 1.9, 1.7</code>. The other 13 patches (sky, road, background) score much lower, clustered around <code>0.1</code> to <code>0.4</code>.</p>
-
-    <p>Softmax turns that gap into a sharply peaked distribution: roughly <code>0.22, 0.19, 0.15</code> on the three car patches, with the remaining <code>0.44</code> spread thin across the other 13.</p>
-
-    <p>The output is a weighted blend of all 16 patches' value vectors. But because the weights are so concentrated, the result is dominated by the visual features of the actual car patches. That is what lets the next layer's reasoning about color be grounded in the right pixels, instead of guessing based on what cars are usually colored.</p>
-
-    <h3>Production use case: document AI</h3>
     <p>A real document (an invoice, a scanned contract, a medical form) mixes three kinds of information that no single pretrained model handles well alone:</p>
 
     <ul>

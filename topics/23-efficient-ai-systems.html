@@ -464,19 +464,29 @@
     <p>Applying a compute-side fix to a memory-bound problem, or the reverse, is a common and completely avoidable mistake. <strong>Profile first, optimize second.</strong></p>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">14</span>Worked example and a production use case</h2>
-    <h3>Illustrative arithmetic-intensity calculation</h3>
-    <p>Take a single attention operation during one autoregressive decoding step. One new token generated, attending back over a KV cache of length <span>$n$</span>, with head dimension <span>$d$</span>.</p>
+  <section id="build">
+    <h2><span class="num">14</span>Build this</h2>
+    <p class="lede">The roofline turns "memory-bound" from a phrase you repeat into a place on a graph. Your GPU has one. You can measure it yourself in an afternoon.</p>
 
-    <p>The computation is dominated by two matrix-vector products: the new query against all cached keys, and the resulting attention weights against all cached values. Roughly <span>$4nd$</span> FLOPs (illustrative, rounding off constants).</p>
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Measure your GPU's roofline with one matmul</span>
+        <span class="proj-meta">~3 hours · PyTorch + one NVIDIA GPU</span>
+      </div>
+      <p>Benchmark a single operation, <span>$y = Wx$</span>, across a sweep of batch sizes. That is the whole experiment. One frozen weight matrix, one growing batch, and the <strong>arithmetic intensity</strong> from section 08 worked out by hand from the shapes. As the batch grows, the same loaded weights do more useful work per byte fetched. The operation walks out of one regime and into the other, and you get to watch it. This one genuinely needs a GPU. A free Colab T4 is enough.</p>
+      <ol class="proj-steps">
+        <li>Fix <span>$W$</span> at something like 4096×4096 in FP16. Sweep the batch size <span>$B$</span> over powers of two, from 1 up to whatever still fits in memory.</li>
+        <li>Time each size with <code>torch.cuda.Event</code>. Warm up first, average over many repeats, and call <code>torch.cuda.synchronize()</code> before you trust any timing.</li>
+        <li>Compute both quantities <strong>by hand from the shapes</strong>, not from a profiler. FLOPs is <span>$2 \cdot 4096 \cdot 4096 \cdot B$</span>. Bytes is the weight matrix plus the input and output activations, 2 bytes apiece. Divide one by the other.</li>
+        <li>Plot achieved FLOP/s against arithmetic intensity, both axes logarithmic. Then draw two straight lines from your GPU's datasheet: a diagonal at its peak memory bandwidth, and a flat ceiling at its peak FP16 throughput.</li>
+        <li>Now change one thing. Store <span>$W$</span> in int8, rerun the identical sweep, recompute intensity at 1 byte per weight, and plot the new points on the same axes.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> your measured points trace both roofs. At small <span>$B$</span> they climb the bandwidth diagonal. At large <span>$B$</span> they flatten out underneath the compute ceiling. The bend between the two is your GPU's <strong>ridge point</strong>, sitting where your own two datasheet lines cross. Throughput keeps rising with batch size until batching stops helping. That is the knee, and you found it by measurement rather than by argument.</div>
+      <div class="proj-stretch"><strong>What the change teaches.</strong> Halving the bytes per weight does not change the FLOP count at all. It slides every point to the right along the intensity axis. Watch which of them move. The small-batch points are pinned to the diagonal, so sliding right walks them up the bandwidth roof. The large-batch points were already pressed against the compute ceiling, so they have nowhere to go. That is the "why int4 weights barely hurt an LLM" callout from section 11, drawn rather than argued. It is also section 13's advice in one picture: which fix helps depends entirely on which side of the knee you started.</div>
+    </div>
 
-    <p>The data that has to move through memory is the entire KV cache: <span>$2nd$</span> values, keys plus values, each some number of bytes depending on precision. Say 2 bytes for FP16, so <span>$4nd$</span> bytes moved (illustrative).</p>
-
-    <p>Arithmetic intensity works out to roughly <span>$4nd / 4nd \approx 1$</span> FLOP per byte moved. That is far below the ridge point of any modern GPU, which typically needs on the order of 100+ FLOPs per byte to be compute-bound.</p>
-
-    <p>This tiny illustrative calculation reproduces the real-world finding. Single-request decode-step attention is deeply memory-bound, because you move the entire cache through memory to do very little arithmetic with each piece of it.</p>
-    <h3>Production use case: sizing a chat product's serving deployment</h3>
+    <h3>Where this runs in production</h3>
     <p>Say you're standing up serving infrastructure for a chat product. Three decisions, in order:</p>
 
     <ul>

@@ -265,7 +265,7 @@
       <li><strong>Forward pass:</strong> about <span>$2N$</span> FLOPs, one multiply and one add per parameter.</li>
       <li><strong>Backward pass:</strong> roughly twice the forward pass again, since it propagates gradients with respect to both the weights <em>and</em> the activations.</li>
     </ul>
-    <p>Two separate memory costs follow from that. <strong>Parameters</strong> set your floor for weights. <strong>Activations</strong>, which you must keep around for the backward pass, set a second cost that scales with batch size and depth, and it is often the larger of the two. That is precisely why gradient accumulation and activation checkpointing exist (more in Applications and in 23).</p>
+    <p>Two separate memory costs follow from that. <strong>Parameters</strong> set your floor for weights. <strong>Activations</strong>, which you must keep around for the backward pass, set a second cost that scales with batch size and depth, and it is often the larger of the two. That is precisely why gradient accumulation and activation checkpointing exist (more in section 07 and in 23).</p>
   </section>
 
   <section id="math">
@@ -406,16 +406,30 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
-    <h3>Tiny worked example — one backward pass, by hand</h3>
-    <p>Illustrative / toy numbers only. Chain: input <span>$x \to$</span> neuron 1 (ReLU) <span>$\to h \to$</span> neuron 2 (sigmoid) <span>$\to \hat y \to$</span> MSE loss against target <span>$y=1.0$</span>.</p>
-    <p>Forward: <span>$x=1.0$</span>, <span>$w_1=0.8,\ b_1=-0.2 \Rightarrow z_1 = 0.8(1.0)-0.2 = 0.6 \Rightarrow h=\text{ReLU}(0.6)=0.6$</span>. <span>$w_2=0.5,\ b_2=0.1 \Rightarrow z_2 = 0.5(0.6)+0.1 = 0.4 \Rightarrow \hat y = \sigma(0.4) \approx 0.599$</span>. Loss <span>$L=\tfrac{1}{2}(\hat y-y)^2 \approx \tfrac{1}{2}(-0.401)^2 \approx 0.080$</span>.</p>
-    <p>Backward, layer 2 first. <span>$\partial L/\partial \hat y = \hat y - y \approx -0.401$</span> and <span>$\partial \hat y/\partial z_2 = \hat y(1-\hat y) \approx 0.240$</span>, so <span>$\delta_2 = -0.401 \times 0.240 \approx -0.096$</span>. That gives <span>$\partial L/\partial w_2 = \delta_2 \cdot h \approx -0.058$</span> and <span>$\partial L/\partial b_2 = \delta_2 \approx -0.096$</span>.</p>
-    <p>Now propagate one layer further back. <span>$\partial L/\partial h = \delta_2 \cdot w_2 \approx -0.048$</span>. Since <span>$z_1=0.6>0$</span>, the ReLU derivative is exactly 1, so <span>$\delta_1 \approx -0.048$</span> passes through unchanged. That gives <span>$\partial L/\partial w_1 = \delta_1 \cdot x \approx -0.048$</span> and <span>$\partial L/\partial b_1 \approx -0.048$</span>.</p>
-    <p>Notice the pattern. Every gradient further back is the previous one, multiplied by one more local derivative. That is the whole algorithm, run by hand, twice.</p>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">Section 05 makes a claim that sounds wrong. A deep plain network can have higher training error than a shallow one, on the same data. The loss curve is more convincing than the sentence.</p>
 
-    <h3>Production use case: training a 7B-parameter model on limited GPU memory</h3>
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Stall a 40-layer MLP, then fix it with one addition</span>
+        <span class="proj-meta">~4 hours · NumPy</span>
+      </div>
+      <p>Fit a smooth one-dimensional curve with a plain MLP, then keep making it deeper until it stops learning. Everything is hand-written from the four backprop equations in section 04, with <strong>no autograd</strong>. That is the point: you want to watch the gradient shrink on its way back, and then change that by hand.</p>
+      <ol class="proj-steps">
+        <li>Data: a few hundred points from a smooth curve with a couple of bends. One input, one output, no noise needed.</li>
+        <li>Write forward and backward in NumPy from the section 04 equations. A <span>$\delta$</span> at each pre-activation, an outer product for each weight gradient. Depth and width are arguments. Use tanh, and check the gradients once against finite differences before trusting anything.</li>
+        <li>Train at depth 4. Then train at depth 40, same width, same learning rate, same number of steps. Plot both training-loss curves on one axis, plus each network's fitted curve over the target. If depth 40 still trains, keep adding layers until it stops. Where that happens is worth knowing and is yours to find.</li>
+        <li>Print the gradient norm for every layer of the deep net, output back to input, at the first step and again later in training.</li>
+        <li>Add the <strong>residual</strong>: each block computes <code>x + f(x)</code> instead of <code>f(x)</code>. In the backward pass that is one extra term, the incoming gradient passed straight through. Add hand-written RMSNorm from section 04 ahead of each block. Retrain at the same depth.</li>
+        <li>Now ablate. Remove the residual and keep the norm, then keep the residual and remove the norm. Same depth, same seed, same steps, three curves on one plot.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the deep plain net's <em>training</em> loss curve sits above the shallow one's. Its fitted curve stays close to flat while the shallow net traces the target. Nothing was overfitted and no capacity was missing: the deep net contains the shallow one as a special case (section 05). Step 4 shows the mechanism, with the per-layer gradient norms shrinking as they travel back toward the input. Add the residual and that decay flattens out.</div>
+      <div class="proj-stretch"><strong>What the ablation teaches.</strong> Depth was never the problem on its own. Section 05 has the framing worth keeping. A residual block starts from the identity and only learns a deviation from it. The network is never asked to discover the identity across forty stacked non-linearities. The norm and the residual do different jobs. Running each one alone, at a depth where plain stacking fails, is the cheapest way to feel that difference. Whichever turns out to be load-bearing for you, step 4's gradient-norm printout says why.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>Two of the tradeoffs above compound into a real constraint. A 7B-parameter model's weights, gradients, and optimizer state already consume tens of gigabytes in FP32, before a single activation is stored.</p>
     <p>Three levers, each attacking a different part of that:</p>
     <ul>

@@ -74,6 +74,9 @@ which left 4,475 words unedited at 0.35 em-dashes per sentence. To be explicit:
   their labels; the sentences inside are ordinary prose and get the same
   treatment as everything else.
 - `.callout` bodies, `.diagram-caption`, and `eq-explain` descriptions
+- `.project` cards in the `id="build"` section: the intro, the `.proj-steps`
+  items, and the `.proj-done` / `.proj-stretch` bodies. See `docs/PROJECTS.md`
+  for what those have to say; this guide governs only how the sentences read.
 
 **Out of scope — do not touch at all:**
 

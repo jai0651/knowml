@@ -227,7 +227,7 @@
         <text x="693" y="228" text-anchor="middle" font-size="10.5" font-weight="700" fill="#e9e9ef">Classifier head</text>
         <text x="693" y="242" text-anchor="middle" font-size="10" fill="#9a9aa8">class scores</text>
       </svg>
-      <div class="diagram-caption">The dashed amber squares over the input mark how much of the original image a single output unit can "see" at increasing depth — its receptive field — even though every individual filter only ever looks at a small local window at a time; the exact arithmetic behind that growth is worked out in §07. Spatial dimensions shown (112×112, 56×56, 28×28) are illustrative, roughly how a ResNet-style backbone shrinks space while channel depth grows.</div>
+      <div class="diagram-caption">The dashed amber squares over the input mark how much of the original image a single output unit can "see" at increasing depth — its receptive field — even though every individual filter only ever looks at a small local window at a time. Spatial dimensions shown (112×112, 56×56, 28×28) are illustrative, roughly how a ResNet-style backbone shrinks space while channel depth grows.</div>
     </div>
 
     <h3>Pooling vs. strided convolution — two ways to downsample</h3>
@@ -244,7 +244,7 @@
     <ul>
       <li><strong>LeNet</strong> (late 1980s/1990s, LeCun) established the template on small images like handwritten digits: conv layers, pooling, a small classifier head. The compute and data of the era could not scale it further.</li>
       <li><strong>AlexNet</strong> (2012) proved the template scales. Enough labeled data (ImageNet), enough compute (GPUs), and ReLU instead of saturating activations were enough to blow past hand-engineered features. ReLU mattered because it avoided the vanishing-gradient problem sigmoid/tanh networks suffered at depth.</li>
-      <li><strong>VGG</strong> (2014) made a simplicity argument. Stop hand-tuning filter sizes per layer; stack small 3×3 convolutions repeatedly and go deeper. Three stacked 3×3 convolutions see as much of the input as one 7×7, with more non-linearity and fewer parameters (worked out exactly in §07).</li>
+      <li><strong>VGG</strong> (2014) made a simplicity argument. Stop hand-tuning filter sizes per layer; stack small 3×3 convolutions repeatedly and go deeper. Three stacked 3×3 convolutions see as much of the input as one 7×7, with more non-linearity and roughly 45% fewer parameters: <code>27·C²</code> against <code>49·C²</code> at equal channel count <code>C</code>.</li>
       <li><strong>Inception/GoogLeNet</strong> (2014) argued the opposite axis mattered too. Instead of picking one filter size per layer, run several (1×1, 3×3, 5×5) in parallel within the same layer. Let the network combine multi-scale information itself rather than betting on one receptive field size being right everywhere.</li>
       <li><strong>ResNet</strong> (He et al., 2015) fixed something structural. Plain networks stacked past roughly 20 layers got harder to train, not just prone to overfitting. The exact failure and fix are covered in §05; it is the same residual-connection idea introduced in 04.</li>
     </ul>
@@ -254,7 +254,7 @@
     <ul>
       <li><strong>DenseNet</strong> connects each layer to every previous layer's output, not just the one before it. That encourages feature reuse and eases gradient flow by a different mechanism than ResNet's: concatenation instead of summation.</li>
       <li><strong>EfficientNet</strong> scaled depth, width, and input resolution together in a fixed ratio (<em class="term">compound scaling</em>) rather than growing one dimension. That gives a better accuracy-per-FLOP curve than scaling any single dimension alone.</li>
-      <li><strong>MobileNet</strong> targets on-device inference, built from <strong>depthwise separable convolutions</strong>. These split a standard convolution into a per-channel spatial filter followed by a 1×1 filter that mixes channels, doing almost the same job for a fraction of the parameters and compute (exact multiplier in §07).</li>
+      <li><strong>MobileNet</strong> targets on-device inference, built from <strong>depthwise separable convolutions</strong>. These split a standard convolution into a per-channel spatial filter followed by a 1×1 filter that mixes channels, doing almost the same job for a fraction of the parameters and compute. The cost ratio against a standard <code>k×k</code> convolution with <code>N</code> output channels is <code>1/N + 1/k²</code>. For 3×3 kernels at typical channel counts, that is roughly 8–9× cheaper.</li>
       <li><strong>ConvNeXt</strong> (2022) is a more recent data point in the CNN vs ViT story. It took a standard ResNet, modernized the training recipe, and borrowed a handful of transformer design choices. A "pure" CNN can still match ViT-era accuracy when trained with modern tricks, which suggests some of the ViT-era gains came from training recipes rather than attention alone.</li>
     </ul>
     <p><strong>Feature pyramids</strong> solve a different problem. Early layers have fine spatial detail; late layers have strong semantic content but coarse resolution. Combining feature maps from multiple depths of the same backbone is the standard way detection and segmentation heads get both properties at once, instead of picking one depth and losing the other.</p>
@@ -359,19 +359,30 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
-    <h3>Illustrative worked example: receptive field growth</h3>
-    <p>Stack three 3×3 convolutions directly on top of each other, stride 1, no pooling in between — the VGG-style building block referenced in §03. Walking through how far back a single output unit can "see" into the original input:</p>
-    <ul>
-      <li>After conv 1: an output unit is a function of a 3×3 patch of the input. Receptive field = 3×3.</li>
-      <li>After conv 2: that unit's own input was itself already a blend of a 3×3 patch, so an output unit two convolutions deep depends on a 5×5 patch of the original input. Receptive field = 5×5.</li>
-      <li>After conv 3: by the same reasoning, receptive field = 7×7.</li>
-    </ul>
-    <p>Three stacked 3×3 convolutions see exactly as much of the input as a single 7×7 convolution. But they get three ReLU non-linearities instead of one. And, illustratively at equal channel counts <code>C</code> in and out, roughly <code>3·(9·C²) = 27·C²</code> parameters versus <code>49·C²</code> for the single 7×7.</p>
-    <p>Fewer parameters and more non-linearity from the same effective receptive field: that is precisely the argument VGG (2014) made for stacking small filters instead of using large ones directly. It is still the standard building-block intuition today. (Real backbones interleave pooling/stride-2 layers between blocks like this, which grows the effective receptive field considerably faster than stride-1 stacking alone.)</p>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">Nobody tells a convolution to look for edges. It finds them anyway, and the fastest way to believe that is to plot the filters yourself.</p>
 
-    <h3>Production use case: a real-time detector on a mobile device</h3>
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Watch a conv layer grow its own edge detectors</span>
+        <span class="proj-meta">~3 hours · PyTorch</span>
+      </div>
+      <p>Train a small CNN on CIFAR-10, then render its first convolutional layer's filters as images. The classification task is ordinary on purpose. The reveal is the filter grid. It starts as random noise and ends up looking like a page from a signal-processing textbook nobody handed the network.</p>
+      <ol class="proj-steps">
+        <li>Write the convolution yourself first. Loop over output positions, dot the kernel with the patch underneath, and check the answer matches <code>nn.Conv2d</code> on a random input. Use the library version afterwards so training actually finishes.</li>
+        <li>Build a small CNN: a 7×7 first conv with 32 filters, then three 3×3 blocks with stride-2 downsampling, global pool, one linear head. The first kernel is large on purpose, so the filters are legible when plotted. Size each layer with the formula from §04.</li>
+        <li>Before any training, render those 32 filters as tiny RGB images on a grid. Save that picture.</li>
+        <li>Train for a few epochs. Re-render the same grid after every epoch. Then push one test image through and plot the 32 activation maps the first layer produces.</li>
+        <li>Now break it. Replace the whole conv stack with an MLP of matching parameter count and train it identically.</li>
+        <li>Shift every test image two pixels to the right. Re-evaluate both models on the shifted set.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the filter grid stops looking like static. Oriented edges, opposing-colour blobs and a few centre-surround spots appear, and each one lights up a different region of the activation maps. Gradient descent chose those. You did not.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> The parameter-matched MLP scores worse, and the two-pixel shift costs it far more than it costs the CNN. That second gap is <strong>weight sharing</strong> made visible. The CNN learned one edge detector and got every position for free. The MLP had to learn each position separately, from whichever training examples happened to land there. §05 argues this in prose; here it is a number you measured.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>Say the constraint is a phone-class NPU running object detection at 30 fps — roughly a 33ms budget per frame. Every choice covered above becomes a concrete lever, not an abstract one:</p>
     <ul>
       <li>Backbone: a MobileNet-style stack built from depthwise separable convolutions rather than standard convolutions. Illustrative at <code>C_in = C_out = 256</code>: a standard 3×3 convolution costs <code>9·256·256 ≈ 590,000</code> parameters (and proportional FLOPs); splitting it into a depthwise 3×3 (one filter per channel, <code>9·256 ≈ 2,300</code> parameters) followed by a pointwise 1×1 that mixes channels (<code>256·256 ≈ 65,500</code> parameters) does nearly the same job for roughly 8–9× fewer parameters and FLOPs — the difference between fitting the latency budget and not.</li>

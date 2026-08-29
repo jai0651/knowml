@@ -405,8 +405,8 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>DQN's stabilizers, a worked Bellman backup, and RLHF</h2>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
 
     <h3>Why DQN needs a replay buffer and a target network</h3>
     <p>This is one of the most common "why does X exist" interview questions in RL, and both fixes solve a distinct instability.</p>
@@ -415,12 +415,28 @@
     <p>Separately, Q-learning's update target is itself built from the network's own current Q-value estimate at the next state. You're regressing the network toward a target that's computed by the same network you're currently updating. Every gradient step changes the network, which changes the target, which changes what "correct" means for the very next step. That is a moving target that can oscillate or diverge instead of settling down.</p>
     <p>DQN fixes this by keeping a separate <strong>target network</strong>, a lagging copy of the main network's weights that's only updated (or slowly blended in) every so many steps. The target used for each update comes from this frozen copy, so the regression target stays stable for a while, giving the main network something fixed to converge toward before the target itself shifts.</p>
 
-    <h3>A tiny worked Bellman backup (illustrative)</h3>
-    <p>Say an agent is one step from a terminal state. It takes an action, receives an immediate reward of <code>r = 4</code>, and lands in a state whose current value estimate is <code>V(s') = 10</code>. With discount factor <code>γ = 0.9</code>, the Bellman backup updates this state's value toward:</p>
-    <div class="eq-block"><span>$$V(s) \leftarrow r + \gamma V(s') = 4 + 0.9 \times 10 = 13$$</span></div>
-    <p>Notice the recursion doing all the work: the agent never needed to simulate the entire rest of the episode to update <span>$V(s)$</span>. One real transition, plus the value function's own current (possibly still-wrong) estimate of what comes after, was enough. Run this update repeatedly across many sampled transitions and the value estimates gradually converge to their true values, propagating information backward from wherever real reward is received.</p>
+    <p class="lede">Both of those fixes are repairs to a method that already works in a table, with no network anywhere in it. Print that table after every episode and the Bellman equation stops being an equation.</p>
 
-    <h3>Production use case: RLHF</h3>
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Print a Q-table and watch value spread backwards</span>
+        <span class="proj-meta">~2 hours · NumPy</span>
+      </div>
+      <p>Run tabular Q-learning on a 5×5 gridworld small enough to print in full. No network, no Gym, no replay buffer. A grid this size means the <strong>entire value function fits on one screen</strong>. You get to watch reward travel backwards out of the goal cell, rather than infer from a reward curve that it did.</p>
+      <ol class="proj-steps">
+        <li>Write the world in about thirty lines. A 5×5 grid, start in one corner, goal in the opposite one, four actions, walls that clamp. Reward is <code>+1</code> for entering the goal and <code>0</code> everywhere else. Put one pit next to the shortest route, worth <code>-1</code> and ending the episode.</li>
+        <li>Make <code>Q</code> a zeros array of shape <code>(25, 4)</code>. Write the update yourself from the Bellman equation in section 04: <span>$Q(s,a) \leftarrow Q(s,a) + \alpha\big[r + \gamma \max_{a'} Q(s',a') - Q(s,a)\big]$</span>. That one line is all the learning in the project.</li>
+        <li>Train with ε-greedy action selection. After every episode, print <span>$\max_a Q(s,a)$</span> for all 25 cells as a grid of two-decimal numbers. Then read the printouts in order.</li>
+        <li>Read the greedy policy off the finished table with an argmax per cell, and print it as arrows.</li>
+        <li>Break it. Set <span>$\gamma = 0$</span>, retrain from zeros, print the same grids.</li>
+        <li>Restore <span>$\gamma$</span> and make the world stochastic instead. Give every action some chance of slipping into a random direction. First run the deterministic table's arrows in this world, then retrain in it and compare the two arrow maps.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the printed grids sit flat at zero, away from the pit, until the agent first stumbles into the goal. After that a nonzero region starts spreading out of the goal cell, roughly a ring at a time. Each backup can only carry information one step, so the wave is slow enough to watch its edge advance. Nothing in your code draws that wave. It is one line of Bellman backup, iterated.</div>
+      <div class="proj-stretch"><strong>What the two breakages teach.</strong> With <span>$\gamma = 0$</span> the update collapses to <span>$Q(s,a) \leftarrow r$</span>. Only transitions that touch the goal or the pit are ever worth anything. The wave never starts, and the rest of the table stays at zero. The discount is what carries reward backwards at all. It is not a knob for how far-sighted the agent feels. Then the slip. The tight route past the pit stops being the best route. Section 04's expectation is now averaging over transitions that can shove you in. A table trained in the deterministic world still recommends that route and takes the penalty. Retrain under slip and the arrows should bend away from the pit.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>The most common place PPO shows up in a 2026 interview is RLHF. A <strong>reward model</strong>, trained on human preference comparisons, stands in for the reward function. The language model itself is the <strong>policy</strong>. Generating a response token-by-token is the sequence of <strong>actions</strong>.</p>
     <p>PPO takes the update step described above (improve the policy, but clip so it doesn't move too far from the previous policy in one step) with a KL penalty added on top, to keep the fine-tuned model from drifting too far from the original supervised-fine-tuned model it started from.</p>
     <p>Page 10 covers RLHF's full pipeline in depth: reward modeling, the KL penalty, RLHF vs. DPO. The point here is just that everything RLHF does with PPO is a direct application of the MDP, advantage, and clipped-objective machinery on this page. Nothing new needs to be invented at the LLM layer.</p>

@@ -403,17 +403,30 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
-    <h3>Illustrative worked example: stereo depth from disparity</h3>
-    <p>Say a stereo rig has a baseline (distance between the two cameras) of <code>b = 0.5 m</code> and a focal length of <code>f = 700</code> pixels. Illustrative, round numbers, not a real system's spec sheet. A point produces a disparity, meaning how far it shifts between the left and right image, of <code>d = 35</code> pixels.</p>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">The projection equation in section 04 throws depth away in a single line. Recovering it from two photographs, with your own code, is what makes the rest of this page feel mechanical instead of magical.</p>
 
-    <p>Depth falls directly out of the geometry: <code>depth = f · b / d = 700 × 0.5 / 35 = 10 m</code>.</p>
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Recover depth from a stereo pair, then break the calibration</span>
+        <span class="proj-meta">~3 hours · NumPy</span>
+      </div>
+      <p>Take one rectified stereo pair from a public driving dataset and compute a disparity map by hand. Turn it into depth, then drop the result into the smallest possible bird's-eye-view grid. Two real photographs, about a hundred lines. Everything BEVFormer adds on top of this is learned. This part is not, and it is worth seeing that <strong>geometry alone already puts objects roughly where they belong</strong>.</p>
+      <ol class="proj-steps">
+        <li>Download one rectified stereo pair and its calibration from a public benchmark. KITTI's stereo set is the usual choice. Rectified means corresponding pixels already sit on the same image row. Note the focal length <span>$f$</span> in pixels and the baseline <span>$b$</span> in metres.</li>
+        <li>Write <strong>block matching</strong> yourself. For each pixel in the left image, slide a small window along the same row of the right image. Score each shift by sum of absolute differences and keep the best. That 1D search along a row is the epipolar constraint from section 04, cashed in. No <code>cv2.StereoBM</code>. Downscale the pair if the loop crawls.</li>
+        <li>Convert with <span>$\text{depth} = fb/d$</span> and show the disparity map beside the left image. Pick a few pixels by hand: a car just ahead, a car further down the road, a building at the end of the street. Compare their depths against each other.</li>
+        <li>Back-project every pixel into vehicle-frame 3D by inverting the projection equation from section 04. Bin the points into a top-down grid of, say, 20 cm cells and plot the counts. That grid is a BEV with no learning in it at all.</li>
+        <li>Now break the calibration. Change the baseline by a few percent and rerun everything, with the images untouched.</li>
+        <li>Restore the baseline. Instead rotate the assumed camera extrinsic by a fraction of a degree, rerun, and look at the BEV again.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the disparity map is bright on near surfaces and dark on far ones, with edges where object edges actually are. The BEV grid should put a blob near the bottom for the car ahead, and a band at the far edge for the buildings. Nothing you wrote knows what a car is. That layout came out of geometry.</div>
+      <div class="proj-stretch"><strong>What the two breakages teach.</strong> A wrong baseline scales every depth by a constant, so the disparity map looks exactly as convincing as before and the BEV is uniformly wrong. Nothing in either picture flags it. A small extrinsic rotation is nastier. It tilts the whole point cloud, so the ground plane slopes and far points slide sideways much further than near ones. That is the miscalibration failure mode from section 06, reproduced in a few lines. Calibration errors do not look like errors. They look like confident, plausible, wrong geometry, which is why a real stack spends so much effort on staying calibrated.</div>
+    </div>
 
-    <p>Now notice the <em>shape</em> of that relationship. A nearby object with a large disparity of 175 pixels gives <code>700 × 0.5 / 175 ≈ 2 m</code>. A far object with a small disparity of 7 pixels gives <code>700 × 0.5 / 7 = 50 m</code>. Small disparities correspond to large distances.</p>
-
-    <p>That is exactly why stereo depth gets noisy at long range. A 1-pixel error in a 7-pixel disparity is a far larger <em>relative</em> error than a 1-pixel error in a 175-pixel one.</p>
-    <h3>Production use case: multi-camera BEV perception feeding prediction and planning</h3>
+    <h3>Where this runs in production</h3>
     <p>A representative modern stack runs five stages:</p>
 
     <ul>

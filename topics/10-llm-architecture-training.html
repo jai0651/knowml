@@ -483,17 +483,30 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
-    <h3>Scaling-law arithmetic (illustrative)</h3>
-    <p>Fix a compute budget and use <span>$C \approx 6ND$</span>. Say, purely for clean arithmetic, <span>$C = 6\times10^{22}$</span> FLOPs (illustrative, not a real training run). Chinchilla's fitted rule of thumb says the compute-optimal split is roughly <span>$D \approx 20N$</span> tokens per parameter.</p>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">A scaling law reads like a claim about somebody else's compute budget. Three small training runs on your own laptop turn it into a line you drew yourself.</p>
 
-    <p>Substitute: <span>$6\times10^{22} = 6\cdot N\cdot(20N) = 120N^2 \Rightarrow N^2 \approx 5\times10^{20} \Rightarrow N \approx 22\text{B parameters}$</span>, trained on <span>$D \approx 20\times22\text{B} \approx 440\text{B tokens}$</span>.</p>
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Make a scaling line appear from three tiny GPTs</span>
+        <span class="proj-meta">~4 hours · PyTorch</span>
+      </div>
+      <p>Train the <em>same</em> decoder-only model at three sizes on one small corpus, then plot final validation loss against parameter count on log axes. The task is ordinary next-token prediction. The thing worth looking at is not the samples. It is the <strong>shape of the three points</strong>. That shape is section 03's scaling argument, drawn from runs you can afford.</p>
+      <ol class="proj-steps">
+        <li>Take a few megabytes of plain text. Anything with consistent style works: one book, one codebase, one set of transcripts. Hold out a slice for validation.</li>
+        <li>Train a <strong>BPE tokenizer</strong> on that corpus with a small vocabulary, a few thousand merges. Print the merge list in order and read the first hundred. Watch characters assemble into common suffixes, then into whole words.</li>
+        <li>Build the decoder block <strong>by hand</strong> from the diagram in section 03: LayerNorm, masked self-attention, residual add, LayerNorm, feed-forward, residual add. Write the causal mask yourself with <code>torch.tril</code>. No <code>nn.TransformerDecoder</code>.</li>
+        <li>Train three models that differ by roughly an order of magnitude in parameter count each, varying width and depth. Same data, same number of tokens seen, same optimizer, same schedule. Only size changes.</li>
+        <li>Plot final validation loss against parameter count with <strong>both axes log-scaled</strong>. Sample a paragraph from each model and read them side by side.</li>
+        <li>Now break it deliberately. Delete the causal mask from the smallest model and retrain.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the three points sit close to a straight line on the log-log plot. The samples also get more coherent in the order the line predicts. If the largest point bends off the line, that is not a bug. A few megabytes is a very small <span>$D$</span>. You have found the size at which your corpus stops having enough signal to feed a bigger <span>$N$</span>. That is the Chinchilla tradeoff, on your own axes.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> Without the causal mask, training loss falls almost immediately to somewhere far below anything the masked runs reached, and the samples are still incoherent. The model is reading the answer. Each position can attend to the token it is being asked to predict, so it learns to copy rather than to model. A beautiful loss curve sitting next to worthless output is the clearest argument for why masking is the one structural change in section 03.</div>
+    </div>
 
-    <p>Compare that to what many pre-Chinchilla efforts did. Fix a large <span>$N$</span> (GPT-3-scale, 175B), then train on however many tokens the schedule allowed, often far fewer than 20 per parameter. Those models were, by Chinchilla's own framing, <strong>substantially undertrained for their size</strong>.</p>
-
-    <p>The verified headline result behind this reasoning: Chinchilla, 70B parameters trained on roughly 1.4 trillion tokens, compute-matched to Gopher's 280B parameters and 300B tokens, outperformed Gopher, GPT-3, and several other larger contemporaries trained on the same compute budget.</p>
-    <h3>Production use case</h3>
+    <h3>Where this runs in production</h3>
     <p>A modern assistant product's pipeline maps onto this page almost exactly:</p>
 
     <ul>

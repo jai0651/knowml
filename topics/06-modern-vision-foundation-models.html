@@ -394,14 +394,30 @@
     <p>Both patterns are in active production use. Which one a given system chose is exactly the kind of design-tradeoff question worth being able to explain in an interview, not just recognize by name.</p>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">09</span>Worked example and a production use case</h2>
-    <h3>Tiny worked example: CLIP zero-shot classification</h3>
-    <p>Say you have an image and four candidate class-name prompts: <code>"a photo of a cat"</code>, <code>"a photo of a dog"</code>, <code>"a photo of a car"</code>, <code>"a photo of a bicycle"</code>.</p>
-    <p>Embed the image once with CLIP's image encoder. Embed all four prompts with CLIP's text encoder. Compute cosine similarity between the image embedding and each text embedding. Illustrative similarities (hand-picked, not from a real run): <code>[0.31, 0.24, 0.09, 0.11]</code> for cat / dog / car / bicycle respectively.</p>
-    <p>Divide by temperature <span>$\tau$</span> and apply softmax to turn these into a probability distribution over the four candidates. The image gets classified as whichever prompt has the highest similarity, here "cat." No gradient update, no fine-tuning, and no cat-labeled training examples required for this specific classification task.</p>
-    <p>Swap in any new list of candidate text prompts and you have defined a brand-new classifier on the spot.</p>
-    <h3>Production use case</h3>
+  <section id="build">
+    <h2><span class="num">09</span>Build this</h2>
+    <p class="lede">Zero-shot classification sounds like magic until you write the ten lines that do it. Then it looks like a dot product, and its failure modes stop being surprising.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Build a zero-shot classifier out of nothing but prompts</span>
+        <span class="proj-meta">~2 hours · PyTorch + a pretrained CLIP checkpoint</span>
+      </div>
+      <p>Take a frozen CLIP checkpoint and classify images against a label set nobody trained it on. Pick something narrow and personal: the plants on your windowsill, six shapes of pasta, the pieces on a chessboard. You define the classes by typing them, and no gradient ever runs.</p>
+      <ol class="proj-steps">
+        <li>Load a pretrained CLIP image encoder and text encoder. Take nothing else from the library. You are writing the classifier head yourself.</li>
+        <li>Write that head from the similarity term in section 04: encode the image, encode each candidate prompt, L2-normalise both, take cosine similarity, divide by <span>$\tau$</span>, softmax.</li>
+        <li>Collect fifty or so images across five classes. Label them yourself, run the classifier, and build a confusion matrix.</li>
+        <li>Now break it on the text side. Rerun the identical images three times, changing only the phrasing: bare nouns (<code>"cat"</code>), the standard template (<code>"a photo of a cat"</code>), then something wordier (<code>"a blurry phone snapshot of a cat"</code>). Keep every confusion matrix.</li>
+        <li>Add a distractor class that no image belongs to. Watch how confidently the softmax hands out probability anyway.</li>
+        <li>Finally, average the text embeddings across several templates before comparing. That is prompt ensembling, in one line.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> a class list you invented five minutes ago produces a confusion matrix with a visible diagonal. No fine-tuning, no labelled training set, no new output head. You changed the classifier by editing a list of strings.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> Three phrasings move the confusion matrix around, from identical images and identical frozen weights. That is the prompt-sensitivity failure named in section 06, and it is why production pipelines ensemble templates rather than trust one. The distractor class shows the other half. Softmax always normalises to one, so an image belonging to none of your classes still gets assigned confidently to the nearest prompt.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>Visual search and content moderation pipelines lean on CLIP embeddings directly. Embed a large catalog of images once, offline. Store the embeddings in a vector index. At query time, embed either a text query or a reference image, then run nearest-neighbor search over that index.</p>
     <p>The payoff is that two apparently different features collapse into one. "Find images similar to this one" and "find images matching this text description" become the same operation: a similarity search over the same embedding space.</p>
     <p>Image-captioning and visual-QA products typically use the encoder + projector + LLM pattern from the previous section. A CLIP-style image encoder plus a small projector feeds an LLM that generates the caption, answer, or reasoning trace. The product team can then swap in incrementally better open-source encoders or LLMs as they ship, without retraining the whole system from scratch.</p>

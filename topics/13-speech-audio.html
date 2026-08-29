@@ -364,16 +364,30 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
-    <h3>Tiny worked example: CTC alignment collapse (illustrative)</h3>
-    <p>Target transcript: "up" (2 characters). Suppose the encoder produces 5 frames. Two different frame-level paths can both be valid alignments for this target:</p>
-    <div class="eq-block"><span>$$\pi_A = [u, u, {-}, p, p] \qquad \pi_B = [{-}, u, {-}, p, {-}]$$</span></div>
-    <p>Apply the collapse rule to <span>$\pi_A$</span>: merge the adjacent repeated u's into one u, merge the adjacent repeated p's into one p, giving <code>[u, -, p]</code>; then drop the blank, leaving <code>[u, p]</code> = "up". Apply it to <span>$\pi_B$</span>: there are no adjacent repeats to merge, so dropping the blanks directly gives <code>[u, p]</code> = "up" as well. </p>
-    <p>Both paths count toward the training loss for this example. CTC sums both of their probabilities, plus every other path that also collapses to "up," without ever being told which one is "the" real alignment. </p>
-    <p>Contrast that with a path like <code>[u, p, u, p, -]</code>: no adjacent repeats to merge, drop the blank, and you get <code>[u, p, u, p]</code> = "upup". That is a path whose collapse doesn't match the target at all, and which the training objective simply doesn't reward.</p>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">CTC's sum over alignments is easy to state and hard to believe. One plot of the network's per-frame output settles it in a way no derivation can.</p>
 
-    <h3>Production use case: a real-time customer-support voice agent's latency budget</h3>
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Watch CTC place its own alignment spikes</span>
+        <span class="proj-meta">~4 hours · PyTorch + torchaudio</span>
+      </div>
+      <p>Train a small CTC recognizer on spoken digits, transcribing each clip as the <em>spelled-out word</em>: "three", "seven", "zero". Ten words, a couple of dozen output symbols, clips under a second. The task is trivial on purpose. What you are here to look at is the per-frame output distribution, because that is where the alignment the training data never supplied shows up.</p>
+      <ol class="proj-steps">
+        <li>Get a small spoken-digit corpus, a few thousand short recordings. Label each with its spelled-out word. Your output alphabet is the handful of letters those ten words use, plus one <strong>blank</strong> symbol.</li>
+        <li>Convert each clip to a log-mel spectrogram with <code>torchaudio</code>. That is the representation from section 02, and it is the one part you should let a library handle.</li>
+        <li>Encoder: a couple of 1D convolutions and a small bidirectional GRU, then a linear layer to one logit per symbol per frame. Nothing Conformer-sized. A few hundred thousand parameters is plenty.</li>
+        <li>Before training, implement the <strong>CTC forward recursion by hand</strong> for one (audio, transcript) pair. Check your log-probability against what <code>nn.CTCLoss</code> reports on that same pair. That is the marginalization in section 04, computed rather than recited.</li>
+        <li>Train with <code>nn.CTCLoss</code>. Then plot the per-frame softmax as a heatmap: symbols down one axis, frames across the other, one plot per clip.</li>
+        <li>Now break it. Delete the blank from the output alphabet and retrain, keeping everything else fixed.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the heatmap is mostly one bright blank row, punctuated by narrow spikes on the correct letters in the correct order. That spiky, mostly-silent pattern is the alignment. No frame-level label ever told the network where a letter starts, and it chose those frames itself.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> Watch what happens to "three" specifically. With no blank, every frame has to emit a real letter, so the collapse rule merges the doubled <em>e</em> with nothing to separate the two. "Three" can only ever collapse to "thre", and no amount of training fixes it. That is the two-t's-in-"letter" point from section 04, failing in front of you. The spiky structure goes with it. Given no "output nothing here" option, the model has to smear each letter across a run of frames.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>A caller finishes a sentence. VAD and endpointing decide they're actually done talking, not just pausing. Streaming ASR, which has been emitting partial hypotheses the whole time, finalizes the transcript quickly since it isn't starting from scratch. </p>
     <p>The reasoning stage begins generating a response. What matters here is time-to-first-token, not total generation time, since the response can start being spoken before it's fully generated. Streaming TTS begins synthesizing audio for the first sentence or chunk as soon as enough text exists, rather than waiting for the complete reply, so audio starts playing well before the LLM has finished. </p>
     <p>The budget across the whole loop is additive: a fast LLM doesn't help if endpointing alone waits an extra beat to be sure the caller is done, and a fast TTS model doesn't help if it's sitting idle waiting for the entire response text instead of being fed sentence by sentence. </p>

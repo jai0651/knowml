@@ -329,19 +329,30 @@
     </div>
   </section>
 
-  <section id="applications">
-    <h2><span class="num">07</span>Worked example and a production use case</h2>
-    <h3>Illustrative ECE calculation</h3>
-    <p>Say a classifier's predictions fall into three confidence bins (illustrative numbers throughout):</p>
-    <ul>
-      <li><strong>100 predictions at ~90% confidence</strong>, 80 correct. Accuracy 0.80, gap 0.10.</li>
-      <li><strong>60 predictions at ~70% confidence</strong>, 45 correct. Accuracy 0.75, gap 0.05. This bin is fine.</li>
-      <li><strong>40 predictions at ~50% confidence</strong>, 34 correct. Accuracy 0.85, gap 0.35. Badly under-confident.</li>
-    </ul>
-    <p>Weight each bin's gap by its share of the 200 total predictions:</p>
-    <div class="eq-block"><span>$$\begin{aligned}&(100/200)(0.10) + (60/200)(0.05) + (40/200)(0.35) \\ &= 0.05 + 0.015 + 0.07 = 0.135\end{aligned}$$</span></div>
-    <p>An ECE of roughly 0.135 (illustrative) says this model's stated confidence is off by about 13.5 percentage points on average. That is enough to warrant a temperature-scaling pass before trusting its confidence scores downstream, for something like an abstention threshold.</p>
-    <h3>Production use case: shipping a prompt change safely</h3>
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">Overconfidence is the one failure on this page you can see with your own eyes in a single plot. Draw the reliability diagram once and the ECE equation stops being notation.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Straighten an overconfident classifier with one scalar</span>
+        <span class="proj-meta">~2 hours · PyTorch, CPU only</span>
+      </div>
+      <p>Train a small network on two <em>deliberately overlapping</em> Gaussian classes, so that no model, however good, is entitled to be certain anywhere near the boundary. That overlap is the reason for this dataset rather than a harder one. It gives you a task where confident predictions are provably unjustified, which is exactly what a reliability diagram is built to expose.</p>
+      <ol class="proj-steps">
+        <li>Generate the two overlapping classes. Split three ways: train, a held-out <strong>calibration</strong> split, and test.</li>
+        <li>Train a small MLP well past the point where training accuracy stops improving. Keep going. Overconfidence is something a network grows into late in training, not something it starts with.</li>
+        <li>Build the reliability diagram by hand. Bin the test predictions by stated confidence, plot each bin's accuracy against its mean confidence, and draw the <span>$y = x$</span> diagonal. Compute ECE from the equation in section 04 while you are already binning.</li>
+        <li>Fit one scalar <strong>temperature</strong> <span>$T$</span> on the calibration split, minimising negative log-likelihood over <span>$\text{softmax}(z/T)$</span>. One parameter, fitted after training. The weights never move.</li>
+        <li>Replot the diagram and recompute ECE on the same untouched test split.</li>
+        <li>Now break it. Refit <span>$T$</span> on the <em>training</em> split instead of the held-out one, and replot.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the before-plot sits below the diagonal, with bin accuracy trailing stated confidence and the mass piled into the top confidence bin. After scaling, the points settle onto the diagonal. Check test accuracy before and after: it is unchanged, to the digit. Dividing every logit by the same positive scalar cannot reorder them, so <strong>temperature scaling changes only how sure the model claims to be</strong>, never which class it picks.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> On data it has memorised, the model's confidence looks entirely justified, because it really does get those examples right. So the fit finds almost nothing to correct and lands close to no correction at all. The test diagram stays bent. Calibration is a statement about data the model has not seen, which means the corrector has to be fitted on data the model has not seen. That is the same held-out logic as every other evaluation on this page. It is also why calibration belongs here as a thing you <em>measure</em>, not only a thing you fix at training time.</div>
+    </div>
+
+    <h3>Where this runs in production</h3>
     <p>A team wants to change a chatbot's system prompt, and needs to know whether it is an improvement before rolling it out to all traffic. The practical pipeline:</p>
     <ol>
       <li><strong>Generate.</strong> Run both prompt versions against a fixed set of representative queries.</li>
