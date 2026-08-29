@@ -384,6 +384,24 @@ window.KML_TECHTREE = [
         { name: 'AI for science (AlphaFold2)', desc: 'Predicts a protein’s 3D structure directly from its amino-acid sequence.', page: '26-frontier-2026' }
       ]}
     ]
+  },
+  {
+    name: 'Hands-on', color: 'var(--c-practice)', children: [
+      { name: 'Adapting a model to your task', children: [
+        { name: 'Full fine-tuning', desc: 'Updates every weight. Highest quality ceiling, highest VRAM cost.', page: '29-finetuning-llms' },
+        { name: 'LoRA', desc: 'Freezes the base and trains small low-rank adapters instead.', page: '29-finetuning-llms' },
+        { name: 'QLoRA', desc: 'LoRA on top of a 4-bit quantized base, so a single consumer GPU is enough.', page: '29-finetuning-llms' },
+        { name: 'Chat templates', desc: 'The exact token format a base model was trained on; a mismatch quietly ruins a run.', page: '29-finetuning-llms' },
+        { name: 'Unsloth', desc: 'Custom Triton kernels and manual backprop that cut fine-tuning memory and time.', page: '29-finetuning-llms' }
+      ]},
+      { name: 'Fitting a model on your hardware', children: [
+        { name: 'VRAM arithmetic', desc: 'Weights plus KV cache plus overhead. Compute it rather than guessing.', page: '30-running-models-locally' },
+        { name: 'GGUF', desc: 'The quantized format llama.cpp and Ollama consume.', page: '30-running-models-locally' },
+        { name: 'GPTQ / AWQ', desc: 'Post-training quantization formats aimed at GPU serving runtimes like vLLM.', page: '30-running-models-locally' },
+        { name: 'llama.cpp / Ollama', desc: 'Local single-user inference, CPU or GPU, with the widest hardware reach.', page: '30-running-models-locally' },
+        { name: 'vLLM', desc: 'Throughput-oriented serving when you have concurrent requests, not one user.', page: '30-running-models-locally' }
+      ]}
+    ]
   }
 ];
 

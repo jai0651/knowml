@@ -38,7 +38,7 @@ window.SEARCH_INDEX = [
       "architectures",
       "full"
     ],
-    "summary": "Every model, architecture and algorithm on this site, organized by the problem it solves — one expandable tree spanning all 28 sections.",
+    "summary": "Every model, architecture and algorithm on this site, organized by the problem it solves — one expandable tree spanning every section.",
     "color": "var(--c-map)"
   },
   {
@@ -376,5 +376,38 @@ window.SEARCH_INDEX = [
     ],
     "summary": "SIMT cores, the GPU memory hierarchy, streaming multiprocessors, warps and warp divergence, tensor cores, the CUDA programming model, Triton, NVLink vs InfiniBand, and ring all-reduce — the hardware and communication layer underneath every training run.",
     "color": "var(--c-gpu)"
+  },
+  {
+    "title": "29 \u00b7 Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html",
+    "tags": [
+      "Fine-tuning LLMs in Practice",
+      "Hands-on",
+      "unsloth",
+      "LoRA",
+      "QLoRA",
+      "chat template",
+      "full"
+    ],
+    "summary": "When fine-tuning is the wrong answer, choosing between full/LoRA/QLoRA by VRAM, chat templates and data prep, and a working Unsloth pipeline end to end.",
+    "color": "var(--c-practice)"
+  },
+  {
+    "title": "30 \u00b7 Running Models Locally",
+    "section": "Hands-on",
+    "url": "topics/30-running-models-locally.html",
+    "tags": [
+      "Running Models Locally",
+      "Hands-on",
+      "VRAM",
+      "quantization",
+      "GGUF",
+      "llama.cpp",
+      "Ollama",
+      "full"
+    ],
+    "summary": "Compute the VRAM yourself \u2014 weights, KV cache and overhead \u2014 then pick a quantization format, a runtime and hardware that actually fits.",
+    "color": "var(--c-practice)"
   }
 ];
