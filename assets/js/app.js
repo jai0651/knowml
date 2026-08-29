@@ -223,21 +223,25 @@
     if (doneBtn) doneBtn.addEventListener('click', function () {
       NP_toggleDone(document.body.getAttribute('data-page-id'));
     });
-    if (window.renderMathInElement) {
-      renderMathInElement(document.body, {
-        delimiters: [
-          { left: '$$', right: '$$', display: true },
-          { left: '$', right: '$', display: false }
-        ]
-      });
-    } else {
-      window.addEventListener('load', function () {
-        if (window.renderMathInElement) {
-          renderMathInElement(document.body, {
-            delimiters: [{ left: '$$', right: '$$', display: true }, { left: '$', right: '$', display: false }]
-          });
-        }
-      });
+    /* KaTeX rewrites the DOM as it renders. notes.js anchors highlights on
+       character offsets into that DOM, so it waits for this signal rather than
+       guessing when math has settled. Fires either way, so a page with no math
+       (or a blocked CDN) does not leave highlighting stalled. */
+    var mathDone = false;
+    function renderMath() {
+      if (mathDone) return;
+      mathDone = true;
+      if (window.renderMathInElement) {
+        renderMathInElement(document.body, {
+          delimiters: [
+            { left: '$$', right: '$$', display: true },
+            { left: '$', right: '$', display: false }
+          ]
+        });
+      }
+      document.dispatchEvent(new CustomEvent('kml:math-ready'));
     }
+    if (window.renderMathInElement) renderMath();
+    else window.addEventListener('load', renderMath);
   });
 })();
