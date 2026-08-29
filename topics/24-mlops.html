@@ -106,7 +106,7 @@
   <div class="topic-header">
     <div class="crumbs"><a href="../index.html">Map &amp; Timeline</a> / Systems, Safety &amp; Interview / 24</div>
     <h1>ML Engineering &amp; MLOps</h1>
-    <p class="dek">A trained model is not a finished product — it's the start of a system that has to keep being right while the world underneath it quietly changes. This is the machinery that notices when it stops being right, and the discipline that keeps shipping new versions safely.</p>
+    <p class="dek">A trained model is not a finished product. It's the start of a system that has to keep being right while the world underneath it quietly changes. This is the machinery that notices when it stops being right, and the discipline that keeps shipping new versions safely.</p>
     <div class="meta-row">
       <span class="tag tag-conceptual">Know conceptually</span>
       <span class="reading-time">~20 min · prerequisites: none specific, but training-loop basics (04) help</span>
@@ -116,13 +116,13 @@
   <section id="tldr">
     <div class="tldr">
       <div class="tldr-label">TL;DR</div>
-      <p>A model's accuracy on your validation set the day you shipped it tells you almost nothing about its accuracy six months later, because the world it's making predictions about keeps moving while the model stays frozen — that's the entire reason MLOps exists as a discipline. The production lifecycle is a loop, not a pipeline: data becomes features (via a feature store, so training and serving compute them identically), features train a model (tracked so the run is reproducible), the model is evaluated against a golden set before it's trusted, it rolls out gradually (shadow, then canary, then full) so a bad version has a small blast radius and an easy rollback, and then it's monitored continuously for drift and performance decay — which is what triggers the next lap of the loop. One sentence for an interview: most of MLOps is answering "how do we find out our model went stale before our users do, and how do we fix it without breaking anything on the way."</p>
+      <p>A model's accuracy on your validation set the day you shipped it tells you almost nothing about its accuracy six months later. The world it predicts on keeps moving while the model stays frozen. That gap is the entire reason MLOps exists as a discipline. The production lifecycle is a <strong>loop, not a pipeline</strong>: data becomes features (via a feature store, so training and serving compute them identically), features train a model (tracked so the run is reproducible), the model is evaluated against a golden set before it's trusted, and it rolls out gradually so a bad version has a small blast radius. Then it's monitored continuously for drift and decay, which is what triggers the next lap. One sentence for an interview: most of MLOps is answering "how do we find out our model went stale before our users do, and how do we fix it without breaking anything on the way."</p>
     </div>
   </section>
 
   <section id="timeline">
     <h2><span class="num">01</span>Where this sits in the timeline</h2>
-    <p>MLOps isn't a technique with a founding paper the way attention or backpropagation is — it's a discipline that congealed out of painful experience, once companies had enough models running in production long enough to watch them quietly fail in the same handful of ways, over and over, across completely different teams and problems.</p>
+    <p>MLOps has no founding paper the way attention or backpropagation does. It congealed out of painful experience. Companies ran enough models in production, for long enough, to watch them fail the same handful of ways over and over, across completely different teams and problems.</p>
     <div class="bia">
       <div class="bia-box">
         <div class="bia-label">Before</div>
@@ -131,26 +131,41 @@
       <div class="bia-arrow">→</div>
       <div class="bia-box innovation">
         <div class="bia-label">Innovation</div>
-        <p>Google's 2015 "Hidden Technical Debt in Machine Learning Systems" paper named the problem precisely: ML systems accumulate a uniquely insidious kind of technical debt, because a model can be quietly wrong without throwing an error, and its behavior is entangled with every other model and every upstream data source it depends on. That paper — and the "ML Test Score" rubric that followed it — reframed the goal from "does the model work in the notebook" to "is this a production system with the same rigor as any other production system": versioned data, tracked experiments, gated rollouts, and continuous monitoring, treated as first-class engineering, not afterthoughts.</p>
+        <p>Google's 2015 <strong>"Hidden Technical Debt in Machine Learning Systems"</strong> paper named the problem precisely. ML systems accumulate a uniquely insidious kind of technical debt, because a model can be quietly wrong without throwing an error. Its behavior is also entangled with every other model and every upstream data source it depends on. That paper, and the "ML Test Score" rubric that followed it, reframed the goal. Not "does the model work in the notebook" but "is this a production system with the same rigor as any other production system": versioned data, tracked experiments, gated rollouts, and continuous monitoring, treated as first-class engineering rather than afterthoughts.</p>
       </div>
       <div class="bia-arrow">→</div>
       <div class="bia-box">
         <div class="bia-label">After</div>
-        <p>Today's MLOps stack is a recognizable, largely standardized set of layers — feature stores, experiment trackers, model registries, drift monitors, canary infrastructure — often assembled from mature open-source or managed tools rather than built from scratch. The discipline scaled further with LLMs: prompts and retrieval pipelines now get versioned and evaluated the same way model weights always were, and "LLM-as-judge" evaluation (see <a href="./25-evaluation-reliability-safety.html">25</a>) has become its own monitoring layer on top of everything below.</p>
+        <p>Today's MLOps stack is a recognizable, largely standardized set of layers: feature stores, experiment trackers, model registries, drift monitors, canary infrastructure. They are often assembled from mature open-source or managed tools rather than built from scratch. The discipline scaled further with LLMs. Prompts and retrieval pipelines now get versioned and evaluated the same way model weights always were, and "LLM-as-judge" evaluation (see <a href="./25-evaluation-reliability-safety.html">25</a>) has become its own monitoring layer on top of everything below.</p>
       </div>
     </div>
   </section>
 
   <section id="intuition">
     <h2><span class="num">02</span>The intuition, before any math</h2>
-    <p class="lede">A model is not a fact about the world you compute once and keep. It's a bet about a pattern that was true in your training window — and every day that passes, the bet gets a little more stale.</p>
-    <p>Ordinary software fails loudly: a null pointer throws, a 500 shows up in your logs, someone gets paged. A machine learning system's most dangerous failure mode is the opposite — it keeps returning confident, well-formed, plausible-looking predictions while being quietly, progressively wrong, and nothing in a standard error log will ever tell you that. The input distribution the model sees in production drifts away from what it was trained on (users change, a competitor launches a promotion, a pandemic changes shopping behavior overnight), or the relationship between inputs and the right answer itself changes (what counted as fraud last year doesn't cover this year's new fraud pattern) — and the model, having no idea any of this happened, keeps applying last year's pattern with complete confidence.</p>
-    <p>This is why MLOps exists as a distinct discipline rather than just being "software engineering, but for ML": you need infrastructure whose entire job is to notice decay that produces no exceptions and no crashes — only a slow decline in a business metric that, if you're not watching for it specifically, looks like nothing at all until it's a serious, expensive problem.</p>
+    <p class="lede">A model is not a fact about the world that you compute once and keep. It's a bet about a pattern that was true in your training window. Every day that passes, the bet gets a little more stale.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">Why ML failures are worse than ordinary bugs</span>
+      <p>Ordinary software fails loudly. A null pointer throws. A 500 shows up in your logs. Someone gets paged.</p>
+      <p>A machine learning system's <strong>most dangerous failure mode is the opposite</strong>. It keeps returning confident, well-formed, plausible-looking predictions while being quietly, progressively wrong. Nothing in a standard error log will ever tell you.</p>
+      <p>There is no exception to catch. That is the whole problem.</p>
+    </div>
+
+    <p>Two things can slip out from under a working model:</p>
+    <ul>
+      <li><strong>The inputs move.</strong> The distribution the model sees in production drifts away from what it trained on. Users change, a competitor launches a promotion, a pandemic changes shopping behavior overnight.</li>
+      <li><strong>The answer moves.</strong> The relationship between inputs and the right answer changes. What counted as fraud last year doesn't cover this year's new pattern.</li>
+    </ul>
+
+    <p>The model has no idea either happened. It keeps applying last year's pattern with complete confidence.</p>
+
+    <p>This is why MLOps is a distinct discipline rather than just "software engineering, but for ML". You need infrastructure whose entire job is to notice decay that produces no exceptions and no crashes. Only a slow decline in a business metric, which, if you're not watching for it specifically, looks like nothing at all until it's a serious, expensive problem.</p>
   </section>
 
   <section id="architecture">
     <h2><span class="num">03</span>Architecture: the production ML lifecycle as a loop</h2>
-    <p>Every box below solves a specific way the naive version — train once, deploy, forget — goes wrong. The loop only closes because monitoring feeds back into retraining; a pipeline that ends at "deploy" isn't actually finished.</p>
+    <p>The naive version is train once, deploy, forget. Every box below solves a specific way that goes wrong. The loop only closes because monitoring feeds back into retraining. A pipeline that ends at "deploy" isn't finished.</p>
 
     <div class="diagram">
       <div class="diagram-title">The MLOps loop — from raw data back to itself
@@ -204,21 +219,54 @@
       <div class="diagram-caption">Feature stores keep training and serving computing features the same way (the single biggest source of train-serving skew otherwise). Experiment tracking makes every run in the "Train" box reproducible. The registry gates what's even eligible to serve traffic, and shadow → canary → full is how a new version earns more traffic instead of getting all of it at once. The dashed line is the loop closing: monitoring is what decides a retrain is needed, not a calendar.</div>
     </div>
 
-    <p>Two ideas do a lot of the load-bearing work inside that loop. A <strong>feature store</strong> is a system of record for features — the same transformation logic that computes "user's average order value over the last 30 days" for training also computes it for a live request, from the same underlying pipeline, so the model never sees a subtly different version of a feature at serving time than it saw at training time. That mismatch — <strong>train-serving skew</strong> — is one of the most common causes of a model that scored well offline and then quietly underperforms in production, and a feature store exists specifically to make it structurally impossible rather than something you have to remember to get right every time. <strong>Experiment tracking</strong> (logging every run's code version, data version, hyperparameters, and resulting metrics) is what makes "reproduce the model that's currently in production" an actual answerable question six months later, instead of an archaeology project.</p>
+    <p>Two ideas do most of the load-bearing work inside that loop.</p>
+
+    <ul>
+      <li><strong>A feature store</strong> is a system of record for features. The same transformation logic that computes "user's average order value over the last 30 days" for training also computes it for a live request, from the same underlying pipeline. The model never sees a subtly different version of a feature at serving time than it saw at training time.</li>
+      <li><strong>Experiment tracking</strong> logs every run's code version, data version, hyperparameters, and resulting metrics. It makes "reproduce the model currently in production" an answerable question six months later, instead of an archaeology project.</li>
+    </ul>
+
+    <p>That feature mismatch has a name: <em class="term">train-serving skew</em>. It is one of the most common causes of a model that scored well offline and then quietly underperforms in production. A feature store exists specifically to make it structurally impossible, rather than something you have to remember to get right every time.</p>
   </section>
 
   <section id="deployment">
     <h2><span class="num">04</span>Rolling out a new model without betting the business on it</h2>
-    <p>The obvious way to deploy a new model version is to just switch all traffic to it and watch. The problem is that "watch" is doing an enormous amount of unstated work — by the time a bad model has served 100% of traffic long enough for someone to notice, it may have already made thousands of bad recommendations, approved thousands of bad transactions, or shown thousands of users a broken experience, some of which can't be undone by a rollback (a recommendation already shown, a loan already denied). Every technique below exists to shrink that blast radius before you fully commit.</p>
-    <p><strong>Batch vs online inference</strong> is the first fork: batch inference runs predictions on a schedule over a stored dataset (score every user overnight, write results to a table) — simple, cheap, and tolerant of a slow pipeline, but the predictions are only as fresh as the last batch run. Online inference computes a prediction per request, in real time — necessary when the input only exists at request time (a live search query, a fraud check on a transaction happening right now), at the cost of needing to actually meet a latency budget under real traffic.</p>
-    <p><strong>Shadow deployment</strong> runs the new model on live production traffic in parallel with the current model, computing its predictions but never actually serving or acting on them — you get real production behavior on real traffic with zero user-facing risk, purely to compare the new model's outputs against the incumbent's before trusting it with anything. <strong>Canary deployment</strong> is the next step up: the new model actually serves a small, real slice of traffic (often 1–5%) end to end, with its impact on real business metrics measured directly, before that slice is gradually increased. The difference matters — shadow tells you the new model's predictions look reasonable; only canary tells you whether users actually respond to them the way you hoped. <strong>Rollback strategy</strong> is the part teams most often forget to design in advance: reverting a model version is easy if it's just a registry pointer, but if the new version also required a new feature or a new database schema, "roll back the model" and "roll back everything the model depended on" are not the same operation, and finding that out during an actual incident is the wrong time to learn it.</p>
-    <p><strong>Human-in-the-loop systems</strong> route a model's low-confidence or high-stakes predictions to a person instead of auto-acting on them — used deliberately where the cost of a wrong automated decision is high (content moderation edge cases, large financial transactions, medical triage), trading some automation for a human backstop exactly where errors are most expensive. It's also a source of higher-quality labels: human decisions on the cases a model is least sure about are disproportionately useful training data for the next version.</p>
+    <p>The obvious way to deploy a new model is to switch all traffic to it and watch. The problem is that "watch" is doing an enormous amount of unstated work.</p>
+
+    <p>By the time a bad model has served 100% of traffic long enough for someone to notice, it may have already made thousands of bad recommendations, approved thousands of bad transactions, or shown thousands of users a broken experience. Some of that cannot be undone by a rollback. A recommendation already shown. A loan already denied.</p>
+
+    <p>Every technique below exists to shrink that blast radius before you fully commit.</p>
+
+    <p><strong>Batch vs online inference</strong> is the first fork.</p>
+    <ul>
+      <li><strong>Batch</strong> runs predictions on a schedule over a stored dataset. Score every user overnight, write results to a table. Simple, cheap, and tolerant of a slow pipeline. The predictions are only as fresh as the last run.</li>
+      <li><strong>Online</strong> computes a prediction per request, in real time. Necessary when the input only exists at request time, like a live search query or a fraud check on a transaction happening right now. The cost is having to meet a latency budget under real traffic.</li>
+    </ul>
+
+    <p>Then the rollout itself, in increasing order of exposure:</p>
+    <ul>
+      <li><strong>Shadow deployment</strong> runs the new model on live production traffic in parallel with the current one, computing predictions but never serving or acting on them. Real production behavior, real traffic, zero user-facing risk. Purely to compare the new model's outputs against the incumbent's.</li>
+      <li><strong>Canary deployment</strong> is the next step up. The new model serves a small, real slice of traffic (often 1&ndash;5%) end to end, with its impact on real business metrics measured directly, before that slice is gradually increased.</li>
+    </ul>
+
+    <p>The difference matters. Shadow tells you the new model's predictions <em>look</em> reasonable. Only canary tells you whether users actually respond to them the way you hoped.</p>
+
+    <p><strong>Rollback strategy</strong> is the part teams most often forget to design in advance. Reverting a model version is easy if it's just a registry pointer. But if the new version also required a new feature or a new database schema, then "roll back the model" and "roll back everything the model depended on" are not the same operation. An actual incident is the wrong time to learn that.</p>
+
+    <p><strong>Human-in-the-loop systems</strong> route a model's low-confidence or high-stakes predictions to a person instead of auto-acting on them. Used deliberately where the cost of a wrong automated decision is high: content moderation edge cases, large financial transactions, medical triage. You trade some automation for a human backstop exactly where errors are most expensive.</p>
+
+    <p>There is a second benefit. Human decisions on the cases a model is least sure about are disproportionately useful training data for the next version.</p>
   </section>
 
   <section id="monitoring">
     <h2><span class="num">05</span>Monitoring: telling drift apart from noise</h2>
-    <p>"Something changed" isn't actionable on its own — the fix for a shifted input distribution is completely different from the fix for a genuinely changed relationship between inputs and outcomes, so the first job of monitoring is telling apart three things that all just look like "the numbers moved."</p>
-    <p><strong>Data drift</strong> is a change in the distribution of the model's input features — your fraud model was trained when average transaction size was $40, and it's now $65, even though "what counts as fraud" hasn't changed at all. <strong>Concept drift</strong> is a change in the actual relationship between inputs and the correct output — the fraud patterns themselves evolved, so the same transaction profile that used to be safe now genuinely often isn't. <strong>Performance drift</strong> is the downstream symptom: accuracy, precision, or whatever business metric you actually care about visibly degrading — which data or concept drift eventually cause, but which you can also only measure directly once you have ground-truth labels, which for many production systems arrive late or never at scale.</p>
+    <p>"Something changed" isn't actionable on its own. The fix for a shifted input distribution is completely different from the fix for a genuinely changed relationship between inputs and outcomes. So the first job of monitoring is telling apart three things that all just look like "the numbers moved."</p>
+
+    <ul>
+      <li><strong>Data drift</strong> is a change in the distribution of the model's input features. Your fraud model was trained when average transaction size was $40, and it's now $65, even though "what counts as fraud" hasn't changed at all.</li>
+      <li><strong>Concept drift</strong> is a change in the actual relationship between inputs and the correct output. The fraud patterns themselves evolved, so the same transaction profile that used to be safe now genuinely often isn't.</li>
+      <li><strong>Performance drift</strong> is the downstream symptom: accuracy, precision, or whatever business metric you care about visibly degrading. Data or concept drift eventually cause it. You can only measure it directly once you have ground-truth labels, which for many production systems arrive late or never at scale.</li>
+    </ul>
     <div class="eq-block">
       <span>$$\text{PSI} = \sum_{i=1}^{k} \left( p_i - q_i \right) \cdot \ln\!\left(\frac{p_i}{q_i}\right)$$</span>
     </div>
@@ -227,28 +275,65 @@
       <li><span class="sym">PSI</span> the Population Stability Index — zero when the two distributions are identical, growing as they diverge. It's one of several standard drift statistics (alongside KL divergence and Wasserstein distance), popular because it's simple, symmetric enough in practice, and easy to compute per feature.</li>
       <li><span class="sym">Common thresholds (industry convention, not a law of nature)</span> PSI below ~0.1 is usually treated as no meaningful shift, 0.1–0.25 as a moderate shift worth investigating, and above ~0.25 as a significant shift worth acting on. Treat these as starting points to calibrate against your own feature's normal volatility, not universal cutoffs.</li>
     </ul>
-    <p>The engineering reality underneath the formula: you can't eyeball this for hundreds of features across every model in a company, which is what model observability tooling (dashboards, automated per-feature drift scoring, alerting) exists to do — and why alert design matters as much as detection. A drift monitor that fires constantly on features with normal seasonal variance trains everyone to ignore it, which is worse than not having the monitor at all — this is the ML-specific version of the general alert-fatigue problem.</p>
+    <p>The engineering reality underneath the formula: you can't eyeball this for hundreds of features across every model in a company. That is what model observability tooling exists to do, via dashboards, automated per-feature drift scoring, and alerting.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">Why a noisy monitor is worse than no monitor</span>
+      <p>Alert design matters as much as detection.</p>
+      <p>A drift monitor that fires constantly on features with normal seasonal variance trains everyone to ignore it. At that point you have all the cost of the monitor and none of the benefit, plus a team conditioned to dismiss the one alert that mattered.</p>
+      <p>This is the ML-specific version of the general <strong>alert-fatigue</strong> problem.</p>
+    </div>
   </section>
 
   <section id="evaluation">
     <h2><span class="num">06</span>Evaluation: golden sets, and offline vs online metrics</h2>
-    <p>A <strong>golden set</strong> is a fixed, carefully curated, high-quality labeled dataset held out specifically for evaluating every candidate model version against the same yardstick — not a random validation split that might itself drift, but a deliberately maintained benchmark you can trust to mean the same thing this quarter as it did last quarter. Golden sets are also where a team deliberately overrepresents rare-but-critical cases (the fraud pattern that's 0.1% of traffic but 40% of the financial risk) that a random sample would barely include.</p>
-    <p><strong>Offline metrics</strong> (accuracy, AUC, F1, calibration — computed against the golden set or a held-out historical dataset before anything ships) answer "does this model appear to be at least as good as what it's replacing." <strong>Online metrics</strong> (click-through rate, conversion, revenue per user, actual fraud losses — measured from real canary traffic) answer the question that actually matters commercially: does this model change user behavior and business outcomes in the intended direction. The two can and do disagree — a model with a better offline AUC can still perform worse online if it's more confidently wrong on the specific cases users actually encounter most, which is exactly why canary deployment exists as a gate between "looked good offline" and "fully trusted."</p>
+    <p>A <strong>golden set</strong> is a fixed, carefully curated, high-quality labeled dataset, held out specifically for evaluating every candidate model version against the same yardstick. Not a random validation split that might itself drift. A deliberately maintained benchmark you can trust to mean the same thing this quarter as it did last quarter.</p>
+
+    <p>Golden sets are also where a team deliberately overrepresents rare-but-critical cases that a random sample would barely include. The fraud pattern that's 0.1% of traffic but 40% of the financial risk, for instance.</p>
+
+    <p>Two families of metric, answering two different questions:</p>
+    <ul>
+      <li><strong>Offline metrics</strong> (accuracy, AUC, F1, calibration) are computed against the golden set or a held-out historical dataset before anything ships. They answer "does this model appear to be at least as good as what it's replacing."</li>
+      <li><strong>Online metrics</strong> (click-through rate, conversion, revenue per user, actual fraud losses) are measured from real canary traffic. They answer the question that matters commercially: does this model change user behavior and business outcomes in the intended direction.</li>
+    </ul>
+
+    <p>The two can and do disagree. A model with a better offline AUC can still perform worse online if it's more confidently wrong on the specific cases users encounter most. That gap is exactly why canary deployment exists, as a gate between "looked good offline" and "fully trusted."</p>
   </section>
 
   <section id="why">
     <h2><span class="num">07</span>Why this design, not the obvious alternative</h2>
-    <p><strong>Why not just retrain on a fixed schedule (say, every Monday) instead of building drift detection?</strong> A fixed schedule is either wasteful or too slow, and usually both at different times — retraining weekly when nothing has actually changed burns compute and engineering time for zero benefit, while a sudden, sharp shift (a fraud ring changing tactics overnight) can do real damage for days before the next scheduled retrain even happens. Drift-triggered retraining spends the retraining budget where and when it's actually needed, at the cost of needing real monitoring infrastructure to know when that is — a fixed schedule is simpler to build and is a completely reasonable choice when drift is genuinely slow and predictable, which is itself something you should verify rather than assume.</p>
-    <p><strong>Why not skip staging and go straight from "passed offline eval" to full production traffic?</strong> Because offline metrics and online outcomes can disagree, and because a golden set — however carefully built — is still a fixed snapshot that can't fully capture live traffic's edge cases, adversarial behavior, or genuine novelty. Shadow and canary deployment exist to catch exactly the gap between "looks right on the benchmark" and "behaves correctly on today's real traffic," while it's still cheap to catch.</p>
+    <p><strong>Why not just retrain on a fixed schedule (say, every Monday) instead of building drift detection?</strong></p>
+
+    <p>A fixed schedule is either wasteful or too slow, and usually both at different times. Retraining weekly when nothing has changed burns compute and engineering time for zero benefit. Meanwhile a sudden, sharp shift, like a fraud ring changing tactics overnight, can do real damage for days before the next scheduled retrain even happens.</p>
+
+    <p>Drift-triggered retraining spends the budget where and when it's needed. The cost is needing real monitoring infrastructure to know when that is. A fixed schedule is simpler to build and is a completely reasonable choice when drift is genuinely slow and predictable, which is itself something you should verify rather than assume.</p>
+
+    <p><strong>Why not skip staging and go straight from "passed offline eval" to full production traffic?</strong></p>
+
+    <p>Because offline metrics and online outcomes can disagree. And because a golden set, however carefully built, is still a fixed snapshot. It can't fully capture live traffic's edge cases, adversarial behavior, or genuine novelty. Shadow and canary exist to catch the gap between "looks right on the benchmark" and "behaves correctly on today's real traffic," while catching it is still cheap.</p>
   </section>
 
   <section id="failure-modes">
     <h2><span class="num">08</span>Complexity, failure modes, and what actually breaks</h2>
-    <p><strong>Train-serving skew</strong> is the recurring villain of this entire page: any place where the feature computation logic used at training time differs even slightly from the logic used at serving time — a different library version, a subtly different time-window definition, a null-handling difference — produces a model that looks great offline and is silently miscalibrated the moment it sees production traffic. A feature store's whole reason for existing is making this structurally hard to do by accident.</p>
-    <p><strong>Hidden feedback loops</strong> happen when a model's own predictions influence the data it's later trained on — a recommender that under-shows a certain category generates less engagement data for that category, which then looks like genuinely low demand to the next training run, reinforcing the original bias with no external cause required at all. This is one of the specific risk factors named in the "Hidden Technical Debt" paper, and it's genuinely hard to detect from inside the system, since every signal you'd use to check is itself produced by the loop.</p>
-    <p><strong>Data leakage</strong> — information about the label leaking into the features, usually through a feature that's only available after the outcome is already known (using "did the customer cancel this month" to help predict "will the customer cancel this month") — inflates offline metrics dramatically and then evaporates entirely in production, since the leaked signal simply isn't available at real prediction time. It's one of the most common reasons a model that looked excellent in evaluation performs close to random once deployed.</p>
-    <p><strong>Alert fatigue and threshold tuning</strong> are a genuine, ongoing operational cost, not a one-time setup step — a drift threshold that's too sensitive trains engineers to ignore the monitor; one that's too loose lets real regressions through silently. And <strong>rollback strategy</strong> failures are almost always a dependency problem discovered too late: rolling back model weights is trivial, but if the new version shipped alongside a new required feature, a new schema, or a new downstream consumer expecting a new field, "roll back the model" and "restore the previous working system" can be two very different amounts of work — worth deciding in advance, not during an incident.</p>
-    <p><strong>Privacy, security and governance</strong> compound all of the above: training data and logged features often contain PII, which constrains what a feature store can retain and for how long, who can query it, and whether a user's deletion request has to propagate through every training set that ever touched their data — not just the live database. Getting this wrong isn't a performance failure, it's a compliance and trust failure, and it needs to be designed into the data layer from the start rather than retrofitted after an incident.</p>
+    <p><strong>Train-serving skew</strong> is the recurring villain of this entire page. Any place where feature computation at training time differs even slightly from serving time produces a model that looks great offline and is silently miscalibrated the moment it sees production traffic.</p>
+
+    <p>The culprit is usually small: a different library version, a subtly different time-window definition, a null-handling difference. A feature store's whole reason for existing is making this structurally hard to do by accident.</p>
+
+    <p><strong>Hidden feedback loops</strong> happen when a model's own predictions influence the data it's later trained on. A recommender that under-shows a certain category generates less engagement data for that category. To the next training run, that looks like genuinely low demand, reinforcing the original bias with no external cause required at all.</p>
+
+    <p>This is one of the specific risk factors named in the "Hidden Technical Debt" paper. It's genuinely hard to detect from inside the system, since every signal you'd use to check is itself produced by the loop.</p>
+
+    <p><strong>Data leakage</strong> is information about the label leaking into the features, usually through a feature that's only available after the outcome is already known. Using "did the customer cancel this month" to help predict "will the customer cancel this month," for example.</p>
+
+    <p>It inflates offline metrics dramatically, then evaporates entirely in production, since the leaked signal simply isn't available at real prediction time. It's one of the most common reasons a model that looked excellent in evaluation performs close to random once deployed.</p>
+
+    <p><strong>Alert fatigue and threshold tuning</strong> are a genuine, ongoing operational cost, not a one-time setup step. A threshold that's too sensitive trains engineers to ignore the monitor. One that's too loose lets real regressions through silently.</p>
+
+    <p><strong>Rollback strategy</strong> failures are almost always a dependency problem discovered too late. Rolling back model weights is trivial. But if the new version shipped alongside a new required feature, a new schema, or a new downstream consumer expecting a new field, then "roll back the model" and "restore the previous working system" can be two very different amounts of work. Worth deciding in advance, not during an incident.</p>
+
+    <p><strong>Privacy, security and governance</strong> compound all of the above. Training data and logged features often contain PII, which constrains what a feature store can retain and for how long, and who can query it. It also determines whether a user's deletion request has to propagate through every training set that ever touched their data, not just the live database.</p>
+
+    <p>Getting this wrong isn't a performance failure. It's a compliance and trust failure, and it needs designing into the data layer from the start rather than retrofitting after an incident.</p>
   </section>
 
   <section id="applications">
@@ -256,7 +341,11 @@
     <h3>Illustrative PSI walkthrough</h3>
     <p>Say a lending model's "monthly income" feature was binned into 5 buckets during training, with reference proportions <span>$q = [0.30, 0.30, 0.20, 0.15, 0.05]$</span> (illustrative). Six months later, the current production traffic falls into those same bins at <span>$p = [0.15, 0.25, 0.25, 0.20, 0.15]$</span> (illustrative) — noticeably more mass in the higher-income bins than the model ever saw in training. Computing <span>$\sum (p_i - q_i)\ln(p_i/q_i)$</span> bucket by bucket and summing gives a PSI in the moderate-to-significant range (illustrative arithmetic, not a real dataset) — the kind of result that should trigger investigating whether this is a temporary shift (a marketing campaign that attracted a different customer segment this month) or a durable one worth retraining for, rather than auto-triggering a retrain on the number alone.</p>
     <h3>Production use case: rolling out a new fraud model safely</h3>
-    <p>A team retrains a fraud-detection model with a new feature set. It first runs in shadow for a week — real transactions, real predictions computed, nothing acted on — comparing its flagged-transaction set against the current model's and against actual chargebacks that come in during that week. Satisfied it's not obviously worse, it moves to a 2% canary: real users, real blocking decisions, but capped blast radius, with online metrics (false-positive rate on real customers, actual fraud losses prevented) tracked against the incumbent's matched traffic. Only once the canary clears does traffic ramp to 25%, then 100% — and once fully live, per-feature drift monitoring on the new model's inputs is what will eventually trigger the next retrain, closing the loop back to where this example started.</p>
+    <p>A team retrains a fraud-detection model with a new feature set. It first runs in <strong>shadow</strong> for a week: real transactions, real predictions computed, nothing acted on. They compare its flagged-transaction set against the current model's, and against actual chargebacks that arrive during that week.</p>
+
+    <p>Satisfied it's not obviously worse, they move to a <strong>2% canary</strong>. Real users, real blocking decisions, capped blast radius. Online metrics (false-positive rate on real customers, actual fraud losses prevented) are tracked against the incumbent's matched traffic.</p>
+
+    <p>Only once the canary clears does traffic ramp to 25%, then 100%. Once fully live, per-feature drift monitoring on the new model's inputs is what will eventually trigger the next retrain, closing the loop back to where this example started.</p>
   </section>
 
   <section id="interview">

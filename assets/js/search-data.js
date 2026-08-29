@@ -24,7 +24,7 @@ window.SEARCH_INDEX = [
       "interview questions",
       "full"
     ],
-    "summary": "Drill all 166 interview questions with spaced repetition — answer, rate yourself, and let the schedule bring each one back right before you forget it.",
+    "summary": "Drill every interview question on the site with spaced repetition — answer, rate yourself, and let the schedule bring each one back right before you forget it.",
     "color": "var(--c-map)"
   },
   {

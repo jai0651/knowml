@@ -105,7 +105,7 @@
   <div class="topic-header">
     <div class="crumbs"><a href="../index.html">Map &amp; Timeline</a> / Systems, Safety &amp; Interview / 26</div>
     <h1>2026 Frontier Map</h1>
-    <p class="dek">Every technique on this site up to here answers "how do we build a good model." This page is about a quieter shift: most of the field's energy in 2025–2026 went into what you do <em>around</em> a model — at inference time, and as a system — not just into making the model itself bigger.</p>
+    <p class="dek">Every technique on this site up to here answers "how do we build a good model." This page is about a quieter shift. Most of the field's energy in 2025–2026 went into what you do <em>around</em> a model, at inference time and as a system, rather than into making the model itself bigger.</p>
     <div class="meta-row">
       <span class="tag tag-conceptual">Know conceptually</span>
       <span class="reading-time">~18 min · prerequisites: LLM training (10), RAG &amp; agents (11), efficient systems (23)</span>
@@ -115,46 +115,105 @@
   <section id="tldr">
     <div class="tldr">
       <div class="tldr-label">TL;DR</div>
-      <p>Pretraining-scale gains got expensive faster than they got useful, so the frontier moved to spending compute at <em>inference</em> time instead: sample several candidate answers, score them with a verifier, and keep the best one — which can beat a much larger model on the same problem for less total cost. The same shift shows up as agentic systems: instead of asking one model to do everything in one forward pass, wrap it in a loop that plans, calls tools, checks its own work, and iterates — trading a monolithic black box for an inspectable pipeline built from pieces that are each individually reliable. Multimodality, robotics, and science followed the same arc: bolt a pretrained backbone onto a new modality or embodiment rather than starting from scratch. None of this solved the field's actual hard problems — reliability at the tail, grounding claims in evidence, planning over long horizons, and evaluation itself — it just gave everyone new tools to attack them with. One sentence for an interview: the 2026 frontier is less "a bigger model" and more "a system built around a fixed model," and the honest caveat is that the open problems from 2023 are mostly still open.</p>
+      <p>Pretraining-scale gains got expensive faster than they got useful. So the frontier moved to spending compute at <em>inference</em> time instead: sample several candidate answers, score them with a verifier, keep the best one. That can beat a much larger model on the same problem for less total cost. The same shift shows up as agentic systems. Instead of asking one model to do everything in one forward pass, wrap it in a loop that plans, calls tools, checks its own work, and iterates. You trade a monolithic black box for an inspectable pipeline built from pieces that are each individually reliable. Multimodality, robotics and science followed the same arc: bolt a pretrained backbone onto a new modality or embodiment rather than starting from scratch. None of this solved the field's actual hard problems. Reliability at the tail, grounding claims in evidence, planning over long horizons, and evaluation itself all remain open. It just gave everyone new tools to attack them with. One sentence for an interview: the 2026 frontier is less "a bigger model" and more "a system built around a fixed model," and the honest caveat is that the open problems from 2023 are mostly still open.</p>
     </div>
   </section>
 
   <section id="timeline">
     <h2><span class="num">01</span>Where this sits in the timeline</h2>
-    <p>The home page's timeline calls 2023–2026 the "reasoning &amp; agents" era, and this page is that era zoomed in. The path here was gradual, not a single breakthrough: chain-of-thought prompting (2022) showed that just asking a model to "think step by step" in its output improved accuracy on multi-step problems, for free, with no architecture change. That raised an obvious question — if letting the model use more of its own output as scratch space helps, what happens if you deliberately spend <em>more</em> compute on that scratch space, on purpose, and pick the best result? That question is what turned into formal test-time-compute scaling and process-supervised verifiers (2023–2024). In parallel, once models got reliable enough at following instructions and calling tools (RLHF and instruction tuning, covered in 10), it became practical to wire them into agentic loops that could act, observe a result, and re-plan — this site's page 11 covers the retrieval and single-step tool-use side of that; this page covers what happens when you extend it to long-horizon, multi-tool, multi-hour tasks like autonomous coding.</p>
-    <p>The rest of this page is organized the same way: not "here's a list of 17 buzzwords," but "here are five directions the field pushed on, each one a response to a specific limitation of what came before, plus the problems none of them fixed."</p>
+    <p>The home page's timeline calls 2023–2026 the "reasoning &amp; agents" era. This page is that era zoomed in. The path here was gradual, not a single breakthrough.</p>
+
+    <p><strong>Chain-of-thought prompting</strong> (2022) showed that asking a model to "think step by step" in its output improved accuracy on multi-step problems. For free, with no architecture change. That raised an obvious question. If letting the model use more of its own output as scratch space helps, what happens if you deliberately spend <em>more</em> compute on that scratch space and pick the best result?</p>
+
+    <p>That question turned into formal <strong>test-time-compute scaling</strong> and process-supervised verifiers (2023–2024).</p>
+
+    <p>In parallel, models got reliable enough at following instructions and calling tools (RLHF and instruction tuning, covered in 10). That made it practical to wire them into <strong>agentic loops</strong> that could act, observe a result, and re-plan. Page 11 covers the retrieval and single-step tool-use side. This page covers what happens when you extend it to long-horizon, multi-tool, multi-hour tasks like autonomous coding.</p>
+
+    <p>The rest of this page is organized the same way. Not a list of 17 buzzwords, but five directions the field pushed on, each a response to a specific limitation of what came before, plus the problems none of them fixed.</p>
   </section>
 
   <section id="intuition">
     <h2><span class="num">02</span>The intuition, before any math</h2>
-    <p>Every large model has a fixed amount of "knowledge and skill" baked in by pretraining and fine-tuning — call it its raw competence. Historically, the way to get a more competent model was to make it bigger, train it on more data, or both, all before it ever answers a single question. That approach has a ceiling problem: pretraining compute is a sunk, fixed cost, spent identically whether the eventual question is "what's the capital of France" or "prove this theorem" — the model can't tell in advance which questions deserve more effort, because by the time it's answering, all the training compute has already been spent.</p>
-    <p>Inference-time compute inverts that. Instead of spending everything upfront, spend a little more <em>per question, adaptively</em> — sample multiple attempts, search over partial solutions, or run a verifier to catch mistakes — right when you know what the question actually is. An easy question gets one quick pass; a hard one gets ten attempts and a checker. Agentic systems apply the same "spend adaptively" idea one level up: instead of forcing a single model call to plan, execute, and self-correct all at once, split those into separate steps a system can run in a loop, stopping early on easy tasks and iterating longer on hard ones. Multimodal and embodied frontier work is a different kind of adaptation — reusing a capable pretrained backbone for a new input/output modality (video, robot actions) instead of learning that modality from zero — because the expensive part (broad world knowledge and reasoning) transfers, and only the comparatively cheap part (how to perceive or act in the new modality) needs to be learned fresh.</p>
+    <p class="lede">Pretraining spends the same compute on "what's the capital of France" as on "prove this theorem." That is the problem.</p>
+
+    <p>Every large model has a fixed amount of knowledge and skill baked in by pretraining and fine-tuning. Call it raw competence. Historically the way to get more of it was to make the model bigger, train on more data, or both, all before it answers a single question.</p>
+
+    <p>That has a ceiling problem. Pretraining compute is a sunk, fixed cost. The model cannot tell in advance which questions deserve more effort, because by the time it is answering, all the training compute has already been spent.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The inversion the whole page rests on</span>
+      <p><strong>Inference-time compute</strong> flips the order. Instead of spending everything upfront, spend a little more <em>per question, adaptively</em>, right when you finally know what the question is.</p>
+      <p>Sample multiple attempts. Search over partial solutions. Run a verifier to catch mistakes.</p>
+      <p>An easy question gets one quick pass. A hard one gets ten attempts and a checker.</p>
+    </div>
+
+    <p>Agentic systems apply that same "spend adaptively" idea one level up. Rather than forcing a single model call to plan, execute and self-correct all at once, split those into separate steps a system can run in a loop. Stop early on easy tasks. Iterate longer on hard ones.</p>
+
+    <p>Multimodal and embodied frontier work is a different kind of adaptation: reusing a capable pretrained backbone for a new input or output modality, like video or robot actions, instead of learning that modality from zero. The expensive part, broad world knowledge and reasoning, transfers. Only the comparatively cheap part, how to perceive or act in the new modality, needs learning fresh.</p>
   </section>
 
   <section id="landscape">
     <h2><span class="num">03</span>The landscape, in five directions</h2>
 
     <h3>Reasoning &amp; inference-time compute</h3>
-    <p>The clearest instance of "spend compute per-query instead of upfront." The two mechanisms Snell et al. formalize (see Go Deeper) are: search against a verifier — sample N candidate solutions, score each with a model trained to judge correctness, keep the best — and adaptive revision, where the model iteratively refines its own draft conditioned on the prompt. The verifier itself is usually a <strong>process reward model (PRM)</strong>, scoring each intermediate reasoning step rather than only the final answer; Lightman et al.'s "Let's Verify Step by Step" is the paper that established this matters — process supervision caught errors that outcome supervision (grading only the final answer) let slip through, because a right final answer can hide a wrong method that happened to land correctly.</p>
+    <p>The clearest instance of "spend compute per-query instead of upfront." Snell et al. formalize two mechanisms (see Go Deeper):</p>
+
+    <ul>
+      <li><strong>Search against a verifier.</strong> Sample N candidate solutions, score each with a model trained to judge correctness, keep the best.</li>
+      <li><strong>Adaptive revision.</strong> The model iteratively refines its own draft, conditioned on the prompt.</li>
+    </ul>
+
+    <p>The verifier is usually a <em class="term">process reward model</em> (PRM), scoring each intermediate reasoning step rather than only the final answer. Lightman et al.'s "Let's Verify Step by Step" established that this matters. Process supervision caught errors that outcome supervision let slip through, because a right final answer can hide a wrong method that happened to land correctly.</p>
 
     <h3>Agentic systems</h3>
-    <p>Page 11 already covers the core loop — reasoning, a tool call, an observation, repeat (ReAct). This page's addition is what changes when that loop has to run for a long horizon: a coding agent that has to plan a multi-file change, write code, run the test suite, read the failure, and retry, possibly dozens of times before it's done. That requires the loop to carry state across steps (memory), break the goal into sub-goals (planning), and — critically — decide for itself when a sub-goal actually succeeded, not just when it ran without crashing (self-verification, echoing the same verifier idea from reasoning). Toolformer (Schick et al., see Go Deeper) was an early demonstration that a model can learn <em>when</em> to call a tool and with what arguments from self-supervised examples, rather than needing every tool call hand-scripted — the technique underlying how modern agent frameworks decide to reach for a calculator, a search engine, or a code interpreter.</p>
+    <p>Page 11 already covers the core loop: reasoning, a tool call, an observation, repeat (ReAct). This page's addition is what changes when that loop runs for a <em>long horizon</em>. Picture a coding agent planning a multi-file change, writing code, running the test suite, reading the failure, retrying. Possibly dozens of times.</p>
+
+    <p>That demands three things the single-step loop does not:</p>
+
+    <ul>
+      <li><strong>Memory.</strong> Carry state across steps.</li>
+      <li><strong>Planning.</strong> Break the goal into sub-goals.</li>
+      <li><strong>Self-verification.</strong> Decide for itself when a sub-goal actually <em>succeeded</em>, not merely when it ran without crashing. The same verifier idea from reasoning, one level up.</li>
+    </ul>
+
+    <p>Toolformer (Schick et al., see Go Deeper) was an early demonstration that a model can learn <em>when</em> to call a tool, and with what arguments, from self-supervised examples rather than hand-scripted rules. That underlies how modern agent frameworks decide to reach for a calculator, a search engine, or a code interpreter.</p>
 
     <h3>The multimodal &amp; efficiency frontier</h3>
-    <p>Two threads that both push a capable backbone into new territory. Multimodal: page 14 covers the bolt-on "encoder + projector + LLM" recipe versus training natively multimodal from the start; the frontier direction is pushing native multimodality across more modalities at once (text, image, audio, video in one model) and toward generative video that's temporally consistent enough to function as an interactive world simulator, not just a short clip generator — a direct extension of the diffusion techniques in 12, applied across time as well as space. Efficiency: Mixture-of-Experts (Switch Transformers, see Go Deeper, and covered in more depth in 10) decouples total parameter count from per-token compute, so total capacity can keep growing without inference cost growing at the same rate; distillation and quantization (23) push the other direction — take a large, capable model's behavior and compress it into something small enough to run on-device. Both are the same underlying goal: more capability per dollar of inference compute, not more capability per dollar of training compute.</p>
+    <p>Two threads, both pushing a capable backbone into new territory.</p>
+
+    <ul>
+      <li><strong>Multimodal.</strong> Page 14 covers the bolt-on "encoder + projector + LLM" recipe versus training natively multimodal from the start. The frontier direction pushes native multimodality across more modalities at once (text, image, audio, video in one model), and toward generative video temporally consistent enough to function as an interactive world simulator rather than a short clip generator. A direct extension of the diffusion techniques in 12, applied across time as well as space.</li>
+      <li><strong>Efficiency.</strong> Mixture-of-Experts (Switch Transformers, see Go Deeper, covered in depth in 10) decouples total parameter count from per-token compute, so capacity can grow without inference cost growing at the same rate. Distillation and quantization (23) push the other way: take a large model's behavior and compress it small enough to run on-device.</li>
+    </ul>
+
+    <p>Both chase the same goal. More capability per dollar of <em>inference</em> compute, not per dollar of training compute.</p>
 
     <h3>The embodied &amp; robotics frontier</h3>
-    <p>Vision-language-action models (21) and world models used as learned simulators for planning (22) are the same "reuse a pretrained backbone" idea applied to physical action instead of text or code: start from a model that already understands images and language, and fine-tune it to output robot actions as an additional token type, rather than training a robot control policy from scratch on a tiny amount of robot data. Cross-embodiment generalization (21) pushes this further — pooling data across many different physical robot bodies so a single policy transfers across them, the same logic that makes a pretrained language model reusable across many downstream text tasks.</p>
+    <p>Vision-language-action models (21) and world models used as learned simulators for planning (22) are the same "reuse a pretrained backbone" idea, applied to physical action instead of text or code. Start from a model that already understands images and language. Fine-tune it to output robot actions as an additional token type. That beats training a control policy from scratch on a tiny amount of robot data.</p>
+
+    <p>Cross-embodiment generalization (21) pushes further, pooling data across many different physical robot bodies so a single policy transfers across them. The same logic that makes a pretrained language model reusable across many downstream text tasks.</p>
 
     <h3>AI for science</h3>
-    <p>The clearest proof that "a general architecture plus the right training objective and enough of the right data" generalizes past language and images: AlphaFold2 (Jumper et al., see Go Deeper) treated protein structure prediction as a geometric learning problem and reached accuracy that decades of physics-based simulation approaches hadn't, becoming <em>Nature</em>'s and <em>Science</em>'s Method of the Year for 2021 and, per the community assessments cited in follow-up literature, changing how structural biologists actually work day to day. The same recipe — a domain-appropriate architecture, a large corpus of structured natural data, and a well-chosen training objective — has since been extended toward molecule and materials design, though those domains are individually less mature than protein structure prediction and are still active, unsettled research areas rather than solved problems.</p>
+    <p>The clearest proof that a general architecture, plus the right training objective and enough of the right data, generalizes past language and images.</p>
+
+    <p><strong>AlphaFold2</strong> (Jumper et al., see Go Deeper) treated protein structure prediction as a geometric learning problem and reached accuracy that decades of physics-based simulation had not. It became <em>Nature</em>'s and <em>Science</em>'s Method of the Year for 2021 and, per the community assessments cited in follow-up literature, changed how structural biologists work day to day.</p>
+
+    <p>The same recipe of domain-appropriate architecture, a large corpus of structured natural data, and a well-chosen objective has since been extended toward molecule and materials design. Those domains are individually less mature than protein structure prediction, and remain active, unsettled research areas rather than solved problems.</p>
   </section>
 
   <section id="mechanisms">
     <h2><span class="num">04</span>The core mechanisms, precisely</h2>
-    <p>This page spans too many sub-fields to have one shared equation the way a single-architecture page does — but two mechanisms recur across almost everything above, so it's worth being exact about them instead of hand-wavy.</p>
-    <p><strong>Best-of-N with a verifier.</strong> Given a prompt, sample N candidate completions from the model (independently, usually with some sampling temperature &gt; 0 so they actually differ), score each candidate with a verifier <code>V</code>, and return the highest-scoring one: <code>argmax_i V(candidate_i)</code>. The verifier can be a separate trained model (a PRM, scoring each reasoning step) or, in simpler setups, a rule-based checker (does the code compile, does the final numeric answer match a known constraint). The core tradeoff: larger N costs more inference compute linearly, but accuracy gains are sublinear and eventually flatten — which is exactly the "compute-optimal allocation" problem Snell et al. study: for a fixed compute budget, is it better to spend it on more samples, or on letting one sample "think" longer?</p>
-    <p><strong>Sparse routing (Mixture-of-Experts).</strong> A router network computes, per token, a score over a bank of expert feed-forward networks, and only the top-<code>k</code> highest-scoring experts (commonly k=1 or k=2) actually process that token — the rest of the experts contribute nothing to that token's forward pass and cost nothing for it. Total parameter count can scale with the number of experts, while compute per token stays pinned to k experts' worth of work, which is the mechanism (see 10 for the training-time complications this introduces, like load balancing across experts) behind why sparse models can have far more total parameters than a dense model trained with the same per-token compute budget.</p>
+    <p>This page spans too many sub-fields to have one shared equation the way a single-architecture page does. But two mechanisms recur across almost everything above, so they are worth stating exactly rather than hand-wavily.</p>
+
+    <p><strong>Best-of-N with a verifier.</strong> Given a prompt, sample N candidate completions from the model, independently and usually at temperature &gt; 0 so they actually differ. Score each with a verifier <code>V</code>. Return <code>argmax_i V(candidate_i)</code>.</p>
+
+    <p>The verifier can be a separate trained model, such as a PRM scoring each reasoning step. In simpler setups it is a rule-based checker: does the code compile, does the final answer match a known constraint.</p>
+
+    <p>The core tradeoff is that larger N costs inference compute linearly, while accuracy gains are sublinear and eventually flatten. That is exactly the compute-optimal allocation problem Snell et al. study. For a fixed budget, is it better to spend on more samples, or on letting one sample think longer?</p>
+
+    <p><strong>Sparse routing (Mixture-of-Experts).</strong> A router network computes, per token, a score over a bank of expert feed-forward networks. Only the top-<code>k</code> highest-scoring experts, commonly k=1 or k=2, actually process that token. The rest contribute nothing to that token's forward pass and cost nothing for it.</p>
+
+    <p>Total parameter count can scale with the number of experts, while compute per token stays pinned to k experts' worth of work. That is the mechanism behind why sparse models can hold far more total parameters than a dense model trained at the same per-token compute budget. See 10 for the training-time complications this introduces, like load balancing across experts.</p>
   </section>
 
   <section id="why-this">
@@ -162,36 +221,74 @@
     <div class="bia">
       <div class="bia-box">
         <div class="bia-label">Obvious alternative</div>
-        <p>Keep scaling pretraining — more parameters, more data — since that recipe reliably worked from GPT-2 through GPT-4-class models.</p>
+        <p>Keep scaling pretraining. More parameters, more data. That recipe reliably worked from GPT-2 through GPT-4-class models.</p>
       </div>
       <div class="bia-arrow">→</div>
       <div class="bia-box innovation">
         <div class="bia-label">What frontier work does instead</div>
-        <p>Spend more compute adaptively, at inference time, per query — because a fixed pretraining budget is spent identically on easy and hard questions, while inference compute can be allocated only where it's needed.</p>
+        <p>Spend more compute adaptively, at inference time, per query. A fixed pretraining budget is spent identically on easy and hard questions. Inference compute can be allocated only where it is needed.</p>
       </div>
       <div class="bia-arrow">→</div>
       <div class="bia-box">
         <div class="bia-label">What it costs</div>
-        <p>Higher and less predictable per-query latency and serving cost — a hard query might now take 10× longer or run 10× more samples than an easy one, which complicates capacity planning versus a model with fixed inference cost.</p>
+        <p>Higher and less predictable per-query latency and serving cost. A hard query might take 10× longer, or run 10× more samples, than an easy one. That complicates capacity planning versus a model with fixed inference cost.</p>
       </div>
     </div>
-    <p>Snell et al.'s headline result makes the tradeoff concrete: under a matched compute budget, their compute-optimal test-time strategy let a smaller model outperform a roughly 14× larger model on problems where the smaller model already had some non-trivial baseline success rate — but that same result comes with a real caveat worth stating out loud in an interview: it depended on the problem having a verifiable or scoreable structure (math, code) where a verifier or an adaptive search strategy can actually tell a better answer from a worse one. For open-ended tasks without a clean way to score a candidate answer, spending more inference-time compute has much weaker guarantees, which is exactly why verifier design and evaluation (25) are just as much a frontier problem as raw compute allocation.</p>
-    <p>Why agentic decomposition over one giant end-to-end model: a monolithic model has to implicitly learn arithmetic, retrieval, and code execution as internal skills, imperfectly, from training data — routing those to an actual calculator, an actual search index, or an actual code interpreter each does that sub-task exactly, and a wrong tool call is visible and debuggable in a way a wrong internal computation buried inside a forward pass is not.</p>
+    <p>Snell et al.'s headline result makes the tradeoff concrete. Under a matched compute budget, their compute-optimal test-time strategy let a smaller model outperform a roughly 14× larger model, on problems where the smaller model already had some non-trivial baseline success rate.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The caveat to say out loud in an interview</span>
+      <p>That result depended on the problem having a <strong>verifiable or scoreable structure</strong>, like math or code, where a verifier or search strategy can actually tell a better answer from a worse one.</p>
+      <p>For open-ended tasks with no clean way to score a candidate, spending more inference-time compute has much weaker guarantees.</p>
+      <p>Which is exactly why verifier design and evaluation (25) are as much a frontier problem as raw compute allocation.</p>
+    </div>
+
+    <p>Why agentic decomposition rather than one giant end-to-end model? A monolithic model has to implicitly learn arithmetic, retrieval and code execution as internal skills, imperfectly, from training data. Routing each to an actual calculator, search index or code interpreter does that sub-task exactly. And a wrong tool call is visible and debuggable in a way a wrong internal computation buried inside a forward pass is not.</p>
   </section>
 
   <section id="failure-modes">
     <h2><span class="num">06</span>Complexity, failure modes, and the persistent open problems</h2>
-    <p>Inference-time search inherits a classic optimization failure mode: <strong>reward hacking against the verifier</strong>. If the verifier is imperfect — and every verifier is, to some degree — aggressive search can find a candidate that scores well under the verifier without actually being correct, the same way an RL policy can learn to exploit a misspecified reward function (15). The more compute you spend searching, the more thoroughly you search for exactly this kind of exploit, whether you meant to or not.</p>
-    <p>Agentic loops inherit a different one: <strong>compounding error over long horizons</strong>. If an agent's per-step success rate is 95% (illustrative number, not a benchmark result) and a task takes 50 sequential steps, the probability every step succeeds is roughly <code>0.95^50 ≈ 7.7%</code> if errors are independent — which is why long-horizon agent reliability, not per-step accuracy, is the actual bottleneck for autonomous coding and other multi-hour agent tasks, and why self-verification at intermediate steps (catching an error at step 12 instead of discovering it at step 50) matters so much more here than in a single-shot model call.</p>
-    <p>And then there's the honest list — the problems that none of the above directions have actually solved, carried over unchanged from 2023 to now: <strong>reliability</strong> (models are still confidently wrong at a non-trivial rate, and inference-time compute reduces but doesn't eliminate this); <strong>grounding</strong> (tying a claim to actual verifiable evidence rather than a fluent-sounding guess, see hallucination and groundedness in 25); <strong>long-horizon planning</strong> (the compounding-error problem above, unresolved for genuinely long, ambiguous real-world tasks); <strong>evaluation</strong> (benchmark contamination and the weaknesses of LLM-as-judge, covered in 25, get worse, not better, as models get better at sounding right); <strong>cost</strong> (inference-time compute directly trades money and latency for accuracy, and that trade doesn't have a free lunch); and <strong>safety and controllability</strong> (an agent that can execute code and call tools has a correspondingly larger blast radius when it does the wrong thing than a model that only outputs text). None of this is a reason for pessimism about the field — it's the actual, current research agenda, and naming these specifically, instead of gesturing at "AI safety" vaguely, is what separates an informed answer from a rehearsed one in an interview.</p>
+    <p>Inference-time search inherits a classic optimization failure mode: <strong>reward hacking against the verifier</strong>. Every verifier is imperfect to some degree. Aggressive search can find a candidate that scores well under the verifier without being correct. That is the same way an RL policy can learn to exploit a misspecified reward function (15).</p>
+
+    <p>The perverse part: the more compute you spend searching, the more thoroughly you search for exactly this kind of exploit. Whether you meant to or not.</p>
+
+    <p>Agentic loops inherit a different one: <strong>compounding error over long horizons</strong>. Say an agent's per-step success rate is 95% (illustrative number, not a benchmark result) and a task takes 50 sequential steps. If errors are independent, the probability every step succeeds is roughly <code>0.95^50 ≈ 7.7%</code>.</p>
+
+    <p>That is why long-horizon reliability, not per-step accuracy, is the real bottleneck for autonomous coding. And why self-verification at intermediate steps, catching an error at step 12 rather than discovering it at step 50, matters far more here than in a single-shot model call.</p>
+
+    <p>And then there is the honest list. These problems carried over unchanged from 2023, and none of the directions above solved them:</p>
+
+    <ul>
+      <li><strong>Reliability.</strong> Models are still confidently wrong at a non-trivial rate. Inference-time compute reduces this but does not eliminate it.</li>
+      <li><strong>Grounding.</strong> Tying a claim to verifiable evidence rather than a fluent-sounding guess. See hallucination and groundedness in 25.</li>
+      <li><strong>Long-horizon planning.</strong> The compounding-error problem above, unresolved for genuinely long, ambiguous real-world tasks.</li>
+      <li><strong>Evaluation.</strong> Benchmark contamination and the weaknesses of LLM-as-judge (25) get <em>worse</em>, not better, as models get better at sounding right.</li>
+      <li><strong>Cost.</strong> Inference-time compute trades money and latency for accuracy directly. There is no free lunch in that trade.</li>
+      <li><strong>Safety and controllability.</strong> An agent that can execute code and call tools has a much larger blast radius when it does the wrong thing than a model that only outputs text.</li>
+    </ul>
+
+    <p>None of this is a reason for pessimism about the field. It is the actual current research agenda. Naming these specifically, instead of gesturing vaguely at "AI safety," is what separates an informed answer from a rehearsed one.</p>
   </section>
 
   <section id="worked-example">
     <h2><span class="num">07</span>Worked example and a production use case</h2>
     <h3>Tiny worked example</h3>
-    <p>Say a model is asked a hard math problem and, rather than answering once, is sampled 4 times (illustrative, small N for clarity) at N=4, producing 4 candidate solutions. A process reward model scores each candidate's reasoning steps and assigns an overall confidence: <code>[0.31, 0.58, 0.22, 0.61]</code> (illustrative). Best-of-N selection returns the 4th candidate, at 0.61 — not necessarily the one that "looks" most confident or longest, but the one the verifier scored highest on step-by-step correctness. If instead the same compute budget were spent as one longer single attempt with self-revision, it might reach a similar or better result for some problems — this is exactly the compute-allocation question Snell et al. study, and why "spend more" alone isn't a strategy without deciding <em>how</em> to spend it.</p>
+    <p>Say a model is asked a hard math problem. Rather than answering once, it is sampled 4 times (illustrative, small N for clarity), producing 4 candidate solutions. A process reward model scores each candidate's reasoning steps and assigns an overall confidence: <code>[0.31, 0.58, 0.22, 0.61]</code> (illustrative).</p>
+
+    <p>Best-of-N selection returns the 4th candidate, at 0.61. Not necessarily the one that <em>looks</em> most confident, or the longest. The one the verifier scored highest on step-by-step correctness.</p>
+
+    <p>Spend that same budget instead as one longer attempt with self-revision, and for some problems you might reach a similar or better result. That is exactly the compute-allocation question Snell et al. study, and why "spend more" alone is not a strategy without deciding <em>how</em> to spend it.</p>
     <h3>Production use case</h3>
-    <p>An autonomous coding agent given a bug report: it plans a fix (identify likely files, form a hypothesis), writes a code change, runs the existing test suite as its verifier, and — if tests fail — reads the failure output and revises, looping until tests pass or a step/time budget is exhausted. This is the agentic loop from section 03 with the test suite standing in as an automatic, domain-specific verifier — precisely the same "generate, verify, keep or retry" shape as best-of-N sampling in section 04, just spread across sequential steps instead of parallel samples, and it inherits the same compounding-error risk from section 06 if a multi-file change requires many sequential correct steps.</p>
+    <p>An autonomous coding agent, given a bug report, runs a loop:</p>
+
+    <ul>
+      <li><strong>Plan.</strong> Identify likely files, form a hypothesis.</li>
+      <li><strong>Act.</strong> Write a code change.</li>
+      <li><strong>Verify.</strong> Run the existing test suite.</li>
+      <li><strong>Revise.</strong> If tests fail, read the failure output and try again. Loop until tests pass or a step or time budget is exhausted.</li>
+    </ul>
+
+    <p>This is the agentic loop from section 03, with the test suite standing in as an automatic, domain-specific verifier. Structurally it is the same "generate, verify, keep or retry" shape as best-of-N sampling in section 04, just spread across sequential steps rather than parallel samples. And it inherits the compounding-error risk from section 06 whenever a multi-file change needs many sequential correct steps.</p>
   </section>
 
   <section id="interview">

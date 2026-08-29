@@ -1826,5 +1826,148 @@ window.KML_QUESTIONS = [
 "level": "deep",
 "q": "You're handed a cluster with several GPUs per node on NVLink, and InfiniBand between nodes. How do you lay out tensor, pipeline, and data parallelism across it, and why?",
 "a": "<p>Tensor parallelism goes inside a node, on the NVLink-connected GPUs, because it communicates partial results within every layer — many times per forward and backward pass — and needs the fastest possible link or that communication dominates the compute. Pipeline parallelism can cross the InfiniBand link between nodes, since it only passes activations at stage boundaries, which is far less frequent and far more tolerant of a slower link. Data parallelism replicates the whole tensor-parallel-plus-pipeline-parallel unit across as many groups of nodes as you have, synchronizing gradients once per step via ring all-reduce over InfiniBand — tolerable specifically because ring all-reduce keeps each GPU's communication burden bounded regardless of how many replicas you add. Getting this backwards — for instance splitting a single layer tensor-parallel-style across InfiniBand — turns the network into the bottleneck and leaves the GPUs' raw compute capacity mostly unused, since they'd spend most of their time waiting on data that has to cross the slower link on every layer.</p>"
+},
+{
+"id": "29-finetuning-llms::0",
+"pageId": "29-finetuning-llms",
+"page": "29-finetuning-llms",
+"pageTitle": "Fine-tuning LLMs in Practice",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "beginner",
+"q": "When would you fine-tune instead of using RAG?",
+"a": "<p>Fine-tune when the gap is behavioural: style, tone, output format, or a domain's idiom that prompting only approximates. Use RAG when the gap is knowledge, especially knowledge that changes or needs to be cited. The operational argument is decisive. A fact in a document is updated by editing the document; a fact in the weights requires another training run and still gives you no provenance. The two compose well, and a common production shape is a fine-tuned model that formats and reasons over retrieved context.</p>"
+},
+{
+"id": "29-finetuning-llms::1",
+"pageId": "29-finetuning-llms",
+"page": "29-finetuning-llms",
+"pageTitle": "Fine-tuning LLMs in Practice",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "beginner",
+"q": "What is the practical difference between LoRA and QLoRA?",
+"a": "<p>LoRA freezes the base model and trains small low-rank adapter matrices, so optimizer state only exists for the adapters. QLoRA does the same thing but quantizes the frozen base to 4-bit first, which cuts the memory needed to merely hold the base. The distinction matters when the full-precision base does not fit in your VRAM at all. QLoRA is what makes fine-tuning a mid-sized model feasible on a single consumer GPU, at the cost of a small quality hit from quantizing the base.</p>"
+},
+{
+"id": "29-finetuning-llms::2",
+"pageId": "29-finetuning-llms",
+"page": "29-finetuning-llms",
+"pageTitle": "Fine-tuning LLMs in Practice",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Your fine-tuned model rambles and leaks role markers like \"assistant\" into its output. What went wrong?",
+"a": "<p>Almost certainly a chat template mismatch. Every instruct model is post-trained with a specific set of special tokens delimiting system, user and assistant turns. If you format training data with a different template, the model is simultaneously learning a new formatting convention and your task, and it does neither cleanly. The symptoms are exactly this: failing to stop in the right place, and emitting role markers as ordinary text. The fix is to apply the base model's own template, not to collect more data.</p>"
+},
+{
+"id": "29-finetuning-llms::3",
+"pageId": "29-finetuning-llms",
+"page": "29-finetuning-llms",
+"pageTitle": "Fine-tuning LLMs in Practice",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Why mask the instruction tokens during SFT?",
+"a": "<p>If loss is computed over the whole sequence, the model spends capacity learning to predict your prompts as well as the responses. You do not want a model that is good at generating user questions. Masking the instruction portion, which Unsloth exposes as <code>train_on_responses_only</code>, restricts the loss to assistant tokens so all the gradient signal goes toward producing better answers. It matters most when prompts are long relative to responses, since otherwise most of the loss is being spent on text you will never need generated.</p>"
+},
+{
+"id": "29-finetuning-llms::4",
+"pageId": "29-finetuning-llms",
+"page": "29-finetuning-llms",
+"pageTitle": "Fine-tuning LLMs in Practice",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Training loss dropped steadily. Is the fine-tune working?",
+"a": "<p>Unknown, and the question is a trap. Falling training loss shows the model is fitting the training set, which is also exactly what memorisation looks like. The measurement that matters is held-out performance, scored before and after on a set you split off before training. Unsloth's guide treats training loss below roughly 0.2 as a memorisation warning rather than a success signal. You should also probe capabilities you never trained on, because catastrophic forgetting is invisible to any metric computed only on your task.</p>"
+},
+{
+"id": "29-finetuning-llms::5",
+"pageId": "29-finetuning-llms",
+"page": "29-finetuning-llms",
+"pageTitle": "Fine-tuning LLMs in Practice",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "You have one 24GB GPU and need a customer-support model in a specialised domain. Walk through your plan.",
+"a": "<p>Start by not fine-tuning. Establish a prompted baseline with retrieval over the support corpus, and measure it, because that may be the whole answer and it is the cheapest thing to maintain. Assume it leaves a gap in tone and format consistency rather than in knowledge, since knowledge is what retrieval already handles.</p><p>Then: pick a small instruct base that fits in 24GB when 4-bit quantized, so QLoRA rather than LoRA. Build a few thousand curated examples from real resolved tickets, deduplicated, with a held-out split made by time so near-duplicates cannot leak across it. Apply the base model's own chat template and mask instruction tokens. Start at rank 16, alpha 16, learning rate 2e-4, two epochs, targeting all seven linear modules.</p><p>Evaluate against the prompted baseline on held-out tickets, reading outputs rather than only scoring them, and separately probe general ability to catch forgetting. Keep retrieval in the final system regardless: the fine-tune supplies the voice and the format, retrieval supplies the facts and the citations.</p>"
+},
+{
+"id": "30-running-models-locally::0",
+"pageId": "30-running-models-locally",
+"page": "30-running-models-locally",
+"pageTitle": "Running Models Locally",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "beginner",
+"q": "How do you estimate whether a model fits on a given GPU?",
+"a": "<p>Add three terms. Weights are parameter count times bits per weight divided by eight, using the measured bits per weight rather than the number in the quantization name. KV cache is 2 × layers × KV heads × head dimension × bytes per element, per token, multiplied by your context length and concurrency. Then add several hundred megabytes to about a gigabyte of framework overhead. As a sanity check, Q4_K_M lands near 0.6 to 0.7 GB per billion parameters before cache.</p>"
+},
+{
+"id": "30-running-models-locally::1",
+"pageId": "30-running-models-locally",
+"page": "30-running-models-locally",
+"pageTitle": "Running Models Locally",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "beginner",
+"q": "Why is Q4_K_M not 4 bits per weight?",
+"a": "<p>Because k-quants store a scale and a minimum for each block of weights, and the medium mix deliberately keeps some tensors at higher precision. llama.cpp measures Q4_K_M at 4.8944 bits per weight for Llama 3.1 8B, about 22% above the naive assumption. Budgeting from the filename rather than the measured figure is a common way to discover a model does not fit only after downloading it.</p>"
+},
+{
+"id": "30-running-models-locally::2",
+"pageId": "30-running-models-locally",
+"page": "30-running-models-locally",
+"pageTitle": "Running Models Locally",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Why does the KV cache formula use KV heads rather than attention heads?",
+"a": "<p>Because grouped-query attention shares each key-value head across several query heads, so only the KV heads are actually stored. Llama 3 8B has 32 attention heads but 8 KV heads, which makes its cache four times smaller than the multi-head equivalent: 128 KiB per token instead of 512 KiB. Using attention heads in the formula overestimates cache memory by exactly that ratio, which is enough to reject a configuration that would have worked.</p>"
+},
+{
+"id": "30-running-models-locally::3",
+"pageId": "30-running-models-locally",
+"page": "30-running-models-locally",
+"pageTitle": "Running Models Locally",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "A model loads fine but runs out of memory after a long conversation. What happened?",
+"a": "<p>The KV cache grew past the remaining headroom. Weights are a fixed cost paid at load, but the cache grows linearly with every token in the context. A model that leaves a gigabyte free after loading will exhaust it once the conversation reaches a length whose cache exceeds that gigabyte. Fixes are to cap context length, use a smaller quantization to free capacity, or quantize the cache itself if the runtime supports it.</p>"
+},
+{
+"id": "30-running-models-locally::4",
+"pageId": "30-running-models-locally",
+"page": "30-running-models-locally",
+"pageTitle": "Running Models Locally",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Why does a smaller quantization generate tokens faster on the same hardware?",
+"a": "<p>Because generation is memory-bandwidth-bound. Producing each token requires reading every weight, so halving the bytes per weight roughly halves the bytes moved per token. llama.cpp's benchmarks show this directly: about 72 tokens/sec at Q4_K_M against 29 at F16 for Llama 3.1 8B. Prompt processing does not follow the same pattern, staying roughly flat across quantizations, because prefill processes many tokens per weight load and is compute-bound instead.</p>"
+},
+{
+"id": "30-running-models-locally::5",
+"pageId": "30-running-models-locally",
+"page": "30-running-models-locally",
+"pageTitle": "Running Models Locally",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "Your model needs 26 GB and you have a 24 GB card. Walk through the options.",
+"a": "<p>Take the cheapest quality loss first. Drop one quantization step, since Q5_K_M to Q4_K_M is roughly a 14% size reduction and usually closes a 2 GB gap on its own. Next, reduce maximum context length, which shrinks the cache term without touching weights at all, and check whether your runtime can quantize the KV cache to 8-bit. Offloading layers to CPU should be near-last, because every offloaded layer crosses PCIe on every token and typically costs more throughput than a smaller quantization would have. Adding a second GPU works but introduces communication between devices, which is only worth it when quality genuinely cannot be compromised.</p>"
+},
+{
+"id": "30-running-models-locally::6",
+"pageId": "30-running-models-locally",
+"page": "30-running-models-locally",
+"pageTitle": "Running Models Locally",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "When is running locally genuinely cheaper than an API?",
+"a": "<p>When utilisation is high and quality requirements are modest. Hardware is a fixed cost that you pay whether or not it is busy, while API pricing is proportional to use, so local wins on sustained high-volume workloads and loses on spiky or low ones. The comparison also has to include engineering time, which is usually the largest hidden cost. The honest framing is that most local deployments are justified by privacy, offline operation, or model access rather than by cost, and treating cost as the primary argument usually means the arithmetic has not been done.</p>"
 }
 ];

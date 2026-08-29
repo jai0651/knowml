@@ -60,6 +60,30 @@ replacement fact.
 Keep the existing section anatomy, `id` attributes, diagrams, and KaTeX spans
 untouched. You are changing sentence rhythm and visual hierarchy, nothing else.
 
+## What counts as prose
+
+An earlier pass told agents to leave `.bia` blocks "exactly as they are," meaning
+do not restructure the component. It was read as do not touch the text inside,
+which left 4,475 words unedited at 0.35 em-dashes per sentence. To be explicit:
+
+**In scope — edit the sentences, keep the markup:**
+
+- `<p>` and `<li>` anywhere in `<main>`
+- the `.tldr` summary
+- **`.bia` Before / Innovation / After boxes.** Keep the three-box structure and
+  their labels; the sentences inside are ordinary prose and get the same
+  treatment as everything else.
+- `.callout` bodies, `.diagram-caption`, and `eq-explain` descriptions
+
+**Out of scope — do not touch at all:**
+
+- `<details class="qa">` interview answers. These are served as flashcards by the
+  Review page, so their phrasing is load-bearing elsewhere.
+- `<details class="derivation">` steps and their justifications.
+- Anything inside `<svg>`, including `<text>` labels.
+- The `techmap-embed` dek, which is byte-identical across every page that has it.
+  Editing it on one page desyncs it from its siblings.
+
 ## Worked reference
 
 See `topics/08-attention-transformers.html`, section `id="intuition"`. Same

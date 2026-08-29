@@ -106,7 +106,7 @@
   <div class="topic-header">
     <div class="crumbs"><a href="../index.html">Map &amp; Timeline</a> / Systems, Safety &amp; Interview / 28</div>
     <h1>GPU Architecture, CUDA &amp; Distributed Training</h1>
-    <p class="dek">What a GPU actually is, why its hardware fits neural network math almost by accident, and the physical communication layer underneath every distributed training run — SIMT cores, warps, tensor cores, CUDA, Triton, NVLink, and ring all-reduce.</p>
+    <p class="dek">What a GPU actually is, why its hardware fits neural network math almost by accident, and the physical communication layer underneath every distributed training run. SIMT cores, warps, tensor cores, CUDA, Triton, NVLink, and ring all-reduce.</p>
     <div class="meta-row">
       <span class="tag tag-cold">Know cold</span>
       <span class="reading-time">~25 min · prerequisites: Efficient AI &amp; Systems (23), Attention &amp; Transformers (08)</span>
@@ -116,27 +116,27 @@
   <section id="tldr">
     <div class="tldr">
       <div class="tldr-label">TL;DR</div>
-      <p>A GPU is thousands of simple cores built to execute the same instruction across thousands of pieces of data at once — SIMT, single instruction multiple threads — which is exactly the shape of dense matrix multiplication, the operation that dominates deep learning compute. Warps of 32 threads execute in lockstep, tensor cores fuse whole small-matrix multiply-accumulates into one hardware operation, and CUDA lets you write a kernel from a single thread's point of view while the hardware runs that same code across a grid of thread blocks; Triton exists because writing that CUDA well — coalesced memory access, enough resident warps to hide memory latency — takes deep, specialized expertise that most ML researchers don't have and, increasingly, don't need. Scale training beyond one GPU and the bottleneck moves from compute to communication: NVLink connects GPUs on the same node at very high bandwidth, InfiniBand connects nodes at meaningfully lower bandwidth, and ring all-reduce is the algorithm that keeps gradient synchronization from becoming the bottleneck as you add more GPUs, because each GPU only ever sends and receives a bounded amount of data, independent of cluster size. One sentence for an interview: GPUs win at deep learning because SIMT hardware matches dense matmul's shape almost perfectly, and distributed training scales because ring all-reduce turns gradient synchronization into a communication cost that doesn't grow with the number of GPUs.</p>
+      <p>A GPU is thousands of simple cores built to execute the same instruction across thousands of pieces of data at once. That is <strong>SIMT</strong>: single instruction, multiple threads. It is exactly the shape of dense matrix multiplication, the operation that dominates deep learning compute. <strong>Warps</strong> of 32 threads execute in lockstep. <strong>Tensor cores</strong> fuse whole small-matrix multiply-accumulates into one hardware operation. CUDA lets you write a kernel from a single thread's point of view while the hardware runs that same code across a grid of thread blocks. <strong>Triton</strong> exists because writing that CUDA well takes deep, specialized expertise: coalesced memory access, enough resident warps to hide memory latency. Most ML researchers don't have that expertise and, increasingly, don't need it. Scale training beyond one GPU and the bottleneck moves from compute to communication. <strong>NVLink</strong> connects GPUs on the same node at very high bandwidth. <strong>InfiniBand</strong> connects nodes at meaningfully lower bandwidth. <strong>Ring all-reduce</strong> is the algorithm that keeps gradient synchronization from becoming the bottleneck as you add more GPUs, because each GPU only ever sends and receives a bounded amount of data, independent of cluster size. One sentence for an interview: GPUs win at deep learning because SIMT hardware matches dense matmul's shape almost perfectly, and distributed training scales because ring all-reduce turns gradient synchronization into a communication cost that doesn't grow with the number of GPUs.</p>
     </div>
   </section>
 
   <section id="timeline">
     <h2><span class="num">01</span>Where this sits in the timeline</h2>
-    <p>None of this hardware was designed for neural networks in the first place. The fit between GPUs and deep learning is one of the more consequential accidents in computing history — and understanding how it happened tells you a lot about why the hardware looks the way it does today.</p>
+    <p>None of this hardware was designed for neural networks in the first place. The fit between GPUs and deep learning is one of the more consequential accidents in computing history. Understanding how it happened tells you a lot about why the hardware looks the way it does today.</p>
     <div class="bia">
       <div class="bia-box">
         <div class="bia-label">Before</div>
-        <p>Neural networks were trained on CPUs, or on early GPUs that were never built with this workload in mind — they existed to rasterize triangles and shade pixels for real-time graphics. Getting general-purpose numerical computation to run on them meant disguising your math as a rendering problem. There was no dedicated deep learning tooling, no purpose-built matrix-multiply hardware, and no real framework for treating a GPU as a general-purpose parallel computer rather than a graphics accelerator.</p>
+        <p>Neural networks were trained on CPUs, or on early GPUs that were never built with this workload in mind. Those GPUs existed to rasterize triangles and shade pixels for real-time graphics. Getting general-purpose numerical computation to run on them meant disguising your math as a rendering problem. There was no dedicated deep learning tooling, no purpose-built matrix-multiply hardware, and no real framework for treating a GPU as a general-purpose parallel computer rather than a graphics accelerator.</p>
       </div>
       <div class="bia-arrow">→</div>
       <div class="bia-box innovation">
         <div class="bia-label">Innovation</div>
-        <p>CUDA (2007) gave programmers a general-purpose way to run arbitrary parallel code on a GPU without pretending it was a graphics workload — the first time GPUs became a genuine general-purpose compute platform. cuDNN and tensor cores (tensor cores arrived with the Volta architecture in 2017) added library- and hardware-level support specifically for the matrix-multiply-heavy shape of deep learning. Around the same time, ring all-reduce — Baidu's 2017 application of a decades-old high-performance-computing technique to gradient synchronization — solved a scaling problem that had nothing to do with any single GPU's speed: how do you average gradients across hundreds of GPUs without one central link becoming the bottleneck? Horovod (2018) popularized that approach as an easy-to-adopt library. And Triton — first described in a 2019 academic paper, then open-sourced by OpenAI in 2021 — made most of hand-tuned CUDA's performance reachable without years of CUDA-specific expertise.</p>
+        <p>CUDA (2007) gave programmers a general-purpose way to run arbitrary parallel code on a GPU without pretending it was a graphics workload. That was the first time GPUs became a genuine general-purpose compute platform. cuDNN and tensor cores (tensor cores arrived with the Volta architecture in 2017) added library- and hardware-level support specifically for the matrix-multiply-heavy shape of deep learning. Around the same time, ring all-reduce solved a scaling problem that had nothing to do with any single GPU's speed: how do you average gradients across hundreds of GPUs without one central link becoming the bottleneck? It was Baidu's 2017 application of a decades-old high-performance-computing technique to gradient synchronization. Horovod (2018) popularized that approach as an easy-to-adopt library. And Triton, first described in a 2019 academic paper then open-sourced by OpenAI in 2021, made most of hand-tuned CUDA's performance reachable without years of CUDA-specific expertise.</p>
       </div>
       <div class="bia-arrow">→</div>
       <div class="bia-box">
         <div class="bia-label">After</div>
-        <p>Frontier model training now runs on thousands of GPUs spread across many physical nodes, with parallelism strategies chosen specifically around the interconnect topology underneath them. Hardware- and kernel-level efficiency work — the direct continuation of what page 23 covers — is as central to training and serving frontier models today as any purely algorithmic idea. The systems layer stopped being an implementation detail a while ago; at this scale, it's load-bearing.</p>
+        <p>Frontier model training now runs on thousands of GPUs spread across many physical nodes, with parallelism strategies chosen specifically around the interconnect topology underneath them. Hardware- and kernel-level efficiency work, the direct continuation of what page 23 covers, is as central to training and serving frontier models today as any purely algorithmic idea. The systems layer stopped being an implementation detail a while ago. At this scale it is load-bearing.</p>
       </div>
     </div>
   </section>
@@ -144,13 +144,36 @@
   <section id="intuition">
     <h2><span class="num">02</span>The intuition, before any math</h2>
     <p class="lede">A GPU is a factory floor with thousands of simple, identical workers, each doing the same small step of the same job at the same time. A CPU is a handful of extremely capable generalists, each able to do a completely different, complicated task, including deciding what to do next based on what just happened.</p>
-    <p>A CPU core is built to run a long, branchy, sequential program fast. It has deep pipelines, branch predictors, out-of-order execution, and a lot of on-chip logic dedicated purely to guessing what instruction comes next and recovering cheaply when the guess is wrong. That's an enormous amount of silicon spent on control flow, and a CPU only has a handful of these very capable cores — tens, not thousands. A GPU makes the opposite bet: it gives up almost all of that control-flow machinery and instead packs thousands of small, simple cores onto the same chip, all of which execute the exact same instruction at the exact same time, just on different pieces of data. That architecture has a name — SIMT, single instruction, multiple threads. It's a terrible fit for a workload full of unpredictable branches, because every one of those thousands of cores has to be doing the same thing at once. But it's close to a perfect fit for a workload that's the same simple arithmetic operation repeated an enormous number of times over different numbers — which is exactly what deep learning is.</p>
-    <p>Look at what a neural network's forward pass actually does at the arithmetic level: matrix multiplications and elementwise operations, over and over, layer after layer. A matrix multiply is thousands or millions of independent multiply-and-add operations — every output element depends only on one row and one column of the inputs, none of those computations depend on each other, and there's essentially no branching anywhere in it. That's an embarrassingly parallel workload in the literal technical sense: parallelizing it requires no cleverness and no communication between the parallel pieces, just doing the same tiny operation many times over. It's exactly the workload SIMT hardware was built for — and it's the real reason GPUs, originally built to compute pixel colors, which is also an enormous number of small independent identical computations, turned out to be the right hardware for neural networks almost by accident.</p>
+    <p>A CPU core is built to run a long, branchy, sequential program fast. It has deep pipelines, branch predictors, out-of-order execution, and a lot of on-chip logic dedicated purely to guessing what instruction comes next and recovering cheaply when the guess is wrong.</p>
+
+    <p>That is an enormous amount of silicon spent on control flow. And a CPU only has a handful of these very capable cores. Tens, not thousands.</p>
+
+    <p>A GPU makes the opposite bet. It gives up almost all of that control-flow machinery and instead packs thousands of small, simple cores onto the same chip. All of them execute the exact same instruction at the exact same time, just on different pieces of data. That architecture has a name: <em class="term">SIMT</em>, single instruction, multiple threads.</p>
+
+    <p>The bet cuts both ways:</p>
+
+    <ul>
+      <li><strong>Terrible</strong> for a workload full of unpredictable branches, because every one of those thousands of cores has to be doing the same thing at once.</li>
+      <li><strong>Close to perfect</strong> for a workload that is the same simple arithmetic operation repeated an enormous number of times over different numbers.</li>
+    </ul>
+
+    <p>Which is exactly what deep learning is.</p>
+    <p>Look at what a neural network's forward pass does at the arithmetic level. Matrix multiplications and elementwise operations, over and over, layer after layer.</p>
+
+    <p>A matrix multiply is thousands or millions of independent multiply-and-add operations. Every output element depends only on one row and one column of the inputs. None of those computations depend on each other. There is essentially no branching anywhere in it.</p>
+
+    <p>That is an <strong>embarrassingly parallel</strong> workload in the literal technical sense: parallelizing it requires no cleverness and no communication between the parallel pieces, just doing the same tiny operation many times over.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The accident underneath all of this</span>
+      <p>GPUs were originally built to compute pixel colors. That is also an enormous number of small, independent, identical computations.</p>
+      <p>So the hardware that turned out to be right for neural networks was designed for something else entirely. The fit is almost an accident: the two workloads just happen to have the same shape.</p>
+    </div>
   </section>
 
   <section id="architecture">
     <h2><span class="num">03</span>Architecture: from the code you write to the silicon that runs it</h2>
-    <p>The factory-floor picture is the intuition. Here's the actual hierarchy — both in the code you write and in the physical hardware that executes it. They mirror each other almost exactly, which is the entire point of the CUDA programming model: you describe work in software terms, and the hardware structure underneath was built to match.</p>
+    <p>The factory-floor picture is the intuition. Here is the actual hierarchy, both in the code you write and in the physical hardware that executes it. They mirror each other almost exactly. That mirroring is the entire point of the CUDA programming model: you describe work in software terms, and the hardware structure underneath was built to match.</p>
 
     <div class="diagram">
       <div class="diagram-title">The CUDA execution hierarchy — software concepts mapped onto physical hardware
@@ -196,16 +219,27 @@
         <text x="650" y="280" text-anchor="middle" font-size="13" font-weight="700" fill="#818cf8">CUDA / tensor core</text>
         <text x="650" y="298" text-anchor="middle" font-size="10.5" fill="#a3a3b2">executes one thread's instruction</text>
       </svg>
-      <div class="diagram-caption">Each level on the left has exactly one physical counterpart on the right — this is the literal execution model, not an approximation. A kernel launch is a grid of thread blocks; each block is assigned to one streaming multiprocessor for its whole lifetime; each block's threads are grouped into warps of 32, and the SM's warp scheduler issues one instruction to one warp per cycle; each thread's instruction actually runs on one core. You write the kernel once, from a single thread's point of view — the hardware is what turns that into thousands of simultaneous executions.</div>
+      <div class="diagram-caption">Each level on the left has exactly one physical counterpart on the right. This is the literal execution model, not an approximation. A kernel launch is a grid of thread blocks. Each block is assigned to one streaming multiprocessor for its whole lifetime. Each block's threads are grouped into warps of 32, and the SM's warp scheduler issues one instruction to one warp per cycle. Each thread's instruction actually runs on one core. You write the kernel once, from a single thread's point of view; the hardware is what turns that into thousands of simultaneous executions.</div>
     </div>
 
-    <p>That last point is the mental model worth sitting with: CUDA code is written from one thread's perspective. Inside the kernel you ask "which piece of the problem am I" — using built-in indices for which block and which thread within the block you are — and the hardware launches that exact same function across every thread in the grid simultaneously. You never write a loop over threads; the loop is the hardware itself, running your one function body thousands of times over, in parallel, each copy seeing a different index.</p>
+    <p>That last point is the mental model worth sitting with. <strong>CUDA code is written from one thread's perspective.</strong> Inside the kernel you ask "which piece of the problem am I", using built-in indices for which block and which thread within the block you are. The hardware then launches that exact same function across every thread in the grid simultaneously.</p>
+
+    <p>You never write a loop over threads. The loop <em>is</em> the hardware, running your one function body thousands of times over, in parallel, each copy seeing a different index.</p>
   </section>
 
   <section id="memory">
     <h2><span class="num">04</span>The memory hierarchy: where page 23's bandwidth story physically lives</h2>
-    <p>Page 23 built its entire framing around one fact: LLM inference is usually bottlenecked by memory bandwidth, not compute. This section is about where that ceiling actually comes from — the chain of physical memory a GPU has to move data through, fastest and smallest at one end, slowest and largest at the other.</p>
-    <p>Registers sit closest to the arithmetic units and are private to a single thread — the fastest memory on the chip, and there's very little of it per thread. Shared memory (sometimes described together with L1 cache, since they occupy the same physical on-chip pool on most architectures) is private to one streaming multiprocessor and shared among the threads of a block running on it — still extremely fast, still small, but large enough to hold a working tile of data that many threads in the same block need to reuse. This is precisely the memory FlashAttention deliberately tiles its computation to fit inside, so intermediate attention scores never have to leave it. L2 cache is shared across the entire chip rather than one SM — bigger than shared memory/L1, but a further step down in speed. And HBM, the GPU's main memory, holds everything: the model's full set of weights, activations, and the KV cache during inference. It's enormous compared to what's above it in this hierarchy, and it's comparatively slow to reach — it's the thing you're actually bottlenecked on during a memory-bound decode step.</p>
+    <p>Page 23 built its entire framing around one fact: LLM inference is usually bottlenecked by memory bandwidth, not compute. This section is about where that ceiling comes from. It is a chain of physical memory a GPU has to move data through, fastest and smallest at one end, slowest and largest at the other.</p>
+    <p>Four tiers, from closest to the arithmetic to furthest away:</p>
+
+    <ul>
+      <li><strong>Registers.</strong> Private to a single thread, sitting closest to the arithmetic units. The fastest memory on the chip, and there is very little of it per thread.</li>
+      <li><strong>Shared memory / L1.</strong> Private to one streaming multiprocessor and shared among the threads of a block running on it. Still extremely fast, still small, but large enough to hold a working tile of data that many threads in the same block need to reuse. (The two are often described together, since they occupy the same physical on-chip pool on most architectures.)</li>
+      <li><strong>L2 cache.</strong> Shared across the entire chip rather than one SM. Bigger than shared memory/L1, but a further step down in speed.</li>
+      <li><strong>HBM.</strong> The GPU's main memory, holding everything: the model's full set of weights, activations, and the KV cache during inference. Enormous compared to what sits above it, and comparatively slow to reach.</li>
+    </ul>
+
+    <p>That bottom tier is what you are actually bottlenecked on during a memory-bound decode step. Shared memory is precisely what FlashAttention tiles its computation to fit inside, so intermediate attention scores never have to leave it.</p>
 
     <div class="diagram">
       <div class="diagram-title">GPU memory hierarchy — small and fast at the top, huge and slow at the bottom
@@ -233,48 +267,112 @@
 
         <text x="190" y="332" text-anchor="middle" font-size="9.5" fill="#a3a3b2">↓ slowest, largest</text>
       </svg>
-      <div class="diagram-caption">Registers and shared memory/L1 live physically inside each streaming multiprocessor — private to it, and about as fast as on-chip memory gets. L2 is shared across the whole chip: larger, slower. HBM sits off the compute die entirely — huge capacity, by far the slowest tier to reach. Every "memory-bound" claim on page 23 is really a claim about the gap between the top of this stack and the bottom.</div>
+      <div class="diagram-caption">Registers and shared memory/L1 live physically inside each streaming multiprocessor, private to it, and about as fast as on-chip memory gets. L2 is shared across the whole chip: larger, slower. HBM sits off the compute die entirely, with huge capacity and by far the slowest access. Every "memory-bound" claim on page 23 is really a claim about the gap between the top of this stack and the bottom.</div>
     </div>
   </section>
 
   <section id="sm-warps">
     <h2><span class="num">05</span>Streaming multiprocessors, warps, and warp divergence</h2>
-    <p>A streaming multiprocessor, or SM, is the basic physical building block of a GPU — one chip contains dozens of them, each with its own chunk of cores, its own warp scheduler, its own register file, and its own shared memory/L1 pool. SMs operate largely independently of each other; a thread block, once assigned to an SM, stays there and runs using only that SM's local resources.</p>
-    <p>A warp is a group of 32 threads that the hardware always schedules and executes together — the same instruction, at the same time, just on different data. It's the actual physical unit of SIMT execution, one level below the thread block you write your code in terms of. Whatever a thread block's size is, the hardware internally splits it into warps of 32 and issues instructions warp by warp.</p>
-    <p>Warp divergence is what happens when threads inside the same warp need to take different branches of an if/else. Say 16 of the 32 threads in a warp satisfy some condition and the other 16 don't. Because a warp can only execute one instruction stream at a time across all of its lanes, the GPU can't run both branches simultaneously for different threads — it serializes them. First it runs the "if" branch's instructions across the whole warp, masking off the 16 threads that shouldn't be doing that work so their results don't get written. Then it runs the "else" branch's instructions across the whole warp, masking off the other 16. Every thread in the warp sits through both branches; only half the work in each pass is actually useful. That's why branch-heavy, data-dependent control flow is slow on a GPU — and it's exactly what dense matrix multiplication and elementwise operations avoid almost entirely, since every thread in every warp is doing the identical instruction on different numbers, with essentially nothing to diverge on.</p>
+    <p>A <em class="term">streaming multiprocessor</em>, or SM, is the basic physical building block of a GPU. One chip contains dozens of them. Each has its own chunk of cores, its own warp scheduler, its own register file, and its own shared memory/L1 pool. SMs operate largely independently of each other. A thread block, once assigned to an SM, stays there and runs using only that SM's local resources.</p>
+    <p>A <strong>warp</strong> is a group of 32 threads that the hardware always schedules and executes together. Same instruction, same time, different data. It is the actual physical unit of SIMT execution, one level below the thread block you write your code in terms of. Whatever a thread block's size is, the hardware internally splits it into warps of 32 and issues instructions warp by warp.</p>
+    <p><strong>Warp divergence</strong> is what happens when threads inside the same warp need to take different branches of an if/else.</p>
+
+    <p>Say 16 of the 32 threads satisfy some condition and the other 16 don't. A warp can only execute one instruction stream at a time across all of its lanes, so the GPU can't run both branches simultaneously. It serializes them:</p>
+
+    <ul>
+      <li>Run the <strong>if</strong> branch across the whole warp, masking off the 16 threads that shouldn't be doing that work so their results don't get written.</li>
+      <li>Run the <strong>else</strong> branch across the whole warp, masking off the other 16.</li>
+    </ul>
+
+    <p>Every thread in the warp sits through both branches. Only half the work in each pass is useful.</p>
+
+    <p>That is why branch-heavy, data-dependent control flow is slow on a GPU. It is also exactly what dense matrix multiplication and elementwise operations avoid almost entirely, since every thread in every warp is doing the identical instruction on different numbers, with essentially nothing to diverge on.</p>
   </section>
 
   <section id="tensor-cores">
     <h2><span class="num">06</span>Tensor cores: dedicated hardware for matrix multiply-accumulate</h2>
-    <p>A regular CUDA core does general-purpose arithmetic — useful for a huge range of operations, but not specialized for any one of them. A tensor core is different: it's a separate, purpose-built piece of hardware, alongside the regular cores on the same SM, that does exactly one thing extremely fast — a fused multiply-accumulate on small tiles of matrices, computed as a single hardware operation rather than as a sequence of individual multiplies and adds.</p>
-    <p>This is the literal hardware reason mixed-precision training, covered on page 23, runs faster rather than merely smaller. Reducing precision from FP32 to FP16 or BF16 shrinks the bytes you have to move — that's the memory-bandwidth half of the story. Tensor cores are the other half: they execute matrix multiplication at these reduced precisions at dramatically higher throughput than the general-purpose cores achieve, even at matched precision. Training in FP16 or BF16 isn't just about fitting more into memory — it's routing your matrix multiplies onto hardware that is specifically, physically built to be fast at exactly that operation, at exactly that precision.</p>
+    <p>A regular CUDA core does general-purpose arithmetic. Useful for a huge range of operations, but not specialized for any one of them.</p>
+
+    <p>A <strong>tensor core</strong> is different. It is a separate, purpose-built piece of hardware sitting alongside the regular cores on the same SM, and it does exactly one thing extremely fast: a fused multiply-accumulate on small tiles of matrices, computed as a single hardware operation rather than as a sequence of individual multiplies and adds.</p>
+    <p>This is the literal hardware reason mixed-precision training, covered on page 23, runs <em>faster</em> rather than merely <em>smaller</em>.</p>
+
+    <p>Reducing precision from FP32 to FP16 or BF16 shrinks the bytes you have to move. That is the memory-bandwidth half of the story. Tensor cores are the other half: they execute matrix multiplication at these reduced precisions at dramatically higher throughput than the general-purpose cores achieve, even at matched precision.</p>
+
+    <p>So training in FP16 or BF16 is not just about fitting more into memory. It routes your matrix multiplies onto hardware physically built to be fast at exactly that operation, at exactly that precision.</p>
   </section>
 
   <section id="cuda-model">
     <h2><span class="num">07</span>The CUDA programming model: kernels, occupancy, and hiding latency</h2>
-    <p>A kernel is a function you write once and launch across a grid of thread blocks — the diagram above showed the shape of it. Each block gets assigned to one SM, and within that block, many warps of 32 threads each get scheduled onto that SM's cores. The mental shift, coming from ordinary sequential programming, is that you don't write a loop over the data — you write the body of the loop, from one thread's point of view, and the hardware runs that body across every thread in the grid at once.</p>
-    <p>Occupancy is how many warps can be resident on an SM at the same time, out of some hardware maximum. It's determined by how much of the SM's limited register file and shared memory each thread block consumes — a kernel that uses a lot of registers or a lot of shared memory per thread fits fewer blocks (and therefore fewer warps) onto an SM simultaneously; a lean kernel fits more.</p>
-    <p>Occupancy matters because of what happens when a warp stalls. If a warp issues a memory request to HBM — slow, relative to the chip's arithmetic throughput, exactly as the memory hierarchy above lays out — it has to wait for that data to come back before it can keep computing. A warp scheduler with only one resident warp just sits idle during that wait. A warp scheduler with many resident warps instead switches to a different warp that has work ready to go, right away, for that cycle — hiding the first warp's memory latency behind another warp's useful compute. That's the entire point of occupancy: more resident warps gives the scheduler more options to hide latency behind. Push a kernel's register or shared-memory usage too high, fewer blocks fit on an SM, occupancy drops, and the SM starts genuinely idling waiting on HBM instead of hiding that wait — which is exactly the failure mode you're trying to avoid, given how slow that bottom tier of the memory hierarchy is relative to everything above it.</p>
+    <p>A <strong>kernel</strong> is a function you write once and launch across a grid of thread blocks. The diagram above showed the shape of it. Each block gets assigned to one SM, and within that block, many warps of 32 threads each get scheduled onto that SM's cores.</p>
+
+    <p>The mental shift, coming from ordinary sequential programming: you don't write a loop over the data. You write the <em>body</em> of the loop, from one thread's point of view, and the hardware runs that body across every thread in the grid at once.</p>
+    <p><strong>Occupancy</strong> is how many warps can be resident on an SM at the same time, out of some hardware maximum. It is determined by how much of the SM's limited register file and shared memory each thread block consumes. A kernel that uses a lot of registers or shared memory per thread fits fewer blocks, and therefore fewer warps, onto an SM at once. A lean kernel fits more.</p>
+    <p>Occupancy matters because of what happens when a warp stalls.</p>
+
+    <p>If a warp issues a memory request to HBM, it has to wait for that data to come back before it can keep computing. HBM is slow relative to the chip's arithmetic throughput, exactly as the memory hierarchy above lays out.</p>
+
+    <p>A warp scheduler with only one resident warp sits idle during that wait. A scheduler with many resident warps switches to a different warp that has work ready to go, right away, for that cycle. The first warp's memory latency gets hidden behind another warp's useful compute.</p>
+
+    <p><strong>That is the entire point of occupancy.</strong> More resident warps gives the scheduler more options to hide latency behind. Push a kernel's register or shared-memory usage too high and fewer blocks fit on an SM. Occupancy drops. The SM starts genuinely idling on HBM instead of hiding that wait, which is exactly the failure mode you are trying to avoid.</p>
   </section>
 
   <section id="triton">
     <h2><span class="num">08</span>Triton: why most people no longer hand-write CUDA</h2>
-    <p>Writing genuinely efficient CUDA requires exactly the expertise laid out in the last two sections at once — coalesced memory access patterns so a warp's threads read contiguous, aligned memory instead of scattering many small requests across HBM, careful register and shared-memory budgeting to keep occupancy high, and correct manual thread-indexing math for every kernel you write. Getting all of that right simultaneously is a genuinely specialized skill, closer to hardware engineering than to the tensor-and-layer thinking most ML researchers actually work in — and building a new hand-tuned CUDA kernel for every new idea is a real cost most research doesn't have time to pay.</p>
-    <p>Triton exists to remove that cost. It's a Python-embedded language and compiler where you write kernels at the level of tiles or blocks of data rather than individual threads — you describe the computation on a block of, say, 128 elements at once, using ordinary-looking array operations, and Triton's compiler automatically handles the low-level thread scheduling, memory coalescing, and shared-memory allocation that you would otherwise have to hand-tune in raw CUDA. It doesn't always match what a world-class hand-written CUDA kernel achieves in every case, but it routinely gets close — a large fraction of hand-tuned CUDA's performance, for a fraction of the development time and specialized expertise that hand-tuned CUDA demands.</p>
-    <p>This isn't a hypothetical tradeoff — it shows up directly in tooling you've probably already used. FlashAttention's efficient reference implementation is written in Triton. A large and growing share of PyTorch's own generated custom kernels are Triton kernels. OpenAI open-sourced Triton in 2021 specifically because it hit that performance-per-engineering-hour tradeoff well enough to be worth building an entire compiler around.</p>
+    <p>Writing genuinely efficient CUDA requires the expertise from the last two sections, all at once:</p>
+
+    <ul>
+      <li><strong>Coalesced memory access</strong>, so a warp's threads read contiguous, aligned memory instead of scattering many small requests across HBM.</li>
+      <li><strong>Register and shared-memory budgeting</strong>, to keep occupancy high.</li>
+      <li><strong>Manual thread-indexing math</strong>, correct for every kernel you write.</li>
+    </ul>
+
+    <p>Getting all of that right simultaneously is a genuinely specialized skill, closer to hardware engineering than to the tensor-and-layer thinking most ML researchers actually work in. Building a new hand-tuned CUDA kernel for every new idea is a real cost most research doesn't have time to pay.</p>
+    <p><strong>Triton</strong> exists to remove that cost. It is a Python-embedded language and compiler where you write kernels at the level of tiles or blocks of data rather than individual threads. You describe the computation on a block of, say, 128 elements at once, using ordinary-looking array operations. Triton's compiler automatically handles the low-level thread scheduling, memory coalescing, and shared-memory allocation you would otherwise have to hand-tune in raw CUDA.</p>
+
+    <p>It doesn't always match what a world-class hand-written CUDA kernel achieves in every case. But it routinely gets close: a large fraction of hand-tuned CUDA's performance, for a fraction of the development time and specialized expertise that hand-tuned CUDA demands.</p>
+    <p>This isn't a hypothetical tradeoff. It shows up directly in tooling you have probably already used. FlashAttention's efficient reference implementation is written in Triton. A large and growing share of PyTorch's own generated custom kernels are Triton kernels. OpenAI open-sourced Triton in 2021 specifically because it hit that performance-per-engineering-hour tradeoff well enough to be worth building an entire compiler around.</p>
   </section>
 
   <section id="interconnects">
     <h2><span class="num">09</span>The interconnect hierarchy: NVLink, InfiniBand, and Ethernet</h2>
-    <p>Everything so far happens inside one GPU. Distributed training needs GPUs to talk to each other, and the physical link they talk over matters enormously — it's a completely different bottleneck from anything discussed above.</p>
-    <p>Within one node, GPUs communicate over NVLink — a direct, very high-bandwidth link built specifically for GPU-to-GPU communication, roughly hundreds of GB/s (approximate, and it varies by generation of hardware). Between nodes, GPUs communicate over InfiniBand, or RoCE (RDMA over Converged Ethernet, which achieves similar low-latency direct-memory-access behavior over Ethernet-like hardware) — still fast, purpose-built for high-performance computing and large training clusters, but roughly an order of magnitude or more below NVLink's bandwidth. Plain Ethernet without RDMA is the slow path: general-purpose networking, higher latency, lower throughput, fine for cluster coordination and logging traffic but not built to carry the volume of data distributed training needs to move between every synchronization step.</p>
-    <p>This directly drives how you place a training job's parallelism strategies onto physical hardware. Tensor-parallel shards exchange partial results within every single layer — many times per forward pass and many times per backward pass — so they need to sit on GPUs connected by NVLink; put them across an InfiniBand link instead and the communication cost dwarfs the compute almost immediately, given how constantly they talk. Data-parallel replicas, by contrast, only need to synchronize once per training step — the gradient all-reduce — so they can tolerate sitting across the slower inter-node InfiniBand link without it dominating the step time. This is exactly why real training runs place tensor parallelism inside a node and data parallelism (and typically pipeline parallelism) across nodes — the callback to page 23's four parallelism strategies, now with the hardware reason attached to where each one physically goes.</p>
+    <p>Everything so far happens inside one GPU. Distributed training needs GPUs to talk to each other, and the physical link they talk over matters enormously. It is a completely different bottleneck from anything discussed above.</p>
+    <p>Three tiers, fastest to slowest:</p>
+
+    <ul>
+      <li><strong>NVLink</strong>, within one node. A direct, very high-bandwidth link built specifically for GPU-to-GPU communication, roughly hundreds of GB/s (approximate, and it varies by generation of hardware).</li>
+      <li><strong>InfiniBand, or RoCE</strong>, between nodes. Still fast, purpose-built for high-performance computing and large training clusters, but roughly an order of magnitude or more below NVLink's bandwidth. (RoCE is RDMA over Converged Ethernet, which achieves similar low-latency direct-memory-access behavior over Ethernet-like hardware.)</li>
+      <li><strong>Plain Ethernet without RDMA</strong>, the slow path. General-purpose networking, higher latency, lower throughput. Fine for cluster coordination and logging traffic, but not built to carry the volume of data distributed training needs to move between every synchronization step.</li>
+    </ul>
+    <p>This directly drives how you place a training job's parallelism strategies onto physical hardware.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">Why parallelism strategy is really a wiring decision</span>
+      <p><strong>Tensor-parallel shards</strong> exchange partial results within every single layer, many times per forward pass and many times per backward pass. They need to sit on GPUs connected by NVLink. Put them across an InfiniBand link instead and the communication cost dwarfs the compute almost immediately, given how constantly they talk.</p>
+      <p><strong>Data-parallel replicas</strong> only need to synchronize once per training step, on the gradient all-reduce. They can tolerate sitting across the slower inter-node InfiniBand link without it dominating step time.</p>
+      <p>That is why real training runs place tensor parallelism inside a node and data parallelism (and typically pipeline parallelism) across nodes. It is page 23's four parallelism strategies, now with the hardware reason attached to where each one physically goes.</p>
+    </div>
   </section>
 
   <section id="collectives">
     <h2><span class="num">10</span>Collective communication and ring all-reduce</h2>
-    <p>Multi-GPU training relies on a small set of standard communication patterns, called collectives, that every distributed training framework implements. Broadcast sends the same data from one GPU to every other GPU. Reduce combines data from every GPU — typically by summing — down onto one destination GPU. All-reduce combines data from every GPU and gives every GPU the combined result, which is exactly what gradient synchronization needs: every replica needs the same averaged gradient. All-gather has each GPU holding a different piece of data, and ends with every GPU holding all the pieces, concatenated. Reduce-scatter combines data from every GPU, but splits the combined result so each GPU ends up with only its own slice of it rather than the whole thing. All-reduce, in practice, is usually implemented as a reduce-scatter followed by an all-gather — which is exactly how ring all-reduce is built.</p>
-    <p>Arrange the N GPUs participating in an all-reduce in a logical ring — each GPU has exactly two neighbors, one it sends to and one it receives from. Split each GPU's local data (its gradients) into N chunks. The scatter-reduce phase runs for N−1 steps: at every step, every GPU simultaneously sends one chunk to its right-hand neighbor and receives a chunk from its left-hand neighbor, adding the received chunk into its own copy of that same chunk index, and the chunk index being passed rotates each step. After N−1 steps, every GPU holds the fully-reduced sum for exactly one chunk index — a different one per GPU. The all-gather phase then runs for another N−1 steps, using the same ring, except now each GPU just relays its already-final chunk onward instead of adding to it, until every GPU has received every chunk in its fully-reduced form. The key property, at every single step of both phases: each GPU only ever sends and receives one chunk's worth of data — a bounded amount, independent of how many GPUs total are in the ring.</p>
+    <p>Multi-GPU training relies on a small set of standard communication patterns, called <em class="term">collectives</em>, that every distributed training framework implements.</p>
+
+    <ul>
+      <li><strong>Broadcast.</strong> Sends the same data from one GPU to every other GPU.</li>
+      <li><strong>Reduce.</strong> Combines data from every GPU, typically by summing, down onto one destination GPU.</li>
+      <li><strong>All-reduce.</strong> Combines data from every GPU and gives every GPU the combined result. Exactly what gradient synchronization needs: every replica needs the same averaged gradient.</li>
+      <li><strong>All-gather.</strong> Each GPU holds a different piece of data, and it ends with every GPU holding all the pieces, concatenated.</li>
+      <li><strong>Reduce-scatter.</strong> Combines data from every GPU, but splits the combined result so each GPU ends up with only its own slice of it rather than the whole thing.</li>
+    </ul>
+
+    <p>All-reduce, in practice, is usually implemented as a reduce-scatter followed by an all-gather. Which is exactly how ring all-reduce is built.</p>
+    <p>Arrange the N GPUs participating in an all-reduce in a logical <strong>ring</strong>. Each GPU has exactly two neighbors, one it sends to and one it receives from. Split each GPU's local data (its gradients) into N chunks.</p>
+
+    <p>The <strong>scatter-reduce</strong> phase runs for N−1 steps. At every step, every GPU simultaneously sends one chunk to its right-hand neighbor and receives a chunk from its left-hand neighbor, adding the received chunk into its own copy of that same chunk index. The chunk index being passed rotates each step. After N−1 steps, every GPU holds the fully-reduced sum for exactly one chunk index, a different one per GPU.</p>
+
+    <p>The <strong>all-gather</strong> phase then runs for another N−1 steps, using the same ring. Now each GPU just relays its already-final chunk onward instead of adding to it, until every GPU has received every chunk in its fully-reduced form.</p>
+
+    <p>The key property, at every single step of both phases: <strong>each GPU only ever sends and receives one chunk's worth of data.</strong> A bounded amount, independent of how many GPUs total are in the ring.</p>
   </section>
 
   <section id="math">
@@ -284,17 +382,27 @@
     </div>
     <ul class="eq-explain">
       <li><span class="sym">N</span> the number of GPUs participating in the ring.</li>
-      <li><span class="sym">S</span> the size of the data being all-reduced — for gradient synchronization, the total size of the gradients.</li>
-      <li><span class="sym">2(N-1)/N</span> N−1 steps of scatter-reduce plus N−1 steps of all-gather, each step moving 1/N of the data — total <span>$2(N-1) \times S/N$</span> per GPU.</li>
-      <li><span class="sym">The limit</span> as N grows large, <span>$2(N-1)/N \to 2$</span> — a constant, not something that scales with the number of GPUs.</li>
+      <li><span class="sym">S</span> the size of the data being all-reduced. For gradient synchronization, that is the total size of the gradients.</li>
+      <li><span class="sym">2(N-1)/N</span> N−1 steps of scatter-reduce plus N−1 steps of all-gather, each step moving 1/N of the data, for a total of <span>$2(N-1) \times S/N$</span> per GPU.</li>
+      <li><span class="sym">The limit</span> as N grows large, <span>$2(N-1)/N \to 2$</span>. A constant, not something that scales with the number of GPUs.</li>
     </ul>
-    <p>That limit is the elegant part. Doubling your GPU count doesn't double each GPU's communication burden — it stays roughly flat, approaching twice the data size and never exceeding it, no matter how large the ring gets. Compare that to a naive centralized parameter server: every one of the N workers has to send its gradients to the server, and the server has to send updated weights back to all N workers, all through that one server's network link. That link's traffic grows linearly with N — it becomes the exact bottleneck you're trying to scale past, precisely as you add more GPUs to go faster.</p>
+    <p>That limit is the elegant part. Doubling your GPU count doesn't double each GPU's communication burden. It stays roughly flat, approaching twice the data size and never exceeding it, no matter how large the ring gets.</p>
+
+    <p>Compare a naive centralized parameter server. Every one of the N workers has to send its gradients to the server, and the server has to send updated weights back to all N workers, all through that one server's network link. That link's traffic grows linearly with N. It becomes the exact bottleneck you are trying to scale past, precisely as you add more GPUs to go faster.</p>
   </section>
 
   <section id="why">
     <h2><span class="num">12</span>Why this hardware, and why this algorithm</h2>
-    <p>Why SIMT hardware fits dense matrix math specifically: a matrix multiply's output elements are all independent of each other, computed by the same operation — multiply, accumulate, repeat — with no data-dependent branching anywhere in the computation. That's precisely the one constraint SIMT hardware is built around: thousands of simple cores, no branch-prediction machinery, all executing the same instruction across different data every cycle. A CPU's expensive control-flow logic exists to handle exactly the kind of unpredictable, data-dependent branching that dense matrix math simply doesn't have — which means, for this specific workload, a CPU is paying for hardware capability it never uses, while a GPU is spending its entire chip budget on exactly the capability the workload needs.</p>
-    <p>Why ring all-reduce beats a naive centralized parameter server: a star topology, with every worker talking to one central server, funnels all N workers' traffic through a single network link. That link has a fixed bandwidth ceiling, so the time to synchronize grows with N — the more GPUs you add to speed up training, the worse that one link's congestion gets, which is the opposite of what you want from adding hardware. Ring all-reduce distributes the communication load evenly across every link in the ring instead of concentrating it on one node — there's no single point where traffic piles up. It isn't entirely free: with more GPUs in the ring there are more steps to complete, since scatter-reduce and all-gather each take N−1 hops. But the resource that was actually the bottleneck — bytes any single GPU has to push through its own link — stays close to constant. That's the trade that makes large-scale data-parallel training's gradient synchronization scale gracefully instead of collapsing under its own communication cost.</p>
+    <p>Why SIMT hardware fits dense matrix math specifically: a matrix multiply's output elements are all independent of each other, computed by the same operation (multiply, accumulate, repeat) with no data-dependent branching anywhere in the computation.</p>
+
+    <p>That is precisely the one constraint SIMT hardware is built around. Thousands of simple cores, no branch-prediction machinery, all executing the same instruction across different data every cycle.</p>
+
+    <p>A CPU's expensive control-flow logic exists to handle exactly the kind of unpredictable, data-dependent branching that dense matrix math simply doesn't have. So for this specific workload, a CPU is paying for hardware capability it never uses, while a GPU spends its entire chip budget on exactly the capability the workload needs.</p>
+    <p>Why ring all-reduce beats a naive centralized parameter server: a star topology, with every worker talking to one central server, funnels all N workers' traffic through a single network link. That link has a fixed bandwidth ceiling, so the time to synchronize grows with N. The more GPUs you add to speed up training, the worse that one link's congestion gets, which is the opposite of what you want from adding hardware.</p>
+
+    <p>Ring all-reduce distributes the communication load evenly across every link in the ring instead of concentrating it on one node. There is no single point where traffic piles up.</p>
+
+    <p>It isn't entirely free. With more GPUs in the ring there are more steps to complete, since scatter-reduce and all-gather each take N−1 hops. But the resource that was actually the bottleneck, bytes any single GPU has to push through its own link, stays close to constant. That is the trade that makes large-scale data-parallel gradient synchronization scale gracefully instead of collapsing under its own communication cost.</p>
   </section>
 
   <section id="tradeoffs">
@@ -310,15 +418,41 @@
         </tbody>
       </table>
     </div>
-    <p>Three failure modes worth naming explicitly, because they show up in real kernels and real clusters, not just in theory. Warp divergence from branch-heavy code silently halves or worse a kernel's effective throughput — every diverging branch means the warp pays for both paths while only ever benefiting from one, and it's easy to write correct CUDA or Triton code that divergences without realizing it. Low occupancy from register or shared-memory pressure is a quieter failure — the kernel still produces correct results, it's just slower than it should be, because the SM doesn't have enough resident warps to hide memory latency behind, so cores sit idle waiting on HBM instead of doing useful work for another warp. And communication becoming the bottleneck when interconnect topology doesn't match your parallelism strategy is a cluster-design failure, not a kernel one — put tensor-parallel shards across InfiniBand instead of NVLink, or fail to keep pipeline-parallel stage boundaries aligned with node boundaries, and you can end up with GPUs that are individually fast sitting mostly idle waiting on the network, which defeats the entire point of adding more of them.</p>
+    <p>Three failure modes worth naming explicitly, because they show up in real kernels and real clusters, not just in theory.</p>
+
+    <ul>
+      <li><strong>Warp divergence from branch-heavy code</strong> silently halves or worse a kernel's effective throughput. Every diverging branch means the warp pays for both paths while only ever benefiting from one, and it is easy to write correct CUDA or Triton code that diverges without realizing it.</li>
+      <li><strong>Low occupancy from register or shared-memory pressure</strong> is a quieter failure. The kernel still produces correct results, it is just slower than it should be, because the SM doesn't have enough resident warps to hide memory latency behind. Cores sit idle waiting on HBM instead of doing useful work for another warp.</li>
+      <li><strong>Communication becoming the bottleneck</strong> when interconnect topology doesn't match your parallelism strategy is a cluster-design failure, not a kernel one. Put tensor-parallel shards across InfiniBand instead of NVLink, or fail to keep pipeline-parallel stage boundaries aligned with node boundaries, and you can end up with GPUs that are individually fast sitting mostly idle waiting on the network, which defeats the entire point of adding more of them.</li>
+    </ul>
   </section>
 
   <section id="applications">
     <h2><span class="num">14</span>Worked example and a production use case</h2>
     <h3>Illustrative ring all-reduce walkthrough — 4 GPUs, toy numbers</h3>
-    <p>Take 4 GPUs in a ring: GPU0 → GPU1 → GPU2 → GPU3 → back to GPU0. Each GPU's gradient vector is split into 4 chunks (N=4), and follow just one chunk index through the scatter-reduce phase — say GPU0 holds the value 2 for this chunk, GPU1 holds 5, GPU2 holds 3, GPU3 holds 8 (illustrative, made up for this walkthrough). Step 1: GPU0 sends its 2 to GPU1, which adds it to its own 5, holding 7. Step 2: GPU1 sends that 7 to GPU2, which adds it to its own 3, holding 10. Step 3: GPU2 sends that 10 to GPU3, which adds it to its own 8, holding 18 — the true sum, 2+5+3+8=18, and for now it lives only on GPU3. That's 3 steps, N−1 for N=4, exactly as the formula predicts. Meanwhile, the other 3 chunk indices are rotating through the exact same pattern simultaneously, each one fully reducing onto a different GPU by the end of its own 3 steps — scatter-reduce is done, and each of the 4 GPUs now holds the true sum for exactly one of the 4 chunks. All-gather then runs the same ring pattern for 3 more steps, except each GPU now just relays its already-final chunk onward instead of adding to it, until all 4 GPUs hold all 4 fully-reduced chunks — the complete, synchronized gradient, on every GPU, with no GPU ever having sent or received more than 3 chunks' worth of data in total across the whole process.</p>
+    <p>Take 4 GPUs in a ring: GPU0 → GPU1 → GPU2 → GPU3 → back to GPU0. Each GPU's gradient vector is split into 4 chunks (N=4). Follow just one chunk index through the scatter-reduce phase.</p>
+
+    <p>Say GPU0 holds the value 2 for this chunk, GPU1 holds 5, GPU2 holds 3, GPU3 holds 8 (illustrative, made up for this walkthrough).</p>
+
+    <ul>
+      <li><strong>Step 1.</strong> GPU0 sends its 2 to GPU1, which adds it to its own 5, holding 7.</li>
+      <li><strong>Step 2.</strong> GPU1 sends that 7 to GPU2, which adds it to its own 3, holding 10.</li>
+      <li><strong>Step 3.</strong> GPU2 sends that 10 to GPU3, which adds it to its own 8, holding 18. The true sum, 2+5+3+8=18, and for now it lives only on GPU3.</li>
+    </ul>
+
+    <p>That is 3 steps, N−1 for N=4, exactly as the formula predicts. Meanwhile the other 3 chunk indices are rotating through the exact same pattern simultaneously, each one fully reducing onto a different GPU by the end of its own 3 steps. Scatter-reduce is done, and each of the 4 GPUs now holds the true sum for exactly one of the 4 chunks.</p>
+
+    <p>All-gather then runs the same ring pattern for 3 more steps, except each GPU now just relays its already-final chunk onward instead of adding to it. At the end all 4 GPUs hold all 4 fully-reduced chunks: the complete, synchronized gradient on every GPU, with no GPU ever having sent or received more than 3 chunks' worth of data in total across the whole process.</p>
     <h3>Production use case: designing GPU cluster topology for a large training run</h3>
-    <p>Say you're laying out a training job across a cluster with several GPUs per node, connected by NVLink within a node and InfiniBand between nodes. The placement decision follows directly from the communication-frequency argument in this page: tensor parallelism — which needs to communicate within every layer — goes on the GPUs connected by NVLink, meaning it stays confined inside a single node, sized to however many GPUs that node has. Pipeline parallelism, which only needs to pass activations at stage boundaries, can cross the slower InfiniBand link between nodes without it dominating step time. Data parallelism — replicating that whole tensor-parallel-plus-pipeline-parallel unit and synchronizing gradients once per step via ring all-reduce — is the layer that scales across as many of those units as you have, tolerating the InfiniBand link because ring all-reduce keeps each individual GPU's communication burden bounded regardless of how many replicas you add. Get this placement backwards — say, splitting a single layer's weights tensor-parallel-style across an InfiniBand link — and the cluster's raw compute capacity stops mattering, because the GPUs spend most of their time waiting on the network rather than computing.</p>
+    <p>Say you are laying out a training job across a cluster with several GPUs per node, connected by NVLink within a node and InfiniBand between nodes. The placement decision follows directly from the communication-frequency argument on this page.</p>
+
+    <ul>
+      <li><strong>Tensor parallelism</strong> needs to communicate within every layer, so it goes on the GPUs connected by NVLink. It stays confined inside a single node, sized to however many GPUs that node has.</li>
+      <li><strong>Pipeline parallelism</strong> only needs to pass activations at stage boundaries, so it can cross the slower InfiniBand link between nodes without that dominating step time.</li>
+      <li><strong>Data parallelism</strong> replicates that whole tensor-parallel-plus-pipeline-parallel unit and synchronizes gradients once per step via ring all-reduce. It scales across as many of those units as you have, tolerating the InfiniBand link because ring all-reduce keeps each individual GPU's communication burden bounded regardless of how many replicas you add.</li>
+    </ul>
+
+    <p>Get this placement backwards, say by splitting a single layer's weights tensor-parallel-style across an InfiniBand link, and the cluster's raw compute capacity stops mattering. The GPUs spend most of their time waiting on the network rather than computing.</p>
   </section>
 
   <section id="interview">
