@@ -195,6 +195,82 @@
     </ul>
     <p>In plain language: today's value equals the reward you get right now, plus the (discounted) value of wherever you end up next. That's it — the whole recursive structure that makes value-based RL tractable. It means you never have to know the value of the entire rest of an infinite future directly; you only ever need one step of real reward plus your own current estimate of what comes after. Dynamic programming applies this equation exactly, sweeping over all states. Q-learning and TD learning apply an approximate, sampled version of it, updating one estimate at a time from lived experience instead of an exact model of the environment.</p>
 
+    <p>The Bellman equation is the backbone of value-based methods. Policy-gradient methods rest on a different result, and it is worth seeing where it comes from, because the whole of PPO is built on top of it.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">The policy gradient theorem, and why the environment drops out</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">We want to maximise expected return <span>$J(\theta) = \mathbb{E}_{\tau \sim p_\theta}\!\left[R(\tau)\right]$</span> over trajectories <span>$\tau$</span>. The obstacle is subtle: <span>$\theta$</span> does not appear in <span>$R$</span>. It appears in the <em>distribution we are averaging over</em>. Assume an episodic task and the usual regularity conditions that let us exchange a gradient and an integral.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta J(\theta) = \nabla_\theta \int p_\theta(\tau)\, R(\tau)\, d\tau = \int \nabla_\theta p_\theta(\tau)\, R(\tau)\, d\tau$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> the return <span>$R(\tau)$</span> of a fixed trajectory carries no <span>$\theta$</span>, so the gradient passes straight through it and lands only on <span>$p_\theta(\tau)$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\int \nabla_\theta p_\theta(\tau)\, R(\tau)\, d\tau \quad \text{is not an expectation}$$</span></div>
+            <div class="drv-why"><strong>Why this is the problem:</strong> <span>$\nabla_\theta p_\theta(\tau)$</span> is not a probability distribution. It does not integrate to one and it goes negative. So we cannot estimate this integral by sampling trajectories, which is the only thing we can actually do.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta p_\theta(\tau) = p_\theta(\tau)\, \nabla_\theta \log p_\theta(\tau)$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> the <em class="term">log-derivative trick</em>. Differentiating a log gives <span>$\nabla \log f = \nabla f / f$</span>. Multiply both sides by <span>$f$</span> and you have this identity. It is ordinary calculus, and it is the hinge the entire method turns on.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim p_\theta}\!\left[\nabla_\theta \log p_\theta(\tau)\, R(\tau)\right]$$</span></div>
+            <div class="drv-why"><strong>Why this rescues us:</strong> substituting step 3 puts <span>$p_\theta(\tau)$</span> back in front of the integrand. That makes it an expectation under the policy again, and expectations under the policy are exactly what rolling out the policy samples.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned}\log p_\theta(\tau) = \log p(s_0) \;&+\; \sum_t \log \pi_\theta(a_t \mid s_t) \\ &+\; \sum_t \log P(s_{t+1} \mid s_t, a_t)\end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> a trajectory's probability is the start-state probability times the policy's action probabilities times the environment's transition probabilities. Taking a log turns that product into a sum.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta \log p_\theta(\tau) = \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t)$$</span></div>
+            <div class="drv-why"><strong>Why this is the punchline:</strong> <span>$p(s_0)$</span> and <span>$P(s_{t+1} \mid s_t, a_t)$</span> belong to the environment. Neither contains <span>$\theta$</span>, so both gradients are zero and both terms vanish. Only the policy survives.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta J(\theta) = \mathbb{E}\!\left[\left(\sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t)\right) R(\tau)\right]$$</span></div>
+            <div class="drv-why"><strong>Why this is usable:</strong> every quantity here is something you have. Run the policy, record which actions it took, compute the log-probabilities it assigned them, and weight by the return you observed. That estimate is <strong>unbiased</strong>.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this actually tells you.</strong> You just computed a gradient of expected reward without ever differentiating the reward, and without knowing the environment's dynamics at all. <span>$R(\tau)$</span> can be a black box. It can be discontinuous, non-differentiable, or a human clicking a thumbs-up. That is precisely why RLHF is possible: a reward model's score never has to be differentiable with respect to the sampling process that produced the text.</div>
+      </div>
+    </details>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">Why a baseline is free, and why advantage is the right one</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">The REINFORCE estimator above is unbiased but brutally noisy. The standard fix is to subtract a <em class="term">baseline</em> <span>$b(s)$</span> from the return before weighting. That looks like it should change the answer. It does not, provided <span>$b$</span> depends on the state but never on the action. The sums below assume a discrete action space; for continuous actions every sum becomes an integral and the argument is unchanged.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned}\mathbb{E}_{a \sim \pi}&\!\left[\nabla_\theta \log \pi_\theta(a \mid s)\, b(s)\right] \\ &= b(s) \sum_a \pi_\theta(a \mid s)\, \nabla_\theta \log \pi_\theta(a \mid s)\end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> <span>$b(s)$</span> does not depend on <span>$a$</span>, so it is a constant with respect to the expectation and factors straight out.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= b(s) \sum_a \pi_\theta(a \mid s)\, \frac{\nabla_\theta \pi_\theta(a \mid s)}{\pi_\theta(a \mid s)} = b(s) \sum_a \nabla_\theta \pi_\theta(a \mid s)$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> the log-derivative trick again, run backwards this time. The <span>$\pi_\theta$</span> in front cancels the one in the denominator.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= b(s)\, \nabla_\theta \sum_a \pi_\theta(a \mid s) = b(s)\, \nabla_\theta (1) = 0$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> swap the finite sum and the gradient, which linearity permits. What is left inside is the total probability mass over all actions. That is <span>$1$</span> by definition, for every <span>$\theta$</span>. The gradient of a constant is zero.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta J(\theta) = \mathbb{E}\!\left[\nabla_\theta \log \pi_\theta(a \mid s)\,\big(Q(s,a) - b(s)\big)\right]$$</span></div>
+            <div class="drv-why"><strong>Why this is now safe:</strong> the term you just subtracted has expectation exactly zero. Subtracting something with zero mean cannot shift the mean. The gradient stays unbiased for <em>any</em> action-independent <span>$b$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$b(s) = V(s) \;\Longrightarrow\; Q(s,a) - V(s) = A(s,a)$$</span></div>
+            <div class="drv-why"><strong>Why this choice:</strong> setting the baseline to the state's own value recentres the weight around zero. Better-than-usual actions get a positive push, worse-than-usual ones a negative push. Without it, in a task where all rewards are positive, every sampled action gets pushed up and learning has to rely on differences in magnitude alone.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this actually tells you.</strong> Advantage is not a heuristic somebody preferred. It is the baseline-subtracted estimator that provably keeps the gradient unbiased while stripping out the variance caused by <em>which state you happened to be in</em>, leaving only the part that answers <em>was this action better than my usual behaviour here</em>. One caveat worth knowing: unbiasedness holds for any action-independent baseline, but variance reduction is not guaranteed for a bad one. <span>$V(s)$</span> is the standard choice and works well in practice, though it is not strictly the variance-minimising baseline.</div>
+      </div>
+    </details>
+
     <h3>PPO's clipped surrogate objective, conceptually</h3>
     <p>Policy gradients want to increase the probability of actions that led to high advantage and decrease the probability of actions that led to low advantage. The naive way to do this computes a ratio between the new policy's probability of an action and the old policy's probability of that same action, and scales the gradient step by that ratio times the advantage. The problem: nothing stops a single update from moving the policy enormously if the estimated advantage is large, and a policy that has moved too far in one update can collapse — it starts producing actions so different from what generated the training data that the whole learning process destabilizes and never recovers.</p>
     <div class="eq-block">
@@ -207,6 +283,39 @@
       <li><span class="sym">min(·, ·)</span> takes the more pessimistic of the unclipped and clipped objective, which means clipping only ever removes the incentive to keep pushing once you've already moved far enough — it never creates an incentive to push further.</li>
     </ul>
     <p>The whole point in one sentence: take a policy-improving step, but clip it so the new policy can't move too far from the old policy in a single update. It's a cheap, first-order stand-in for what TRPO (PPO's more complicated predecessor) enforced with an explicit, expensive constraint on how different the new and old policies are allowed to be.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">How TRPO's constraint became PPO's clip</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">This one is more argument than algebra, and it is worth saying that plainly. The clip is not derived from the constraint. It is a cheaper thing that behaves similarly, and the steps below trace why anyone would settle for that.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$L(\theta) = \mathbb{E}_{a \sim \pi_{\text{old}}}\!\left[\frac{\pi_\theta(a \mid s)}{\pi_{\text{old}}(a \mid s)} A(s,a)\right] = \mathbb{E}\!\left[r_t(\theta) A_t\right]$$</span></div>
+            <div class="drv-why"><strong>Why we need the ratio at all:</strong> the data was collected under <span>$\pi_{\text{old}}$</span>, but we want to score <span>$\pi_\theta$</span>. Importance sampling reweights each sample by how much more or less likely the new policy makes it. This is what buys you several gradient steps from one batch of rollouts instead of one.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\max_\theta\ \mathbb{E}\!\left[r_t A_t\right] \;\Longrightarrow\; r_t \to \infty \ \text{ when } A_t \gt 0$$</span></div>
+            <div class="drv-why"><strong>Why the naive version breaks:</strong> nothing in that objective bounds the ratio. Push <span>$r_t$</span> arbitrarily high and the objective keeps improving. But the importance-sampling estimate is only trustworthy while <span>$\pi_\theta$</span> stays near <span>$\pi_{\text{old}}$</span>. Optimise it hard and you leave the region where it means anything.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\max_\theta\ \mathbb{E}\!\left[r_t(\theta) A_t\right] \quad \text{subject to} \quad \mathbb{E}\!\left[D_{\mathrm{KL}}\!\left(\pi_{\text{old}} \,\|\, \pi_\theta\right)\right] \leq \delta$$</span></div>
+            <div class="drv-why"><strong>TRPO's answer:</strong> make the trust region explicit. Bound the average KL between old and new policy, so the optimiser cannot leave the region where the surrogate is valid. The cost is real: this is a constrained problem needing conjugate gradient and a line search, with curvature information from Fisher matrix-vector products.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$L^{\text{CLIP}}(\theta) = \mathbb{E}\Big[\min\big(r_t A_t,\ \operatorname{clip}(r_t, 1-\epsilon, 1+\epsilon)\, A_t\big)\Big]$$</span></div>
+            <div class="drv-why"><strong>PPO's answer:</strong> drop the constraint and flatten the objective instead. Once <span>$r_t$</span> leaves <span>$[1-\epsilon, 1+\epsilon]$</span>, the clipped branch stops changing with <span>$\theta$</span>, so its gradient is zero. No constraint solver, just a clamp on a scalar.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned}A_t \gt 0 \;&:\ \text{capped at } (1+\epsilon)A_t \\ A_t \lt 0 \;&:\ \text{floored at } (1-\epsilon)A_t\end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why the <span>$\min$</span> is load-bearing:</strong> it selects the more pessimistic of the two branches. With <span>$A_t \gt 0$</span> that caps the reward for raising <span>$r_t$</span>. With <span>$A_t \lt 0$</span> the unclipped term actually <em>grows</em> as <span>$r_t$</span> falls, so the <span>$\min$</span> is what stops the objective from paying you to drive the probability toward zero. Clipping only ever removes incentive. It never manufactures one.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this actually tells you, honestly.</strong> PPO does not implement a trust region. It approximates the <em>behaviour</em> of one. A bounded ratio does not imply bounded KL, and because clipping works by zeroing gradients, it removes the very corrective signal that would pull a policy back once it has escaped. TRPO's monotonic improvement guarantee does not survive the substitution. PPO won anyway, because it is a few lines of code instead of a constrained optimiser and it works nearly as well in practice. That is a fair trade, but knowing it is a trade is the part worth carrying into an interview. It is also why serious implementations still monitor KL directly and stop early when it drifts.</div>
+      </div>
+    </details>
   </section>
 
   <section id="why">

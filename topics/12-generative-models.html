@@ -183,6 +183,47 @@
     </ul>
     <p>Careful architectures and loss variants (Wasserstein GANs, spectral normalization, and others) reduced how often this happens. But "will this GAN converge nicely" was never something you could assume.</p>
 
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">What the GAN loss is secretly minimising</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">The minimax objective looks like an arbitrary game somebody invented. It is not. Hold the discriminator at its optimum and the whole thing collapses into a recognisable distance between two distributions.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} \min_G \max_D V(D, G) \;=\;\; & \mathbb{E}_{x \sim p_{\text{data}}}\!\left[\log D(x)\right] \\[2pt] +\;\; & \mathbb{E}_{z \sim p_z}\!\left[\log\big(1 - D(G(z))\big)\right] \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>The setup.</strong> The discriminator wants to output 1 on real data and 0 on fakes, so it maximises. The generator wants the opposite, so it minimises. Notice what is absent: no density is ever written down. <span>$G$</span> only produces samples.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} V(D, G) = \int_x \Big[\;\; & p_{\text{data}}(x) \log D(x) \\[2pt] +\;\; & p_g(x) \log\big(1 - D(x)\big) \Big]\, dx \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why this is legal:</strong> pushing <span>$z$</span> through <span>$G$</span> induces <em>some</em> distribution <span>$p_g$</span> over samples, even though we cannot write it down. Re-expressing the second expectation over <span>$p_g$</span> rather than <span>$p_z$</span> puts both terms under a single integral in <span>$x$</span>. We never need a formula for <span>$p_g$</span>. We only need it to exist.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} &\text{maximise} \quad f(y) = a \log y + b \log(1 - y) \\[2pt] &\text{where } \; a = p_{\text{data}}(x), \quad b = p_g(x) \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why we may optimise pointwise:</strong> <span>$D$</span> is free to return whatever value it likes at each <span>$x$</span>, independently of every other <span>$x$</span>. An integral of independent terms is maximised by maximising each term separately. This step needs <span>$D$</span> to range over <em>all</em> functions, and that is precisely where the theory quietly parts company with a finite network.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} f'(y) &= \frac{a}{y} - \frac{b}{1-y} = 0 \\[4pt] \Longrightarrow \quad D^*(x) &= \frac{p_{\text{data}}(x)}{p_{\text{data}}(x) + p_g(x)} \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> solve for the stationary point, then check <span>$f''(y) = -a/y^2 - b/(1-y)^2 < 0$</span>, so it is a maximum rather than a minimum. Read the answer aloud. The best possible discriminator reports the <strong>fraction of the density at <span>$x$</span> that is real</strong>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} C(G) = V(D^*, G) \;=\;\; & \mathbb{E}_{p_{\text{data}}}\!\left[\log \frac{p_{\text{data}}}{p_{\text{data}} + p_g}\right] \\[2pt] +\;\; & \mathbb{E}_{p_g}\!\left[\log \frac{p_g}{p_{\text{data}} + p_g}\right] \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> substitute <span>$D^*$</span> back in. The second term works because <span>$1 - D^*(x) = p_g/(p_{\text{data}} + p_g)$</span>, which makes it a mirror image of the first. The generator now faces a fixed objective with no discriminator left in it.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$C(G) = 2 \cdot D_{\mathrm{JS}}\!\left(p_{\text{data}} \,\|\, p_g\right) - \log 4$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> Jensen-Shannon divergence is <span>$\tfrac{1}{2}D_{\mathrm{KL}}(P\|M) + \tfrac{1}{2}D_{\mathrm{KL}}(Q\|M)$</span> with <span>$M = (P+Q)/2$</span>. Each expectation above is one of those KL terms missing a factor of 2 inside its logarithm. Insert the 2 and compensate, and each term sheds a <span>$\log 2$</span>. Two of them give <span>$-\log 4$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} \min_G C(G) = -\log 4 \quad &\text{iff} \quad p_g = p_{\text{data}} \\[2pt] &\text{at which } \; D^*(x) = \tfrac{1}{2} \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> JSD is non-negative, and zero only when the two distributions match exactly. So the game has one global optimum, and at it the discriminator is reduced to a coin flip. It is not being fooled. It genuinely cannot tell.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>Now the honest part.</strong> That result is elegant, and it describes a procedure you are not running. It assumes <span>$D$</span> sits at its optimum for every <span>$G$</span>. In practice you train <span>$D$</span> for a handful of steps between generator updates, so you descend a rough estimate of JSD rather than JSD itself. The theory also works against you at the start. When <span>$D$</span> is confidently correct, <span>$\log(1 - D(G(z)))$</span> saturates and the generator's gradient nearly vanishes. That is why almost nobody implements the loss as written. The standard fix is to have the generator <em>maximise</em> <span>$\log D(G(z))$</span> instead: same fixed point, far stronger gradients early on. Knowing exactly where the derivation and the code diverge is the part worth carrying into an interview.</div>
+      </div>
+    </details>
+
     <h3>Diffusion: learn to un-shred a photo, one small step at a time</h3>
     <p class="lede">The idea that made everything above easier to avoid: never ask a network to go straight from noise to a perfect image in one shot.</p>
     <p>Take a real image and destroy it. Add a small amount of Gaussian noise, then a bit more, then a bit more, hundreds of times, until what is left is indistinguishable from pure static. That is the <strong>forward process</strong>. It is not learned at all: it is a fixed, known mathematical recipe.</p>
@@ -285,6 +326,45 @@
     <h2><span class="num">04</span>The equations, term by term</h2>
     <p>The forward process is designed so you can jump straight to any noise level <span>$t$</span> in one step, without simulating all the steps before it: <span>$x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\, \epsilon$</span>.</p>
     <p>Here <span>$\epsilon \sim \mathcal{N}(0, I)$</span> is fresh Gaussian noise, and <span>$\bar\alpha_t$</span> is a known, fixed schedule value that decreases from near 1 (almost no noise) to near 0 (almost pure noise) as <span>$t$</span> increases. That is the whole forward process: no network involved, just algebra.</p>
+    <p>Before the diffusion loss, the VAE's. Diffusion inherits its whole argument, so it is worth having this one straight first.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">Where the VAE loss comes from, line by line</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">We want to maximise <span>$\log p(x)$</span>. We cannot: it requires <span>$p(x) = \int p(x \mid z)\, p(z)\, dz$</span>, an integral over every possible latent. The way out is to stop computing it and start bounding it.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\log p(x) = \mathbb{E}_{q(z \mid x)}\!\left[\log p(x)\right]$$</span></div>
+            <div class="drv-why"><strong>Why this is legal:</strong> there is no <span>$z$</span> anywhere in <span>$\log p(x)$</span>. Taking an expectation over <span>$z$</span> of something that does not depend on <span>$z$</span> changes nothing. This looks like it does no work, but it is the move that lets us introduce <span>$q$</span> at all.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= \mathbb{E}_{q}\!\left[\log \frac{p(x, z)}{p(z \mid x)}\right]$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> Bayes' rule, rearranged. Since <span>$p(z \mid x) = p(x,z)/p(x)$</span>, we can write <span>$p(x) = p(x,z)/p(z \mid x)$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= \mathbb{E}_{q}\!\left[\log \left( \frac{p(x, z)}{q(z \mid x)} \cdot \frac{q(z \mid x)}{p(z \mid x)} \right)\right]$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> multiply and divide by <span>$q(z \mid x)$</span>. This is the entire trick. It manufactures one term we can actually compute and one term we can bound.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= \underbrace{\mathbb{E}_{q}\!\left[\log \frac{p(x, z)}{q(z \mid x)}\right]}_{\text{ELBO}} \;+\; \underbrace{\mathbb{E}_{q}\!\left[\log \frac{q(z \mid x)}{p(z \mid x)}\right]}_{D_{\mathrm{KL}}(q \,\|\, p(z \mid x))}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> the log of a product splits into a sum, and expectation is linear. The second term is exactly the definition of KL divergence between your encoder and the true posterior.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\log p(x) \;\geq\; \text{ELBO}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> KL divergence is never negative. Drop a non-negative term from a sum and what remains is a lower bound. That inequality is the "LB" in ELBO.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\text{ELBO} = \underbrace{\mathbb{E}_{q}\!\left[\log p(x \mid z)\right]}_{\text{reconstruction}} \;-\; \underbrace{D_{\mathrm{KL}}\!\left(q(z \mid x) \,\|\, p(z)\right)}_{\text{regulariser}}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> expand <span>$p(x,z) = p(x \mid z)\,p(z)$</span> inside the ELBO, then group the two terms that depend only on <span>$z$</span>. Both pieces are now computable: the first by decoding a sample, the second in closed form for Gaussians.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this actually tells you.</strong> The gap between the true log-likelihood and the ELBO is <em>exactly</em> <span>$D_{\mathrm{KL}}(q \,\|\, p(z \mid x))$</span>. So maximising the ELBO does two jobs at once: it pushes the likelihood up, and it drags your encoder toward the true posterior. And it does the second one without ever computing that posterior, which was the intractable thing you started out trying to avoid.</div>
+      </div>
+    </details>
+
     <p>Training the reverse process reduces, after the derivation settles, to a strikingly simple objective:</p>
     <div class="eq-block">
       <span>$$\mathcal{L} = \mathbb{E}_{x_0,\, t,\, \epsilon}\left[\, \lVert \epsilon - \epsilon_\theta(x_t, t) \rVert^2 \,\right]$$</span>
@@ -297,6 +377,43 @@
       <li><span class="sym">ε_θ(x_t, t)</span> the network's prediction: "given this noisy image and this timestep, what noise do I think was added?"</li>
       <li><span class="sym">‖·‖²</span> plain L2 distance between the true noise and the predicted noise — an ordinary regression loss, nothing adversarial or exotic about it.</li>
     </ul>
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">How a variational bound collapses into that one MSE line</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">Diffusion is a VAE whose latents are the whole noising trajectory <span>$x_1, \dots, x_T$</span>, and whose encoder <span>$q$</span> is fixed by hand rather than learned. So it inherits the bound above, and the work is in simplifying it.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\log p(x_0) \;\geq\; \mathbb{E}_q\!\left[\log \frac{p_\theta(x_{0:T})}{q(x_{1:T} \mid x_0)}\right]$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> identical to the ELBO step above. The only change is that the latent is now a sequence, not a single <span>$z$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned}\mathcal{L} = \mathbb{E}_q\Big[\;&amp;\underbrace{D_{\mathrm{KL}}\big(q(x_T \mid x_0)\,\|\,p(x_T)\big)}_{\text{no parameters}} \\[2pt] &amp;+ \sum_{t>1} D_{\mathrm{KL}}\big(q(x_{t-1} \mid x_t, x_0)\,\|\,p_\theta(x_{t-1} \mid x_t)\big) \\[2pt] &amp;- \log p_\theta(x_0 \mid x_1)\Big]\end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> both the forward and reverse joints factor into per-step terms, so the bound regroups into one KL per timestep. The first term contains no learnable parameters at all: both sides are fixed. It is a constant you can ignore.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$q(x_{t-1} \mid x_t, x_0) = \mathcal{N}\big(x_{t-1};\, \tilde\mu_t(x_t, x_0),\, \tilde\beta_t I\big)$$</span></div>
+            <div class="drv-why"><strong>Why this step matters most:</strong> the reverse of a noising step is intractable on its own. Conditioned <em>also</em> on <span>$x_0$</span> it becomes an ordinary Gaussian with a closed-form mean. That is the entire reason <span>$x_0$</span> is carried through the derivation.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$D_{\mathrm{KL}} = \frac{1}{2\sigma_t^2}\left\lVert \tilde\mu_t(x_t, x_0) - \mu_\theta(x_t, t) \right\rVert^2 + C$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> fix the reverse process to have the same variance as the forward posterior, and the KL between two Gaussians collapses to a scaled squared distance between their means. Every KL in the sum is now a regression target.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\left\lVert \tilde\mu_t - \mu_\theta \right\rVert^2 \;\longrightarrow\; w_t \left\lVert \epsilon - \epsilon_\theta(x_t, t) \right\rVert^2$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> <span>$x_t$</span> is an invertible function of <span>$(x_0, \epsilon)$</span>. Substituting that relation into <span>$\tilde\mu_t$</span> rewrites the mean-matching problem as a noise-matching problem. Same objective, different coordinates, and the noise coordinates turn out to be much easier to learn in.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\mathcal{L}_{\text{simple}} = \mathbb{E}_{x_0, t, \epsilon}\left[\left\lVert \epsilon - \epsilon_\theta(x_t, t) \right\rVert^2\right]$$</span></div>
+            <div class="drv-why"><strong>Why — and this is the honest part:</strong> the weights <span>$w_t$</span> are simply dropped. That is not a mathematical simplification. Ho et al. found the unweighted version trains better, so the objective everyone uses is deliberately <em>not</em> the tight variational bound.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this actually tells you.</strong> The MSE is not a heuristic somebody guessed. It is a variational bound on log-likelihood, made tractable by conditioning on <span>$x_0$</span>, reparameterised into noise coordinates, and then knowingly un-weighted because that trains better. Only the last step is unprincipled, and knowing precisely which step that is separates reciting the loss from understanding it.</div>
+      </div>
+    </details>
+
     <p>Notice what's <em>not</em> in this loss: no discriminator, no generator fighting anything, no minimax. Pick a random image, pick a random timestep, add the corresponding amount of noise, ask the network to predict that noise, compute MSE, backpropagate. It's supervised regression with an unusually clever choice of label.</p>
     <p>At sampling time you start from <span>$x_T \sim \mathcal{N}(0, I)$</span>, pure noise. Then repeatedly use <span>$\epsilon_\theta(x_t, t)$</span> to estimate and subtract off a bit of noise, stepping from <span>$x_T$</span> down to <span>$x_{T-1}$</span>, then <span>$x_{T-2}$</span>, and so on to <span>$x_0$</span>.</p>
     <p>The original <strong>DDPM</strong> sampler does this stochastically, adding a little fresh noise back in at each step to match the forward process exactly. It needs on the order of hundreds to a thousand steps.</p>

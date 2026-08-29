@@ -307,10 +307,43 @@
       <li><span class="sym">· V</span> the weighted sum — multiplying those probabilities back into the value vectors gives, for each token, a blend of everyone else's information, proportioned by relevance.</li>
     </ul>
 
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">Why <span>$\sqrt{d_k}$</span>, and not <span>$d_k$</span> or any other constant</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">"Keeps the variance stable" is the usual hand-wave. It is a three-line calculation, and doing it tells you exactly why the exponent is one half. Follow the original paper and assume the components of <span>$q$</span> and <span>$k$</span> are <strong>independent, with mean 0 and variance 1</strong>. That assumption is what the whole argument rests on.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$q \cdot k = \sum_{i=1}^{d_k} q_i k_i$$</span></div>
+            <div class="drv-why"><strong>Setting up:</strong> the raw score for one query against one key is a sum of <span>$d_k$</span> products. The question is how that sum behaves as <span>$d_k$</span> grows.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\mathbb{E}[q_i k_i] = \mathbb{E}[q_i]\,\mathbb{E}[k_i] = 0$$</span></div>
+            <div class="drv-why"><strong>Why the factorisation is legal:</strong> independence lets the expectation of a product split into a product of expectations. Both are zero by assumption, so every term is mean-zero and the whole score is centred at 0. The score does not drift as dimension grows. Only its <em>spread</em> does.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\operatorname{Var}(q_i k_i) = \mathbb{E}[q_i^2 k_i^2] - 0^2 = \mathbb{E}[q_i^2]\,\mathbb{E}[k_i^2] = 1 \cdot 1 = 1$$</span></div>
+            <div class="drv-why"><strong>Why <span>$\mathbb{E}[q_i^2] = 1$</span>:</strong> variance is <span>$\mathbb{E}[q_i^2] - \mathbb{E}[q_i]^2$</span>, and the mean is zero, so the second moment <em>equals</em> the variance. That is the small step that makes this collapse so cleanly, and it only works because the components are centred.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\operatorname{Var}(q \cdot k) = \sum_{i=1}^{d_k} \operatorname{Var}(q_i k_i) = d_k$$</span></div>
+            <div class="drv-why"><strong>Why the variances simply add:</strong> variance of a sum equals the sum of variances only when the terms are uncorrelated, which independence across <span>$i$</span> gives us. Drop that assumption and this line fails. So the score's standard deviation is <span>$\sqrt{d_k}$</span>: it grows with the <em>square root</em> of head dimension, not with the dimension itself.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\operatorname{Var}\!\left(\frac{q \cdot k}{\sqrt{d_k}}\right) = \frac{d_k}{d_k} = 1$$</span></div>
+            <div class="drv-why"><strong>Why this exact constant:</strong> dividing a random variable by <span>$c$</span> divides its variance by <span>$c^2$</span>. To cancel a variance of <span>$d_k$</span> you need <span>$c^2 = d_k$</span>, so <span>$c = \sqrt{d_k}$</span>. Dividing by <span>$d_k$</span> would over-correct and crush the scores toward zero; dividing by anything else leaves a dimension-dependent scale. There is exactly one right answer.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this actually tells you.</strong> The scaling exists to protect the <em>softmax</em>, not the dot product. Softmax is shift-invariant but not scale-invariant: multiply every logit by 10 and the output collapses toward one-hot, where the Jacobian is nearly zero in every direction. A model in that regime stops learning, because no gradient survives the backward pass. So <span>$\sqrt{d_k}$</span> is a variance-control trick whose real purpose is keeping softmax inside the range where it still has a usable slope. Change the assumption at the top and the constant changes with it. This is one of the rare interview answers where you can derive the number rather than recall it.</div>
+      </div>
+    </details>
+
     <h3>Multi-head attention</h3>
     <p>Running one attention function gives the model exactly one notion of "relevance." In practice you want several. One head might learn to track subject-verb agreement, another coreference, another local syntax. Multi-head attention runs <span>$h$</span> independent, smaller attention operations in parallel and concatenates the results:</p>
     <div class="eq-block">
-      <span>$$\text{MultiHead}(Q,K,V) = \text{Concat}(\text{head}_1, \dots, \text{head}_h)\,W^{O}, \qquad \text{head}_i = \text{Attention}(QW_i^{Q}, KW_i^{K}, VW_i^{V})$$</span>
+      <span>$$\begin{aligned}\text{MultiHead}(Q,K,V) &= \text{Concat}(\text{head}_1, \dots, \text{head}_h)\,W^{O} \\[4pt] \text{head}_i &= \text{Attention}(QW_i^{Q}, KW_i^{K}, VW_i^{V})\end{aligned}$$</span>
     </div>
     <p>If <span>$d_{model}=512$</span> and <span>$h=8$</span>, each head works in <span>$d_k = 64$</span> dimensions. That is the same total compute as one 512-dim head. The difference is what you get for it: <strong>8 independent subspaces</strong> to specialize in, instead of one that has to average everything together.</p>
 

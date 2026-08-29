@@ -236,7 +236,7 @@
     <h2><span class="num">04</span>The equations, term by term</h2>
     <h3>Backprop through a 2-layer MLP</h3>
     <div class="eq-block">
-      <span>$$z^{[1]} = W^{[1]}x + b^{[1]}, \quad a^{[1]} = f(z^{[1]}), \quad z^{[2]} = W^{[2]}a^{[1]} + b^{[2]}, \quad \hat y = g(z^{[2]}), \quad L = \text{loss}(\hat y, y)$$</span>
+      <span>$$\begin{aligned}z^{[1]} &= W^{[1]}x + b^{[1]}, \qquad a^{[1]} = f(z^{[1]}) \\ z^{[2]} &= W^{[2]}a^{[1]} + b^{[2]}, \qquad \hat y = g(z^{[2]}) \\ L &= \text{loss}(\hat y, y)\end{aligned}$$</span>
     </div>
     <p>That's the forward pass. The backward pass computes a gradient <span>$\delta$</span> at each layer's pre-activation, propagates it back through one linear map, and stops:</p>
     <div class="eq-block">
@@ -252,10 +252,51 @@
       <li><span class="sym">δ(a)ᵀ</span> an outer product: every weight <span>$W_{ij}$</span> gets the product of "how wrong was output <span>$i$</span>" and "how active was input <span>$j$</span>" — a weight only gets blamed in proportion to how much it was actually used.</li>
     </ul>
 
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">Deriving backpropagation from the chain rule alone</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">Those four equations were stated, not earned. Here is where each one comes from. Nothing below is more than the chain rule applied carefully, which is the point: backprop is not a separate algorithm you have to memorise.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\delta^{[l]} \;\equiv\; \frac{\partial L}{\partial z^{[l]}}$$</span></div>
+            <div class="drv-why"><strong>Why define this at all:</strong> we want <span>$\partial L / \partial W^{[l]}$</span>, not <span>$\partial L / \partial z^{[l]}$</span>. But every parameter in layer <span>$l$</span> influences the loss <em>only</em> by changing <span>$z^{[l]}$</span>. So if we know how sensitive <span>$L$</span> is to <span>$z^{[l]}$</span>, one more short step gives us every gradient in that layer. <span>$\delta$</span> is the quantity worth computing.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\delta^{[2]} = \frac{\partial L}{\partial \hat y} \odot g'(z^{[2]})$$</span></div>
+            <div class="drv-why"><strong>Why the Hadamard product:</strong> the output activation acts <em>elementwise</em>, so <span>$\hat y_i$</span> depends on <span>$z^{[2]}_i$</span> and on no other component. The chain rule for a single index reads <span>$\partial L/\partial z_i = (\partial L / \partial \hat y_i)\, g'(z_i)$</span>. Stack those independent scalar equations and you get an elementwise product, not a matrix multiply.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\frac{\partial L}{\partial z^{[1]}_j} = \sum_i \frac{\partial L}{\partial z^{[2]}_i}\cdot\frac{\partial z^{[2]}_i}{\partial z^{[1]}_j}$$</span></div>
+            <div class="drv-why"><strong>Why a sum:</strong> this is the multivariable chain rule. Perturbing <span>$z^{[1]}_j$</span> changes <span>$a^{[1]}_j$</span>, which feeds into <em>every</em> unit of the next layer. The blame arriving at one hidden unit is the total collected over all the paths leaving it.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\frac{\partial z^{[2]}_i}{\partial z^{[1]}_j} = W^{[2]}_{ij}\, f'(z^{[1]}_j)$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> expand the single path. <span>$z^{[2]}_i = \sum_j W^{[2]}_{ij} a^{[1]}_j + b^{[2]}_i$</span> and <span>$a^{[1]}_j = f(z^{[1]}_j)$</span>. Differentiating the composition gives the weight on that edge times the local activation slope.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned}\frac{\partial L}{\partial z^{[1]}_j} &= f'(z^{[1]}_j)\sum_i W^{[2]}_{ij}\,\delta^{[2]}_i \\[6pt] \delta^{[1]} &= \left(\left(W^{[2]}\right)^{\top}\delta^{[2]}\right)\odot f'(z^{[1]})\end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why the transpose appears, concretely:</strong> in that sum, <span>$i$</span> is the <em>row</em> index of <span>$W^{[2]}$</span> and <span>$j$</span> is fixed as the column. Summing down a column of <span>$W$</span> is the same as summing across a row of <span>$W^{\top}$</span>. The forward pass used row <span>$i$</span> to build output <span>$i$</span> from all inputs. The backward pass reads column <span>$j$</span> to collect what input <span>$j$</span> is answerable for. Same matrix, read the other way.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\frac{\partial L}{\partial W^{[2]}_{ij}} = \delta^{[2]}_i\, a^{[1]}_j \;\;\Longrightarrow\;\; \frac{\partial L}{\partial W^{[2]}} = \delta^{[2]}\left(a^{[1]}\right)^{\top}$$</span></div>
+            <div class="drv-why"><strong>Why the outer product:</strong> <span>$W^{[2]}_{ij}$</span> appears in exactly one place in the whole forward pass, the expression for <span>$z^{[2]}_i$</span>, where it multiplies <span>$a^{[1]}_j$</span>. So its derivative is that single term, with no sum. Every <span>$(i,j)$</span> pairing of the two vectors is an outer product.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\frac{\partial L}{\partial b^{[2]}} = \delta^{[2]}$$</span></div>
+            <div class="drv-why"><strong>Why it is just <span>$\delta$</span>:</strong> <span>$\partial z^{[2]}_i / \partial b^{[2]}_i = 1$</span>. The bias enters additively, so the error signal passes through it unchanged.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this actually tells you.</strong> There is no backpropagation algorithm in the sense of a clever new idea. There is the chain rule, plus one observation: <span>$\delta^{[l]}$</span> is a <strong>shared subexpression</strong>. Every parameter in a layer needs it, and every layer below needs it too. Compute it once per layer, cache it, reuse it. The naive alternative recomputes that same downstream product separately for each parameter, so cost scales with the number of parameters instead of staying at roughly one extra pass. That reuse is the entire reason a billion-parameter network is trainable at all.</div>
+      </div>
+    </details>
+
     <h3>Normalization</h3>
     <p>BatchNorm computes statistics per feature, across the batch:</p>
     <div class="eq-block">
-      <span>$$\mu_B = \frac{1}{m}\sum_{i=1}^{m} x_i, \qquad \sigma_B^2 = \frac{1}{m}\sum_{i=1}^{m}(x_i-\mu_B)^2, \qquad \hat x_i = \frac{x_i - \mu_B}{\sqrt{\sigma_B^2+\epsilon}}, \qquad y_i = \gamma\hat x_i + \beta$$</span>
+      <span>$$\begin{aligned}\mu_B &= \frac{1}{m}\sum_{i=1}^{m} x_i, \qquad \sigma_B^2 = \frac{1}{m}\sum_{i=1}^{m}(x_i-\mu_B)^2 \\[4pt] \hat x_i &= \frac{x_i - \mu_B}{\sqrt{\sigma_B^2+\epsilon}}, \qquad y_i = \gamma\hat x_i + \beta\end{aligned}$$</span>
     </div>
     <p>LayerNorm uses the identical formula — but <span>$\mu$</span> and <span>$\sigma^2$</span> are computed per example, across that example's own features, never touching the batch dimension at all. RMSNorm goes one step further and drops the mean-centering entirely, normalizing only by the root-mean-square magnitude:</p>
     <div class="eq-block">

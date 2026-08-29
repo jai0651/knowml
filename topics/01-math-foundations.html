@@ -299,6 +299,80 @@
     <p><span>$H(p)$</span> doesn't depend on your model at all, because the data doesn't change while you train. So minimizing cross-entropy and minimizing KL divergence are <strong>the same optimization problem</strong>. You're minimizing the gap between what your model believes and what's true. That's the justification for cross-entropy as a loss function, in one sentence.</p>
     <p>One caveat: this is not symmetric. <span>$D_{KL}(p\|q) \neq D_{KL}(q\|p)$</span> in general, so KL divergence isn't a true distance metric. Which distribution you designate "true" changes what gets penalized, and it matters (see the worked example below).</p>
 
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">Where cross-entropy comes from, and why it equals KL</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">Nobody picked cross-entropy because it looked good. It is what maximum likelihood turns into once your model outputs a distribution over classes. Here is the whole path.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\theta^\star = \arg\max_\theta \prod_{n=1}^{N} q_\theta(y_n \mid x_n)$$</span></div>
+            <div class="drv-why"><strong>Where we start:</strong> maximum likelihood. Pick the parameters that make the labels you actually observed most probable. Two things here are assumed rather than derived: that MLE is the right estimation principle at all, and that examples are independent, which is what licenses turning a joint probability into a product.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= \arg\max_\theta \sum_{n=1}^{N} \log q_\theta(y_n \mid x_n)$$</span></div>
+            <div class="drv-why"><strong>Why this is legal:</strong> <span>$\log$</span> is strictly increasing, so it cannot move the location of a maximum. The payoff is that a product becomes a sum. That matters twice: products of thousands of probabilities underflow to zero in floating point, and a sum differentiates term by term, which is what makes mini-batch gradients possible.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\theta^\star = \arg\min_\theta \; -\frac{1}{N}\sum_{n=1}^{N} \log q_\theta(y_n \mid x_n)$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> negating turns a maximisation into a minimisation, because optimisers are written to descend. The <span>$1/N$</span> is pure convention. It makes the number comparable across batch sizes and does not move the argmin.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$-\log q_\theta(y_n \mid x_n) = -\sum_i p_n(i) \log q_\theta(i \mid x_n)$$</span></div>
+            <div class="drv-why"><strong>Why this changes nothing numerically:</strong> <span>$p_n$</span> is the one-hot label vector. Every term in that sum is multiplied by zero except the true class, so the right side collapses straight back to the left. The point is not to compute something new. It is to rewrite the expression in a shape you already recognise.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\mathcal{L} = \frac{1}{N}\sum_{n} H\big(p_n,\; q_\theta(\cdot \mid x_n)\big)$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> that is exactly the definition of <span>$H(p,q)$</span> from above. <strong>Cross-entropy was never chosen as a loss. It is what maximum likelihood already was, written out.</strong></div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$H(p,q) = H(p) + D_{KL}(p \,\|\, q)$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> expand the KL definition. <span>$\sum_i p_i \log \frac{p_i}{q_i} = \sum_i p_i \log p_i - \sum_i p_i \log q_i$</span>, and that is <span>$-H(p) + H(p,q)$</span>. Rearranging gives the line above.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\arg\min_\theta H(p, q_\theta) \;=\; \arg\min_\theta D_{KL}(p \,\|\, q_\theta)$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> <span>$H(p)$</span> contains no <span>$\theta$</span>. It is a fixed property of the labels, not of your model. Adding a constant to an objective shifts its value but never moves its argmin.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this actually tells you.</strong> Three things that get discussed as separate choices are one procedure: maximising likelihood, minimising cross-entropy, and minimising KL from the true labels to your model. With hard one-hot labels the link is tighter still, because <span>$H(p) = 0$</span> and cross-entropy <em>equals</em> KL exactly. With soft labels, from label smoothing or distillation, <span>$H(p)$</span> is non-zero but still constant, so the argmin is unchanged.</div>
+      </div>
+    </details>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">Why KL divergence can never be negative</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">Everything above leans on <span>$D_{KL} \geq 0$</span>. Worth seeing why, because the same fact is what makes the ELBO on <a href="./12-generative-models.html">12</a> a genuine <em>lower</em> bound rather than just an approximation.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$D_{KL}(p \,\|\, q) = \sum_i p_i \log \frac{p_i}{q_i} = -\,\mathbb{E}_{p}\!\left[\log \frac{q_i}{p_i}\right]$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> flipping a fraction inside a log flips its sign, since <span>$\log(a/b) = -\log(b/a)$</span>. Writing the result as an expectation under <span>$p$</span> is what sets up the next step.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\mathbb{E}_p\!\left[\log \frac{q_i}{p_i}\right] \;\leq\; \log\, \mathbb{E}_p\!\left[\frac{q_i}{p_i}\right]$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> Jensen's inequality. <span>$\log$</span> is concave, since its second derivative <span>$-1/x^2$</span> is negative everywhere on its domain. For a concave function, the expectation of the function is at most the function of the expectation.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\log\, \mathbb{E}_p\!\left[\frac{q_i}{p_i}\right] = \log \sum_i p_i \frac{q_i}{p_i} = \log \sum_i q_i = \log 1 = 0$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> the <span>$p_i$</span> cancel, leaving the total mass of <span>$q$</span>. This is the one step that uses the fact that <span>$q$</span> is a normalised probability distribution. Remove that assumption and the proof stops working.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$-D_{KL}(p \,\|\, q) \leq 0 \quad\Longrightarrow\quad D_{KL}(p \,\|\, q) \geq 0$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> steps 1 to 3 together say the negative of the divergence is at most zero. Multiply through by <span>$-1$</span> and the inequality flips.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$D_{KL}(p \,\|\, q) = 0 \iff p = q$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> Jensen is tight only when the quantity inside is constant. Here that forces <span>$q_i/p_i$</span> to take the same value for every <span>$i$</span>, and since both distributions sum to one, that constant has to be one.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this actually tells you.</strong> KL has a hard floor at zero, reached only when the two distributions agree exactly. That is what makes it usable as a "how wrong am I" score. It is also load-bearing well beyond this page: the ELBO is a lower bound precisely <em>because</em> the KL term being dropped cannot be negative. One assumption the proof makes quietly: <span>$q_i &gt; 0$</span> wherever <span>$p_i &gt; 0$</span>. Assign zero probability to something that then happens, and the divergence is infinite.</div>
+      </div>
+    </details>
+
     <div class="diagram">
       <div class="diagram-title">Cross-entropy loss as a function of the probability assigned to the true class
         <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
@@ -329,6 +403,39 @@
       <li><span class="sym">Variance</span> error from a model too sensitive to exactly which training sample it saw — retrain on a different sample from the same distribution and predictions swing wildly. High variance looks like overfitting.</li>
       <li><span class="sym">σ²</span> irreducible error — noise inherent to the data itself. No model, however good, gets below this.</li>
     </ul>
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">Splitting squared error into bias, variance, and noise</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">Assume <span>$y = f(x) + \varepsilon$</span>, with <span>$\mathbb{E}[\varepsilon] = 0$</span> and <span>$\mathrm{Var}(\varepsilon) = \sigma^2$</span>. The estimator <span>$\hat f$</span> is itself random, because it depends on which training sample you happened to draw. Every expectation below runs over both sources of randomness at once.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\mathbb{E}\big[(y - \hat f(x))^2\big]$$</span></div>
+            <div class="drv-why"><strong>Where we start:</strong> expected squared error at a single point <span>$x$</span>. Keeping straight which randomness is which, noise in the label versus noise in the training set, is the entire difficulty of this derivation.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= \mathbb{E}\Big[\big(\underbrace{f(x) - \mathbb{E}[\hat f(x)]}_{A} \;+\; \underbrace{\varepsilon}_{B} \;+\; \underbrace{\mathbb{E}[\hat f(x)] - \hat f(x)}_{C}\big)^2\Big]$$</span></div>
+            <div class="drv-why"><strong>Why this is legal:</strong> substitute <span>$y = f(x) + \varepsilon$</span>, then add and subtract <span>$\mathbb{E}[\hat f(x)]$</span>. Adding zero changes nothing. Choosing <em>that particular</em> quantity is the pivot of the whole proof: it separates how far the average prediction sits from the truth, from how far this one prediction sits from that average.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} =\;& \mathbb{E}[A^2] + \mathbb{E}[B^2] + \mathbb{E}[C^2] \\[2pt] &+\; 2\,\mathbb{E}[AB] + 2\,\mathbb{E}[AC] + 2\,\mathbb{E}[BC] \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> expanding a squared trinomial, then using linearity of expectation to pull the six terms apart.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\mathbb{E}[AB] = \mathbb{E}[AC] = \mathbb{E}[BC] = 0$$</span></div>
+            <div class="drv-why"><strong>Why, and each dies for its own reason:</strong> <span>$A$</span> is not random at all, since <span>$f(x)$</span> and <span>$\mathbb{E}[\hat f(x)]$</span> are both fixed numbers. So <span>$\mathbb{E}[AB] = A\,\mathbb{E}[\varepsilon] = 0$</span>, and <span>$\mathbb{E}[AC] = A\big(\mathbb{E}[\hat f] - \mathbb{E}[\hat f]\big) = 0$</span>. The third is different in kind: <span>$\varepsilon$</span> is noise on the test label while <span>$C$</span> depends only on the training sample, so they are independent and both have mean zero.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= \underbrace{\big(\mathbb{E}[\hat{f}(x)] - f(x)\big)^2}_{\text{Bias}^2} + \underbrace{\mathrm{Var}[\hat{f}(x)]}_{\text{Variance}} + \underbrace{\sigma^2}_{\text{irreducible}}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> <span>$\mathbb{E}[A^2] = A^2$</span> because <span>$A$</span> is deterministic, and squaring makes its sign irrelevant. <span>$\mathbb{E}[C^2]$</span> is precisely the definition of the variance of <span>$\hat f(x)$</span>. And <span>$\mathbb{E}[B^2] = \mathrm{Var}(\varepsilon) = \sigma^2$</span>, using <span>$\mathbb{E}[\varepsilon] = 0$</span>.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this tells you, and what it does not.</strong> The clean three-way split is a property of <strong>squared-error loss specifically</strong>, not a general law of learning. Under 0-1 loss the equivalent identity is notoriously hard to obtain, and <a href="https://homes.cs.washington.edu/~pedrod/papers/aaai00.pdf" target="_blank" rel="noopener">Domingos (2000)</a> showed the natural definitions do not sum to the expected loss the way they do here. The <em>tradeoff intuition</em> carries over to classification. The <em>equation</em> does not.</div>
+      </div>
+    </details>
+
     <p>Every regularization technique you've used is the same trade. L2 weight decay, dropout, early stopping, data augmentation, a smaller architecture: each one buys less variance by accepting more bias, betting the variance removed outweighs the bias added. <strong>That trade, not any specific technique, is the concept an interviewer is checking for.</strong></p>
   </section>
 
@@ -389,16 +496,16 @@
     <h3>Cross-entropy loss for a 3-class prediction</h3>
     <p>Say the true label is cat, out of {cat, dog, bird}. That's a one-hot target <span>$y=[1,0,0]$</span>. Illustrative model output, a softmax distribution: <span>$\hat{y} = [0.9,\ 0.07,\ 0.03]$</span>.</p>
     <p>Cross-entropy only ever looks at the probability assigned to the <strong>true</strong> class, because every other term in the sum is multiplied by a zero from the one-hot target:</p>
-    <div class="eq-block"><span>$$H(y,\hat{y}) = -\big(1\cdot\log 0.9 + 0\cdot\log 0.07 + 0\cdot\log 0.03\big) = -\log(0.9) \approx 0.105 \text{ nats}$$</span></div>
+    <div class="eq-block"><span>$$\begin{aligned}H(y,\hat{y}) &= -\big(1\cdot\log 0.9 + 0\cdot\log 0.07 + 0\cdot\log 0.03\big) \\ &= -\log(0.9) \approx 0.105 \text{ nats}\end{aligned}$$</span></div>
     <p>Now the same true label, but an illustrative model that guessed confidently wrong: <span>$\hat{y}' = [0.05,\ 0.9,\ 0.05]$</span>.</p>
     <div class="eq-block"><span>$$H(y,\hat{y}') = -\log(0.05) \approx 3.0 \text{ nats}$$</span></div>
     <p>Same true label, roughly 30x more loss, just for going from confidently right to confidently wrong. <strong>That gap is the entire point of the loss function's shape.</strong> See the diagram above.</p>
 
     <h3>KL divergence between two tiny distributions</h3>
     <p>Illustrative true/reference distribution over 3 outcomes: <span>$p=[0.5,\ 0.3,\ 0.2]$</span>. Illustrative predicted distribution: <span>$q=[0.6,\ 0.2,\ 0.2]$</span>.</p>
-    <div class="eq-block"><span>$$D_{KL}(p\|q) = 0.5\log\frac{0.5}{0.6} + 0.3\log\frac{0.3}{0.2} + 0.2\log\frac{0.2}{0.2} \approx -0.091 + 0.122 + 0 \approx 0.030 \text{ nats}$$</span></div>
+    <div class="eq-block"><span>$$\begin{aligned}D_{KL}(p\|q) &= 0.5\log\frac{0.5}{0.6} + 0.3\log\frac{0.3}{0.2} + 0.2\log\frac{0.2}{0.2} \\ &\approx -0.091 + 0.122 + 0 \approx 0.030 \text{ nats}\end{aligned}$$</span></div>
     <p>Small, because the two distributions are close. Now swap which one is called "true" and compute <span>$D_{KL}(q\|p)$</span> instead:</p>
-    <div class="eq-block"><span>$$D_{KL}(q\|p) = 0.6\log\frac{0.6}{0.5} + 0.2\log\frac{0.2}{0.3} + 0.2\log\frac{0.2}{0.2} \approx 0.109 - 0.081 + 0 \approx 0.028 \text{ nats}$$</span></div>
+    <div class="eq-block"><span>$$\begin{aligned}D_{KL}(q\|p) &= 0.6\log\frac{0.6}{0.5} + 0.2\log\frac{0.2}{0.3} + 0.2\log\frac{0.2}{0.2} \\ &\approx 0.109 - 0.081 + 0 \approx 0.028 \text{ nats}\end{aligned}$$</span></div>
     <p>A different number: 0.030 vs 0.028 nats. Close in this illustrative case, but not equal, and in general they can diverge much further. That's the asymmetry mentioned above. KL divergence penalizes <em>"my model is confident about something the truth says is unlikely"</em> differently than <em>"my model is unsure about something the truth says is certain."</em></p>
 
     <h3>Where this shows up in production</h3>
