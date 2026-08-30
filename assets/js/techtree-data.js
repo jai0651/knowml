@@ -394,6 +394,14 @@ window.KML_TECHTREE = [
         { name: 'Chat templates', desc: 'The exact token format a base model was trained on; a mismatch quietly ruins a run.', page: '29-finetuning-llms' },
         { name: 'Unsloth', desc: 'Custom Triton kernels and manual backprop that cut fine-tuning memory and time.', page: '29-finetuning-llms' }
       ]},
+      { name: 'Serving a model to many users', children: [
+        { name: 'Prefill vs decode', desc: 'The two phases of a request. Prefill saturates compute; decode is bound by memory bandwidth.', page: '31-llm-inference-serving' },
+        { name: 'Continuous batching', desc: 'Schedules per decode step, so finished requests leave the batch and waiting ones join it immediately.', page: '31-llm-inference-serving' },
+        { name: 'Chunked prefill', desc: 'Splits a long prefill into interleaved pieces so one big prompt cannot stall everyone else mid-stream.', page: '31-llm-inference-serving' },
+        { name: 'Prefix caching', desc: 'Reuses the KV cache of a shared prompt prefix across requests, cutting time to first token.', page: '31-llm-inference-serving' },
+        { name: 'TTFT / inter-token latency', desc: 'The two latency numbers users feel, set by prefill and decode respectively.', page: '31-llm-inference-serving' },
+        { name: 'Serving engines', desc: 'vLLM, SGLang, llama.cpp and TensorRT-LLM, and the workloads each one is actually for.', page: '31-llm-inference-serving' }
+      ]},
       { name: 'Fitting a model on your hardware', children: [
         { name: 'VRAM arithmetic', desc: 'Weights plus KV cache plus overhead. Compute it rather than guessing.', page: '30-running-models-locally' },
         { name: 'GGUF', desc: 'The quantized format llama.cpp and Ollama consume.', page: '30-running-models-locally' },

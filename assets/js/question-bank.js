@@ -1969,5 +1969,93 @@ window.KML_QUESTIONS = [
 "level": "deep",
 "q": "When is running locally genuinely cheaper than an API?",
 "a": "<p>When utilisation is high and quality requirements are modest. Hardware is a fixed cost that you pay whether or not it is busy, while API pricing is proportional to use, so local wins on sustained high-volume workloads and loses on spiky or low ones. The comparison also has to include engineering time, which is usually the largest hidden cost. The honest framing is that most local deployments are justified by privacy, offline operation, or model access rather than by cost, and treating cost as the primary argument usually means the arithmetic has not been done.</p>"
+},
+{
+"id": "31-llm-inference-serving::0",
+"pageId": "31-llm-inference-serving",
+"page": "31-llm-inference-serving",
+"pageTitle": "LLM Inference & Serving",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "beginner",
+"q": "What are prefill and decode, and why does the distinction matter?",
+"a": "<p>Prefill processes the entire input prompt in one parallel forward pass and produces the first output token. Decode then generates each subsequent token in its own pass. The distinction matters because they have opposite hardware profiles: prefill has many tokens per weight load and saturates compute, while decode has one token per request per pass and is limited by memory bandwidth. Almost every serving optimisation targets one phase or the other, so naming the phase is the first step in any performance discussion.</p>"
+},
+{
+"id": "31-llm-inference-serving::1",
+"pageId": "31-llm-inference-serving",
+"page": "31-llm-inference-serving",
+"pageTitle": "LLM Inference & Serving",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "beginner",
+"q": "What is TTFT, and what is inter-token latency?",
+"a": "<p>Time to first token is how long a user waits before any output appears, and it is dominated by prefill, so it grows with prompt length. Inter-token latency is the gap between successive streamed tokens, dominated by decode, and roughly constant per token. They matter to different products: TTFT decides whether a chat interface feels responsive, while inter-token latency decides whether the stream reads comfortably once it starts.</p>"
+},
+{
+"id": "31-llm-inference-serving::2",
+"pageId": "31-llm-inference-serving",
+"page": "31-llm-inference-serving",
+"pageTitle": "LLM Inference & Serving",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Why is batching so much more effective during decode than during prefill?",
+"a": "<p>Because decode is memory-bandwidth-bound and prefill is not. A decode step reads every weight to compute one token per request, so the weights are already in flight and adding another request costs almost no extra memory traffic. Its arithmetic intensity works out to roughly the batch size, independent of model size, so more requests move you along the roofline toward the compute limit. Prefill already has thousands of tokens per weight load and is compute-bound, so extra requests mostly queue for the same saturated arithmetic units.</p>"
+},
+{
+"id": "31-llm-inference-serving::3",
+"pageId": "31-llm-inference-serving",
+"page": "31-llm-inference-serving",
+"pageTitle": "LLM Inference & Serving",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "What is continuous batching and what problem does it solve?",
+"a": "<p>It schedules at the granularity of a single decode step rather than a whole request, so finished requests leave the batch and waiting ones join it after every step. The problem it solves is that generation lengths vary a great deal. With static batching, a batch cannot retire until its longest member finishes, so short requests occupy slots while producing nothing. Iteration-level scheduling, introduced in the Orca paper, keeps the batch full instead and is the largest single throughput win in modern serving.</p>"
+},
+{
+"id": "31-llm-inference-serving::4",
+"pageId": "31-llm-inference-serving",
+"page": "31-llm-inference-serving",
+"pageTitle": "LLM Inference & Serving",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Users report their output freezing mid-stream at random. What would you check?",
+"a": "<p>Correlate the freezes against other requests' input lengths. The likely cause is head-of-line blocking: a long prefill occupies the GPU for one long scheduler step, and every request already streaming stalls for its duration. The affected users did nothing unusual, which is why it looks random from their side. The fix is chunked prefill, which splits a long prefill into pieces interleaved with ongoing decodes, so no single step is long enough to starve anyone. Preemption and recompute under cache pressure can produce a similar signature and is worth ruling out.</p>"
+},
+{
+"id": "31-llm-inference-serving::5",
+"pageId": "31-llm-inference-serving",
+"page": "31-llm-inference-serving",
+"pageTitle": "LLM Inference & Serving",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "Why is goodput a better target than throughput?",
+"a": "<p>Because throughput can be raised without limit by accepting more concurrency, and past a certain point every additional request is served too slowly to be worth anything. A server can post an excellent tokens-per-second figure while missing its latency target on every request. Goodput counts only the requests that met their target, so it cannot be improved by degrading service. It also makes capacity planning honest, since it answers how many users you can serve acceptably rather than how much work the hardware can be made to do.</p>"
+},
+{
+"id": "31-llm-inference-serving::6",
+"pageId": "31-llm-inference-serving",
+"page": "31-llm-inference-serving",
+"pageTitle": "LLM Inference & Serving",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "Your system prompt is 4,000 tokens and TTFT is too high. Walk through the options.",
+"a": "<p>Start with prefix caching, since a fixed system prompt is identical across every request and its KV entries can be computed once and reused, removing that prefill work entirely on a hit. Check the prompt's ordering next: cache reuse stops at the first differing token, so anything variable near the top, a timestamp or a user ID, invalidates everything below it and must move to the end. If caching is already in place, chunked prefill will not reduce this request's own TTFT but stops it inflating everyone else's latency. Only then consider shortening the prompt or serving a smaller model, and measure the tail rather than the mean throughout, because TTFT problems usually live in the 99th percentile.</p>"
+},
+{
+"id": "31-llm-inference-serving::7",
+"pageId": "31-llm-inference-serving",
+"page": "31-llm-inference-serving",
+"pageTitle": "LLM Inference & Serving",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "When would you choose SGLang or TensorRT-LLM over vLLM?",
+"a": "<p>SGLang when the traffic has heavy prefix overlap, which is normal for agent loops, few-shot prompting and repeated questions about one document, because RadixAttention shares cached prefixes through a radix tree rather than requiring exact matches. It is also the stronger choice when constrained or structured output matters. TensorRT-LLM when the hardware is fixed to NVIDIA, the model is stable, and an ahead-of-time compiled plan is worth the build step and version coupling it introduces. vLLM remains the sensible default, and the case for moving should come from a measurement on your own traffic rather than from published benchmarks run on someone else's.</p>"
 }
 ];

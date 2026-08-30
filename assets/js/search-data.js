@@ -409,5 +409,30 @@ window.SEARCH_INDEX = [
     ],
     "summary": "Compute the VRAM yourself \u2014 weights, KV cache and overhead \u2014 then pick a quantization format, a runtime and hardware that actually fits.",
     "color": "var(--c-practice)"
+  },
+  {
+    "title": "31 \u00b7 LLM Inference & Serving",
+    "section": "Hands-on",
+    "url": "topics/31-llm-inference-serving.html",
+    "tags": [
+      "LLM Inference & Serving",
+      "Hands-on",
+      "prefill",
+      "decode",
+      "TTFT",
+      "inter-token latency",
+      "throughput",
+      "goodput",
+      "continuous batching",
+      "chunked prefill",
+      "prompt caching",
+      "prefix caching",
+      "vLLM",
+      "SGLang",
+      "TensorRT-LLM",
+      "full"
+    ],
+    "summary": "Prefill saturates compute, decode is starved by memory bandwidth. Everything else \u2014 batching, chunked prefill, prefix caching, engine choice \u2014 follows from that.",
+    "color": "var(--c-practice)"
   }
 ];
