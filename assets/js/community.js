@@ -83,7 +83,15 @@
             .catch(function () {});
         }
       })
-      .catch(function () { /* API not reachable — skip the widget entirely */ });
+      .catch(function (err) {
+        /* No backend (local static server) is normal, so the widget is skipped
+           rather than shown broken. A 4xx is not normal: it means the request
+           reached the API and was rejected, which is how pages 29-32 silently
+           lost their counters once. Surface that one. */
+        if (err && err.status >= 400 && err.status < 500) {
+          console.warn('[KnowML] counters API rejected pageId "' + pid + '" (' + err.status + ') — widget not shown');
+        }
+      });
   }
 
   /* ---------- discussion / comments ---------- */
@@ -280,15 +288,23 @@
   }
 
   /* ---------- tiny fetch helpers ---------- */
+  /* Carry the status on the error. Without it every failure looks identical, so
+     "no backend running" and "the API rejected this request" were indistinguishable,
+     which is what let a 400 on four pages go unnoticed. */
+  function httpError(r) {
+    var e = new Error('bad response: ' + r.status);
+    e.status = r.status;
+    return e;
+  }
   function apiGet(url) {
-    return fetch(url).then(function (r) { if (!r.ok) throw new Error('bad response'); return r.json(); });
+    return fetch(url).then(function (r) { if (!r.ok) throw httpError(r); return r.json(); });
   }
   function apiPost(url, body) {
     return fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    }).then(function (r) { if (!r.ok) throw new Error('bad response'); return r.json(); });
+    }).then(function (r) { if (!r.ok) throw httpError(r); return r.json(); });
   }
 
   document.addEventListener('DOMContentLoaded', function () {

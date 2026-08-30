@@ -12,42 +12,30 @@ export function getSql() {
   return _sql;
 }
 
-// Recognized page ids — kept in sync with assets/js/search-data.js's page list.
-// Validating against this prevents arbitrary strings from creating junk rows.
-export const KNOWN_PAGE_IDS = new Set([
-  "00-map-timeline",
-  "01-math-foundations",
-  "02-classical-ml",
-  "03-unsupervised-self-supervised",
-  "04-neural-network-fundamentals",
-  "05-cnn-vision-foundations",
-  "06-modern-vision-foundation-models",
-  "07-sequence-modeling-pre-transformer",
-  "08-attention-transformers",
-  "09-nlp-evolution",
-  "10-llm-architecture-training",
-  "11-rag-agents-reasoning",
-  "12-generative-models",
-  "13-speech-audio",
-  "14-multimodal-ai",
-  "15-reinforcement-learning",
-  "16-recommenders-ranking-search",
-  "17-time-series-forecasting",
-  "18-graph-ml",
-  "19-scientific-structured-ai",
-  "20-3d-spatial-autonomous-driving",
-  "21-robotics-embodied-ai",
-  "22-world-models",
-  "23-efficient-ai-systems",
-  "24-mlops",
-  "25-evaluation-reliability-safety",
-  "26-frontier-2026",
-  "27-interview-mastery",
-  "28-gpu-architecture-cuda-distributed",
-]);
+// Page ids are lowercase-hyphenated slugs, usually carrying a two-digit index:
+// "08-attention-transformers", or "technique-map" for pages outside the
+// numbered sequence. This validates by shape rather than against a list of
+// known ids, and that is deliberate.
+//
+// The previous version enumerated every id by hand with a note to keep it in
+// sync. It was not kept in sync. Pages 29 through 32 and the technique map were
+// never added, so every request for them failed validation with a 400, and
+// because the client catches that error and skips the widget rather than
+// surfacing it, five pages quietly lost their view and like counters with
+// nothing in any log to say so.
+//
+// The tradeoff is that a well-formed id which is not a real page can still
+// create a row. For a view counter that is a much smaller cost than silently
+// losing the widget on every page added from here on.
+const PAGE_ID_PATTERN = /^(?:\d{2}-)?[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const PAGE_ID_MAX_LENGTH = 64;
 
 export function isValidPageId(pageId) {
-  return typeof pageId === "string" && KNOWN_PAGE_IDS.has(pageId);
+  return (
+    typeof pageId === "string" &&
+    pageId.length <= PAGE_ID_MAX_LENGTH &&
+    PAGE_ID_PATTERN.test(pageId)
+  );
 }
 
 export function setCors(res) {
