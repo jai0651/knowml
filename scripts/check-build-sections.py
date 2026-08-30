@@ -34,7 +34,7 @@ EXPECTED_NUM = {
     "21-robotics-embodied-ai": "07", "23-efficient-ai-systems": "14",
     "24-mlops": "09", "25-evaluation-reliability-safety": "07",
     "26-frontier-2026": "07", "28-gpu-architecture-cuda-distributed": "14",
-    "31-llm-inference-serving": "07",
+    "31-llm-inference-serving": "07", "32-preference-optimization": "09",
 }
 
 # Page 30's "Worked example" is the VRAM sizing calculation, which is the whole

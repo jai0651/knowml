@@ -394,6 +394,14 @@ window.KML_TECHTREE = [
         { name: 'Chat templates', desc: 'The exact token format a base model was trained on; a mismatch quietly ruins a run.', page: '29-finetuning-llms' },
         { name: 'Unsloth', desc: 'Custom Triton kernels and manual backprop that cut fine-tuning memory and time.', page: '29-finetuning-llms' }
       ]},
+      { name: 'Teaching a model what people prefer', children: [
+        { name: 'RLHF (PPO)', desc: 'Train a reward model on comparisons, then optimise the policy against it with PPO under a KL constraint.', page: '32-preference-optimization' },
+        { name: 'Reward model / Bradley-Terry', desc: 'Turns pairwise comparisons into a scalar score. Only reward differences are identified.', page: '32-preference-optimization' },
+        { name: 'DPO', desc: 'The reward model cancels algebraically, leaving a supervised loss on preference pairs.', page: '32-preference-optimization' },
+        { name: 'GRPO', desc: 'Keeps the RL loop but replaces the value network with the mean reward of a sampled group.', page: '32-preference-optimization' },
+        { name: 'RLVR (verifiable rewards)', desc: 'Scores against a checker that is simply right: a test suite, an exact answer, a schema.', page: '32-preference-optimization' },
+        { name: 'KTO / ORPO / SimPO', desc: 'DPO variants dropping paired data, the reference model, or normalising away length bias.', page: '32-preference-optimization' }
+      ]},
       { name: 'Serving a model to many users', children: [
         { name: 'Prefill vs decode', desc: 'The two phases of a request. Prefill saturates compute; decode is bound by memory bandwidth.', page: '31-llm-inference-serving' },
         { name: 'Continuous batching', desc: 'Schedules per decode step, so finished requests leave the batch and waiting ones join it immediately.', page: '31-llm-inference-serving' },

@@ -434,5 +434,30 @@ window.SEARCH_INDEX = [
     ],
     "summary": "Prefill saturates compute, decode is starved by memory bandwidth. Everything else \u2014 batching, chunked prefill, prefix caching, engine choice \u2014 follows from that.",
     "color": "var(--c-practice)"
+  },
+  {
+    "title": "32 \u00b7 Preference Optimization: RLHF, DPO & GRPO",
+    "section": "Hands-on",
+    "tags": [
+      "Preference Optimization",
+      "Hands-on",
+      "RLHF",
+      "DPO",
+      "GRPO",
+      "PPO",
+      "RLVR",
+      "reward model",
+      "Bradley-Terry",
+      "KTO",
+      "ORPO",
+      "SimPO",
+      "IPO",
+      "reward hacking",
+      "TRL",
+      "full"
+    ],
+    "url": "topics/32-preference-optimization.html",
+    "summary": "RLHF, DPO, GRPO and verifiable rewards reach the same KL-constrained objective with steadily less machinery. The derivations, and how each one breaks.",
+    "color": "var(--c-practice)"
   }
 ];

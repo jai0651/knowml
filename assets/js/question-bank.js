@@ -2123,5 +2123,93 @@ window.KML_QUESTIONS = [
 "level": "deep",
 "q": "When would you choose SGLang or TensorRT-LLM over vLLM?",
 "a": "<p>SGLang when the traffic has heavy prefix overlap, which is normal for agent loops, few-shot prompting and repeated questions about one document, because RadixAttention shares cached prefixes through a radix tree rather than requiring exact matches. It is also the stronger choice when constrained or structured output matters. TensorRT-LLM when the hardware is fixed to NVIDIA, the model is stable, and an ahead-of-time compiled plan is worth the build step and version coupling it introduces. vLLM remains the sensible default, and the case for moving should come from a measurement on your own traffic rather than from published benchmarks run on someone else's.</p>"
+},
+{
+"id": "32-preference-optimization::0",
+"pageId": "32-preference-optimization",
+"page": "32-preference-optimization",
+"pageTitle": "Preference Optimization: RLHF, DPO & GRPO",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "beginner",
+"q": "Why is supervised fine-tuning not enough to align a model?",
+"a": "<p>Because SFT can only raise the likelihood of one target sequence, and preference is a relation between two acceptable outputs rather than a property of one. Given a concise answer and a thorough one that are both correct, SFT has no way to express that people prefer one. There is also a ceiling effect: imitation pushes the model toward the average of its demonstrators, whereas people can reliably judge which of two answers is better long past the point where they could write the better one. Preference optimization converts that judging ability into training signal.</p>"
+},
+{
+"id": "32-preference-optimization::1",
+"pageId": "32-preference-optimization",
+"page": "32-preference-optimization",
+"pageTitle": "Preference Optimization: RLHF, DPO & GRPO",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "beginner",
+"q": "What is the KL term in the RLHF objective for?",
+"a": "<p>It keeps the policy close to the SFT reference model, and it is what stops the method from destroying the model. The reward model is an imperfect proxy, so an unconstrained optimiser will find where the proxy is wrong and exploit it, producing text that scores highly and reads badly. The coefficient <span>$\\beta$</span> sets the exchange rate between reward and drift. Too low and the model degenerates; too high and it barely moves from where it started.</p>"
+},
+{
+"id": "32-preference-optimization::2",
+"pageId": "32-preference-optimization",
+"page": "32-preference-optimization",
+"pageTitle": "Preference Optimization: RLHF, DPO & GRPO",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "How does DPO eliminate the reward model, and is it an approximation?",
+"a": "<p>It is not an approximation on the stated objective. The KL-constrained RLHF objective has a closed-form optimal policy, the reference distribution reweighted by exponentiated reward. Rearranging gives the reward as a log-ratio between policy and reference, plus a normalising term that depends only on the prompt. Substituting that into the Bradley-Terry preference model leaves a difference of two rewards for the same prompt, so the intractable normaliser cancels, and what remains is a supervised loss on the policy's own log-probabilities. The caveats are that the equivalence assumes an unconstrained policy class, and that DPO learns only from the fixed dataset rather than from its own samples.</p>"
+},
+{
+"id": "32-preference-optimization::3",
+"pageId": "32-preference-optimization",
+"page": "32-preference-optimization",
+"pageTitle": "Preference Optimization: RLHF, DPO & GRPO",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "What does GRPO remove relative to PPO, and what does it cost?",
+"a": "<p>It removes the value network. That network exists to provide a baseline for the advantage, and GRPO gets a baseline instead by sampling a group of responses to the same prompt and normalising each reward by the group's mean and standard deviation. That deletes a model roughly the size of the policy and gives a per-prompt difficulty baseline, which is exactly what the value function was trying to learn. The cost is generation: every step needs several full completions per prompt rather than one, so GRPO is inference-heavy and serious setups run a dedicated inference engine for rollouts.</p>"
+},
+{
+"id": "32-preference-optimization::4",
+"pageId": "32-preference-optimization",
+"page": "32-preference-optimization",
+"pageTitle": "Preference Optimization: RLHF, DPO & GRPO",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Reward is climbing steadily during RLHF but the outputs look worse. What is happening?",
+"a": "<p>Reward hacking. The policy has found a region where the reward model is wrong and is optimising the proxy rather than the thing it stands for. A related cause is distribution shift: the reward model was trained on SFT-era outputs, and as the policy moves away its scores become unreliable. Check whether the KL from the reference is growing, look for the usual exploits such as length inflation or repeated flattering phrasing, and read generations from a fixed prompt set at every checkpoint. Remedies are raising <span>$\\beta$</span>, stopping earlier, or refreshing the reward model on samples from the current policy.</p>"
+},
+{
+"id": "32-preference-optimization::5",
+"pageId": "32-preference-optimization",
+"page": "32-preference-optimization",
+"pageTitle": "Preference Optimization: RLHF, DPO & GRPO",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "In DPO, both chosen and rejected log-probabilities decrease during training. Is that a bug?",
+"a": "<p>It is a real and commonly observed property of the objective rather than an implementation error. The loss depends only on the difference between the two implicit rewards, so it is satisfied equally well by raising the chosen response's likelihood or by lowering the rejected one further, and gradient descent frequently does the latter to both. The consequence is that the model can become less likely to produce the preferred response while the margin looks healthy. It is a good argument for monitoring the raw log-probabilities rather than only the margin, and part of the motivation for reference-free variants and for online methods that sample from the current policy.</p>"
+},
+{
+"id": "32-preference-optimization::6",
+"pageId": "32-preference-optimization",
+"page": "32-preference-optimization",
+"pageTitle": "Preference Optimization: RLHF, DPO & GRPO",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "What does the Bradley-Terry assumption commit you to, and when does it fail?",
+"a": "<p>It assumes a single scalar of quality exists and that every annotator noisily measures the same one, with preference probability given by the sigmoid of a reward difference. Two consequences follow. Only differences are identified, so reward-model outputs have no absolute meaning and cannot be compared across runs. More seriously, genuine disagreement about tone, caution or verbosity gets averaged into a reward that represents nobody's actual preference, and intransitive preferences cannot be represented at all. Every method fitting a Bradley-Terry reward inherits this, DPO included, since the derivation runs straight through it.</p>"
+},
+{
+"id": "32-preference-optimization::7",
+"pageId": "32-preference-optimization",
+"page": "32-preference-optimization",
+"pageTitle": "Preference Optimization: RLHF, DPO & GRPO",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "When would you use verifiable rewards instead of a learned reward model?",
+"a": "<p>Whenever correctness is decidable by a program: maths answers checked against a reference, code run against a test suite, output validated against a schema. The advantage is that the reward is not a proxy, so the usual form of reward hacking, exploiting the gap between a learned model and what it stands for, has nothing to exploit. It does not eliminate gaming entirely, since a model can special-case visible tests or find a degenerate format the checker accepts, so the pressure moves to the verifier's incompleteness. The real limit is scope: nothing verifies whether an answer was appropriately tactful, so production recipes combine verifiable rewards for reasoning and code with preference data for tone.</p>"
 }
 ];
