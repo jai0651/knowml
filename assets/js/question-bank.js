@@ -398,6 +398,28 @@ window.KML_QUESTIONS = [
 "a": "<p>Classic exploding gradient: an RNN reuses the same weight matrix at every timestep, so the backward gradient is roughly that matrix raised to the power of the sequence length. If its dominant eigenvalue is above 1, the gradient — and eventually the loss — grows exponentially with sequence length until it overflows to NaN. Fix: clip the global gradient norm to a fixed threshold before the optimizer step (this caps magnitude without changing direction), consider a lower learning rate, and if this keeps recurring, consider whether the architecture itself (e.g. gated recurrence, or dropping recurrence for attention) is fighting you rather than a tuning issue.</p>"
 },
 {
+"id": "04-neural-network-fundamentals::7",
+"pageId": "04-neural-network-fundamentals",
+"page": "04-neural-network-fundamentals",
+"pageTitle": "Neural Network Fundamentals",
+"group": "Neural Nets & Vision",
+"color": "var(--c-nn)",
+"level": "intermediate",
+"q": "What does dropout do differently at training time and at evaluation time?",
+"a": "<p>During training it zeroes each unit independently with probability <span>$p$</span> and rescales the survivors by <span>$1/(1-p)$</span>, so the expected activation is unchanged. At evaluation nothing is dropped and no rescaling happens, which is why the scaling has to be applied during training rather than after. The mechanism prevents co-adaptation: no unit can depend on a particular other unit being present, so the network cannot rely on a committee where no member is individually meaningful. Forgetting <code>model.eval()</code> leaves dropout active at inference, which produces results that are noisy and slightly wrong rather than obviously broken.</p>"
+},
+{
+"id": "04-neural-network-fundamentals::8",
+"pageId": "04-neural-network-fundamentals",
+"page": "04-neural-network-fundamentals",
+"pageTitle": "Neural Network Fundamentals",
+"group": "Neural Nets & Vision",
+"color": "var(--c-nn)",
+"level": "deep",
+"q": "Why do modern transformer blocks use little or no dropout in the residual stream?",
+"a": "<p>Partly because dropout and normalization interact badly. Dropout changes activation variance between training and evaluation, and BatchNorm's running statistics were estimated under training-time dropout, so the two disagree at inference. Transformers avoid that by using LayerNorm or RMSNorm, which are per-example and need no running statistics. The larger reason is that regularization need scales with how much the model can memorise relative to the data. A large model trained on a very large corpus sees few repeats, so the data itself does much of the regularising and heavy dropout mostly slows convergence.</p>"
+},
+{
 "id": "05-cnn-vision-foundations::0",
 "pageId": "05-cnn-vision-foundations",
 "page": "05-cnn-vision-foundations",
@@ -957,6 +979,28 @@ window.KML_QUESTIONS = [
 "level": "deep",
 "q": "Retrieval quality looks fine (high precision@k) but the agent's answers are still wrong. What do you check next?",
 "a": "<p>Separate the failure by stage instead of assuming it's a retrieval problem. Check groundedness directly: is the final answer actually supported by the retrieved chunks, or is the model ignoring good context and answering from parametric memory anyway — a real failure mode even with perfect retrieval. Check chunking: a retrieved chunk can be topically \"relevant\" by the precision@k metric but still missing the context needed to answer correctly if it was split awkwardly. Check the generation prompt: is the model actually instructed to answer only from the provided context, or is it free to blend in memorized knowledge unchecked. High precision@k only confirms the right text was found — it says nothing about whether the model used it correctly.</p>"
+},
+{
+"id": "11-rag-agents-reasoning::8",
+"pageId": "11-rag-agents-reasoning",
+"page": "11-rag-agents-reasoning",
+"pageTitle": "RAG, Agents & Reasoning",
+"group": "Generative & Multimodal",
+"color": "var(--c-rag)",
+"level": "intermediate",
+"q": "When do you actually need a vector database?",
+"a": "<p>Later than most teams reach for one. Below roughly a hundred thousand chunks, brute-force cosine similarity in NumPy runs in milliseconds, and it has no index to keep in sync with your source of truth. A dedicated store buys approximate nearest-neighbour speed, metadata filtering, and incremental updates, at the cost of an operational component and a staleness failure mode. It becomes worthwhile when the corpus is large, changes constantly, or needs filtered search. Retrieval quality is almost always the real bottleneck, and no database fixes bad chunking or a mismatched embedding model.</p>"
+},
+{
+"id": "11-rag-agents-reasoning::9",
+"pageId": "11-rag-agents-reasoning",
+"page": "11-rag-agents-reasoning",
+"pageTitle": "RAG, Agents & Reasoning",
+"group": "Generative & Multimodal",
+"color": "var(--c-rag)",
+"level": "intermediate",
+"q": "What does LangGraph give you that a chain abstraction cannot?",
+"a": "<p>An explicit state graph rather than a linear sequence. Nodes are steps, edges are transitions, and conditional edges decide where to go next, so the control flow is a real object you can inspect. That buys cycles, which an agent loop needs by definition, plus checkpointing, resuming a run part-way through, and a defined place to require human approval before a step executes. A chain can express retrieve-then-generate perfectly well; it cannot express a loop that may run an unknown number of times and must survive a restart.</p>"
 },
 {
 "id": "12-generative-models::0",
@@ -1628,6 +1672,28 @@ window.KML_QUESTIONS = [
 "level": "deep",
 "q": "Your LLM-judge pairwise eval shows the new model version winning 65% of comparisons (illustrative), but a few users are reporting the new version feels worse. What do you check?",
 "a": "<p>First, check for judge bias explaining the gap: is the new model simply more verbose, and is verbosity being rewarded rather than controlled for in the rubric? Is the judge from the same family as the new model, creating self-enhancement bias? Second, check the query distribution: the judge's comparison set may not represent the specific query types the complaining users are sending — a model can win in aggregate while regressing on a specific, underrepresented but important slice, which is exactly the subgroup-evaluation problem applied to query types instead of demographics. Third, do a targeted human review specifically on the query types the complaints are about, rather than trusting the aggregate win rate to generalize to every slice equally — an aggregate number, like an aggregate accuracy, can hide a real regression in a subset that matters.</p>"
+},
+{
+"id": "25-evaluation-reliability-safety::7",
+"pageId": "25-evaluation-reliability-safety",
+"page": "25-evaluation-reliability-safety",
+"pageTitle": "Evaluation, Reliability & Safety",
+"group": "Systems, Safety & Interview",
+"color": "var(--c-eval)",
+"level": "beginner",
+"q": "What do BLEU and ROUGE measure, and how do they differ?",
+"a": "<p>Both compare generated text against human references by n-gram overlap. BLEU was built for translation and is precision-oriented: it asks how much of what the system produced is warranted by the reference, with a brevity penalty so a system cannot win by emitting a few safe words. ROUGE was built for summarisation and is recall-oriented: it asks how much of the reference the system managed to cover, with ROUGE-L using longest common subsequence so word order matters without requiring a contiguous match.</p>"
+},
+{
+"id": "25-evaluation-reliability-safety::8",
+"pageId": "25-evaluation-reliability-safety",
+"page": "25-evaluation-reliability-safety",
+"pageTitle": "Evaluation, Reliability & Safety",
+"group": "Systems, Safety & Interview",
+"color": "var(--c-eval)",
+"level": "deep",
+"q": "A model paraphrases the reference correctly and scores badly on BLEU. Is the metric wrong?",
+"a": "<p>The metric is measuring what it was designed to measure, which is surface overlap rather than meaning, so this is a known limitation rather than a bug. A correct paraphrase sharing no n-grams scores badly, and a fluent but wrong answer reusing the reference's vocabulary scores well. The practical response is to stop treating it as a quality score and start treating it as a cheap regression check that catches gross breakage deterministically. Reserve judged or human evaluation for decisions that matter, while remembering that an LLM judge costs money per call, drifts when the judge model changes, and has its own biases including a preference for longer answers.</p>"
 },
 {
 "id": "26-frontier-2026::0",

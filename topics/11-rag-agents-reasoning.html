@@ -312,6 +312,33 @@
     <p><strong>Reflection</strong> is a useful add-on to the base ReAct loop. After producing an answer or finishing a sub-task, the model (or a separate verifier model) critiques its own output against the retrieved evidence or the stated goal before finalizing it. Some errors get caught before they reach the user rather than after.</p>
     <p><strong>Code-execution agents</strong> take tool use to its most general form. Instead of a fixed menu of hand-written tools, the agent writes and runs arbitrary code in a sandbox. That turns "any computation expressible in code" into an available action, rather than only the specific functions someone pre-registered.</p>
     <p>Both patterns trade extra latency and cost for a real reduction in a specific class of errors. They're refinements on top of the core think/act/observe loop, not replacements for it.</p>
+
+    <h3>Where the vectors actually live</h3>
+
+    <p>Section 04 reduces retrieval to cosine similarity over an approximate nearest-neighbour index. A <em class="term">vector database</em> is what wraps that index in the things a real system needs: persistence, metadata filtering, incremental updates and deletes. The names you will be asked about differ mainly in how much infrastructure they assume.</p>
+
+    <ul>
+      <li><strong>FAISS.</strong> A library, not a service. Meta's ANN implementation, in-process, no server, no metadata layer. It is the right answer for a single machine and a fixed corpus, and it is what several of the managed options run underneath.</li>
+      <li><strong>Chroma.</strong> Embedded and developer-facing, closest to "FAISS plus metadata and persistence with almost no setup". Good for prototypes and small production systems.</li>
+      <li><strong>Pinecone.</strong> Fully managed and hosted. You trade control and per-query cost for not operating an index yourself, which matters most when the corpus changes constantly.</li>
+      <li><strong>pgvector.</strong> An extension that keeps vectors in Postgres beside the relational data. Frequently the correct choice, and frequently overlooked, because most teams already run Postgres and most corpora are far smaller than they assume.</li>
+    </ul>
+
+    <div class="callout callout-teach">
+      <div class="callout-label">The answer that shows judgement</div>
+      <p>The interesting question is rarely which database. It is whether you need one. Below roughly a hundred thousand chunks, brute-force cosine similarity in NumPy runs in milliseconds and has no index to keep in sync with your source of truth. Reaching for a dedicated vector store at that scale adds an operational component and a staleness failure mode in exchange for a speedup nobody measures. Retrieval <em>quality</em> is almost always the bottleneck, and no database fixes bad chunking or a mismatched embedding model.</p>
+    </div>
+
+    <h3>Orchestration frameworks</h3>
+
+    <p>Everything on this page so far is a control-flow pattern: retrieve, then generate; or think, act, observe, repeat. <em class="term">LangChain</em> and <em class="term">LangGraph</em> package those patterns so you write less glue.</p>
+
+    <ul>
+      <li><strong>LangChain</strong> supplies the components and the connectors: document loaders, text splitters, retriever and vector-store adapters, prompt templates, and a uniform interface across model providers. Its value is that swapping an embedding model or a vector store becomes a configuration change.</li>
+      <li><strong>LangGraph</strong> models an agent as an explicit <strong>state graph</strong> rather than a chain. Nodes are steps, edges are transitions, and a conditional edge decides where to go next. Because the graph is a real object, you get cycles, checkpointing, resuming a run mid-way, and a place to require human approval before a step executes. That is what a chain abstraction cannot express.</li>
+    </ul>
+
+    <p>Use them for what they are. The frameworks are worth it for the connector surface and, in LangGraph's case, for durable multi-step state. They are not worth it as a substitute for understanding the loop, and a retrieval pipeline you cannot debug without the framework's tracing is one you do not yet understand. Build the pipeline in section 07 by hand first; the abstractions make more sense once you know what they are abstracting.</p>
   </section>
 
   <section id="math">
@@ -440,6 +467,14 @@
     <details class="qa"><summary><span class="qa-level deep">Deep</span>Retrieval quality looks fine (high precision@k) but the agent's answers are still wrong. What do you check next?</summary>
       <div class="qa-body"><p>Separate the failure by stage instead of assuming it's a retrieval problem. Check groundedness directly: is the final answer actually supported by the retrieved chunks, or is the model ignoring good context and answering from parametric memory anyway — a real failure mode even with perfect retrieval. Check chunking: a retrieved chunk can be topically "relevant" by the precision@k metric but still missing the context needed to answer correctly if it was split awkwardly. Check the generation prompt: is the model actually instructed to answer only from the provided context, or is it free to blend in memorized knowledge unchecked. High precision@k only confirms the right text was found — it says nothing about whether the model used it correctly.</p></div>
     </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>When do you actually need a vector database?</summary>
+      <div class="qa-body"><p>Later than most teams reach for one. Below roughly a hundred thousand chunks, brute-force cosine similarity in NumPy runs in milliseconds, and it has no index to keep in sync with your source of truth. A dedicated store buys approximate nearest-neighbour speed, metadata filtering, and incremental updates, at the cost of an operational component and a staleness failure mode. It becomes worthwhile when the corpus is large, changes constantly, or needs filtered search. Retrieval quality is almost always the real bottleneck, and no database fixes bad chunking or a mismatched embedding model.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What does LangGraph give you that a chain abstraction cannot?</summary>
+      <div class="qa-body"><p>An explicit state graph rather than a linear sequence. Nodes are steps, edges are transitions, and conditional edges decide where to go next, so the control flow is a real object you can inspect. That buys cycles, which an agent loop needs by definition, plus checkpointing, resuming a run part-way through, and a defined place to require human approval before a step executes. A chain can express retrieve-then-generate perfectly well; it cannot express a loop that may run an unknown number of times and must survive a restart.</p></div>
+    </details>
   </section>
 
   <section id="resources">
@@ -460,6 +495,18 @@
       <a class="resource-card" href="https://www.pinecone.io/learn/series/rag/rerankers/" target="_blank" rel="noopener">
         <div class="r-icon">📰</div>
         <div class="r-body"><div class="r-kind">Article</div><div class="r-title">Rerankers and Two-Stage Retrieval</div><div class="r-sub">Pinecone — bi-encoder vs cross-encoder, in depth</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/facebookresearch/faiss" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">FAISS</div><div class="r-sub">Meta's similarity-search library. The in-process option, and what several managed stores run underneath.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/pgvector/pgvector" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">pgvector</div><div class="r-sub">Vector similarity search inside Postgres. Usually the right answer when you already run Postgres.</div></div>
+      </a>
+      <a class="resource-card" href="https://langchain-ai.github.io/langgraph/" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">LangGraph</div><div class="r-sub">Agents as explicit state graphs: cycles, checkpointing, and human-in-the-loop approval steps.</div></div>
       </a>
     </div>
   </section>

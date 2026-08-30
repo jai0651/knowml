@@ -360,7 +360,7 @@
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">06</span>Normalization tradeoffs and what actually breaks</h2>
+    <h2><span class="num">06</span>Normalization and regularization: what actually breaks</h2>
     <p>What you normalize over (batch, features, or a group of channels) is not a stylistic detail. It is the answer to a very common interview trap question: <em>why do transformers use LayerNorm/RMSNorm and not BatchNorm?</em></p>
     <div class="tbl-wrap">
       <table class="cmp">
@@ -405,6 +405,23 @@
       <p>RMSNorm paired with a SwiGLU-style gated feed-forward block has become the default recipe across most frontier open-weight LLM families (LLaMA, Mistral, Qwen, and others). It has largely displaced the original 2017 Transformer's LayerNorm + ReLU/GELU feed-forward design.</p>
       <p>The training algorithm underneath all of it is still exactly the backprop described on this page, essentially unchanged since 1986. The architecture keeps evolving. The gradient computation does not.</p>
     </div>
+
+    <h3>Regularization: dropout, early stopping, weight decay</h3>
+
+    <p>Normalization stabilises optimisation. <em class="term">Regularization</em> does something different: it deliberately makes training harder so the network cannot memorise its way to a low loss. Page <a href="./01-math-foundations.html">01</a> frames the tradeoff; here is what the three most common levers actually do to the network.</p>
+
+    <ul>
+      <li><strong>Dropout.</strong> During training, zero out each unit independently with probability <span>$p$</span>, then rescale the survivors by <span>$1/(1-p)$</span> so the expected activation is unchanged. At evaluation time nothing is dropped. The effect is that no unit can rely on any particular other unit being present, which stops <em>co-adaptation</em>, where a group of units only works as a committee and none is individually meaningful.</li>
+      <li><strong>Early stopping.</strong> Track validation loss every epoch, keep the weights from the best one, and stop once it has not improved for a set number of epochs. It costs nothing and it is the only technique here that needs no hyperparameter tuning beyond the patience value.</li>
+      <li><strong>Weight decay.</strong> Add a penalty proportional to the squared magnitude of the weights, which pulls them toward zero unless the data pushes back. This is <span>$L_2$</span> regularization, and in a Bayesian reading it is a Gaussian prior centred on zero.</li>
+    </ul>
+
+    <div class="callout callout-teach">
+      <div class="callout-label">The detail that trips people up</div>
+      <p>Dropout and BatchNorm interact badly, and it is a common interview follow-up. Dropout changes the variance of activations between training and evaluation, while BatchNorm's running statistics were estimated under training-time dropout. The two disagree at inference. This is one reason modern transformer blocks use LayerNorm or RMSNorm with little or no dropout in the residual stream, and it is why <code>model.eval()</code> matters: it switches <em>both</em> layers into inference behaviour, and forgetting it is a classic source of results that are quietly wrong rather than obviously broken.</p>
+    </div>
+
+    <p>A practical ordering. Reach for early stopping always, since it is free. Add weight decay next, because it is one number and it usually helps. Add dropout when the model still overfits after both, and expect to need less of it than older tutorials suggest: large models trained on large corpora are often regularised adequately by the data itself.</p>
   </section>
 
   <section id="build">
@@ -466,6 +483,14 @@
     <details class="qa"><summary><span class="qa-level deep">Deep</span>Your RNN's training loss suddenly goes to NaN a few hundred steps in. What's happening, and what do you do?</summary>
       <div class="qa-body"><p>Classic exploding gradient: an RNN reuses the same weight matrix at every timestep, so the backward gradient is roughly that matrix raised to the power of the sequence length. If its dominant eigenvalue is above 1, the gradient — and eventually the loss — grows exponentially with sequence length until it overflows to NaN. Fix: clip the global gradient norm to a fixed threshold before the optimizer step (this caps magnitude without changing direction), consider a lower learning rate, and if this keeps recurring, consider whether the architecture itself (e.g. gated recurrence, or dropping recurrence for attention) is fighting you rather than a tuning issue.</p></div>
     </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What does dropout do differently at training time and at evaluation time?</summary>
+      <div class="qa-body"><p>During training it zeroes each unit independently with probability <span>$p$</span> and rescales the survivors by <span>$1/(1-p)$</span>, so the expected activation is unchanged. At evaluation nothing is dropped and no rescaling happens, which is why the scaling has to be applied during training rather than after. The mechanism prevents co-adaptation: no unit can depend on a particular other unit being present, so the network cannot rely on a committee where no member is individually meaningful. Forgetting <code>model.eval()</code> leaves dropout active at inference, which produces results that are noisy and slightly wrong rather than obviously broken.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why do modern transformer blocks use little or no dropout in the residual stream?</summary>
+      <div class="qa-body"><p>Partly because dropout and normalization interact badly. Dropout changes activation variance between training and evaluation, and BatchNorm's running statistics were estimated under training-time dropout, so the two disagree at inference. Transformers avoid that by using LayerNorm or RMSNorm, which are per-example and need no running statistics. The larger reason is that regularization need scales with how much the model can memorise relative to the data. A large model trained on a very large corpus sees few repeats, so the data itself does much of the regularising and heavy dropout mostly slows convergence.</p></div>
+    </details>
   </section>
 
   <section id="resources">
@@ -490,6 +515,10 @@
       <a class="resource-card" href="https://arxiv.org/abs/1412.6980" target="_blank" rel="noopener">
         <div class="r-icon">📄</div>
         <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Adam: A Method for Stochastic Optimization</div><div class="r-sub">Kingma &amp; Ba, 2014 — arXiv:1412.6980</div></div>
+      </a>
+      <a class="resource-card" href="https://jmlr.org/papers/v15/srivastava14a.html" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Dropout: A Simple Way to Prevent Neural Networks from Overfitting</div><div class="r-sub">Srivastava et al., JMLR 2014 — the co-adaptation argument, from the source.</div></div>
       </a>
     </div>
   </section>
