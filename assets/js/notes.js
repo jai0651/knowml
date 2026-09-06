@@ -333,10 +333,14 @@
     if (exportBtn) exportBtn.addEventListener('click', exportMarkdown);
     var clearBtn = document.getElementById('clearNotes');
     if (clearBtn) clearBtn.addEventListener('click', function () {
-      if (!confirm('Clear all highlights and notes on this page?')) return;
-      state = { freeNotes: '', highlights: [] };
-      save(state);
-      location.reload();
+      window.KMLModal.confirm('Clear all highlights and notes on this page?', {
+        title: 'Clear this page?', confirmLabel: 'Clear', danger: true
+      }).then(function (ok) {
+        if (!ok) return;
+        state = { freeNotes: '', highlights: [] };
+        save(state);
+        location.reload();
+      });
     });
   }
 

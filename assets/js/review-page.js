@@ -278,9 +278,13 @@
     });
 
     $('resetBtn').addEventListener('click', function () {
-      if (!confirm('Reset all review progress? Your highlights and notes are not affected.')) return;
-      R.reset();
-      paintStats(); paintMastery();
+      window.KMLModal.confirm('Reset all review progress? Your highlights and notes are not affected.', {
+        title: 'Reset progress?', confirmLabel: 'Reset', danger: true
+      }).then(function (ok) {
+        if (!ok) return;
+        R.reset();
+        paintStats(); paintMastery();
+      });
     });
   });
 })();

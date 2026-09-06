@@ -172,12 +172,13 @@
     }
     ranked.forEach(function (r, idx) {
       var it = r.it;
+      var isSection = it.kind === 'section';
       var a = document.createElement('a');
       a.href = pathPrefix() + it.url;
-      a.className = 'search-hit' + (idx === 0 ? ' active' : '');
-      a.innerHTML = '<div class="sh-sec" style="color:' + it.color + '">' + it.section + '</div>' +
+      a.className = 'search-hit' + (isSection ? ' search-hit--section' : '') + (idx === 0 ? ' active' : '');
+      a.innerHTML = '<div class="sh-sec" style="color:' + it.color + '">' + (isSection ? '↳ ' + it.section : it.section) + '</div>' +
         '<div class="sh-title">' + it.title + '</div>' +
-        '<div class="sh-sum">' + it.summary + '</div>';
+        '<div class="sh-sum">' + (isSection ? 'in ' + it.parentTitle : it.summary) + '</div>';
       box.appendChild(a);
     });
   }
@@ -189,7 +190,7 @@
     if (modal) modal.addEventListener('click', function (e) { if (e.target === modal) closeSearch(); });
     if (input) input.addEventListener('input', function () { renderResults(input.value); });
     document.addEventListener('keydown', function (e) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openSearch(); }
+      if ((e.metaKey || e.ctrlKey) && (e.key.toLowerCase() === 'k' || e.key.toLowerCase() === 'f')) { e.preventDefault(); openSearch(); }
       if (e.key === 'Escape') closeSearch();
       var m = document.getElementById('searchModal');
       if (m && m.classList.contains('open') && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter')) {
@@ -216,8 +217,22 @@
     btn.textContent = dia.classList.contains('paused') ? '▶ Play' : '⏸ Pause';
   });
 
+  /* Section search results link to h3 anchors that buildTOC() assigns at
+     runtime (see its slugify call above) — they don't exist in the raw HTML,
+     so the browser's own fragment-scroll-on-load already ran and failed by
+     the time they're created. Redo it once those ids exist. h2-level anchors
+     are real <section id> attributes already in the HTML, so they scrolled
+     correctly on their own and this is a harmless no-op for those. */
+  function scrollToHashIfNeeded() {
+    if (!location.hash) return;
+    var id = decodeURIComponent(location.hash.slice(1));
+    var el = document.getElementById(id);
+    if (el) el.scrollIntoView({ block: 'start' });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     buildTOC();
+    scrollToHashIfNeeded();
     paintDoneMarks();
     var doneBtn = document.getElementById('markDoneBtn');
     if (doneBtn) doneBtn.addEventListener('click', function () {
