@@ -22,7 +22,9 @@
     return new Date(iso).toLocaleDateString();
   }
 
-  /* ---------- views + likes widget ---------- */
+  var COMMENT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H8l-4 4V4z"/></svg>';
+
+  /* ---------- views + likes + comment-count widget ---------- */
   function renderCommunityBar(counts) {
     var pid = pageId();
     var liked = localStorage.getItem('liked:' + pid) === '1';
@@ -33,6 +35,9 @@
       '<span class="pc-views"><svg class="pc-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z"/><circle cx="12" cy="12" r="3"/></svg> <span id="pcViewCount">' + counts.views + '</span> views</span>' +
       '<button class="pc-like-btn' + (liked ? ' is-liked' : '') + '" id="pcLikeBtn" type="button">' +
         '<span class="pc-heart">' + (liked ? '❤️' : '🤍') + '</span> <span id="pcLikeCount">' + counts.likes + '</span>' +
+      '</button>' +
+      '<button class="pc-comment-btn" id="pcCommentBtn" type="button" title="Jump to comments">' +
+        COMMENT_SVG + ' <span id="pcCommentCount">' + (counts.comments != null ? counts.comments : '–') + '</span>' +
       '</button>';
     return bar;
   }
@@ -65,6 +70,27 @@
     });
   }
 
+  function openDiscussion() {
+    var toggle = document.getElementById('discussionToggle');
+    if (toggle) toggle.open = true;
+    var section = document.getElementById('discussion');
+    if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function wireCommentButton() {
+    var btn = document.getElementById('pcCommentBtn');
+    if (btn) btn.addEventListener('click', openDiscussion);
+  }
+
+  /* The bar renders from /api/counters, which has no idea how many comments
+     exist — that count comes from /api/comments, fetched separately by
+     initDiscussion(). Rather than have the bar make its own second request,
+     it starts with a placeholder and this syncs it once that fetch lands. */
+  function syncCommentCount(n) {
+    var el = document.getElementById('pcCommentCount');
+    if (el) el.textContent = n;
+  }
+
   function initCommunityBar() {
     var pid = pageId();
     if (!pid || !isTopicPage()) return;
@@ -72,6 +98,7 @@
       .then(function (counts) {
         mountCommunityBar(renderCommunityBar(counts));
         wireLikeButton();
+        wireCommentButton();
         var sessionKey = 'viewed:' + pid;
         if (!sessionStorage.getItem(sessionKey)) {
           sessionStorage.setItem(sessionKey, '1');
@@ -219,6 +246,7 @@
   function applyComments(list) {
     renderComments(list);
     renderAnchors(list);
+    syncCommentCount(list.length);
   }
 
   function initDiscussion() {
@@ -253,7 +281,7 @@
         })
         .then(function (d) { applyComments(d.comments || []); })
         .catch(function () {
-          alert('Could not post your comment — please try again.');
+          window.KMLModal.alert('Could not post your comment — please try again.', { title: 'Something went wrong' });
         })
         .finally(function () { submitBtn.disabled = false; });
     });
@@ -262,28 +290,34 @@
       var text = e.detail && e.detail.text;
       var occurrence = e.detail ? e.detail.occurrence : 0;
       if (!text) return;
-      var name = localStorage.getItem('community:name');
-      if (!name) {
-        name = (prompt('Your name (shown on your comment):', '') || '').trim();
-        if (!name) return;
-      }
+      var savedName = localStorage.getItem('community:name') || '';
       var preview = text.length > 90 ? text.slice(0, 90) + '…' : text;
-      var body = (prompt('Comment on:\n"' + preview + '"', '') || '').trim();
-      if (!body) return;
-      apiPost('/api/comments', { pageId: pid, authorName: name, body: body, anchorText: text, anchorOccurrence: occurrence })
-        .then(function () {
-          localStorage.setItem('community:name', name);
-          return apiGet('/api/comments?pageId=' + encodeURIComponent(pid));
-        })
-        .then(function (d) {
-          var list = d.comments || [];
-          applyComments(list);
-          var toggle = document.getElementById('discussionToggle');
-          if (toggle) toggle.open = true;
-          var group = list.filter(function (c) { return c.anchorText === text && (c.anchorOccurrence || 0) === occurrence; });
-          if (group.length) scrollToComment(group[group.length - 1].id);
-        })
-        .catch(function () { alert('Could not post your comment — please try again.'); });
+
+      window.KMLModal.form({
+        title: 'Comment on this passage',
+        description: '"' + preview + '"',
+        fields: [
+          { id: 'name', label: 'Your name', type: 'text', value: savedName, placeholder: 'Shown on your comment', maxlength: 60, required: true },
+          { id: 'body', label: 'Comment', type: 'textarea', placeholder: 'Share a thought, a question, a correction…', maxlength: 2000, required: true }
+        ],
+        submitLabel: 'Post comment'
+      }).then(function (values) {
+        if (!values) return;
+        apiPost('/api/comments', { pageId: pid, authorName: values.name, body: values.body, anchorText: text, anchorOccurrence: occurrence })
+          .then(function () {
+            localStorage.setItem('community:name', values.name);
+            return apiGet('/api/comments?pageId=' + encodeURIComponent(pid));
+          })
+          .then(function (d) {
+            var list = d.comments || [];
+            applyComments(list);
+            var toggle = document.getElementById('discussionToggle');
+            if (toggle) toggle.open = true;
+            var group = list.filter(function (c) { return c.anchorText === text && (c.anchorOccurrence || 0) === occurrence; });
+            if (group.length) scrollToComment(group[group.length - 1].id);
+          })
+          .catch(function () { window.KMLModal.alert('Could not post your comment — please try again.', { title: 'Something went wrong' }); });
+      });
     });
   }
 
