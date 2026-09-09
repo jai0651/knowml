@@ -425,6 +425,49 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <p>Self-attention costs <span>$O(n^2 \cdot d)$</span> time and, naively, <span>$O(n^2)$</span> memory to materialize the full attention matrix, where <span>$n$</span> is sequence length. <strong>Double the context window and compute roughly quadruples.</strong> That single fact drives a huge amount of LLM systems engineering. It is why 23 (Efficient AI &amp; Systems) exists as its own section.</p>
 
     <h3>What actually shows up in production</h3>
+
+    <div class="diagram">
+      <div class="diagram-title">KV cache growth — linear in tokens, and that is quite bad enough
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+        <!-- weights reference line -->
+        <line x1="180" y1="40" x2="180" y2="248" stroke="rgba(255,255,255,.14)" stroke-width="1"/>
+        <line x1="308" y1="40" x2="308" y2="248" stroke="#818cf8" stroke-width="1.4" stroke-dasharray="4 4"/>
+        <text x="308" y="32" text-anchor="middle" font-size="9.5" fill="#818cf8">4.9 GB — the weights</text>
+
+        <text x="24" y="60" font-size="10.5" class="dim">context</text>
+        <text x="152" y="60" text-anchor="end" font-size="10.5" class="dim">KV cache</text>
+
+        <!-- 1k -->
+        <text x="24" y="92" font-size="11" fill="#e9e9ef">1k</text>
+        <rect x="180" y="80" width="3" height="20" rx="1.5" fill="#fbbf24" opacity="0.85"/>
+        <text x="195" y="95" font-size="10" class="dim">0.12 GB · 3% of the weights</text>
+
+        <!-- 8k -->
+        <text x="24" y="132" font-size="11" fill="#e9e9ef">8k</text>
+        <rect x="180" y="120" width="26" height="20" rx="2" fill="#fbbf24" opacity="0.85"/>
+        <text x="216" y="135" font-size="10" class="dim">1.0 GB · 20%</text>
+
+        <!-- 32k -->
+        <text x="24" y="172" font-size="11" fill="#e9e9ef">32k</text>
+        <rect x="180" y="160" width="105" height="20" rx="2" fill="#fbbf24" opacity="0.85"/>
+        <text x="295" y="175" font-size="10" class="dim">4.0 GB · 82% — now rivals the weights</text>
+
+        <!-- 128k -->
+        <text x="24" y="212" font-size="11" fill="#fbbf24">128k</text>
+        <rect x="180" y="200" width="420" height="20" rx="2" fill="#fbbf24" opacity="0.85" class="pulse-node"/>
+        <text x="390" y="215" text-anchor="middle" font-size="10.5" font-weight="700" fill="#16161a">16 GB · 3.3× the weights</text>
+
+        <text x="180" y="268" font-size="10.5" class="dim">Bars are linear in gigabytes. Nothing here is quadratic — the cache grows in</text>
+        <text x="180" y="282" font-size="10.5" class="dim">straight proportion to tokens, and that alone is enough to take over the card.</text>
+
+        <text x="24" y="268" font-size="9.5" class="dim">8B model,</text>
+        <text x="24" y="280" font-size="9.5" class="dim">GQA, FP16</text>
+      </svg>
+      <div class="diagram-caption">Worked for an 8B model with grouped-query attention: 32 layers × 8 KV heads × 128 head-dim × 2 (for K and V) × 2 bytes comes to <strong>128 KB per token</strong>. Multiply by context length and the last row is 16 GB — more than three times the 4.9 GB the quantised weights occupy. Note what this diagram is <em>not</em> showing: attention compute is quadratic in sequence length, but the cache is strictly linear. Linear was already sufficient to make context length, not model size, the thing that decides whether a long conversation survives.</div>
+    </div>
+
     <ul>
       <li><strong>KV cache growth.</strong> During autoregressive generation you don't recompute attention from scratch each step. You cache every past token's K and V vectors. Cache size grows linearly with tokens generated × layers × heads × head_dim. For long conversations this becomes the dominant memory cost on the serving GPU, often larger than the model weights themselves.</li>
       <li><strong>FlashAttention</strong> doesn't reduce the <span>$O(n^2)$</span> FLOPs. It restructures the computation to avoid ever writing the full <span>$n \times n$</span> attention matrix to slow GPU memory, computing softmax in fused tiles instead. Same math, dramatically less memory traffic. Memory traffic is usually the real bottleneck on modern GPUs.</li>
