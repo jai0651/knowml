@@ -14,6 +14,9 @@
   document.addEventListener('DOMContentLoaded', function () {
     var btn = document.getElementById('themeToggle');
     if (btn) btn.addEventListener('click', function () {
+      /* Enable the colour transition only now, on a real toggle. It is not on
+         by default because it would also animate the load-time theme fix. */
+      document.documentElement.classList.add('theme-anim');
       var cur = document.documentElement.getAttribute('data-theme');
       applyTheme(cur === 'dark' ? 'light' : 'dark');
     });
@@ -190,7 +193,8 @@
     if (modal) modal.addEventListener('click', function (e) { if (e.target === modal) closeSearch(); });
     if (input) input.addEventListener('input', function () { renderResults(input.value); });
     document.addEventListener('keydown', function (e) {
-      if ((e.metaKey || e.ctrlKey) && (e.key.toLowerCase() === 'k' || e.key.toLowerCase() === 'f')) { e.preventDefault(); openSearch(); }
+      /* ⌘K is global search. ⌘F is find-on-this-page, handled by find-in-page.js. */
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openSearch(); }
       if (e.key === 'Escape') closeSearch();
       var m = document.getElementById('searchModal');
       if (m && m.classList.contains('open') && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter')) {

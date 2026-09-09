@@ -3,6 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>/* Set the theme before first paint. Without this the page renders with the
+   hardcoded data-theme below, then app.js corrects it ~600 lines later, so every
+   navigation flashed light before flipping to dark. */
+try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-theme")||"light")}catch(e){}</script>
 <title>Efficient AI &amp; Systems · KnowML</title>
 <meta name="description" content="GPU fundamentals, parallelism, ZeRO/FSDP sharding, mixed precision, KV cache, PagedAttention, continuous batching, FlashAttention, speculative decoding, quantization — the systems layer that makes LLMs fast and cheap to run.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -376,6 +380,59 @@
       <li><span class="sym">Threshold</span> every GPU has a <strong>ridge point</strong>, its peak compute throughput divided by its peak memory bandwidth, in FLOPs/byte. Above that ridge point you're compute-bound: the chip's math units are the limiting factor. Below it you're memory-bound: the chip finishes the math and then waits on data.</li>
       <li><span class="sym">Practical read</span> operations with a lot of reuse per byte loaded, like the big batched matrix multiplications in most of training, sit above the ridge point. Operations that load a lot of data to do comparatively little math with it, like single-token autoregressive decoding steps, sit well below it. That's the formal version of "LLM inference is memory-bound."</li>
     </ul>
+    <div class="diagram">
+      <div class="diagram-title">The roofline — one chart that tells you which resource you are wasting
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 380" xmlns="http://www.w3.org/2000/svg">
+        <line x1="86" y1="296" x2="656" y2="296" stroke="rgba(255,255,255,.28)" stroke-width="1.4"/>
+        <line x1="86" y1="56"  x2="86"  y2="296" stroke="rgba(255,255,255,.28)" stroke-width="1.4"/>
+        <text x="371" y="368" text-anchor="middle" font-size="11" class="dim">arithmetic intensity — FLOPs per byte moved (log)</text>
+        <text x="22" y="176" font-size="11" class="dim" transform="rotate(-90 22 176)" text-anchor="middle">achieved FLOP/s (log)</text>
+
+        <!-- the roof -->
+        <line x1="86" y1="296" x2="386" y2="96" stroke="#fbbf24" stroke-width="2.5"/>
+        <line x1="386" y1="96" x2="656" y2="96" stroke="#f472b6" stroke-width="2.5"/>
+        <text x="196" y="176" font-size="10.5" fill="#fbbf24" transform="rotate(-33.7 196 176)" text-anchor="middle">slope = peak memory bandwidth</text>
+        <text x="524" y="86" text-anchor="middle" font-size="10.5" fill="#f472b6">peak compute — tensor cores saturated</text>
+        <text x="371" y="70" text-anchor="middle" font-size="9.5" class="dim">nothing can run above this line</text>
+
+        <!-- ridge -->
+        <line x1="386" y1="96" x2="386" y2="296" stroke="rgba(255,255,255,.2)" stroke-width="1.2" stroke-dasharray="4 4"/>
+        <circle cx="386" cy="96" r="5" fill="#e9e9ef" class="pulse-node"/>
+
+        <!-- plotted operations, sitting on the roof -->
+        <circle cx="132" cy="265" r="6" fill="#4f8cff"/>
+        <text x="144" y="262" font-size="10.5" fill="#4f8cff">decode, batch 1</text>
+        <text x="144" y="276" font-size="9.5" class="dim">one token per weight load</text>
+
+        <circle cx="242" cy="192" r="6" fill="#4f8cff"/>
+        <text x="254" y="189" font-size="10.5" fill="#4f8cff">decode, batch 32</text>
+        <text x="254" y="203" font-size="9.5" class="dim">same weights, 32× the useful work</text>
+
+        <circle cx="500" cy="96" r="6" fill="#34d399"/>
+        <text x="500" y="122" text-anchor="middle" font-size="10.5" fill="#34d399">prefill / training</text>
+        <text x="500" y="136" text-anchor="middle" font-size="9.5" class="dim">thousands of tokens per weight load</text>
+
+        <!-- batching slides you ALONG the roof, it does not lift you off it -->
+        <path d="M143,257 L231,200" stroke="#4f8cff" stroke-width="1.8" fill="none" opacity="0.8" class="flow-line"/>
+        <text x="150" y="228" font-size="9.5" fill="#4f8cff" transform="rotate(-33 150 228)">batching</text>
+
+        <!-- regions annotated under the axis, where nothing can collide -->
+        <line x1="90" y1="312" x2="380" y2="312" stroke="#fbbf24" stroke-width="1.4"/>
+        <text x="235" y="330" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">MEMORY-BOUND</text>
+        <text x="235" y="344" text-anchor="middle" font-size="9.5" class="dim">math units idle, waiting on data</text>
+
+        <line x1="392" y1="312" x2="652" y2="312" stroke="#f472b6" stroke-width="1.4"/>
+        <text x="522" y="330" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">COMPUTE-BOUND</text>
+        <text x="522" y="344" text-anchor="middle" font-size="9.5" class="dim">bandwidth to spare, math is the limit</text>
+
+        <text x="386" y="330" text-anchor="middle" font-size="10.5" font-weight="700" fill="#e9e9ef">▲</text>
+        <text x="386" y="344" text-anchor="middle" font-size="9.5" fill="#e9e9ef">ridge</text>
+      </svg>
+      <div class="diagram-caption">Both axes are logarithmic, and the two straight lines come off a datasheet: the diagonal is peak memory bandwidth, the flat ceiling is peak compute. Where they meet is the <strong>ridge point</strong>, and which side of it your operation falls on is what "memory-bound" actually means. Note carefully what batching does. It does not lift decode off the roof — it slides it <em>along</em> the roof toward the ridge. That is why the win is real but bounded: once you reach the ridge, more batching buys nothing, and prefill is over on the right because it has high intensity inherently, not because someone batched it harder.</div>
+    </div>
+
     <p>Keep this conceptual rather than memorizing exact ridge-point numbers for specific chips. What an interviewer is checking is whether you understand that <strong>this ratio</strong>, not raw FLOPs or raw bandwidth in isolation, determines your bottleneck.</p>
   </section>
 
@@ -653,6 +710,7 @@
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script src="../assets/js/app.js"></script>
+<script src="../assets/js/find-in-page.js"></script>
 <script src="../assets/js/kml-modal.js"></script>
 <script src="../assets/js/review.js"></script>
 <script src="../assets/js/question-index.js"></script>
