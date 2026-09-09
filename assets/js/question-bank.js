@@ -2475,5 +2475,159 @@ window.KML_QUESTIONS = [
 "level": "deep",
 "q": "What are the real selection criteria for a video generation model?",
 "a": "<p>Very little to do with published quality scores. Four operational questions decide it. Throughput, expressed as seconds of finished output per GPU-minute at your target resolution, because that sets both cost and schedule. Peak memory at that resolution and duration, since memory grows with frames times resolution and a model that fits at 480p may not fit at 1080p. Whether audio is generated jointly, because a separate audio model adds a synchronisation problem that joint models avoid. And what control surface exists: first and last frame conditioning, camera path, reference images, since a model that cannot be directed is a novelty rather than a tool. Licence sits alongside these, as several strong open video models carry revenue thresholds that convert to a paid agreement at scale.</p>"
+},
+{
+"id": "36-millennium-prize-problems::0",
+"pageId": "36-millennium-prize-problems",
+"page": "36-millennium-prize-problems",
+"pageTitle": "The Millennium Prize Problems",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "beginner",
+"q": "What does P vs NP ask, and why does it matter for machine learning?",
+"a": "<p>P is the class of problems solvable in polynomial time; NP is the class whose candidate solutions can be verified in polynomial time. The question is whether the two classes coincide, and the near-universal expectation is that they do not. It matters for machine learning because the exact versions of many things we do are provably intractable: finding the global optimum of a neural network's loss is NP-hard, exact inference in general graphical models is intractable, and optimal sequence decoding is infeasible. That is the justification for the entire toolkit of approximations we actually use, from gradient descent to sampling to beam search. Complexity theory is what tells you those are principled trades rather than shortcuts.</p>"
+},
+{
+"id": "36-millennium-prize-problems::1",
+"pageId": "36-millennium-prize-problems",
+"page": "36-millennium-prize-problems",
+"pageTitle": "The Millennium Prize Problems",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "beginner",
+"q": "Which Millennium Prize Problem has been solved, and by whom?",
+"a": "<p>The Poincaré conjecture, which asks whether every simply connected closed three-dimensional manifold is homeomorphic to the three-sphere. Grigori Perelman proved it in a series of arXiv preprints in 2002 and 2003, completing a programme based on Richard Hamilton's Ricci flow, which deforms a manifold according to its own curvature. He never submitted the work to a journal, declined the Fields Medal in 2006 and declined the million-dollar prize in 2010. The other six problems remain open, with a disputed claim on Navier–Stokes as of September 2026.</p>"
+},
+{
+"id": "36-millennium-prize-problems::2",
+"pageId": "36-millennium-prize-problems",
+"page": "36-millennium-prize-problems",
+"pageTitle": "The Millennium Prize Problems",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "intermediate",
+"q": "Why do complexity-theoretic barriers make P vs NP different from an ordinary open problem?",
+"a": "<p>Because there are theorems ruling out entire families of proof technique. Relativization, from Baker, Gill and Solovay in 1975, shows that any argument which still works when machines are given an oracle cannot resolve the question, since some oracles make the classes equal and others separate them. Natural proofs, from Razborov and Rudich in 1994, shows that a broad class of circuit lower-bound arguments cannot separate P from NP unless strong pseudorandom functions fail to exist. Algebrization, from Aaronson and Wigderson in 2008, shows the main technique that evaded relativization has its own limit. Together they mean progress requires a genuinely new kind of argument, which is a much stronger statement than nobody having found the proof yet.</p>"
+},
+{
+"id": "36-millennium-prize-problems::3",
+"pageId": "36-millennium-prize-problems",
+"page": "36-millennium-prize-problems",
+"pageTitle": "The Millennium Prize Problems",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "intermediate",
+"q": "What does it mean for the Navier–Stokes equations to \"blow up\", and why would that matter?",
+"a": "<p>Blow-up means a solution that starts smooth with finite energy develops a singularity in finite time, with velocity becoming unbounded at some point. It matters because it would show the equations are an incomplete model of a real fluid: water does not reach infinite speed, so a blow-up marks the point where the mathematics stops describing physics. It also matters for the prize specifically, because Fefferman's official statement offers the award for either direction. Two of the four statements ask for global smoothness with no external force, and the other two ask for a breakdown example, where a smooth forcing term satisfying stated conditions is permitted.</p>"
+},
+{
+"id": "36-millennium-prize-problems::4",
+"pageId": "36-millennium-prize-problems",
+"page": "36-millennium-prize-problems",
+"pageTitle": "The Millennium Prize Problems",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "intermediate",
+"q": "A model produces a Lean-verified proof of an open conjecture. What can and cannot be concluded?",
+"a": "<p>You can conclude that the formal statement follows from the axioms with no gaps, which is a stronger correctness guarantee than a human referee provides. What you cannot conclude is that the formalised statement is the conjecture people care about. Translating an informal problem into a formal one involves choices about definitions, quantifiers and side conditions, and a faithful translation is a human judgement rather than something the proof checker validates. So the remaining work after verification is a mathematical and social process: experts confirm the statement is the intended one, and the community absorbs the argument. This is exactly the gap at issue in the September 2026 Navier–Stokes claim.</p>"
+},
+{
+"id": "36-millennium-prize-problems::5",
+"pageId": "36-millennium-prize-problems",
+"page": "36-millennium-prize-problems",
+"pageTitle": "The Millennium Prize Problems",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "deep",
+"q": "What kinds of mathematical problem is current AI good at, and why?",
+"a": "<p>Problems with an enormous search space and a cheap, reliable verifier. Finding a scheme that multiplies 4×4 matrices in 48 multiplications is hard to discover and trivial to check, which is why AlphaEvolve could improve on a bound that had stood since 1969. A Lean proof is hard to construct and mechanically checkable. Competition problems have gradeable answers. In all these cases a model can search unreliably and at volume, discarding everything that fails verification. The problems where this does not apply are the ones needing a new conceptual framework rather than a search over candidate objects, which is the situation for the Riemann Hypothesis, Hodge and Birch–Swinnerton-Dyer. There is no verifier for \"is this the right definition\", so there is nothing to search against.</p>"
+},
+{
+"id": "36-millennium-prize-problems::6",
+"pageId": "36-millennium-prize-problems",
+"page": "36-millennium-prize-problems",
+"pageTitle": "The Millennium Prize Problems",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "deep",
+"q": "Hundreds of papers assume the Riemann Hypothesis. Is that sound practice?",
+"a": "<p>It is standard and it is explicitly flagged, which is what makes it defensible. A conditional theorem is a real result: it establishes an implication, and it maps out what would follow if the conjecture holds. The evidence base is also unusually strong, with on the order of ten trillion zeros verified on the critical line and a proved analogue over finite fields. The risk is nonetheless real and asymmetric. If the hypothesis fails, conditional results do not merely lose a convenience; some of them become false, and the error terms that depend on it are exactly the quantitative content of the work. The practice is sound because the dependency is declared, not because the assumption is safe.</p>"
+},
+{
+"id": "37-ai-in-industry::0",
+"pageId": "37-ai-in-industry",
+"page": "37-ai-in-industry",
+"pageTitle": "AI in Industry: What It Is Actually Solving",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "beginner",
+"q": "What did AlphaFold change, and what did it not?",
+"a": "<p>It made predicting a protein's three-dimensional structure from its amino-acid sequence accurate enough to substitute for experiment in many cases, collapsing a task that took months of crystallography into minutes of compute. The AlphaFold database now covers over 200 million sequences openly, it has been used by more than two million researchers, and the work shared the 2024 Nobel Prize in Chemistry. What it did not do is solve protein behaviour. It typically predicts a single conformation, while real proteins move between states, and predictions remain much weaker for disordered regions, large allosteric changes and ligand binding. Drug discovery needs dynamics and binding affinity, which a static structure does not provide.</p>"
+},
+{
+"id": "37-ai-in-industry::1",
+"pageId": "37-ai-in-industry",
+"page": "37-ai-in-industry",
+"pageTitle": "AI in Industry: What It Is Actually Solving",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "beginner",
+"q": "Why is \"FDA-cleared\" weak evidence that a medical AI tool helps patients?",
+"a": "<p>Because clearance under the common pathway establishes substantial equivalence to a device already on the market, not clinical benefit. A 2026 review of 1,357 cleared AI-enabled devices found 34 linked to a registered prospective trial, 12 with a peer-reviewed publication, and only three evaluated against patient-centred outcomes such as mortality, morbidity or readmission. So clearance tells you a product may legally be sold, and says almost nothing about whether using it improves outcomes. The MASAI mammography trial, which randomised over 105,000 women and reported both a lower interval cancer rate and higher specificity, shows what the stronger standard looks like and how rarely it is met.</p>"
+},
+{
+"id": "37-ai-in-industry::2",
+"pageId": "37-ai-in-industry",
+"page": "37-ai-in-industry",
+"pageTitle": "AI in Industry: What It Is Actually Solving",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "intermediate",
+"q": "Why did AI weather forecasting succeed in operational deployment when many AI-for-science projects stall?",
+"a": "<p>Because every prerequisite happened to be in place. There is a large, uniform, high-quality training corpus in decades of reanalysis data. There is a free and completely honest verifier: tomorrow arrives and you score the forecast against it. The baseline is well defined and rigorously tracked, so improvements are measurable rather than arguable. And forecasting centres already had the operational machinery to ingest, verify and serve a new model, which is usually the part that kills a project. GenCast beat the leading ensemble on 97.2% of 1,320 targets while running in about eight minutes on a single accelerator, and ECMWF put its own AI system into operations in February 2025. The scarce ingredient in most other fields is the cheap honest verifier, not the model.</p>"
+},
+{
+"id": "37-ai-in-industry::3",
+"pageId": "37-ai-in-industry",
+"page": "37-ai-in-industry",
+"pageTitle": "AI in Industry: What It Is Actually Solving",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "intermediate",
+"q": "What was the substance of the criticism of the GNoME materials results?",
+"a": "<p>That the headline conflated predicted candidates with discoveries. DeepMind reported 2.2 million predicted crystal structures with around 380,000 predicted stable, framed as discovering millions of new materials. Cheetham and Seshadri sampled the release and applied a three-part test of credibility, usefulness and novelty, reporting that they found no strikingly novel compounds in their sample and that much of the set consisted of combinatorial variants and orderings of known compositions. They also noted the scope was inorganic crystalline compounds, excluding polymers, glasses, metal-organic frameworks and composites. The defensible version of the result is that stability prediction at very high throughput is genuinely useful; the indefensible version is counting list length as discoveries.</p>"
+},
+{
+"id": "37-ai-in-industry::4",
+"pageId": "37-ai-in-industry",
+"page": "37-ai-in-industry",
+"pageTitle": "AI in Industry: What It Is Actually Solving",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "intermediate",
+"q": "Why is the fusion plasma control result significant beyond fusion?",
+"a": "<p>Because it crossed the sim-to-real gap on a system where failure is expensive. A reinforcement-learning policy was trained against a tokamak simulator and then commanded the real control coils on the TCV device, holding conventional and advanced plasma configurations including negative triangularity and a snowflake, and sustaining two plasmas at once. Most reinforcement learning successes are in simulation or in games, where the environment and the deployment target are identical. Here the policy had to survive the mismatch between a model of the physics and the actual machine, under hard real-time constraints, on hardware that damage matters to. That transfer problem is the central obstacle to reinforcement learning in the physical world, which is why the result generalises well beyond the application.</p>"
+},
+{
+"id": "37-ai-in-industry::5",
+"pageId": "37-ai-in-industry",
+"page": "37-ai-in-industry",
+"pageTitle": "AI in Industry: What It Is Actually Solving",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "deep",
+"q": "You are asked to assess a new AI-for-science claim. What framework would you use?",
+"a": "<p>Find the verifier first: what checks the model's output, how expensive is that check, and is it independent of the model's authors. If verification is cheap and honest, as with a forecast scored against tomorrow's weather or an algorithm checked by arithmetic, then unreliable generation is fine because errors are filtered for free, and the result is likely to hold up. If verification requires synthesis, a clinical trial or expert judgement, the model has produced a hypothesis list and the meaningful number is the downstream hit rate, which is usually unreported. Then apply the standard four checks: peer-reviewed rather than announced, deployed rather than demonstrated, compared against the best existing method competently operated, and independently reproduced. Finally ask what the claim would look like if it were false, and whether the evidence presented would distinguish those cases.</p>"
+},
+{
+"id": "37-ai-in-industry::6",
+"pageId": "37-ai-in-industry",
+"page": "37-ai-in-industry",
+"pageTitle": "AI in Industry: What It Is Actually Solving",
+"group": "Grand Challenges",
+"color": "var(--c-challenge)",
+"level": "deep",
+"q": "Which scientific problems should you expect machine learning to make progress on next?",
+"a": "<p>The ones whose structure resembles the successes rather than the disappointments. Look for three things: a large body of consistent, well-measured historical data; a well-posed output the model can be asked for; and a verification signal that is cheap, fast and not gameable. Protein folding had all three, with the Protein Data Bank, coordinates as output, and CASP as a blind benchmark. Weather had all three, with reanalysis archives, gridded forecasts, and tomorrow as the judge. Conversely, expect slow progress where the verifier is a wet-lab experiment, a multi-year trial or a human expert's opinion, because throughput on hypotheses stops being the constraint. The corollary is that building a cheap verifier for a field is often a higher-leverage contribution than building a better model for it.</p>"
 }
 ];

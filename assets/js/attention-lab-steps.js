@@ -63,7 +63,7 @@
     steps.push({
       title: 'Positional information (briefly)',
       formula: null,
-      note: 'Attention itself has no notion of order — swap two rows of <code>X</code> and every dot product below is unchanged. Real models fix this by rotating each Q/K vector by an angle that depends on its position (<strong>RoPE</strong>), or by adding a position vector to <code>X</code> before projecting. This walkthrough keeps the numbers focused on attention itself, so it skips the rotation — page <a href="./08-attention-transformers.html">08</a> derives it in full. Everything below still assumes positions exist, because the causal mask a few steps from now depends on knowing which token comes before which.',
+      note: 'Attention itself has no notion of order — swap two rows of <code>X</code> and every dot product below is unchanged. Real models fix this by rotating each Q/K vector by an angle that depends on its position (<strong>RoPE</strong>), or by adding a position vector to <code>X</code> before projecting. This walkthrough keeps the numbers focused on attention itself, so it skips the rotation — page <a href="./topics/08-attention-transformers.html">08</a> derives it in full. Everything below still assumes positions exist, because the causal mask a few steps from now depends on knowing which token comes before which.',
       render: function (stage) {
         stage.appendChild(UI.textCard('<strong>Simplified here:</strong> no rotation is applied to Q/K below. The causal mask still enforces "no looking at the future" using each token\'s position — that part is not simplified, only the RoPE rotation itself is set aside.', 'note'));
       }
@@ -114,7 +114,7 @@
     steps.push({
       title: 'Raw similarity per head: scores = Q_h·K_hᵀ / √d_h',
       formula: '\\text{scores}_h = \\frac{Q_h K_h^{\\top}}{\\sqrt{d_h}} \\in \\mathbb{R}^{T\\times T}',
-      note: 'Every head computes its own <code>T×T</code> grid: row i, column j is how strongly token i\'s query matches token j\'s key, scaled by <span>$1/\\sqrt{d_h}$</span> for the variance reason derived on page <a href="./08-attention-transformers.html">08</a>.',
+      note: 'Every head computes its own <code>T×T</code> grid: row i, column j is how strongly token i\'s query matches token j\'s key, scaled by <span>$1/\\sqrt{d_h}$</span> for the variance reason derived on page <a href="./topics/08-attention-transformers.html">08</a>.',
       render: function (stage) {
         stage.appendChild(UI.headsPanel({
           title: 'Raw scores per head', groupMeaning: 'Each of the 4 heads produces its own independent 4×4 grid — nothing is shared between heads yet.',
@@ -684,7 +684,7 @@
     steps.push({
       title: 'What was actually saved',
       formula: null,
-      note: 'At no point did a full ' + CFG.prefillLen + '×' + CFG.prefillLen + ' score matrix exist in memory — only ' + B + '×' + B + ' tiles, one at a time, plus two length-' + CFG.prefillLen + ' running vectors (<span>$m$</span>, <span>$l$</span>). That is <span>$O(T)$</span> extra memory instead of <span>$O(T^2)$</span> — the entire reason FlashAttention is a memory-traffic optimization, not a FLOPs one. Page <a href="./23-efficient-ai-systems.html">23</a> covers why memory traffic, not raw compute, is the actual bottleneck at these sizes.',
+      note: 'At no point did a full ' + CFG.prefillLen + '×' + CFG.prefillLen + ' score matrix exist in memory — only ' + B + '×' + B + ' tiles, one at a time, plus two length-' + CFG.prefillLen + ' running vectors (<span>$m$</span>, <span>$l$</span>). That is <span>$O(T)$</span> extra memory instead of <span>$O(T^2)$</span> — the entire reason FlashAttention is a memory-traffic optimization, not a FLOPs one. Page <a href="./topics/23-efficient-ai-systems.html">23</a> covers why memory traffic, not raw compute, is the actual bottleneck at these sizes.',
       render: function (stage) {
         stage.appendChild(UI.barsPanel({
           title: 'Extra memory beyond Q, K, V, O', unit: ' numbers (this example)',
