@@ -221,6 +221,27 @@
     btn.textContent = dia.classList.contains('paused') ? '▶ Play' : '⏸ Pause';
   });
 
+  /* Several diagrams are static schematics that were still authored with a Pause
+     button, so clicking it swapped the label and changed nothing on screen. Rather
+     than hand-editing those pages (and re-checking every future diagram), ask the
+     browser which figures actually animate and drop the control from the ones that
+     do not. Reading computed style beats matching class names: it stays correct
+     whatever a diagram is built from. */
+  function hideDeadDiagramToggles() {
+    document.querySelectorAll('.diagram').forEach(function (dia) {
+      var btn = dia.querySelector('[data-diagram-toggle]');
+      if (!btn) return;
+      var animated = Array.prototype.some.call(dia.querySelectorAll('*'), function (el) {
+        var name = getComputedStyle(el).animationName;
+        return name && name !== 'none';
+      });
+      if (!animated) {
+        var controls = btn.closest('.diagram-controls');
+        (controls || btn).remove();
+      }
+    });
+  }
+
   /* Section search results link to h3 anchors that buildTOC() assigns at
      runtime (see its slugify call above) — they don't exist in the raw HTML,
      so the browser's own fragment-scroll-on-load already ran and failed by
@@ -236,6 +257,7 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     buildTOC();
+    hideDeadDiagramToggles();
     scrollToHashIfNeeded();
     paintDoneMarks();
     var doneBtn = document.getElementById('markDoneBtn');
