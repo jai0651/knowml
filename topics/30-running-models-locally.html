@@ -153,6 +153,64 @@
     </ul>
 
     <p>If the sum exceeds your VRAM, one of three things happens. The load fails outright, the runtime silently offloads layers to CPU and slows down by an order of magnitude, or you hit an out-of-memory error partway through a long conversation. That last one is the KV cache growing past your headroom.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The same 24 GB card, four ways — drawn to scale, 20 px per GB
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 350" xmlns="http://www.w3.org/2000/svg">
+        <rect x="30" y="14" width="11" height="11" rx="2" fill="#818cf8" opacity="0.8"/>
+        <text x="48" y="24" font-size="10.5" class="dim">weights</text>
+        <rect x="120" y="14" width="11" height="11" rx="2" fill="#fbbf24" opacity="0.8"/>
+        <text x="138" y="24" font-size="10.5" class="dim">KV cache</text>
+        <rect x="212" y="14" width="11" height="11" rx="2" fill="#f472b6" opacity="0.8"/>
+        <text x="230" y="24" font-size="10.5" class="dim">overhead</text>
+        <rect x="304" y="14" width="11" height="11" rx="2" fill="none" stroke="rgba(255,255,255,.3)"/>
+        <text x="322" y="24" font-size="10.5" class="dim">free</text>
+
+        <line x1="180" y1="44" x2="180" y2="300" stroke="rgba(255,255,255,.10)" stroke-width="1"/>
+        <line x1="660" y1="44" x2="660" y2="300" stroke="#f87171" stroke-width="1.5" stroke-dasharray="4 4"/>
+        <text x="660" y="38" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f87171">24 GB</text>
+
+        <!-- 70B FP16: 140 GB = 2800px, clipped -->
+        <text x="24" y="70" font-size="11" fill="#e9e9ef">70B · FP16</text>
+        <text x="24" y="84" font-size="9.5" class="dim">4k context</text>
+        <rect x="180" y="56" width="470" height="30" rx="4" fill="#818cf8" opacity="0.30"/>
+        <path d="M650,56 L662,71 L650,86" fill="none" stroke="#818cf8" stroke-width="1.5" opacity="0.6"/>
+        <text x="410" y="76" text-anchor="middle" font-size="10.5" fill="#e9e9ef">140 GB of weights — bar runs ~6× off the chart</text>
+
+        <!-- 70B Q4: 40 GB = 800px, clipped -->
+        <text x="24" y="128" font-size="11" fill="#e9e9ef">70B · Q4_K_M</text>
+        <text x="24" y="142" font-size="9.5" class="dim">4k context</text>
+        <rect x="180" y="114" width="470" height="30" rx="4" fill="#818cf8" opacity="0.55"/>
+        <path d="M650,114 L662,129 L650,144" fill="none" stroke="#818cf8" stroke-width="1.5" opacity="0.7"/>
+        <text x="410" y="134" text-anchor="middle" font-size="10.5" fill="#e9e9ef">~40 GB — quantized hard and still 1.7× too big</text>
+
+        <!-- 8B Q4 @ 4k: 4.9 + 0.5 + 1.0 GB -->
+        <text x="24" y="186" font-size="11" fill="#e9e9ef">8B · Q4_K_M</text>
+        <text x="24" y="200" font-size="9.5" class="dim">4k context</text>
+        <rect x="180" y="172" width="98" height="30" rx="4" fill="#818cf8" opacity="0.8"/>
+        <text x="229" y="192" text-anchor="middle" font-size="10" fill="#e9e9ef">4.9 GB</text>
+        <rect x="278" y="172" width="10" height="30" fill="#fbbf24" opacity="0.85"/>
+        <rect x="288" y="172" width="20" height="30" fill="#f472b6" opacity="0.85"/>
+        <rect x="308" y="172" width="352" height="30" rx="4" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="1" stroke-dasharray="3 4"/>
+        <text x="484" y="192" text-anchor="middle" font-size="10.5" class="dim">17.6 GB free</text>
+
+        <!-- 8B Q4 @ 128k: 4.9 + 16.0 + 1.0 GB -->
+        <text x="24" y="244" font-size="11" fill="#e9e9ef">8B · Q4_K_M</text>
+        <text x="24" y="258" font-size="9.5" fill="#fbbf24">128k context</text>
+        <rect x="180" y="230" width="98" height="30" rx="4" fill="#818cf8" opacity="0.8"/>
+        <text x="229" y="250" text-anchor="middle" font-size="10" fill="#e9e9ef">4.9 GB</text>
+        <rect x="278" y="230" width="320" height="30" fill="#fbbf24" opacity="0.85" class="pulse-node"/>
+        <text x="438" y="250" text-anchor="middle" font-size="10.5" fill="#e9e9ef">16 GB of KV cache</text>
+        <rect x="598" y="230" width="20" height="30" fill="#f472b6" opacity="0.85"/>
+        <rect x="618" y="230" width="42" height="30" rx="4" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="1" stroke-dasharray="3 4"/>
+
+        <text x="180" y="326" font-size="11" class="dim">Rows 3 and 4 are identical weights on an identical card. Only the context length moved,</text>
+        <text x="180" y="342" font-size="11" class="dim">and it took the card from 27% full to nearly full.</text>
+      </svg>
+      <div class="diagram-caption">Everything here is one scale, 20 px per GB, so the bars are comparable and the top two genuinely run off the chart rather than being drawn short. The KV figures assume an 8B GQA model — 32 layers, 8 KV heads, head dim 128, FP16 — which works out to 128 KB per token, so 0.5 GB at 4k and 16 GB at 128k. That is the whole reason "will model X fit in Y GB" is unanswerable without a context length attached, and why an out-of-memory error can arrive an hour into a conversation rather than at load time.</div>
+    </div>
   </section>
 
   <section id="arithmetic">

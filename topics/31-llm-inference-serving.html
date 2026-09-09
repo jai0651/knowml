@@ -153,6 +153,71 @@
 
     <p>The two look similar in code. They behave nothing alike on hardware.</p>
 
+    <div class="diagram">
+      <div class="diagram-title">Prefill vs decode — same weights, opposite hardware profile
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+        <!-- ── PREFILL (left) ── -->
+        <text x="24" y="26" font-size="12.5" font-weight="700" fill="#f472b6">PREFILL · one pass</text>
+        <text x="24" y="44" font-size="10.5" class="dim">all 6 prompt tokens enter together</text>
+
+        <g>
+          <rect x="24"  y="62" width="26" height="26" rx="5" fill="#f472b6" opacity="0.85"/>
+          <rect x="56"  y="62" width="26" height="26" rx="5" fill="#f472b6" opacity="0.85"/>
+          <rect x="88"  y="62" width="26" height="26" rx="5" fill="#f472b6" opacity="0.85"/>
+          <rect x="120" y="62" width="26" height="26" rx="5" fill="#f472b6" opacity="0.85"/>
+          <rect x="152" y="62" width="26" height="26" rx="5" fill="#f472b6" opacity="0.85"/>
+          <rect x="184" y="62" width="26" height="26" rx="5" fill="#f472b6" opacity="0.85"/>
+        </g>
+
+        <path d="M117,96 L117,126" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="24" y="132" width="186" height="46" rx="8" fill="none" stroke="#818cf8" stroke-width="2"/>
+        <text x="117" y="153" text-anchor="middle" font-size="11.5" fill="#818cf8">the whole model</text>
+        <text x="117" y="169" text-anchor="middle" font-size="10" class="dim">read once from memory</text>
+
+        <path d="M117,182 L117,212" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="88" y="218" width="58" height="26" rx="5" fill="none" stroke="#34d399" stroke-width="2"/>
+        <text x="117" y="236" text-anchor="middle" font-size="11" fill="#34d399">token 1</text>
+
+        <rect x="24" y="264" width="186" height="46" rx="8" fill="#f472b6" opacity="0.10"/>
+        <text x="117" y="283" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">compute-bound</text>
+        <text x="117" y="299" text-anchor="middle" font-size="10" class="dim">6 tokens of work per weight load</text>
+
+        <!-- ── divider ── -->
+        <line x1="350" y1="16" x2="350" y2="314" stroke="rgba(255,255,255,.14)" stroke-width="1" stroke-dasharray="4 5"/>
+
+        <!-- ── DECODE (right) ── -->
+        <text x="392" y="26" font-size="12.5" font-weight="700" fill="#fbbf24">DECODE · one pass per token</text>
+        <text x="392" y="44" font-size="10.5" class="dim">one token in, one token out, repeatedly</text>
+
+        <rect x="392" y="62" width="26" height="26" rx="5" fill="#fbbf24" opacity="0.85"/>
+        <text x="440" y="80" font-size="10.5" class="dim">just the last token</text>
+
+        <path d="M405,96 L405,126" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="392" y="132" width="186" height="46" rx="8" fill="none" stroke="#818cf8" stroke-width="2"/>
+        <text x="485" y="153" text-anchor="middle" font-size="11.5" fill="#818cf8">the whole model</text>
+        <text x="485" y="169" text-anchor="middle" font-size="10" class="dim">read again, every single step</text>
+
+        <path d="M405,182 L405,212" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="392" y="218" width="58" height="26" rx="5" fill="none" stroke="#34d399" stroke-width="2"/>
+        <text x="421" y="236" text-anchor="middle" font-size="11" fill="#34d399">token 2</text>
+
+        <path d="M456,231 L500,231" stroke="#34d399" stroke-width="1.6" fill="none" opacity="0.6" class="flow-line"/>
+        <text x="512" y="235" font-size="16" fill="#34d399" opacity="0.6">↻</text>
+        <text x="534" y="235" font-size="10.5" class="dim">then token 3, 4, 5…</text>
+
+        <rect x="392" y="264" width="186" height="46" rx="8" fill="#fbbf24" opacity="0.10"/>
+        <text x="485" y="283" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">bandwidth-bound</text>
+        <text x="485" y="299" text-anchor="middle" font-size="10" class="dim">1 token of work per weight load</text>
+      </svg>
+      <div class="diagram-caption">The indigo box is the same weights in both halves, and it is read in full on <em>every</em> pass. Prefill amortises that read across all 6 prompt tokens at once, so the arithmetic units stay busy. Decode pays the identical read to produce one token, then pays it again — which is why it is starved of work, and why adding more concurrent requests is nearly free during decode and nearly useless during prefill.</div>
+    </div>
+
     <p>Prefill has thousands of tokens to multiply against each loaded weight, so the GPU's arithmetic units stay busy. Decode has <em>one</em> token per request. It reads the entire model out of memory to compute a single token's worth of arithmetic, then does it again. The Sarathi-Serve authors put it plainly: prefill iterations "saturate GPU compute", while decode iterations have "low compute utilization" because each one processes only a single token per request.</p>
 
     <div class="callout callout-teach">
