@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>/* Set the theme before first paint. Without this the page renders with the
+   hardcoded data-theme below, then app.js corrects it ~600 lines later, so every
+   navigation flashed light before flipping to dark. */
+try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-theme")||"light")}catch(e){}</script>
+<title>Tokenizer Lab · KnowML</title>
+<meta name="description" content="Train a byte-pair-encoding tokenizer from scratch on a seven-word corpus, one merge at a time — every pair count, every merge, every token computed live — then see exactly why a model that reads tokens cannot count the letters in strawberry.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/img/favicon-32.png">
+<link rel="apple-touch-icon" href="assets/img/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body data-section="lab" data-page-id="tokenizer-lab">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topnav">
+  <button class="iconbtn hamburger" id="hamburger" aria-label="Menu" style="visibility:hidden"></button>
+  <a class="brand" href="./index.html"><img class="brand-logo" src="assets/img/logo.svg" alt="" width="22" height="22">KnowML</a>
+  <div class="spacer"></div>
+  <button class="navbtn" id="searchTrigger">🔍 <span class="navbtn-label">Search everything</span> <kbd>⌘K</kbd></button>
+  <button class="iconbtn" id="themeToggle" title="Toggle theme">☾</button>
+</header>
+
+<div class="layout home">
+<main class="content" id="content" style="max-width:1320px;">
+
+  <div class="topic-header">
+    <div class="crumbs"><a href="./index.html">Home</a> / Tokenizer Lab</div>
+    <h1>Tokenizer Lab</h1>
+    <p class="dek">Seven words, twelve merges, one vocabulary — built in front of you. Every pair count, every merge decision and every token on this page is computed live by actually running byte-pair encoding, not drawn as a diagram of it. By the last tab you will know precisely why a model that reads tokens cannot count the letters in "strawberry".</p>
+    <div class="meta-row">
+      <span class="tag">Interactive</span>
+      <span class="reading-time">Step through at your own pace · prerequisites: NLP Evolution (09)</span>
+    </div>
+  </div>
+
+  <details class="lab-howto" open>
+    <summary>How to use this page <span class="lab-howto-chev">▾</span></summary>
+    <p>Start on <strong>Train BPE</strong> — the other three tabs all use the vocabulary it builds. There is no random seed anywhere on this page: given the corpus and the tie-break rule, byte-pair encoding is deterministic, so every count you see is reproducible with a pencil. The <strong>Train</strong> and <strong>Encode</strong> tabs each end with a self-check that recomputes their result by a second, independent route and prints whether the two agree.</p>
+  </details>
+
+  <div class="lab-shell" id="labShell">
+    <div class="lab-tabs" id="labTabs"></div>
+    <div class="lab-dimstrip" id="labDimStrip"></div>
+
+    <div class="lab-panelbox">
+      <div class="lab-toolbar">
+        <div class="lab-dots" id="labDots"></div>
+        <span class="lab-stepcount" id="labEyebrow"></span>
+        <div class="lab-toolbar-nav">
+          <button class="lab-navbtn" id="labPrev">← Prev</button>
+          <button class="lab-navbtn lab-navbtn--primary" id="labNext">Next →</button>
+        </div>
+      </div>
+
+      <div class="lab-stepintro">
+        <h2 id="labTitle"></h2>
+        <div class="lab-formula" id="labFormula"></div>
+        <p class="lab-stepnote" id="labNote"></p>
+      </div>
+
+      <div class="lab-stage" id="labStage"></div>
+
+      <details class="lab-ledger" id="labLedger"></details>
+    </div>
+  </div>
+
+  <section style="margin-top:56px;">
+    <h2><span class="num">→</span>What this page simplifies, on purpose</h2>
+    <ul>
+      <li><strong>The base vocabulary is characters, not bytes.</strong> Real tokenizers start from the 256 byte values, which makes out-of-vocabulary impossible — any text at all, in any script, is <em>some</em> sequence of bytes. Starting from the characters this corpus happens to contain leaves a visible hole: the Encode tab shows <code>cranberry</code> needing letters the vocabulary has no id for. That hole is exactly what byte-level BPE closes.</li>
+      <li><strong>No word-boundary marker.</strong> Production tokenizers attach the preceding space to the token (<code>" berry"</code> and <code>"berry"</code> are different ids) or append an end-of-word symbol, so merges can never cross a word boundary and word-final pieces stay distinct. Here each word is merged independently with no marker, which keeps the chips readable at the cost of that distinction.</li>
+      <li><strong>Ties are broken by first appearance.</strong> In a corpus this small several pairs routinely tie for most frequent. Different libraries break ties differently, and a different rule gives a different — equally valid — merge list. The Train tab flags every tie as it happens.</li>
+      <li><strong>No special tokens, no normalization, no pre-tokenization regex.</strong> A real pipeline lowercases or not, splits punctuation and digits by an explicit regex, and reserves ids for <code>&lt;|endoftext|&gt;</code> and friends before the first merge is ever applied. All of that sits <em>around</em> the algorithm shown here, not inside it.</li>
+      <li><strong>Twelve merges, not fifty thousand.</strong> The loop is identical at production scale; only the size of the counting problem changes. The final tab's curve is the same curve real tokenizer designers read, computed on a corpus small enough to check by hand.</li>
+    </ul>
+  </section>
+
+  <section id="lab-related">
+    <h2><span class="num">→</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="./topics/09-nlp-evolution.html"><div class="rc-sec" style="color:var(--c-nlp)">09 · Where this starts</div><div class="rc-title">NLP Evolution</div><div class="rc-hook">Why subword tokenization replaced word vocabularies, and where BPE, WordPiece and SentencePiece differ.</div></a>
+      <a class="related-card" href="./topics/10-llm-architecture-training.html"><div class="rc-sec" style="color:var(--c-llm)">10 · The design decision</div><div class="rc-title">LLM Architecture &amp; Training</div><div class="rc-hook">Vocabulary size as a real tradeoff: embedding parameters against sequence length, in production terms.</div></a>
+      <a class="related-card" href="./attention-lab.html"><div class="rc-sec" style="color:var(--c-attention)">Lab · What happens next</div><div class="rc-title">Attention Lab</div><div class="rc-hook">The token ids this page produces, picked up at the embedding table and run through seven attention mechanisms.</div></a>
+      <a class="related-card" href="./topics/31-llm-inference-serving.html"><div class="rc-sec" style="color:var(--c-practice)">31 · What tokens cost</div><div class="rc-title">LLM Inference &amp; Serving</div><div class="rc-hook">Why every extra token is billed twice — once in the context window, once in decode latency.</div></a>
+    </div>
+  </section>
+
+</main>
+</div>
+
+<div class="search-modal" id="searchModal">
+  <div class="search-box">
+    <div class="search-input-row">
+      <span class="si-icon">🔍</span>
+      <input id="searchInput" type="text" placeholder="Search every topic, term, model…" autocomplete="off" />
+      <kbd>Esc</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+    <div class="search-hint"><span>↑↓ navigate</span><span>↵ open</span><span>esc close</span></div>
+  </div>
+</div>
+
+<script src="assets/js/search-data.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script src="assets/js/app.js"></script>
+<script src="assets/js/code-highlight.js"></script>
+<script src="assets/js/find-in-page.js"></script>
+<script src="assets/js/kml-modal.js"></script>
+<script src="assets/js/community.js"></script>
+<script src="assets/js/lab-engine.js"></script>
+<script src="assets/js/tokenizer-lab-model.js"></script>
+<script src="assets/js/lab-ui.js"></script>
+<script src="assets/js/tokenizer-lab-steps.js"></script>
+<script src="assets/js/lab-app.js"></script>
+</body>
+</html>

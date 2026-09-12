@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>/* Set the theme before first paint. Without this the page renders with the
+   hardcoded data-theme below, then app.js corrects it ~600 lines later, so every
+   navigation flashed light before flipping to dark. */
+try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-theme")||"light")}catch(e){}</script>
+<title>Quantization Lab · KnowML</title>
+<meta name="description" content="Quantize one small weight matrix to INT8 and INT4 and watch exactly what is lost — scales, integer codes, dequantized weights and the error matrix, all computed live, plus the outlier that wastes 87% of the integer range and the per-channel fix that recovers it.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/img/favicon-32.png">
+<link rel="apple-touch-icon" href="assets/img/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body data-section="lab" data-page-id="quantization-lab">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topnav">
+  <button class="iconbtn hamburger" id="hamburger" aria-label="Menu" style="visibility:hidden"></button>
+  <a class="brand" href="./index.html"><img class="brand-logo" src="assets/img/logo.svg" alt="" width="22" height="22">KnowML</a>
+  <div class="spacer"></div>
+  <button class="navbtn" id="searchTrigger">🔍 <span class="navbtn-label">Search everything</span> <kbd>⌘K</kbd></button>
+  <button class="iconbtn" id="themeToggle" title="Toggle theme">☾</button>
+</header>
+
+<div class="layout home">
+<main class="content" id="content" style="max-width:1320px;">
+
+  <div class="topic-header">
+    <div class="crumbs"><a href="./index.html">Home</a> / Quantization Lab</div>
+    <h1>Quantization Lab</h1>
+    <p class="dek">One small weight matrix, squeezed into 8-bit and 4-bit integers four different ways. Every scale, every integer code and every last decimal of error is computed live in your browser — including the single outlier that quietly costs the other weights most of their precision, and the one-line change that gives it back.</p>
+    <div class="meta-row">
+      <span class="tag">Interactive</span>
+      <span class="reading-time">Step through at your own pace · prerequisites: Efficient AI &amp; Systems (23)</span>
+    </div>
+  </div>
+
+  <details class="lab-howto" open>
+    <summary>How to use this page <span class="lab-howto-chev">▾</span></summary>
+    <p>Start with <strong>INT8</strong> — the other three tabs reuse its vocabulary (α, the scale <em>s</em>, the integer codes <em>q</em>, the error matrix <em>E</em>) and its numbers as the baseline they are measured against. Every figure you read is arithmetic done in the page from one seeded 4×8 weight block, not a hand-typed illustration: the INT8 tab checks its own dequantized values against <code>code × scale</code> computed by hand, proves quantizing twice changes nothing, and confirms that no weight was moved by more than half a grid step. The <strong>Outlier</strong> tab is the one that explains why quantization is a research area rather than a utility function.</p>
+  </details>
+
+  <div class="lab-shell" id="labShell">
+    <div class="lab-tabs" id="labTabs"></div>
+    <div class="lab-dimstrip" id="labDimStrip"></div>
+
+    <div class="lab-panelbox">
+      <div class="lab-toolbar">
+        <div class="lab-dots" id="labDots"></div>
+        <span class="lab-stepcount" id="labEyebrow"></span>
+        <div class="lab-toolbar-nav">
+          <button class="lab-navbtn" id="labPrev">← Prev</button>
+          <button class="lab-navbtn lab-navbtn--primary" id="labNext">Next →</button>
+        </div>
+      </div>
+
+      <div class="lab-stepintro">
+        <h2 id="labTitle"></h2>
+        <div class="lab-formula" id="labFormula"></div>
+        <p class="lab-stepnote" id="labNote"></p>
+      </div>
+
+      <div class="lab-stage" id="labStage"></div>
+
+      <details class="lab-ledger" id="labLedger"></details>
+    </div>
+  </div>
+
+  <section style="margin-top:56px;">
+    <h2><span class="num">→</span>What this page simplifies, on purpose</h2>
+    <ul>
+      <li><strong>Only weights are quantized, never activations.</strong> Weight-only quantization is the easy half: weights are fixed, known offline, and can be measured exactly. Activations change with every input, so their scale has to be estimated from calibration data or computed on the fly — and they are where the really vicious outliers live. Everything on this page applies to activations too, but the scale would be a guess rather than a measurement.</li>
+      <li><strong>Symmetric only — no zero-point.</strong> The scheme here maps 0 to code 0 and uses a single multiplier. Asymmetric (affine) quantization adds an integer offset <code>z</code> so the grid can be shifted, which fits skewed distributions better and costs one more stored number per scale. The error analysis is structurally identical; only <code>W′ = (q − z)·s</code> replaces <code>W′ = q·s</code>.</li>
+      <li><strong>Round-to-nearest, with no error compensation.</strong> Every rounding decision here is made independently. GPTQ, AdaRound and friends deliberately round some weights the "wrong" way so that the error they introduce cancels against errors elsewhere in the same layer. That changes which codes get chosen; it does not change what a code means.</li>
+      <li><strong>The block is tiny.</strong> Four output channels and eight input dimensions, so every grid fits on a screen and every cell can be checked by hand. A real layer is 4096×4096. Nothing in the arithmetic changes — but note that the per-channel scale overhead, which looks expensive at 8 weights per row, is 0.1% at 4096 weights per row.</li>
+      <li><strong>No kernel, no hardware.</strong> This page shows what the numbers become, not how an INT8 matmul is actually executed, how 4-bit weights are packed two-to-a-byte, or which instructions accumulate in INT32. That side of the story is on page <a href="./topics/28-gpu-architecture-cuda-distributed.html">28</a>.</li>
+    </ul>
+  </section>
+
+  <section id="lab-related">
+    <h2><span class="num">→</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="./topics/23-efficient-ai-systems.html"><div class="rc-sec" style="color:var(--c-efficient)">23 · Where this starts</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Quantization, pruning and distillation in prose: why memory, not FLOPs, is the binding constraint.</div></a>
+      <a class="related-card" href="./topics/31-llm-inference-serving.html"><div class="rc-sec" style="color:var(--c-practice)">31 · Serving depth</div><div class="rc-title">LLM Inference &amp; Serving</div><div class="rc-hook">What weight and KV-cache precision cost at serving scale, and the engines built around them.</div></a>
+      <a class="related-card" href="./topics/30-running-models-locally.html"><div class="rc-sec" style="color:var(--c-practice)">30 · In practice</div><div class="rc-title">Running Models Locally</div><div class="rc-hook">GGUF quantization levels, group sizes, and which 4-bit variant to actually download.</div></a>
+      <a class="related-card" href="./attention-lab.html"><div class="rc-sec" style="color:var(--c-attention)">Lab · The other one</div><div class="rc-title">Attention Lab</div><div class="rc-hook">Seven attention mechanisms on one four-word sentence, every matrix computed live.</div></a>
+    </div>
+  </section>
+
+</main>
+</div>
+
+<div class="search-modal" id="searchModal">
+  <div class="search-box">
+    <div class="search-input-row">
+      <span class="si-icon">🔍</span>
+      <input id="searchInput" type="text" placeholder="Search every topic, term, model…" autocomplete="off" />
+      <kbd>Esc</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+    <div class="search-hint"><span>↑↓ navigate</span><span>↵ open</span><span>esc close</span></div>
+  </div>
+</div>
+
+<script src="assets/js/search-data.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script src="assets/js/app.js"></script>
+<script src="assets/js/code-highlight.js"></script>
+<script src="assets/js/find-in-page.js"></script>
+<script src="assets/js/kml-modal.js"></script>
+<script src="assets/js/community.js"></script>
+<script src="assets/js/lab-engine.js"></script>
+<script src="assets/js/quantization-lab-model.js"></script>
+<script src="assets/js/lab-ui.js"></script>
+<script src="assets/js/quantization-lab-steps.js"></script>
+<script src="assets/js/lab-app.js"></script>
+</body>
+</html>

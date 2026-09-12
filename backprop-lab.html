@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>/* Set the theme before first paint. Without this the page renders with the
+   hardcoded data-theme below, then app.js corrects it ~600 lines later, so every
+   navigation flashed light before flipping to dark. */
+try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-theme")||"light")}catch(e){}</script>
+<title>Backprop Lab · KnowML</title>
+<meta name="description" content="Backpropagation through a 3→4→2 network, computed live: the forward pass, the chain rule backward one derivative at a time, every gradient checked against central differences, and one step of descent that actually lowers the loss.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/img/favicon-32.png">
+<link rel="apple-touch-icon" href="assets/img/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body data-section="lab" data-page-id="backprop-lab">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topnav">
+  <button class="iconbtn hamburger" id="hamburger" aria-label="Menu" style="visibility:hidden"></button>
+  <a class="brand" href="./index.html"><img class="brand-logo" src="assets/img/logo.svg" alt="" width="22" height="22">KnowML</a>
+  <div class="spacer"></div>
+  <button class="navbtn" id="searchTrigger">🔍 <span class="navbtn-label">Search everything</span> <kbd>⌘K</kbd></button>
+  <button class="iconbtn" id="themeToggle" title="Toggle theme">☾</button>
+</header>
+
+<div class="layout home">
+<main class="content" id="content" style="max-width:1320px;">
+
+  <div class="topic-header">
+    <div class="crumbs"><a href="./index.html">Map &amp; Timeline</a> / Backprop Lab</div>
+    <h1>Backprop Lab</h1>
+    <p class="dek">One tiny network — 3 inputs, 4 tanh hidden units, 2 outputs — and one training example. Step through the forward pass, then walk the chain rule backward one derivative at a time, then watch all 29 of those derivatives get re-measured numerically and compared against the analytic ones.</p>
+    <div class="meta-row">
+      <span class="tag">Interactive</span>
+      <span class="reading-time">Step through at your own pace · prerequisites: Neural Network Fundamentals (04)</span>
+    </div>
+  </div>
+
+  <details class="lab-howto" open>
+    <summary>How to use this page <span class="lab-howto-chev">▾</span></summary>
+    <p>Take the tabs in order — <strong>Forward</strong> first, since every gradient on the later tabs is a derivative of the loss it computes. Each backward step shows three things side by side: the <strong>local derivative</strong> of that one operation, the <strong>incoming gradient</strong> from the step above it, and their <strong>product</strong>. That is the chain rule made visible rather than asserted.</p>
+    <p>The tab that matters most is <strong>Gradient check</strong>. It throws the whole derivation away and re-measures every partial derivative the slow way — nudge one parameter by <code>h</code>, re-run the entire network, see how much the loss moved — then prints the largest disagreement between the two methods. Every number on this page, including that verdict, is computed by real arithmetic in your browser from one seeded example. Nothing is hand-typed.</p>
+  </details>
+
+  <div class="lab-shell" id="labShell">
+    <div class="lab-tabs" id="labTabs"></div>
+    <div class="lab-dimstrip" id="labDimStrip"></div>
+
+    <div class="lab-panelbox">
+      <div class="lab-toolbar">
+        <div class="lab-dots" id="labDots"></div>
+        <span class="lab-stepcount" id="labEyebrow"></span>
+        <div class="lab-toolbar-nav">
+          <button class="lab-navbtn" id="labPrev">← Prev</button>
+          <button class="lab-navbtn lab-navbtn--primary" id="labNext">Next →</button>
+        </div>
+      </div>
+
+      <div class="lab-stepintro">
+        <h2 id="labTitle"></h2>
+        <div class="lab-formula" id="labFormula"></div>
+        <p class="lab-stepnote" id="labNote"></p>
+      </div>
+
+      <div class="lab-stage" id="labStage"></div>
+
+      <details class="lab-ledger" id="labLedger"></details>
+    </div>
+  </div>
+
+  <section style="margin-top:56px;">
+    <h2><span class="num">→</span>What this page simplifies, on purpose</h2>
+    <ul>
+      <li><strong>One hidden layer, not many.</strong> The backward pass here is nine steps long. A deep network repeats steps 5–8 once per layer and changes nothing else — the gradient of the input, <code>∂L/∂x</code>, is precisely the tensor the layer below would receive as its incoming gradient.</li>
+      <li><strong>The loss is half sum-of-squares, not cross-entropy.</strong> Squared error keeps the first gradient equal to the residual, so the chain is easy to follow all the way down. Softmax with cross-entropy produces the same "gradient equals residual" shortcut one layer later; everything behind that point is identical to what is shown here.</li>
+      <li><strong>Plain gradient descent, no optimiser.</strong> The descent tab subtracts <code>η · ∇L</code> and stops. Momentum, Adam's per-parameter scaling, weight decay and learning-rate schedules all change what is done <em>with</em> the gradients, not how the gradients are computed.</li>
+      <li><strong>No regularisation, no dropout, no normalisation layers.</strong> Each would add its own local derivative to the chain. None would change the structure of the chain.</li>
+      <li><strong>Batch is 2, and only on the last tab.</strong> Big enough to show where the batch axis gets summed away and where it survives, small enough that every row still fits on screen.</li>
+      <li><strong>Every dimension is tiny.</strong> Real networks have millions of parameters and would never print their gradients. They are also never gradient-checked at full size — the check is run on a small case exactly like this one, and that is the honest reason this page can run it at all.</li>
+    </ul>
+  </section>
+
+  <section id="lab-related">
+    <h2><span class="num">→</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="./topics/04-neural-network-fundamentals.html"><div class="rc-sec" style="color:var(--c-nn)">04 · Where this starts</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">Backprop, activations, initialisation and the vanishing-gradient problem, explained in prose.</div></a>
+      <a class="related-card" href="./topics/01-math-foundations.html"><div class="rc-sec" style="color:var(--c-math)">01 · Prerequisite</div><div class="rc-title">Math &amp; Stats Foundations</div><div class="rc-hook">The chain rule, Jacobians and gradient descent — the two ideas this whole lab runs on.</div></a>
+      <a class="related-card" href="./attention-lab.html"><div class="rc-sec" style="color:var(--accent)">Interactive</div><div class="rc-title">Attention Lab</div><div class="rc-hook">The same treatment for attention: seven mechanisms, every matrix computed live, FlashAttention checking itself.</div></a>
+      <a class="related-card" href="./topics/23-efficient-ai-systems.html"><div class="rc-sec" style="color:var(--c-efficient)">23 · Why training costs what it does</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Activation checkpointing, mixed precision and gradient accumulation — all consequences of the tape this lab builds.</div></a>
+    </div>
+  </section>
+
+</main>
+</div>
+
+<div class="search-modal" id="searchModal">
+  <div class="search-box">
+    <div class="search-input-row">
+      <span class="si-icon">🔍</span>
+      <input id="searchInput" type="text" placeholder="Search every topic, term, model…" autocomplete="off" />
+      <kbd>Esc</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+    <div class="search-hint"><span>↑↓ navigate</span><span>↵ open</span><span>esc close</span></div>
+  </div>
+</div>
+
+<script src="assets/js/search-data.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script src="assets/js/app.js"></script>
+<script src="assets/js/code-highlight.js"></script>
+<script src="assets/js/find-in-page.js"></script>
+<script src="assets/js/kml-modal.js"></script>
+<script src="assets/js/community.js"></script>
+<script src="assets/js/lab-engine.js"></script>
+<script src="assets/js/backprop-lab-model.js"></script>
+<script src="assets/js/lab-ui.js"></script>
+<script src="assets/js/backprop-lab-steps.js"></script>
+<script src="assets/js/lab-app.js"></script>
+</body>
+</html>

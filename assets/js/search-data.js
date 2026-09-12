@@ -1,20 +1,22 @@
 /* Auto-generated search index — regenerate with gen_search_index.py */
 window.SEARCH_INDEX = [
   {
-    "title": "KnowML — Machine Learning → Modern AI, Revision Course",
-    "section": "Foundations",
+    "title": "KnowML — Learn modern AI, watch it run, then ship it",
+    "section": "Site",
     "url": "index.html",
     "tags": [
-      "Map & Timeline",
+      "home",
+      "start here",
+      "map",
       "Foundations",
       "full"
     ],
-    "summary": "A one-stop, searchable revision course covering the entire modern ML/AI stack — math foundations through the 2026 frontier.",
+    "summary": "Everything around modern AI in one place — 37 sections, five interactive labs, four learning roadmaps, a model atlas and 279 interview questions.",
     "color": "var(--c-map)"
   },
   {
     "title": "Review & drill",
-    "section": "Map & Timeline",
+    "section": "Site",
     "url": "review.html",
     "tags": [
       "Review",
@@ -29,7 +31,7 @@ window.SEARCH_INDEX = [
   },
   {
     "title": "Technique Map",
-    "section": "Map & Timeline",
+    "section": "Site",
     "url": "topics/technique-map.html",
     "tags": [
       "Technique Map",
@@ -525,7 +527,7 @@ window.SEARCH_INDEX = [
   },
   {
     "title": "Attention Lab",
-    "section": "Map & Timeline",
+    "section": "Site",
     "url": "attention-lab.html",
     "tags": [
       "Attention Lab",
@@ -796,7 +798,7 @@ window.SEARCH_INDEX = [
   },
   {
     "title": "Where to Practice",
-    "section": "Map & Timeline",
+    "section": "Site",
     "url": "practice.html",
     "tags": [
       "practice",
@@ -820,6 +822,156 @@ window.SEARCH_INDEX = [
     ],
     "summary": "Drill sites, competition platforms and build-from-scratch courses — what each one actually trains, and which fixes the gap you have.",
     "color": "var(--accent)"
+  },
+  {
+    "title": "Browse everything",
+    "section": "Site",
+    "url": "sections.html",
+    "tags": [
+      "browse",
+      "all sections",
+      "index",
+      "sitemap",
+      "timeline",
+      "eras",
+      "learning order",
+      "dependency order",
+      "AI vs ML vs deep learning",
+      "scope",
+      "full"
+    ],
+    "summary": "Every section grouped by theme, the 1950s-to-2026 timeline, the dependency order, and where the scope words — AI, ML, deep learning, foundation models, agents — actually sit.",
+    "color": "var(--c-map)"
+  },
+  {
+    "title": "The Labs",
+    "section": "Site",
+    "url": "labs.html",
+    "tags": [
+      "labs",
+      "interactive",
+      "hands-on",
+      "step through",
+      "worked example",
+      "attention lab",
+      "backprop lab",
+      "tokenizer lab",
+      "sampling lab",
+      "quantization lab",
+      "full"
+    ],
+    "summary": "Five interactive labs — attention, backpropagation, byte-pair encoding, sampling and quantization — stepped through one operation at a time, every number computed live.",
+    "color": "var(--accent)"
+  },
+  {
+    "title": "Learning Roadmaps",
+    "section": "Site",
+    "url": "roadmaps.html",
+    "tags": [
+      "roadmap",
+      "learning path",
+      "where to start",
+      "curriculum",
+      "study plan",
+      "order",
+      "beginner",
+      "checkpoint",
+      "what to skip",
+      "interview prep",
+      "full"
+    ],
+    "summary": "Four ordered paths — total beginner, classical ML to LLMs, LLMs to shipping, and interview consolidation — each with honest time estimates, a checkpoint per stage, and what to skip on a first pass.",
+    "color": "var(--c-classical)"
+  },
+  {
+    "title": "Backprop Lab",
+    "section": "Site",
+    "url": "backprop-lab.html",
+    "tags": [
+      "backprop lab",
+      "backpropagation",
+      "chain rule",
+      "gradient",
+      "gradient check",
+      "finite differences",
+      "central differences",
+      "numerical gradient",
+      "MLP",
+      "forward pass",
+      "backward pass",
+      "tanh",
+      "derivative",
+      "interactive",
+      "full"
+    ],
+    "summary": "Walk a 2-layer MLP forward, then backward one chain-rule link at a time — then watch every analytic gradient checked against a numerical one computed with central differences.",
+    "color": "var(--c-nn)"
+  },
+  {
+    "title": "Tokenizer Lab",
+    "section": "Site",
+    "url": "tokenizer-lab.html",
+    "tags": [
+      "tokenizer lab",
+      "BPE",
+      "byte-pair encoding",
+      "tokenization",
+      "vocabulary",
+      "merges",
+      "subword",
+      "strawberry",
+      "why LLMs cannot spell",
+      "encode",
+      "decode",
+      "interactive",
+      "full"
+    ],
+    "summary": "Build a byte-pair encoding vocabulary from a tiny corpus merge by merge, encode with it, and see exactly why a word split into four tokens carries no letter-level structure.",
+    "color": "var(--c-nlp)"
+  },
+  {
+    "title": "Sampling Lab",
+    "section": "Site",
+    "url": "sampling-lab.html",
+    "tags": [
+      "sampling lab",
+      "softmax",
+      "temperature",
+      "top-k",
+      "top-p",
+      "nucleus sampling",
+      "greedy decoding",
+      "logits",
+      "probability",
+      "numerical stability",
+      "decoding",
+      "interactive",
+      "full"
+    ],
+    "summary": "Turn logits into probabilities step by step, then apply temperature, top-k and top-p to the same distribution — including a case where top-k keeps a candidate top-p correctly rejects.",
+    "color": "var(--c-llm)"
+  },
+  {
+    "title": "Quantization Lab",
+    "section": "Site",
+    "url": "quantization-lab.html",
+    "tags": [
+      "quantization lab",
+      "INT8",
+      "INT4",
+      "quantization",
+      "dequantization",
+      "scale",
+      "zero point",
+      "outlier",
+      "per-tensor",
+      "per-channel",
+      "quantization error",
+      "interactive",
+      "full"
+    ],
+    "summary": "Quantize a weight matrix to INT8 and inspect the error cell by cell — then plant one outlier, watch it consume the numeric range, and fix it with per-channel scales.",
+    "color": "var(--c-efficient)"
   },
   {
     "kind": "section",
