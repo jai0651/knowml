@@ -75,6 +75,16 @@
     });
     return wrap;
   }
+  /* A |V|-wide row is ~520px, so four of them side by side would need 2,100px and
+     the stage would scroll sideways. .lab-heads-group is flex-shrink:0, so it
+     sizes to max-content unless told otherwise; capping it lets .lab-heads-row do
+     the wrapping it was already set up for. */
+  function headsPanel(opts) {
+    var g = UI.headsPanel(opts);
+    g.style.maxWidth = '100%';
+    g.style.flexBasis = '100%';
+    return g;
+  }
   function badgeStack(badges) {
     var wrap = UI.el('div');
     wrap.style.cssText = 'display:flex;flex-direction:column;gap:10px;align-items:flex-start;';
@@ -349,7 +359,7 @@
       formula: null,
       note: 'Read down any one column and you can watch a single token\'s probability move. "' + A.words[A.argmax] + '" goes ' + CFG.temps.map(function (T, i) { return pct(TEMPS_A[i].probs[A.argmax]); }).join(' → ') + ' as <span>$T$</span> goes ' + CFG.temps.join(' → ') + '. Everything else moves the opposite way, because the row has to keep summing to 1 — probability taken from the leader has to land somewhere.',
       render: function (stage) {
-        stage.appendChild(UI.headsPanel({
+        stage.appendChild(headsPanel({
           title: 'The same logits at four temperatures',
           heads: TEMPS_A.map(function (s) {
             return {
@@ -426,7 +436,7 @@
       formula: null,
       note: 'Here is the same four-temperature sweep on the other context, <em>' + B.prompt + ' ___</em>, which starts at ' + f2(B.entropy) + ' bits instead of ' + f2(A.entropy) + '. At <span>$T=' + CFG.temps[0] + '$</span> the focused context is already decided (' + pct(TEMPS_A[0].top1) + ' on one token) while this one is still a near coin-flip: ' + pct(TEMPS_B[0].probs[B.order[0]]) + ' on "' + B.words[B.order[0]] + '" against ' + pct(TEMPS_B[0].probs[B.order[1]]) + ' on "' + B.words[B.order[1]] + '". Even at <span>$T=' + CFG.tempLimits[0] + '$</span> it has only reached ' + pct(LIMITS_B[0].top1) + ', because its top two logits differ by just ' + f2(B.logits[B.order[0]] - B.logits[B.order[1]]) + '. <strong>A temperature setting is not a level of randomness</strong> — it is a multiplier on a gap you do not control.',
       render: function (stage) {
-        stage.appendChild(UI.headsPanel({
+        stage.appendChild(headsPanel({
           title: 'Open context — ' + B.prompt + ' ___',
           heads: TEMPS_B.map(function (s) {
             return {
@@ -522,7 +532,7 @@
       formula: '\\mathcal{V}_1 \\subset \\mathcal{V}_2 \\subset \\dots \\subset \\mathcal{V}_{|V|} = V',
       note: 'The two ends are the interesting ones. <span>$k=1$</span> is greedy decoding written a different way — the argmax gets probability 1. <span>$k=|V|=' + CFG.V + '$</span> is no filtering at all, and the row that comes back is the original distribution, bit for bit; that is checked below rather than assumed. Everything in between trades coverage for safety, and on this row the trade is nearly free: ' + KS_A.map(function (s) { return 'k=' + s.k + ' covers ' + pct(s.mass); }).join(', ') + '.',
       render: function (stage) {
-        stage.appendChild(UI.headsPanel({
+        stage.appendChild(headsPanel({
           title: 'p′ after top-k, for five values of k',
           heads: KS_A.map(function (s) {
             return {
@@ -557,7 +567,7 @@
           unit: ' of 1.0',
           meaning: 'The same k, ' + f2(TK_A.mass / TK_B.mass) + '× apart in coverage.'
         }));
-        stage.appendChild(UI.headsPanel({
+        stage.appendChild(headsPanel({
           title: 'k = ' + CFG.k + ' on both contexts',
           heads: [
             {
@@ -647,7 +657,7 @@
       formula: null,
       note: 'Nothing about the setting changes — same <span>$p=' + CFG.p + '$</span>, same code. The cumulative row climbs much more slowly here (' + B.cum.slice(0, 4).map(function (v) { return f2(v); }).join(', ') + ', …), so the threshold is not reached until rank ' + TP_B.cutRank + ', and the nucleus comes out at <strong>' + TP_B.n + ' tokens</strong> instead of ' + TP_A.n + '. That is the property worth naming: <strong>top-p\'s candidate set resizes itself with the model\'s confidence</strong>, from ' + TP_A.n + ' to ' + TP_B.n + ' on this page, without anyone touching the setting.',
       render: function (stage) {
-        stage.appendChild(UI.headsPanel({
+        stage.appendChild(headsPanel({
           title: 'Cumulative rows, both contexts, cut at p = ' + CFG.p,
           heads: [
             {

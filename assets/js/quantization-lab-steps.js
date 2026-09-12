@@ -358,7 +358,7 @@
             { k: 'code range [min, max]', v: '[' + CS_CLEAN.min + ', ' + CS_CLEAN.max + ']' },
             { k: 'codes spanned / available', v: CS_CLEAN.span + ' / ' + CS_CLEAN.total + '  (' + pctS(CS_CLEAN.pct) + ')' },
             { k: 'effective bits used', v: n(CS_CLEAN.effBits, 2) + ' of ' + CFG.bits8 },
-            { k: 'weights merged onto a shared code', v: String(COL_CLEAN.nCollidedValues) }
+            { k: 'weights merged onto a shared value', v: String(COL_CLEAN.nCollidedValues) + '  (nothing collided)' }
           ]
         }));
       }
@@ -483,14 +483,14 @@
       note: 'A coarse grid does not just add noise — it destroys distinctions. The ordinary rows hold <strong>' + Mo.distinctWeights(Mo.Wout, ORD) + ' distinct float values</strong>, and they come out the other side as <strong>' + CS_OUT_ORD.distinct + ' distinct codes</strong>. ' + COL_OUT.nCollidedValues + ' different weights collapsed onto ' + COL_OUT.nGroups + ' shared codes, ' + COL_OUT.merged + ' distinctions gone; after dequantization those weights are, bit for bit, the same number. No later step can tell them apart again.',
       render: function (stage) {
         stage.appendChild(collisionPanel(COL_OUT, 'Collisions among the ordinary rows',
-          'Each row is a set of genuinely different weights that the per-tensor grid can no longer distinguish. Tab 1 had ' + COL_CLEAN.nGroups + '.'));
+          'Each row is a set of genuinely different weights that the per-tensor grid can no longer tell apart. Tab 1, the same block without the outlier, had ' + COL_CLEAN.nGroups + '.'));
         stage.appendChild(statsPanel({
           title: 'Distinguishability',
           rows: [
             { k: 'ordinary weights', v: String(ORD.length * CFG.cols) },
             { k: 'distinct float values among them', v: String(Mo.distinctWeights(Mo.Wout, ORD)) },
             { k: 'distinct codes they map to', v: String(CS_OUT_ORD.distinct), hi: true },
-            { k: 'values merged away', v: StringCOL_OUT.merged }
+            { k: 'distinctions destroyed', v: String(COL_OUT.merged), hi: true }
           ]
         }));
       }
@@ -622,8 +622,8 @@
             { k: 'percent of range', v: pctS(CS_OUT_ORD.pct) + '  →  ' + pctS(CS_PC_ORD.pct) },
             { k: 'effective bits', v: n(CS_OUT_ORD.effBits, 2) + '  →  ' + n(CS_PC_ORD.effBits, 2), hi: true },
             { k: 'distinct codes used', v: CS_OUT_ORD.distinct + '  →  ' + CS_PC_ORD.distinct },
-            { k: 'colliding code groups', v: COL_OUT.nGroups + '  →  ' + COL_PC.nGroups },
-            { k: 'values merged away', v: COL_OUT.merged + '  →  ' + COL_PC.merged }
+            { k: 'groups landing on one value', v: COL_OUT.nGroups + '  →  ' + COL_PC.nGroups },
+            { k: 'distinctions destroyed', v: COL_OUT.merged + '  →  ' + COL_PC.merged, hi: true }
           ]
         }));
       }
@@ -829,7 +829,7 @@
     steps.push({
       title: 'Where it starts to hurt: weights merging',
       formula: null,
-      note: 'At 8 bits, with these same per-channel scales, all ' + Mo.distinctWeights(Mo.W) + ' distinct weight values in this block came back out as ' + Mo.distinctWeights(Mo.W) + ' distinct numbers — nothing merged. At 4 bits, those same ' + Mo.distinctWeights(Mo.W) + ' values collapse to <strong>' + CS_INT4.distinct + ' distinct codes</strong> across <strong>' + COL_4.nGroups + ' shared codes</strong>, merging ' + COL_4.merged + ' values away. The largest group below is ' + COL_4.biggest + ' different weights that are now the same number. This is qualitatively different from adding noise; it is a loss of identity.',
+      note: 'At 8 bits, with these same per-channel scales, no two different weights in the block landed on the same number: <strong>' + COL_8C.nGroups + ' collisions</strong> across all ' + (CFG.rows * CFG.cols) + ' cells. At 4 bits, <strong>' + COL_4.nGroups + ' groups</strong> form — ' + COL_4.nCollidedValues + ' weights that were genuinely different become ' + COL_4.nGroups + ' numbers, destroying <strong>' + COL_4.merged + ' distinctions</strong>. The largest group below is ' + COL_4.biggest + ' different weights that are now one value. That is qualitatively different from adding noise: it is a loss of identity, and nothing downstream can undo it.',
       render: function (stage) {
         stage.appendChild(collisionPanel(COL_4, 'Weights that became the same number at 4 bits',
           'Grouped by the value they all dequantize to rather than by the integer code — with one scale per row, the same code in two rows is two different floats. The last column is the spread of true weights now represented by a single number.'));
@@ -837,10 +837,11 @@
           title: 'Distinguishability, 8 bits → 4 bits', fresh: true,
           headers: ['quantity', 'int8  →  int4'],
           rows: [
-            { k: 'distinct float weights', v: String(Mo.distinctWeights(Mo.W)) + '  →  ' + Mo.distinctWeights(Mo.W) },
-            { k: 'distinct codes used', v: CS_PC8C.distinct + '  →  ' + CS_INT4.distinct, hi: true },
-            { k: 'groups sharing one value', v: COL_8C.nGroups + '  →  ' + COL_4.nGroups, hi: true },
-            { k: 'values merged away', v: COL_8C.merged + '  →  ' + COL_4.merged }
+            { k: 'cells in the block', v: String(CFG.rows * CFG.cols) + ', holding ' + Mo.distinctWeights(Mo.W) + ' distinct values' },
+            { k: 'codes spanned, per row', v: CS_PC8C.span + '  →  ' + CS_INT4.span + '  (of ' + CS_PC8C.total + '  →  ' + CS_INT4.total + ')' },
+            { k: 'groups landing on one value', v: COL_8C.nGroups + '  →  ' + COL_4.nGroups, hi: true },
+            { k: 'weights inside those groups', v: COL_8C.nCollidedValues + '  →  ' + COL_4.nCollidedValues },
+            { k: 'distinctions destroyed', v: COL_8C.merged + '  →  ' + COL_4.merged, hi: true }
           ]
         }));
       }

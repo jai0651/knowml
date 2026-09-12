@@ -637,7 +637,7 @@
             return { label: r.label + ' (|V| = ' + r.vocab.toLocaleString() + ')', value: r.millions,
                      colorVar: r.vocab === Mo.VOCAB.length ? 'var(--c-nlp)' : 'var(--know-cold)' };
           }),
-          meaning: 'A ' + (128000 / 32000) + '× larger vocabulary costs ' + M.round(Mo.SCALE.rows[2].params / Mo.SCALE.rows[1].params, 1) + '× the embedding parameters — and that is before the tied or untied output head.'
+          meaning: 'This lab\'s ' + Mo.VOCAB.length + '-symbol vocabulary is ' + Mo.SCALE.rows[0].params.toLocaleString() + ' parameters — invisible on this scale, which is the point of the comparison. A ' + (128000 / 32000) + '× larger real vocabulary costs ' + M.round(Mo.SCALE.rows[2].params / Mo.SCALE.rows[1].params, 1) + '× the embedding parameters, and that is before the tied or untied output head.'
         }));
         stage.appendChild(UI.textCard('The counterweight is real too: a tokenizer that fragments your language badly makes every request longer, so a bigger multilingual vocabulary can be cheaper overall despite the extra parameters. Page <a href="./topics/10-llm-architecture-training.html">10</a> works through where the balance lands in practice.', 'note'));
       }

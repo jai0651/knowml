@@ -8,7 +8,7 @@
    navigation flashed light before flipping to dark. */
 try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-theme")||"light")}catch(e){}</script>
 <title>GPU Architecture, CUDA &amp; Distributed Training · KnowML</title>
-<meta name="description" content="SIMT cores, the GPU memory hierarchy, streaming multiprocessors, warps and warp divergence, tensor cores, the CUDA programming model, Triton, NVLink vs InfiniBand, and ring all-reduce — the hardware and communication layer underneath every training run.">
+<meta name="description" content="SIMT cores, warps, tensor cores, CUDA and Triton, then the distributed layer on top: exactly what DDP does each step, what ZeRO stages 1/2/3 shard and what each costs in communication, FSDP vs DeepSpeed, tensor and pipeline parallelism, the bubble, and how to pick a strategy for N GPUs and a model of size M.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -129,9 +129,9 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
   <div class="topic-header">
     <div class="crumbs"><a href="../index.html">Map &amp; Timeline</a> / Systems, Safety &amp; Interview / 28</div>
     <h1>GPU Architecture, CUDA &amp; Distributed Training</h1>
-    <p class="dek">What a GPU actually is, why its hardware fits neural network math almost by accident, and the physical communication layer underneath every distributed training run. SIMT cores, warps, tensor cores, CUDA, Triton, NVLink, and ring all-reduce.</p>
+    <p class="dek">What a GPU actually is, why its hardware fits neural network math almost by accident, and the distributed training layer built on top of it. SIMT cores, warps, tensor cores, CUDA and Triton — then DDP, ZeRO, FSDP, tensor and pipeline parallelism, and how to choose between them with arithmetic rather than taste.</p>
     <div class="meta-row">
-      <span class="reading-time">~25 min · prerequisites: Efficient AI &amp; Systems (23), Attention &amp; Transformers (08)</span>
+      <span class="reading-time">~42 min · prerequisites: Efficient AI &amp; Systems (23), Attention &amp; Transformers (08)</span>
     </div>
   </div>
 
@@ -141,6 +141,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       <p>A GPU is thousands of simple cores built to execute the same instruction across thousands of pieces of data at once. That is <strong>SIMT</strong>: single instruction, multiple threads. It is exactly the shape of dense matrix multiplication, the operation that dominates deep learning compute. <strong>Warps</strong> of 32 threads execute in lockstep. <strong>Tensor cores</strong> fuse whole small-matrix multiply-accumulates into one hardware operation.</p>
     <p>CUDA lets you write a kernel from a single thread's point of view while the hardware runs that same code across a grid of thread blocks. <strong>Triton</strong> exists because writing that CUDA well takes deep, specialized expertise: coalesced memory access, enough resident warps to hide memory latency. Most ML researchers don't have that expertise and, increasingly, don't need it.</p>
     <p>Scale training beyond one GPU and the bottleneck moves from compute to communication. <strong>NVLink</strong> connects GPUs on the same node at very high bandwidth. <strong>InfiniBand</strong> connects nodes at meaningfully lower bandwidth. <strong>Ring all-reduce</strong> is the algorithm that keeps gradient synchronization from becoming the bottleneck as you add more GPUs, because each GPU only ever sends and receives a bounded amount of data, independent of cluster size.</p>
+    <p>Past one node the question becomes which thing you shard. <strong>Data parallel</strong> replicates everything and splits the batch. <strong>ZeRO</strong> and <strong>FSDP</strong> shard the optimizer, then the gradients, then the weights. <strong>Tensor parallel</strong> splits a single matrix multiply; <strong>pipeline parallel</strong> splits the model by depth. Add them in that order and stop at the first one that fits.</p>
     <p>One sentence for an interview: GPUs win at deep learning because SIMT hardware matches dense matmul's shape almost perfectly, and distributed training scales because ring all-reduce turns gradient synchronization into a communication cost that doesn't grow with the number of GPUs.</p>
     </div>
   </section>
@@ -419,8 +420,576 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <p>Compare a naive centralized parameter server. Every one of the N workers has to send its gradients to the server, and the server has to send updated weights back to all N workers, all through that one server's network link. That link's traffic grows linearly with N. It becomes the exact bottleneck you are trying to scale past, precisely as you add more GPUs to go faster.</p>
   </section>
 
+  <section id="ddp">
+    <h2><span class="num">12</span>Data parallel, exactly: what DDP does at every step</h2>
+    <p class="lede">Eight GPUs, a model that fits on each of them, a global batch of 64. Every rank runs the same model on a different eight examples. The only moment they speak to each other is the gradient all-reduce, and <em>when</em> that all-reduce happens is the entire design.</p>
+
+    <p>Once, at startup, rank 0 broadcasts its weights to every other rank. All eight now hold byte-identical parameters, optimizer state and gradient buffers. After that, no weight ever crosses the wire again.</p>
+
+    <p>Then, every step:</p>
+
+    <ul>
+      <li><strong>Forward.</strong> Each rank pushes its own eight examples through its own full copy of the model. No communication whatsoever. The loss each rank computes is a local loss over a local shard of the batch.</li>
+      <li><strong>Backward.</strong> Also purely local arithmetic — but as each parameter's gradient is produced, DDP hands it to a bucket. Backward runs from the last layer to the first, so the last layer's gradients are ready long before the first layer's.</li>
+      <li><strong>The all-reduce, in pieces.</strong> The moment a bucket is full, its all-reduce launches asynchronously. It travels the interconnect while the layers below it are still computing their own gradients.</li>
+      <li><strong>Sync.</strong> At the end of backward, wait on the outstanding bucket all-reduces. Every rank now holds the same averaged gradient, bit for bit.</li>
+      <li><strong>Optimizer step.</strong> Run locally on every rank. Nothing is communicated.</li>
+    </ul>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The invariant that keeps eight GPUs identical without ever sending a weight</span>
+      <p>Identical starting weights, plus identical optimizer state, plus a gradient that all-reduce makes bit-identical on every rank, means the optimizer step lands on identical weights everywhere. Synchronisation is a consequence of those three facts, not a thing DDP does.</p>
+      <p>Break any one of them and the ranks drift apart silently. Batch norm computes its statistics per rank, so it needs <code>SyncBatchNorm</code>. A parameter that receives no gradient on some ranks leaves its bucket waiting, and the collective hangs.</p>
+    </div>
+
+    <h3>Why buckets, and why the default is 25 MiB</h3>
+
+    <p>Both obvious schemes are bad. All-reduce each parameter tensor on its own and you launch thousands of tiny collectives, every one paying a fixed launch and latency cost that its payload never amortises. All-reduce everything once at the end and the wire idles through the whole backward pass, then the GPUs idle through the whole transfer.</p>
+
+    <p>Bucketing is the compromise. Gradients are packed into contiguous buffers of a fixed size, and a bucket fires as soon as it fills. PyTorch's DDP defaults to 25 MiB per bucket: big enough to amortise the collective's fixed cost, small enough that the first bucket leaves early in the backward pass.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The same step, drawn to scale — one all-reduce at the end versus bucketed overlap
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 780 250" xmlns="http://www.w3.org/2000/svg">
+        <line x1="80" y1="222" x2="740" y2="222" stroke="#6c6c7d" stroke-width="1"/>
+        <text x="80" y="240" text-anchor="middle" font-size="9.5" fill="#a3a3b2">0</text>
+        <text x="268" y="240" text-anchor="middle" font-size="9.5" fill="#a3a3b2">20</text>
+        <text x="457" y="240" text-anchor="middle" font-size="9.5" fill="#a3a3b2">40</text>
+        <text x="645" y="240" text-anchor="middle" font-size="9.5" fill="#a3a3b2">60 ms</text>
+
+        <text x="72" y="46" text-anchor="end" font-size="10" fill="#a3a3b2">backward</text>
+        <text x="72" y="58" text-anchor="end" font-size="10" fill="#a3a3b2">compute</text>
+        <rect x="80" y="34" width="55" height="26" rx="3" fill="#818cf8" opacity="0.5"/>
+        <rect x="137" y="34" width="55" height="26" rx="3" fill="#818cf8" opacity="0.5"/>
+        <rect x="193" y="34" width="55" height="26" rx="3" fill="#818cf8" opacity="0.5"/>
+        <rect x="250" y="34" width="55" height="26" rx="3" fill="#818cf8" opacity="0.5"/>
+        <rect x="306" y="34" width="55" height="26" rx="3" fill="#818cf8" opacity="0.5"/>
+        <rect x="363" y="34" width="55" height="26" rx="3" fill="#818cf8" opacity="0.5"/>
+        <rect x="419" y="34" width="55" height="26" rx="3" fill="#818cf8" opacity="0.5"/>
+        <rect x="476" y="34" width="55" height="26" rx="3" fill="#818cf8" opacity="0.5"/>
+        <text x="306" y="26" text-anchor="middle" font-size="9.5" fill="#818cf8">8 layers × 6 ms, last layer first</text>
+
+        <text x="72" y="106" text-anchor="end" font-size="10" fill="#a3a3b2">bucketed</text>
+        <text x="72" y="118" text-anchor="end" font-size="10" fill="#a3a3b2">all-reduce</text>
+        <rect x="137" y="94" width="23" height="26" rx="3" fill="#34d399" opacity="0.75"/>
+        <rect x="193" y="94" width="23" height="26" rx="3" fill="#34d399" opacity="0.75"/>
+        <rect x="250" y="94" width="23" height="26" rx="3" fill="#34d399" opacity="0.75"/>
+        <rect x="306" y="94" width="23" height="26" rx="3" fill="#34d399" opacity="0.75"/>
+        <rect x="363" y="94" width="23" height="26" rx="3" fill="#34d399" opacity="0.75"/>
+        <rect x="419" y="94" width="23" height="26" rx="3" fill="#34d399" opacity="0.75"/>
+        <rect x="476" y="94" width="23" height="26" rx="3" fill="#34d399" opacity="0.75"/>
+        <rect x="533" y="94" width="23" height="26" rx="3" fill="#34d399" opacity="0.75"/>
+        <line x1="556" y1="88" x2="556" y2="222" stroke="#34d399" stroke-width="1.4" stroke-dasharray="4 3"/>
+        <text x="562" y="134" font-size="11" font-weight="700" fill="#34d399">50.5 ms</text>
+        <text x="562" y="148" font-size="9.5" fill="#a3a3b2">one bucket's flight</text>
+        <text x="562" y="160" font-size="9.5" fill="#a3a3b2">time past the compute</text>
+
+        <text x="72" y="184" text-anchor="end" font-size="10" fill="#a3a3b2">one big</text>
+        <text x="72" y="196" text-anchor="end" font-size="10" fill="#a3a3b2">all-reduce</text>
+        <rect x="533" y="172" width="188" height="26" rx="3" fill="#f472b6" opacity="0.7"/>
+        <line x1="721" y1="166" x2="721" y2="222" stroke="#f472b6" stroke-width="1.4" stroke-dasharray="4 3"/>
+        <text x="640" y="212" text-anchor="middle" font-size="10" fill="#f472b6">68 ms</text>
+        <text x="300" y="190" text-anchor="middle" font-size="10" fill="#6c6c7d">wire idle for the whole backward pass</text>
+      </svg>
+      <div class="diagram-caption">Drawn to scale on a single time axis, from the numbers in the Try it below: eight layers at 6 ms of backward compute each, 50 MB of gradient per layer, 20 GB/s of usable bandwidth. The green bars sit under the blue ones because a bucket's all-reduce runs while the next layer down is still computing. What is left over at the end is one bucket in flight — 2.5 ms — instead of the full 20 ms of transfer.</div>
+    </div>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Sweep the bucket size and watch the overlap appear</span>
+      </summary>
+<pre><code># Backward runs last layer -&gt; first. A layer's gradient is ready the
+# moment its backward finishes, so it can go on the wire while the
+# next layer down is still computing. That is the whole trick.
+COMPUTE_MS = [6.0] * 8        # backward compute, per layer
+GRAD_MB = [50.0] * 8          # gradient size, per layer
+MB_PER_MS = 20.0              # 20 GB/s of usable link bandwidth
+
+def wall_clock(bucket_mb):
+    t = link_free = pending = 0.0
+    for c, g in zip(COMPUTE_MS, GRAD_MB):
+        t += c                            # compute this layer
+        pending += g                      # its gradient joins the bucket
+        while pending &gt;= bucket_mb:       # bucket full -&gt; fire it off
+            pending -= bucket_mb
+            link_free = max(link_free, t) + bucket_mb / MB_PER_MS
+    if pending:                           # flush the last partial bucket
+        link_free = max(link_free, t) + pending / MB_PER_MS
+    return max(t, link_free)
+
+compute = sum(COMPUTE_MS)
+comm = sum(GRAD_MB) / MB_PER_MS
+print("backward compute alone      %6.1f ms" % compute)
+print("one all-reduce at the end   %6.1f ms  (compute + comm)"
+      % (compute + comm))
+for b in (400, 200, 100, 50, 25):
+    print("bucket %3d MB               %6.1f ms" % (b, wall_clock(b)))
+print("\nthe floor is the compute (%.1f ms) plus ONE bucket in"
+      " flight: 2.5 ms for 50 MB at this bandwidth." % compute)</code></pre>
+      <div class="tryit-out"><strong>Read the 400 MB row and the 50 MB row.</strong> A bucket the size of the whole model is the no-overlap case exactly — <code>68.0 ms</code> either way, because nothing can be sent until the last gradient exists. At 50 MB a bucket closes after every layer, and wall clock falls to <code>50.5 ms</code>: the 48 ms of compute plus one bucket still in flight. Going smaller than that buys nothing here, and in reality it starts costing, because this model charges nothing per message and NCCL does. That gap is why the default is a size rather than "as small as possible".</div>
+    </details>
+
+    <p>Two consequences that catch people out. Effective batch size is per-rank batch times world size, so adding GPUs silently changes your optimisation problem and your learning rate should move with it. And <code>no_sync()</code> exists so that gradient accumulation skips the all-reduce on every micro-step but the last.</p>
+  </section>
+
+  <section id="ledger">
+    <h2><span class="num">13</span>The memory ledger, and the wall data parallel runs into</h2>
+    <p class="lede">DDP scales throughput almost perfectly and capacity not at all. Every rank holds a complete copy of the training state, so eight GPUs give you eight times the batch and exactly as much room for the model as one GPU had.</p>
+
+    <p>Which raises the question of what "the training state" actually contains. Parameters are the smallest part of it.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Worked example</span>
+        <span class="drv-goal">Why a 7.5B-parameter model needs 120 GB before a single activation</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">Assume the standard recipe: mixed-precision forward and backward, AdamW, no sharding and no offload. Write <span>$\Psi$</span> for the parameter count. Every line below is bytes per parameter.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\text{fp16 parameters} = 2\Psi = 2 \times 7.5\times10^9 = 15\ \text{GB}$$</span></div>
+            <div class="drv-why"><strong>Why reduced precision at all.</strong> Section 06: the matmuls have to land on tensor cores, and tensor cores want fp16 or bf16. This copy is the one the forward and backward passes actually read.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\text{fp16 gradients} = 2\Psi = 15\ \text{GB}$$</span></div>
+            <div class="drv-why">One gradient per parameter, in the same dtype the backward pass produced it in. This is the tensor DDP all-reduces.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\text{fp32 master weights} = 4\Psi = 30\ \text{GB}$$</span></div>
+            <div class="drv-why"><strong>The line people forget.</strong> fp16 carries about 10 bits of mantissa. Add an update of relative size <span>$10^{-4}$</span> to an fp16 weight and it rounds straight back to where it started — the training stalls. So the optimizer keeps an fp32 copy, applies the update there, and casts down for the next forward pass.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\text{Adam momentum} + \text{variance} = 4\Psi + 4\Psi = 60\ \text{GB}$$</span></div>
+            <div class="drv-why">Adam keeps a running first and second moment per parameter, both fp32. This is the price of the optimizer that made large-model training work, and it is four times the size of the weights it is optimising.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$2\Psi + 2\Psi + 12\Psi = 16\Psi = 120\ \text{GB}$$</span></div>
+            <div class="drv-why">Sixteen bytes per parameter. This is exactly the accounting in the ZeRO paper (Rajbhandari et al., 2020), which uses the same 7.5B example and reaches the same 120 GB.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>The ratio is the point.</strong> Parameters are 15 GB of the 120. The optimizer and its master copy are 90 GB — three quarters of the bill — and they are touched exactly once per step, during the update. For the whole forward and backward pass, every rank is sitting on 90 GB of state it is not using. That observation is the whole of ZeRO.</div>
+      </div>
+    </details>
+
+    <p>Now the wall. 120 GB does not fit on an 80 GB H100, and DDP does not help, because DDP's answer to eight GPUs is eight identical 120 GB copies. You have bought 640 GB of HBM and stored 120 GB of information in it.</p>
+
+    <p>Activations sit on top of all of this and none of the techniques in the next section shard them. Activation checkpointing is the orthogonal lever: store only layer boundaries, recompute the rest during backward, and trade roughly 30% more compute for a large drop in activation memory.</p>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">The ledger, and what each ZeRO stage does to it</span>
+      </summary>
+<pre><code># Mixed-precision AdamW keeps five tensors for every parameter.
+PARAM, GRAD = 2, 2           # bf16 weights, bf16 gradients
+OPT = 4 + 4 + 4              # fp32 master copy + Adam m + Adam v
+TOTAL = PARAM + GRAD + OPT   # 16 bytes per parameter
+
+def per_gpu_gb(psi, n, stage):
+    P, G, O = psi * PARAM, psi * GRAD, psi * OPT
+    if stage == "DDP":  return (P + G + O) / 1e9
+    if stage == "ZeRO-1": return (P + G + O / n) / 1e9
+    if stage == "ZeRO-2": return (P + (G + O) / n) / 1e9
+    return (P + G + O) / n / 1e9          # ZeRO-3
+
+psi = 7.5e9
+print(f"{TOTAL} bytes/param x {psi:.1e} params"
+      f" = {psi * TOTAL / 1e9:.0f} GB of training state")
+print(f"\n{'GPUs':&gt;5}{'DDP':&gt;9}{'ZeRO-1':&gt;9}{'ZeRO-2':&gt;9}{'ZeRO-3':&gt;9}")
+for n in (1, 8, 64, 512):
+    cells = [per_gpu_gb(psi, n, s)
+             for s in ("DDP", "ZeRO-1", "ZeRO-2", "ZeRO-3")]
+    print(f"{n:&gt;5}" + "".join(f"{v:&gt;9.1f}" for v in cells))
+print("\nGB per GPU. Weights + grads + optimizer only; activations"
+      " are extra and are NOT sharded by any of these.")</code></pre>
+      <div class="tryit-out"><strong>Read down the DDP column first.</strong> It is <code>120.0</code> at every world size, which is the wall stated as a number: replication means more GPUs add zero capacity. Then read across the last row. At 512 ranks, ZeRO-1 still costs <code>30.2</code> GB and ZeRO-2 <code>15.2</code> GB, because both keep a full copy of the parameters on every rank — the <code>4Ψ</code> and <code>2Ψ</code> terms never shard away. Only ZeRO-3 goes to zero, and section 14 is about what that costs.</div>
+    </details>
+  </section>
+
+  <section id="zero">
+    <h2><span class="num">14</span>ZeRO, stage by stage: what is sharded and what it costs</h2>
+    <p class="lede">The duplication in DDP buys exactly one thing: every rank can run the optimizer step without talking to anyone. ZeRO gives that up, one tier of the ledger at a time, and buys back memory in proportion to how much it gave up.</p>
+
+    <p>The unit of sharding is the parameter index. Rank <span>$i$</span> owns slice <span>$i$</span> of the flattened parameter vector, and "owning" a slice means being the only rank responsible for its optimizer state.</p>
+
+    <ul>
+      <li><strong>Stage 1, optimizer states.</strong> Each rank keeps the full parameters and full gradients, but only <span>$1/N$</span> of the fp32 master weights and Adam moments. Per rank: <span>$4\Psi + 12\Psi/N$</span>.</li>
+      <li><strong>Stage 2, plus gradients.</strong> Gradients are reduce-scattered rather than all-reduced, so each rank keeps only the slice it owns and frees the rest the moment the bucket is reduced. Per rank: <span>$2\Psi + 14\Psi/N$</span>.</li>
+      <li><strong>Stage 3, plus parameters.</strong> The weights themselves are sharded. Before a layer can run, an all-gather reconstructs its full weights; after it runs, the non-owned shards are dropped. Per rank: <span>$16\Psi/N$</span>.</li>
+    </ul>
+
+    <div class="diagram">
+      <div class="diagram-title">Per-GPU training state, 7.5B parameters on 64 GPUs — bars drawn to scale
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 800 240" xmlns="http://www.w3.org/2000/svg">
+        <line x1="550" y1="22" x2="550" y2="212" stroke="#f472b6" stroke-width="1.4" stroke-dasharray="5 4"/>
+        <text x="545" y="18" text-anchor="end" font-size="10" fill="#f472b6">80 GB — one H100</text>
+
+        <text x="142" y="48" text-anchor="end" font-size="11.5" font-weight="700" fill="#e9e9ef">DDP</text>
+        <rect x="150" y="34" width="600" height="24" rx="4" fill="#f472b6" opacity="0.55"/>
+        <text x="758" y="51" font-size="10.5" fill="#a3a3b2">120.0 GB · 2Ψ on the wire</text>
+
+        <text x="142" y="92" text-anchor="end" font-size="11.5" font-weight="700" fill="#e9e9ef">ZeRO-1</text>
+        <rect x="150" y="78" width="157" height="24" rx="4" fill="#fbbf24" opacity="0.6"/>
+        <text x="315" y="95" font-size="10.5" fill="#a3a3b2">31.4 GB · 2Ψ on the wire</text>
+
+        <text x="142" y="136" text-anchor="end" font-size="11.5" font-weight="700" fill="#e9e9ef">ZeRO-2</text>
+        <rect x="150" y="122" width="83" height="24" rx="4" fill="#34d399" opacity="0.6"/>
+        <text x="241" y="139" font-size="10.5" fill="#a3a3b2">16.6 GB · 2Ψ on the wire</text>
+
+        <text x="142" y="180" text-anchor="end" font-size="11.5" font-weight="700" fill="#e9e9ef">ZeRO-3</text>
+        <rect x="150" y="166" width="9" height="24" rx="2" fill="#818cf8" opacity="0.85"/>
+        <text x="167" y="183" font-size="10.5" fill="#a3a3b2">1.9 GB · 3Ψ on the wire — 1.5× DDP</text>
+
+        <line x1="150" y1="206" x2="750" y2="206" stroke="#6c6c7d" stroke-width="1"/>
+        <text x="150" y="222" text-anchor="middle" font-size="9.5" fill="#a3a3b2">0</text>
+        <text x="350" y="222" text-anchor="middle" font-size="9.5" fill="#a3a3b2">40</text>
+        <text x="550" y="222" text-anchor="middle" font-size="9.5" fill="#a3a3b2">80</text>
+        <text x="750" y="222" text-anchor="middle" font-size="9.5" fill="#a3a3b2">120 GB per GPU</text>
+      </svg>
+      <div class="diagram-caption">Bar length is linear in gigabytes: 120.0, 31.4, 16.6 and 1.9, from the formulas above at <span>$\Psi = 7.5\times10^9$</span> and <span>$N = 64$</span>. The pink line is an 80 GB H100's capacity, and it is the reason the first bar is not a viable configuration at any cluster size. Note that stages 1 and 2 are still dominated by their unsharded term — the bars would barely move if you doubled the GPU count. Only stage 3 keeps shrinking.</div>
+    </div>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>What each rank keeps</th><th>Per-GPU bytes</th><th>Traffic per step</th><th>7.5B on 64 GPUs</th></tr></thead>
+        <tbody>
+          <tr><td>DDP</td><td>Everything, replicated</td><td><span>$16\Psi$</span></td><td><span>$2\Psi$</span></td><td>120.0 GB</td></tr>
+          <tr><td>ZeRO-1</td><td>Full params + grads, <span>$1/N$</span> of optimizer</td><td><span>$4\Psi + 12\Psi/N$</span></td><td><span>$2\Psi$</span></td><td>31.4 GB</td></tr>
+          <tr><td>ZeRO-2</td><td>Full params, <span>$1/N$</span> of grads + optimizer</td><td><span>$2\Psi + 14\Psi/N$</span></td><td><span>$2\Psi$</span></td><td>16.6 GB</td></tr>
+          <tr><td>ZeRO-3</td><td><span>$1/N$</span> of everything</td><td><span>$16\Psi/N$</span></td><td><span>$3\Psi$</span></td><td>1.9 GB</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The traffic column is the part worth understanding, because it is where the intuition usually goes wrong. Stages 1 and 2 are <strong>free</strong> in communication terms. They move exactly as many bytes as plain DDP does.</p>
+
+    <p>The reason is section 10. A ring all-reduce <em>is</em> a reduce-scatter followed by an all-gather, <span>$\Psi$</span> of traffic each, <span>$2\Psi$</span> in total. ZeRO-1 and ZeRO-2 simply stop between those two halves, let each rank update the slice it now owns, and then all-gather the updated parameters instead of the summed gradients. Same two collectives, same bytes.</p>
+
+    <p>Stage 3 is the one that costs. Because no rank holds a full layer, the weights have to be all-gathered before the forward pass can use them, and again before the backward pass can use them. That is <span>$\Psi + \Psi$</span> on top of the gradient reduce-scatter's <span>$\Psi$</span>: <span>$3\Psi$</span>, or 1.5× DDP. The figures in this section are the ZeRO paper's own.</p>
+
+    <div class="callout callout-warn">
+      <span class="callout-label">Stage 3 moves the collective onto the critical path</span>
+      <p>The 1.5× understates it. DDP's one all-reduce hides behind the backward pass. Stage 3's all-gathers sit <em>in front of</em> every layer in both directions, so a layer cannot start until its weights arrive.</p>
+      <p>Implementations prefetch the next layer's weights while the current one computes, which hides the cost on NVLink and does not hide it on a slow fabric. The routine outcome: stage 2 is faster in wall clock, stage 3 is the only one that fits. Try stage 2 first and only escalate when it OOMs.</p>
+    </div>
+
+    <p>Both implementations also offload. DeepSpeed's ZeRO-Offload pushes optimizer state and the fp32 master copy to CPU memory, and ZeRO-Infinity extends that to NVMe. Both trade a much slower link for capacity you could not otherwise buy, and both are a last resort rather than a default.</p>
+
+    <h3>FSDP versus DeepSpeed ZeRO: what is actually different</h3>
+
+    <p>Start with the honest answer: the algorithm is the same one. PyTorch's docs map <code>FULL_SHARD</code> onto ZeRO stage 3 and <code>SHARD_GRAD_OP</code> onto stage 2 explicitly, and <code>NO_SHARD</code> is DDP. Nothing in the memory or traffic table above changes depending on which library you run it through.</p>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th>Just naming</th><th>Genuinely different</th></tr></thead>
+        <tbody>
+          <tr><td>"Sharding strategy" vs "ZeRO stage" — <code>FULL_SHARD</code> is stage 3, <code>SHARD_GRAD_OP</code> is stage 2, <code>NO_SHARD</code> is DDP.</td><td>FSDP is in PyTorch core and composes with the rest of it. DeepSpeed is a separate engine with its own config JSON, launcher and checkpoint format.</td></tr>
+          <tr><td>"Shard" vs "partition"; "FSDP unit" vs "parameter group". Same object, two vocabularies.</td><td>Sharding granularity. FSDP shards whatever you wrap, so a careless <code>auto_wrap_policy</code> — one unit for the whole model — gives you the memory profile of DDP and the communication profile of stage 3. DeepSpeed decides granularity for you.</td></tr>
+          <tr><td>Both overlap their collectives with compute; both prefetch; both support mixed precision and activation checkpointing.</td><td>What ships around the edges. DeepSpeed has CPU and NVMe offload, its own pipeline engine and MoE support. FSDP has DTensor, device meshes and <code>torch.compile</code>.</td></tr>
+          <tr><td>Both reach the same loss curve. Neither is an approximation.</td><td>Mixed-precision control. FSDP's <code>MixedPrecision</code> policy sets the parameter, reduction and buffer dtypes separately — reducing gradients in fp32 while computing in bf16 is a one-line change.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>So the decision is not about quality. Already in PyTorch and want one dependency and <code>torch.compile</code>: FSDP. Need to offload to CPU or NVMe, or want the pipeline and MoE machinery in the same package: DeepSpeed. Pick on operational fit and stop reading comparison benchmarks.</p>
+  </section>
+
+  <section id="tensor-parallel">
+    <h2><span class="num">15</span>Tensor parallelism: splitting one matrix multiply across GPUs</h2>
+    <p class="lede">ZeRO shards where weights are <em>stored</em>. Tensor parallelism shards where they are <em>used</em>. That difference is invisible until a single layer stops fitting on one GPU, and then it is the only thing that matters.</p>
+
+    <p>Stage 3 all-gathers a layer's complete weight matrix onto every rank before that layer runs. If the complete matrix does not fit in one GPU's memory, stage 3 cannot save you. Tensor parallelism never materialises it anywhere at all.</p>
+
+    <p>The mechanism, on a transformer's MLP block. Two matrices: <span>$Y = \text{GeLU}(XA)$</span>, then <span>$Z = YB$</span>.</p>
+
+    <ul>
+      <li><strong>Split <span>$A$</span> by columns</strong> across the ranks. GeLU is elementwise, so rank <span>$i$</span> can compute <span>$\text{GeLU}(XA_i)$</span> using nothing but its own columns. No communication.</li>
+      <li><strong>Split <span>$B$</span> by rows</strong>, matching. Rank <span>$i$</span> holds exactly the rows that pair with its columns of <span>$A$</span>, and produces <span>$\text{GeLU}(XA_i)B_i$</span> — a partial sum over part of the hidden dimension.</li>
+      <li><strong>One all-reduce</strong> adds the partial sums into <span>$Z$</span>. Splitting column-then-row is what reduces the communication to exactly one collective per block.</li>
+    </ul>
+
+    <p>Attention splits the same way, by head: the Q, K and V projections go column-parallel so each rank owns whole heads, and the output projection goes row-parallel, ending in one all-reduce. Megatron-LM's accounting for a full transformer layer is two all-reduces in the forward path and two in the backward path.</p>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Shard an MLP block four ways and check it against the unsharded answer</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+T, H, F, TP = 4, 8, 32, 4      # tokens, hidden, ffn width, TP degree
+X = rng.normal(size=(T, H))
+A = rng.normal(size=(H, F))    # first MLP matrix
+C = rng.normal(size=(F, H))    # second MLP matrix
+gelu = lambda t: t * 0.5 * (1 + np.tanh(
+    0.7978845608 * (t + 0.044715 * t ** 3)))
+
+one_gpu = gelu(X @ A) @ C
+
+# Column-parallel on A: rank i owns F/TP columns. GeLU is
+# elementwise, so nothing has to be communicated here.
+Acol = np.split(A, TP, axis=1)
+# Row-parallel on C: rank i owns the matching F/TP rows, so its
+# output is a PARTIAL sum over the full hidden dimension.
+Crow = np.split(C, TP, axis=0)
+
+partial = [gelu(X @ Acol[i]) @ Crow[i] for i in range(TP)]
+tensor_parallel = sum(partial)          # &lt;- the one all-reduce
+
+print("max |1 GPU - %d-way TP| = %.2e"
+      % (TP, np.abs(one_gpu - tensor_parallel).max()))
+print("weights held per rank: %d of %d floats"
+      % (Acol[0].size + Crow[0].size, A.size + C.size))
+print("all-reduce payload per rank: %d floats (T x H, the"
+      " activation)" % partial[0].size)
+print("note the payload does NOT shrink as TP grows -- every"
+      " rank all-reduces the whole activation, every layer.")</code></pre>
+      <div class="tryit-out"><strong>The error is <code>3.55e-15</code>, which is floating-point noise.</strong> Tensor parallelism is an exact rearrangement, not an approximation — the same sum, associated differently. Each rank holds a quarter of the weights, which is the point. The last line is the catch: the all-reduce payload is the <em>activation</em>, sized <span>$b \times s \times h$</span>, and it does not shrink as you add ranks. Four-way tensor parallelism does not move a quarter of the data. It moves all of it, four ways.</div>
+    </details>
+
+    <p>That last property is why tensor parallelism is a wiring decision before it is a modelling one. Put numbers on it. Take a 7B-shaped model: hidden size 4096, 32 layers, batch 8, sequence 2048, bf16.</p>
+
+    <div class="eq-block">
+      <span>$$S = b \cdot s \cdot h \cdot 2\ \text{bytes} = 8 \cdot 2048 \cdot 4096 \cdot 2 = 134\ \text{MB}$$</span>
+    </div>
+
+    <ul class="eq-explain">
+      <li><span class="sym">on the wire</span> a ring all-reduce moves <span>$2(N-1)/N \times S \approx 2S = 268$</span> MB per GPU, from section 11.</li>
+      <li><span class="sym">per layer</span> four all-reduces — two forward, two backward — so <span>$4 \times 268\ \text{MB} \approx 1.07$</span> GB.</li>
+      <li><span class="sym">per step</span> 32 layers, so <span>$32 \times 1.07 = 34.4$</span> GB per GPU, per training step.</li>
+    </ul>
+
+    <p>Now divide that by a link. NVIDIA gives an H100 SXM 900 GB/s of aggregate NVLink bandwidth, which is 450 GB/s in each direction. An InfiniBand NDR port runs at 400 Gb/s, or 50 GB/s. The same 34.4 GB therefore takes <strong>76 ms on NVLink and 687 ms across InfiniBand</strong>.</p>
+
+    <p>Nothing about the arithmetic changed between those two numbers. The matmuls are identical. Only the wire is different, and it cost 611 ms per step. That is the concrete version of the placement rule in section 09: tensor parallelism stays inside a node, and the tensor-parallel degree must not exceed the number of NVLink-connected GPUs in it.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The second reason to reach for tensor parallelism</span>
+      <p>Everything above is about capacity. The other reason is latency. Data parallelism makes a batch finish sooner; it does nothing for a single forward pass, because one pass still runs end to end on one GPU.</p>
+      <p>Tensor parallelism genuinely splits that single pass, so it is the standard way to cut time-to-first-token when serving a large model. Page <a href="./31-llm-inference-serving.html">31</a> is where that side of it lives.</p>
+    </div>
+  </section>
+
+  <section id="pipeline">
+    <h2><span class="num">16</span>Pipeline parallelism, and the bubble you pay for it</h2>
+    <p class="lede">Tensor parallelism cannot cross a node boundary. Pipeline parallelism is what you use when the model still does not fit and you have run out of NVLink.</p>
+
+    <p>Cut the model by depth. Layers 1–8 on GPU 0, 9–16 on GPU 1, and so on. Now the only thing that crosses a stage boundary is the activation tensor at the cut — once per microbatch, in each direction — rather than four all-reduces per layer. That is what makes it survivable over InfiniBand.</p>
+
+    <p>The problem is equally obvious. Stage 1 cannot start until stage 0 finishes, so with one batch in flight exactly one GPU is busy and <span>$p-1$</span> of them are idle. A four-stage pipeline running a single batch achieves 25% utilisation.</p>
+
+    <p>The fix is to keep more than one thing in flight: split the batch into <span>$m$</span> microbatches and feed them in back to back. Stage 0 starts microbatch 1 as soon as it has handed microbatch 0 down. The pipeline still has to fill and drain, and that is the bubble.</p>
+
+    <div class="eq-block">
+      <span>$$\text{wall clock} = (m + p - 1)\,t, \qquad \text{ideal} = m\,t$$</span>
+    </div>
+
+    <ul class="eq-explain">
+      <li><span class="sym">p</span> pipeline stages; <span class="sym">m</span> microbatches; <span class="sym">t</span> time for one microbatch on one stage.</li>
+      <li><span class="sym">bubble</span> <span>$(p-1)\,t$</span> of dead time, which is <span>$\dfrac{p-1}{m+p-1}$</span> of the wall clock.</li>
+      <li><span class="sym">as overhead</span> against the ideal <span>$m\,t$</span>, the same bubble is <span>$\dfrac{p-1}{m}$</span> — the form the Megatron-LM cluster paper quotes.</li>
+    </ul>
+
+    <p>Read the second form as the design rule: the bubble depends on the ratio of microbatches to stages, not on either alone. GPipe's own guidance is that the overhead becomes negligible once <span>$m \ge 4p$</span>.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">A four-stage forward sweep with eight microbatches — every idle cell drawn
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 230" xmlns="http://www.w3.org/2000/svg">
+        <text x="350" y="16" text-anchor="middle" font-size="10.5" fill="#a3a3b2">11 time steps × 4 stages = 44 cells · 32 busy · 12 idle · 27.3%</text>
+        <text x="86" y="46" text-anchor="end" font-size="10.5" fill="#a3a3b2">time →</text>
+        <rect x="94" y="62" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="118" y="82" text-anchor="middle" font-size="11" fill="#e9e9ef">0</text>
+        <rect x="146" y="62" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="170" y="82" text-anchor="middle" font-size="11" fill="#e9e9ef">1</text>
+        <rect x="198" y="62" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="222" y="82" text-anchor="middle" font-size="11" fill="#e9e9ef">2</text>
+        <rect x="250" y="62" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="274" y="82" text-anchor="middle" font-size="11" fill="#e9e9ef">3</text>
+        <rect x="302" y="62" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="326" y="82" text-anchor="middle" font-size="11" fill="#e9e9ef">4</text>
+        <rect x="354" y="62" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="378" y="82" text-anchor="middle" font-size="11" fill="#e9e9ef">5</text>
+        <rect x="406" y="62" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="430" y="82" text-anchor="middle" font-size="11" fill="#e9e9ef">6</text>
+        <rect x="458" y="62" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="482" y="82" text-anchor="middle" font-size="11" fill="#e9e9ef">7</text>
+        <rect x="510" y="62" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <rect x="562" y="62" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <rect x="614" y="62" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <text x="86" y="82" text-anchor="end" font-size="10.5" fill="#a3a3b2">stage 0</text>
+
+        <rect x="94" y="96" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <rect x="146" y="96" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="170" y="116" text-anchor="middle" font-size="11" fill="#e9e9ef">0</text>
+        <rect x="198" y="96" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="222" y="116" text-anchor="middle" font-size="11" fill="#e9e9ef">1</text>
+        <rect x="250" y="96" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="274" y="116" text-anchor="middle" font-size="11" fill="#e9e9ef">2</text>
+        <rect x="302" y="96" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="326" y="116" text-anchor="middle" font-size="11" fill="#e9e9ef">3</text>
+        <rect x="354" y="96" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="378" y="116" text-anchor="middle" font-size="11" fill="#e9e9ef">4</text>
+        <rect x="406" y="96" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="430" y="116" text-anchor="middle" font-size="11" fill="#e9e9ef">5</text>
+        <rect x="458" y="96" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="482" y="116" text-anchor="middle" font-size="11" fill="#e9e9ef">6</text>
+        <rect x="510" y="96" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="534" y="116" text-anchor="middle" font-size="11" fill="#e9e9ef">7</text>
+        <rect x="562" y="96" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <rect x="614" y="96" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <text x="86" y="116" text-anchor="end" font-size="10.5" fill="#a3a3b2">stage 1</text>
+
+        <rect x="94" y="130" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <rect x="146" y="130" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <rect x="198" y="130" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="222" y="150" text-anchor="middle" font-size="11" fill="#e9e9ef">0</text>
+        <rect x="250" y="130" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="274" y="150" text-anchor="middle" font-size="11" fill="#e9e9ef">1</text>
+        <rect x="302" y="130" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="326" y="150" text-anchor="middle" font-size="11" fill="#e9e9ef">2</text>
+        <rect x="354" y="130" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="378" y="150" text-anchor="middle" font-size="11" fill="#e9e9ef">3</text>
+        <rect x="406" y="130" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="430" y="150" text-anchor="middle" font-size="11" fill="#e9e9ef">4</text>
+        <rect x="458" y="130" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="482" y="150" text-anchor="middle" font-size="11" fill="#e9e9ef">5</text>
+        <rect x="510" y="130" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="534" y="150" text-anchor="middle" font-size="11" fill="#e9e9ef">6</text>
+        <rect x="562" y="130" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="586" y="150" text-anchor="middle" font-size="11" fill="#e9e9ef">7</text>
+        <rect x="614" y="130" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <text x="86" y="150" text-anchor="end" font-size="10.5" fill="#a3a3b2">stage 2</text>
+
+        <rect x="94" y="164" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <rect x="146" y="164" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <rect x="198" y="164" width="48" height="30" rx="3" fill="none" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+        <rect x="250" y="164" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="274" y="184" text-anchor="middle" font-size="11" fill="#e9e9ef">0</text>
+        <rect x="302" y="164" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="326" y="184" text-anchor="middle" font-size="11" fill="#e9e9ef">1</text>
+        <rect x="354" y="164" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="378" y="184" text-anchor="middle" font-size="11" fill="#e9e9ef">2</text>
+        <rect x="406" y="164" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="430" y="184" text-anchor="middle" font-size="11" fill="#e9e9ef">3</text>
+        <rect x="458" y="164" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="482" y="184" text-anchor="middle" font-size="11" fill="#e9e9ef">4</text>
+        <rect x="510" y="164" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="534" y="184" text-anchor="middle" font-size="11" fill="#e9e9ef">5</text>
+        <rect x="562" y="164" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="586" y="184" text-anchor="middle" font-size="11" fill="#e9e9ef">6</text>
+        <rect x="614" y="164" width="48" height="30" rx="3" fill="#818cf8" opacity="0.55"/><text x="638" y="184" text-anchor="middle" font-size="11" fill="#e9e9ef">7</text>
+        <text x="86" y="184" text-anchor="end" font-size="10.5" fill="#a3a3b2">stage 3</text>
+
+        <text x="350" y="216" text-anchor="middle" font-size="10" fill="#f472b6">dashed = idle · 6 cells filling the pipe, 6 draining it · p(p−1) = 12</text>
+      </svg>
+      <div class="diagram-caption">Solid cells are a stage working on the numbered microbatch; dashed cells are a GPU with nothing to do. Count them: three idle on stage 0, two on stage 1, and the mirror image on the way out — twelve in total, which is <span>$p(p-1)$</span> for any <span>$p$</span>. Only the forward sweep is drawn; the backward sweep has the same shape. Raising <span>$m$</span> from 8 to 32 leaves those twelve cells unchanged while the grid grows to 140, which is the whole of the <span>$(p-1)/(m+p-1)$</span> formula.</div>
+    </div>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Build the schedule, count the idle cells, check the formula</span>
+      </summary>
+<pre><code>def grid(p, m):
+    """Forward sweep only: stage s runs microbatch k at step s+k."""
+    steps = m + p - 1
+    g = [["." for _ in range(steps)] for _ in range(p)]
+    for s in range(p):
+        for k in range(m):
+            g[s][s + k] = str(k % 10)
+    return g
+
+print("  p    m  steps   idle/cells    measured   (p-1)/(m+p-1)")
+for p, m in [(4, 1), (4, 4), (4, 8), (4, 32), (8, 8), (8, 64)]:
+    g = grid(p, m)
+    cells = p * len(g[0])
+    idle = sum(row.count(".") for row in g)
+    print("%3d %4d %6d   %4d/%-6d %8.1f%% %13.1f%%"
+          % (p, m, len(g[0]), idle, cells,
+             100 * idle / cells, 100 * (p - 1) / (m + p - 1)))
+
+print("\np=4, m=8.  '.' is a stage with nothing to do:")
+for s, row in enumerate(grid(4, 8)):
+    print("  stage %d  %s" % (s, "".join(row)))
+print("\nidle cells are always p(p-1) = %d: a triangle while the"
+      " pipe fills and another while it drains." % (4 * 3))</code></pre>
+      <div class="tryit-out"><strong>The measured column and the formula column agree on every row</strong>, which is the point of counting rather than trusting. Read the first row as the pathology: <code>p=4, m=1</code> wastes 75% of the cluster, exactly the <span>$1/p$</span> utilisation from above. Then read down: at <code>m=4p</code> the waste is under 10% for both pipeline depths, which is GPipe's rule of thumb falling out of the arithmetic. The idle count is <code>12</code> for every <span>$p=4$</span> row and <code>56</code> for every <span>$p=8$</span> row — microbatches never remove a bubble, they only dilute it.</div>
+    </details>
+
+    <p>So why not push <span>$m$</span> to 1000? Two reasons. Smaller microbatches mean smaller matmuls, which run further from peak on hardware that wants big tiles. And the naive GPipe schedule holds the activations of every in-flight microbatch, so activation memory grows with <span>$m$</span>.</p>
+
+    <p>The standard answer to the second is the <strong>1F1B</strong> schedule: once the pipe is full, alternate one forward with one backward, so a microbatch's activations are released as early as possible. Same bubble, activation memory capped at <span>$p$</span> microbatches instead of <span>$m$</span>. Interleaving further subdivides each stage to shrink the bubble, at the cost of more boundary crossings.</p>
+
+    <p>The traffic comparison is what justifies the whole approach. Summed over all microbatches, a stage boundary carries one full batch of activations forward and one of gradients back. For the 7B-shaped model above, four stages and three boundaries: <span>$6 \times 134\ \text{MB} = 805$</span> MB per step, against tensor parallelism's 34.4 GB. Forty times less traffic, which is exactly why one crosses nodes and the other does not.</p>
+  </section>
+
+  <section id="choosing">
+    <h2><span class="num">17</span>Choosing: N GPUs, a model of size M</h2>
+    <p class="lede">Every strategy above costs something, so the procedure is to add them in increasing order of cost and stop at the first one that fits. Nobody reaches for 3D parallelism because it is elegant.</p>
+
+    <p>Work the ledger first. Multiply the parameter count by 16 bytes for mixed-precision AdamW, then ask the questions in this order.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The decision, in the order the constraints actually bind
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 740 320" xmlns="http://www.w3.org/2000/svg">
+        <rect x="20" y="20" width="220" height="40" rx="7" fill="#14141d" stroke="#4f8cff"/>
+        <text x="130" y="38" text-anchor="middle" font-size="11" font-weight="700" fill="#4f8cff">16 × params fits on one GPU?</text>
+        <text x="130" y="52" text-anchor="middle" font-size="10" fill="#a3a3b2">plus activations</text>
+        <path d="M240,40 L300,40" stroke="#34d399" stroke-width="1.8" fill="none" class="flow-line"/>
+        <text x="270" y="33" text-anchor="middle" font-size="9.5" fill="#34d399">yes</text>
+        <rect x="308" y="20" width="180" height="40" rx="7" fill="#14141d" stroke="#34d399"/>
+        <text x="398" y="38" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">DDP across all N</text>
+        <text x="398" y="52" text-anchor="middle" font-size="10" fill="#a3a3b2">one bucketed all-reduce/step</text>
+        <text x="520" y="44" font-size="10" fill="#6c6c7d">cheapest. stop here.</text>
+
+        <path d="M130,60 L130,88" stroke="#f472b6" stroke-width="1.8" fill="none"/>
+        <text x="142" y="78" font-size="9.5" fill="#f472b6">no</text>
+
+        <rect x="20" y="90" width="220" height="40" rx="7" fill="#14141d" stroke="#4f8cff"/>
+        <text x="130" y="108" text-anchor="middle" font-size="11" font-weight="700" fill="#4f8cff">16Ψ/N fits, one layer fits?</text>
+        <text x="130" y="122" text-anchor="middle" font-size="10" fill="#a3a3b2">the usual case</text>
+        <path d="M240,110 L300,110" stroke="#34d399" stroke-width="1.8" fill="none" class="flow-line"/>
+        <text x="270" y="103" text-anchor="middle" font-size="9.5" fill="#34d399">yes</text>
+        <rect x="308" y="90" width="180" height="40" rx="7" fill="#14141d" stroke="#34d399"/>
+        <text x="398" y="108" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">ZeRO / FSDP</text>
+        <text x="398" y="122" text-anchor="middle" font-size="10" fill="#a3a3b2">stage 2 first, stage 3 only if it OOMs</text>
+        <text x="520" y="114" font-size="10" fill="#6c6c7d">stage 3 costs 1.5× traffic</text>
+
+        <path d="M130,130 L130,158" stroke="#f472b6" stroke-width="1.8" fill="none"/>
+        <text x="142" y="148" font-size="9.5" fill="#f472b6">no</text>
+
+        <rect x="20" y="160" width="220" height="40" rx="7" fill="#14141d" stroke="#4f8cff"/>
+        <text x="130" y="178" text-anchor="middle" font-size="11" font-weight="700" fill="#4f8cff">fits inside one node?</text>
+        <text x="130" y="192" text-anchor="middle" font-size="10" fill="#a3a3b2">i.e. across NVLink only</text>
+        <path d="M240,180 L300,180" stroke="#34d399" stroke-width="1.8" fill="none" class="flow-line"/>
+        <text x="270" y="173" text-anchor="middle" font-size="9.5" fill="#34d399">yes</text>
+        <rect x="308" y="160" width="180" height="40" rx="7" fill="#14141d" stroke="#34d399"/>
+        <text x="398" y="178" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">+ tensor parallel</text>
+        <text x="398" y="192" text-anchor="middle" font-size="10" fill="#a3a3b2">degree ≤ GPUs per node</text>
+        <text x="520" y="184" font-size="10" fill="#6c6c7d">4 all-reduces per layer</text>
+
+        <path d="M130,200 L130,228" stroke="#f472b6" stroke-width="1.8" fill="none"/>
+        <text x="142" y="218" font-size="9.5" fill="#f472b6">no</text>
+
+        <rect x="20" y="230" width="220" height="40" rx="7" fill="#14141d" stroke="#818cf8"/>
+        <text x="130" y="248" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">still doesn't fit</text>
+        <text x="130" y="262" text-anchor="middle" font-size="10" fill="#a3a3b2">frontier-scale only</text>
+        <path d="M240,250 L300,250" stroke="#818cf8" stroke-width="1.8" fill="none" class="flow-line"/>
+        <rect x="308" y="230" width="180" height="40" rx="7" fill="#14141d" stroke="#818cf8"/>
+        <text x="398" y="248" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">+ pipeline across nodes</text>
+        <text x="398" y="262" text-anchor="middle" font-size="10" fill="#a3a3b2">m ≥ 4p microbatches</text>
+        <text x="520" y="254" font-size="10" fill="#6c6c7d">bubble = (p−1)/m</text>
+
+        <text x="20" y="298" font-size="10.5" font-weight="700" fill="#a3a3b2">Nesting order, innermost first:</text>
+        <text x="205" y="298" font-size="10.5" fill="#34d399">tensor (NVLink)</text>
+        <text x="305" y="298" font-size="10.5" fill="#a3a3b2">→</text>
+        <text x="320" y="298" font-size="10.5" fill="#818cf8">pipeline (node boundaries)</text>
+        <text x="465" y="298" font-size="10.5" fill="#a3a3b2">→</text>
+        <text x="480" y="298" font-size="10.5" fill="#f472b6">data / ZeRO (InfiniBand)</text>
+      </svg>
+      <div class="diagram-caption">Each "no" costs something the row above did not: ZeRO gives up the free local optimizer step, tensor parallelism gives up the node boundary, pipelining gives up a fraction of every GPU to the bubble. The bottom line is the placement rule from section 09 restated as a nesting order — the most talkative strategy gets the fastest wire, and the least talkative gets the slowest.</div>
+    </div>
+
+    <p>Activation checkpointing sits outside this ladder entirely and is almost always on. It costs roughly an extra forward pass of compute and removes most of the activation memory, which frequently turns a configuration that OOMs at step one into a configuration that runs.</p>
+
+    <h3>Four concrete cases, on one node of 8 × 80 GB</h3>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th>Model</th><th>Ledger at 16 bytes/param</th><th>Choice</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>1B</td><td>16 GB</td><td>DDP × 8</td><td>Fits on one card with room for activations. Anything fancier is pure overhead.</td></tr>
+          <tr><td>7B</td><td>112 GB</td><td>FSDP <code>SHARD_GRAD_OP</code></td><td>Over 80 GB, so replication is out. Stage 2 gives <span>$2\Psi + 14\Psi/8 = 26$</span> GB per card at no extra traffic.</td></tr>
+          <tr><td>70B</td><td>1120 GB</td><td>Stage 3 across 2–4 nodes</td><td>140 GB per card on 8, so one node cannot do it. The largest single weight is well under a card, so tensor parallelism is not required.</td></tr>
+          <tr><td>400B+</td><td>6400 GB</td><td>Tensor × pipeline × data</td><td>Stage 3's per-layer all-gathers become the bottleneck at this scale. Tensor parallel inside the node, pipeline across nodes, data parallel on top.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Note what decided every row: a memory number compared against a capacity number, and then a bandwidth number. Not the model family, not the framework, and not the task.</p>
+  </section>
+
   <section id="why">
-    <h2><span class="num">12</span>Why this hardware, and why this algorithm</h2>
+    <h2><span class="num">18</span>Why this hardware, and why this algorithm</h2>
     <p>Why SIMT hardware fits dense matrix math specifically: a matrix multiply's output elements are all independent of each other, computed by the same operation (multiply, accumulate, repeat) with no data-dependent branching anywhere in the computation.</p>
 
     <p>That is precisely the one constraint SIMT hardware is built around. Thousands of simple cores, no branch-prediction machinery, all executing the same instruction across different data every cycle.</p>
@@ -435,7 +1004,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">13</span>Tradeoffs, and what actually breaks</h2>
+    <h2><span class="num">19</span>Tradeoffs, and what actually breaks</h2>
     <div class="tbl-wrap">
       <table class="cmp">
         <thead><tr><th></th><th>NVLink</th><th>InfiniBand / RoCE</th><th>Ethernet</th></tr></thead>
@@ -454,10 +1023,21 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       <li><strong>Low occupancy from register or shared-memory pressure</strong> is a quieter failure. The kernel still produces correct results, it is just slower than it should be, because the SM doesn't have enough resident warps to hide memory latency behind. Cores sit idle waiting on HBM instead of doing useful work for another warp.</li>
       <li><strong>Communication becoming the bottleneck</strong> when interconnect topology doesn't match your parallelism strategy is a cluster-design failure, not a kernel one. Put tensor-parallel shards across InfiniBand instead of NVLink, or fail to keep pipeline-parallel stage boundaries aligned with node boundaries, and you can end up with GPUs that are individually fast sitting mostly idle waiting on the network, which defeats the entire point of adding more of them.</li>
     </ul>
+
+    <h3>And the ones that only appear above one node</h3>
+
+    <ul>
+      <li><strong>ZeRO stage 3 on a slow fabric.</strong> Memory stops being the problem and throughput becomes it. The all-gathers sit in front of every layer, so when they cannot be prefetched fast enough the GPUs wait on weights instead of computing. Stage 2 is often the faster configuration that still fits.</li>
+      <li><strong>An unbalanced pipeline.</strong> The slowest stage sets the rate for all of them. One extra layer on stage 0, or an embedding table that only lives on the first and last stage, and every other GPU idles for the difference on every microbatch.</li>
+      <li><strong>Tensor-parallel degree larger than the node.</strong> Nothing errors. The collectives simply start crossing PCIe or InfiniBand, and the arithmetic in section 15 turns 76 ms per step into 687 ms.</li>
+      <li><strong>One straggler rank.</strong> A collective is a barrier, so the slowest rank sets the step time for the entire job. A single GPU thermally throttling, or one node on a congested link, slows all 512 of them by the same fraction.</li>
+      <li><strong>A parameter that receives no gradient.</strong> Its bucket never completes and the all-reduce hangs with no error. <code>find_unused_parameters=True</code> fixes it by scanning the graph every iteration, which is a real per-step cost — better to fix the model.</li>
+      <li><strong>The learning rate nobody re-tuned.</strong> Effective batch size is per-rank batch times world size. Doubling the cluster doubles the batch and quietly changes the optimisation problem, and the run that diverged was a hyperparameter bug, not a systems one.</li>
+    </ul>
   </section>
 
   <section id="build">
-    <h2><span class="num">14</span>Build this</h2>
+    <h2><span class="num">20</span>Build this</h2>
     <p class="lede">You can read about coalesced memory access and still not believe layout beats arithmetic. Write one kernel that does no arithmetic at all, and the argument settles itself.</p>
 
     <div class="project">
@@ -492,7 +1072,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
   </section>
 
   <section id="interview">
-    <h2><span class="num">15</span>Interview questions</h2>
+    <h2><span class="num">21</span>Interview questions</h2>
 
     <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why are GPUs so much faster than CPUs for deep learning?</summary>
       <div class="qa-body"><p>A GPU uses SIMT architecture — thousands of simple cores executing the same instruction across different data simultaneously — instead of a CPU's handful of complex cores built with extensive branch-prediction and control-flow hardware. Deep learning is overwhelmingly dense matrix multiplication and elementwise operations: every output element is computed independently, by the same operation, with essentially no data-dependent branching. That's an embarrassingly parallel workload with no need for the control-flow machinery a CPU spends most of its silicon on, and it's exactly the shape SIMT hardware was built to execute — thousands of cores doing the same multiply-accumulate at once, rather than a few cores each handling their own complicated, branchy sequence of instructions.</p></div>
@@ -509,13 +1089,25 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <details class="qa"><summary><span class="qa-level deep">Deep</span>Explain ring all-reduce, and why it scales better than a naive centralized approach.</summary>
       <div class="qa-body"><p>Arrange N GPUs in a logical ring, split each GPU's gradient data into N chunks, and run two phases: scatter-reduce, N−1 steps, where each GPU sends one chunk to its ring-neighbor and accumulates a chunk received from its other neighbor, ending with every GPU holding the true sum for exactly one chunk; then all-gather, another N−1 steps, relaying each GPU's already-final chunk around the ring until every GPU has every chunk. At every step, each GPU only ever sends and receives one chunk — a bounded amount of data, independent of N. Total data moved per GPU works out to roughly 2(N−1)/N times the data size, which approaches a constant (2×) as N grows rather than scaling with cluster size. A naive centralized parameter server, by contrast, funnels every worker's traffic through one server's network link, whose bandwidth ceiling is fixed — so synchronization time grows linearly with the number of workers, becoming the exact bottleneck you're trying to scale past by adding more GPUs.</p></div>
     </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Walk through exactly what DistributedDataParallel does in one training step.</summary>
+      <div class="qa-body"><p>Once at startup, rank 0 broadcasts its weights so every rank begins with byte-identical parameters and optimizer state. Then each step: every rank runs a forward pass on its own shard of the global batch with no communication at all, and computes a local loss. The backward pass is also local arithmetic, but as each parameter's gradient is produced it is appended to a bucket — PyTorch defaults to 25 MiB — and the moment a bucket fills, its all-reduce is launched asynchronously. Because backward runs from the last layer to the first, the last layers' gradients go on the wire while the earlier layers are still computing, which is what overlaps communication with compute. At the end of backward, DDP waits on the outstanding collectives; every rank now holds the same averaged gradient bit for bit. The optimizer step then runs purely locally on each rank. Weights never cross the wire after startup: identical inputs plus an identical gradient produce identical weights, so synchronisation is a consequence rather than an operation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>What does each ZeRO stage shard, and what does each cost in communication?</summary>
+      <div class="qa-body"><p>Mixed-precision Adam costs 16 bytes per parameter: 2 for the fp16 weights, 2 for the fp16 gradients, and 12 for the fp32 master copy plus Adam's two moments. Stage 1 shards only that 12-byte optimizer tier, leaving 4Ψ + 12Ψ/N per rank. Stage 2 also shards gradients, reduce-scattering each bucket during backward instead of all-reducing it, leaving 2Ψ + 14Ψ/N. Stage 3 shards the parameters too, all-gathering each layer's weights just before it is used and dropping them afterwards, leaving 16Ψ/N. The communication answer surprises people: stages 1 and 2 are free. A ring all-reduce already <em>is</em> a reduce-scatter plus an all-gather, 2Ψ of traffic, and those stages just stop in between to update the slice each rank owns. Stage 3 costs 3Ψ — 1.5× — because the weights must be gathered in the forward pass and again in the backward pass. Worse than the ratio suggests, those gathers are on the critical path in front of every layer rather than hidden behind the backward pass, so on a slow interconnect stage 2 is frequently faster while stage 3 is the only one that fits.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>A four-stage pipeline with eight microbatches — how much of the cluster is idle, and what would you change?</summary>
+      <div class="qa-body"><p>With p stages and m microbatches, the schedule takes m + p − 1 time steps against an ideal of m, so the bubble is (p − 1) steps. As a fraction of wall clock that is (p−1)/(m+p−1) = 3/11 ≈ 27%; expressed as overhead against the ideal it is (p−1)/m = 3/8, which is the form the Megatron-LM paper quotes. The absolute number of idle cells is p(p−1) = 12 and it never changes — raising m dilutes the bubble rather than removing it. So the fix is more microbatches: GPipe's guidance is that the overhead becomes negligible around m ≥ 4p, which here means 16 or more. The limits on pushing m higher are that smaller microbatches run the matmuls further from peak, and that the naive schedule holds activations for every in-flight microbatch. A 1F1B schedule fixes the second by alternating forward and backward once the pipe is full, capping activation memory at p microbatches for the same bubble.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>FSDP or DeepSpeed ZeRO — what is genuinely different and what is just naming?</summary>
+      <div class="qa-body"><p>The algorithm is the same, and most of the apparent difference is vocabulary. PyTorch's own docs map FULL_SHARD onto ZeRO stage 3 and SHARD_GRAD_OP onto stage 2, with NO_SHARD being plain DDP; "shard" versus "partition" and "FSDP unit" versus "parameter group" name the same objects. Neither is an approximation, so they reach the same loss curve and the memory and traffic arithmetic is identical. What is actually different is operational. FSDP lives in PyTorch core and composes with DTensor, device meshes and torch.compile; DeepSpeed is a separate engine with its own config file, launcher and checkpoint format, and ships things FSDP does not — CPU and NVMe offload, a pipeline engine, MoE support. Sharding granularity differs too: FSDP shards whatever you wrap, so a careless auto_wrap_policy that makes the whole model one unit gives you DDP's memory profile with stage 3's communication, which is the classic FSDP performance bug. Choose on dependencies and on whether you need offload, not on expected quality.</p></div>
+    </details>
     <details class="qa"><summary><span class="qa-level deep">Deep</span>You're handed a cluster with several GPUs per node on NVLink, and InfiniBand between nodes. How do you lay out tensor, pipeline, and data parallelism across it, and why?</summary>
       <div class="qa-body"><p>Tensor parallelism goes inside a node, on the NVLink-connected GPUs, because it communicates partial results within every layer — many times per forward and backward pass — and needs the fastest possible link or that communication dominates the compute. Pipeline parallelism can cross the InfiniBand link between nodes, since it only passes activations at stage boundaries, which is far less frequent and far more tolerant of a slower link. Data parallelism replicates the whole tensor-parallel-plus-pipeline-parallel unit across as many groups of nodes as you have, synchronizing gradients once per step via ring all-reduce over InfiniBand — tolerable specifically because ring all-reduce keeps each GPU's communication burden bounded regardless of how many replicas you add. Getting this backwards — for instance splitting a single layer tensor-parallel-style across InfiniBand — turns the network into the bottleneck and leaves the GPUs' raw compute capacity mostly unused, since they'd spend most of their time waiting on data that has to cross the slower link on every layer.</p></div>
     </details>
   </section>
 
   <section id="resources">
-    <h2><span class="num">16</span>Go deeper</h2>
+    <h2><span class="num">22</span>Go deeper</h2>
     <div class="resource-grid">
       <a class="resource-card" href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener">
         <div class="r-icon">📄</div>
@@ -533,6 +1125,30 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
         <div class="r-icon">📝</div>
         <div class="r-body"><div class="r-kind">Article</div><div class="r-title">Introducing Triton: Open-source GPU programming for neural networks</div><div class="r-sub">OpenAI, 2021</div></div>
       </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1910.02054" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">ZeRO: Memory Optimizations Toward Training Trillion Parameter Models</div><div class="r-sub">Rajbhandari et al., 2020 — arXiv:1910.02054. The source for every memory and communication figure in section 14.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2006.15704" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">PyTorch Distributed: Experiences on Accelerating Data Parallel Training</div><div class="r-sub">Li et al., VLDB 2020 — arXiv:2006.15704. Gradient bucketing and the overlap in section 12.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2304.11277" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel</div><div class="r-sub">Zhao et al., 2023 — arXiv:2304.11277</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2104.04473" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM</div><div class="r-sub">Narayanan et al., 2021 — arXiv:2104.04473. Where the (p−1)/m bubble fraction comes from.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1811.06965" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">GPipe: Easy Scaling with Micro-Batch Pipeline Parallelism</div><div class="r-sub">Huang et al., 2019 — arXiv:1811.06965. Source of the m ≥ 4p rule of thumb.</div></div>
+      </a>
+      <a class="resource-card" href="https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Article</div><div class="r-title">NVIDIA Hopper Architecture In-Depth</div><div class="r-sub">NVIDIA — the published NVLink and PCIe bandwidth figures used in section 15.</div></div>
+      </a>
       <a class="resource-card" href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/" target="_blank" rel="noopener">
         <div class="r-icon">📚</div>
         <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">CUDA C++ Programming Guide</div><div class="r-sub">Official NVIDIA documentation</div></div>
@@ -541,7 +1157,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
   </section>
 
   <section id="related">
-    <h2><span class="num">17</span>Related pages</h2>
+    <h2><span class="num">23</span>Related pages</h2>
     <div class="related-grid">
       <a class="related-card" href="./23-efficient-ai-systems.html"><div class="rc-sec" style="color:var(--c-efficient)">23 · The layer above this one</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Parallelism strategies, memory-bandwidth-bound inference, mixed precision — this page is the hardware layer underneath all of it.</div></a>
       <a class="related-card" href="./08-attention-transformers.html"><div class="rc-sec" style="color:var(--c-attention)">08 · Where the kernel lives</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">FlashAttention is a Triton/CUDA kernel — this page is what that kernel is actually running on.</div></a>

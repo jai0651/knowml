@@ -659,7 +659,7 @@
     steps.push({
       title: 'The verdict: all ' + C.total + ' derivatives at once',
       formula: '\\max_{\\text{all } ' + C.total + '}\\left|\\;\\nabla_{\\text{backprop}} - \\nabla_{\\text{numeric}}\\;\\right| = ' + exp(C.maxAbsDiff, 3).replace('−', '-'),
-      note: 'Every partial derivative on the backward tab, recomputed from nothing but the forward function and ' + Mo.CHECK_PASSES + ' extra forward passes. The worst disagreement anywhere is <strong>' + exp(C.maxAbsDiff, 3) + '</strong>, on gradients whose magnitudes run up to ' + GRAD_MAX.toFixed(2) + ' — about ' + exp(C.maxAbsDiff / GRAD_MAX, 0) + ' of the signal. That is floating-point noise, not a discrepancy. <strong>The derivation is correct, and you watched it be checked rather than being asked to believe it.</strong>',
+      note: 'Every partial derivative on the backward tab, recomputed from nothing but the forward function and ' + Mo.CHECK_PASSES + ' extra forward passes. The worst disagreement anywhere is <strong>' + exp(C.maxAbsDiff, 3) + '</strong>, on gradients whose magnitudes run up to ' + GRAD_MAX.toFixed(2) + ' — a relative size of about ' + exp(C.maxAbsDiff / GRAD_MAX, 0) + '. That is floating-point noise, not a discrepancy. <strong>The derivation is correct, and you watched it be checked rather than being asked to believe it.</strong>',
       render: function (stage) {
         stage.appendChild(tablePanel({
           title: 'Gradient check, every tensor', shapeLabel: C.total + ' partial derivatives',
