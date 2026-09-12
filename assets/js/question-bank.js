@@ -1311,6 +1311,94 @@ window.KML_QUESTIONS = [
 "a": "<p>Offline RL learns entirely from a fixed, previously-collected dataset with no further environment interaction. If the learned policy drifts toward actions rarely or never taken by the policy that collected the data, the value function has no reliable evidence for what happens there and can become badly overoptimistic about exactly the actions the policy is being pushed toward — a compounding error with nothing to correct it, since there's no environment left to test against. Online RL doesn't have this problem in the same way because the agent can always go collect more real data about whatever action it's currently curious about, which grounds its estimates; offline RL loses that safety net entirely, which is why offline algorithms explicitly constrain the learned policy to stay close to the data-collecting policy's behavior.</p>"
 },
 {
+"id": "16-recommenders-ranking-search::0",
+"pageId": "16-recommenders-ranking-search",
+"page": "16-recommenders-ranking-search",
+"pageTitle": "Recommenders, Ranking & Search",
+"group": "Decision & Retrieval Systems",
+"color": "var(--c-rec)",
+"level": "beginner",
+"q": "Why do recommender systems use a multi-stage funnel instead of one model?",
+"a": "<p>Because cost per item and number of items cannot both be large. Scoring a billion items with a rich model inside a 30-millisecond budget is impossible, so the system narrows first with something cheap and scores later with something expensive. Retrieval reduces roughly a billion candidates to a thousand using a single dot product per item against a precomputed index. Ranking then scores that thousand with a full model that can afford cross features and long histories. A final reranking stage fixes list-level properties such as diversity and freshness that pointwise scoring cannot see. Each stage is about an order of magnitude smaller and two orders more expensive per item, which is what keeps total latency roughly flat.</p>"
+},
+{
+"id": "16-recommenders-ranking-search::1",
+"pageId": "16-recommenders-ranking-search",
+"page": "16-recommenders-ranking-search",
+"pageTitle": "Recommenders, Ranking & Search",
+"group": "Decision & Retrieval Systems",
+"color": "var(--c-rec)",
+"level": "beginner",
+"q": "What is collaborative filtering, and what does matrix factorization add?",
+"a": "<p>Collaborative filtering recommends using only the interaction matrix of who engaged with what, with no content features at all, on the assumption that users who agreed before will agree again. Matrix factorization implements that by assuming the sparse user-item matrix is approximately low-rank, factorizing it into a user matrix and an item matrix of some small dimension k, so a prediction becomes a dot product between a user vector and an item vector. The low rank is the essential part: forcing millions of users through a few dozen dimensions means the model cannot memorise individual entries and must find structure that generalises, which is what lets it predict the blanks.</p>"
+},
+{
+"id": "16-recommenders-ranking-search::2",
+"pageId": "16-recommenders-ranking-search",
+"page": "16-recommenders-ranking-search",
+"pageTitle": "Recommenders, Ranking & Search",
+"group": "Decision & Retrieval Systems",
+"color": "var(--c-rec)",
+"level": "intermediate",
+"q": "Why must a retrieval model keep user and item towers separate?",
+"a": "<p>So that item vectors can be computed offline. If the architecture lets user and item features interact before the final score, every item's representation depends on the user, and you would have to run the model once per item per request — a billion forward passes. Restricting interaction to a single dot product at the end means the item tower can be evaluated once per item, ahead of time, and stored in an approximate nearest neighbour index. At request time you embed only the user and query the index, which is sublinear in corpus size. The accuracy cost is real, since no cross features are possible, and that is precisely what the ranking stage exists to recover on the surviving thousand candidates.</p>"
+},
+{
+"id": "16-recommenders-ranking-search::3",
+"pageId": "16-recommenders-ranking-search",
+"page": "16-recommenders-ranking-search",
+"pageTitle": "Recommenders, Ranking & Search",
+"group": "Decision & Retrieval Systems",
+"color": "var(--c-rec)",
+"level": "intermediate",
+"q": "What are in-batch negatives, and what bias do they introduce?",
+"a": "<p>In a batch of B user-item positive pairs, you score every user against every item in the batch, giving a B×B matrix whose diagonal holds the true positives and whose off-diagonal entries serve as negatives. It is efficient because the negatives are already encoded, and it makes batch size effectively the negative count. The bias is that negatives are sampled from your traffic distribution, so popular items appear as negatives far more often than rare ones and the model learns to suppress them — exactly backwards. The standard correction is logQ: subtract the log sampling probability of each item from its logit so frequently sampled items are not penalised for being frequent.</p>"
+},
+{
+"id": "16-recommenders-ranking-search::4",
+"pageId": "16-recommenders-ranking-search",
+"page": "16-recommenders-ranking-search",
+"pageTitle": "Recommenders, Ranking & Search",
+"group": "Decision & Retrieval Systems",
+"color": "var(--c-rec)",
+"level": "intermediate",
+"q": "Compare pointwise, pairwise and listwise learning to rank.",
+"a": "<p>Pointwise treats each item independently, predicting a score or click probability and sorting by it. It is simple, calibrated and ignores the fact that ranking is about relative order, yet it remains a strong production baseline. Pairwise looks at two items at a time and asks only whether the better one is scored higher, which matches the real task better and suits implicit feedback where absolute relevance labels do not exist; BPR is the canonical example. Listwise optimises a ranking metric over the whole list, which is closest to the goal but hardest to train, because metrics like NDCG are step functions of the ordering with no usable gradient. LambdaRank works around this by defining the gradient directly, weighting each pair by the NDCG change that swapping it would cause.</p>"
+},
+{
+"id": "16-recommenders-ranking-search::5",
+"pageId": "16-recommenders-ranking-search",
+"page": "16-recommenders-ranking-search",
+"pageTitle": "Recommenders, Ranking & Search",
+"group": "Decision & Retrieval Systems",
+"color": "var(--c-rec)",
+"level": "deep",
+"q": "Your offline NDCG improves by 8% but the A/B test is flat. What is going on?",
+"a": "<p>The most likely explanation is that offline evaluation rewards agreement with the system that produced the logs. Your evaluation set records impressions chosen by the current ranker, so a new model can only be credited for items that were already shown; anything genuinely better that the old system never surfaced has no click to be right about. Related causes are position bias, where the model learns that whatever was ranked first gets clicked and so learns the old ranker's ordering, and a train-serve feature mismatch that only manifests online. Diagnose by checking whether the gain persists on a small randomly-ranked exploration slice, which is unbiased by construction, by inspecting how much of the improvement is concentrated in top positions, and by verifying feature parity between training and serving. The general rule is that offline metrics filter candidates for an online test rather than substituting for one.</p>"
+},
+{
+"id": "16-recommenders-ranking-search::6",
+"pageId": "16-recommenders-ranking-search",
+"page": "16-recommenders-ranking-search",
+"pageTitle": "Recommenders, Ranking & Search",
+"group": "Decision & Retrieval Systems",
+"color": "var(--c-rec)",
+"level": "deep",
+"q": "Explain the feedback loop in a deployed recommender and how you would mitigate it.",
+"a": "<p>The model chooses impressions, impressions generate clicks, clicks become training data, and that data trains the next model, so the system is learning from a world it created. Three effects compound: position bias, where clicks reflect placement rather than preference; exposure bias, where unshown items accumulate no evidence and therefore stay unshown; and popularity amplification, where recommending popular items makes them more popular and shrinks effective catalogue coverage. This is not ordinary distribution shift, because the model caused it, so no architectural change escapes it. Mitigations act on data collection rather than the model: include displayed position as a training feature and hold it constant at serving so the model attributes some click probability to the slot, weight logged examples by inverse propensity so rarely-shown items count for more, and reserve a slice of traffic for deliberate exploration that produces unbiased data. Exploration has a genuine short-term cost, which is the point — you are paying now for data you cannot otherwise obtain.</p>"
+},
+{
+"id": "16-recommenders-ranking-search::7",
+"pageId": "16-recommenders-ranking-search",
+"page": "16-recommenders-ranking-search",
+"pageTitle": "Recommenders, Ranking & Search",
+"group": "Decision & Retrieval Systems",
+"color": "var(--c-rec)",
+"level": "deep",
+"q": "How would you handle cold start for a brand-new item in a two-tower system?",
+"a": "<p>Make the item tower depend on content rather than on an ID embedding. If the tower consumes text, images, category and other metadata, it can produce a usable vector the moment the item is created, with no interactions at all, and that vector can be indexed immediately. A pure ID embedding cannot: it is randomly initialised and stays random until interactions arrive, which they will not, because an unindexed item is never shown. In practice you blend the two, learning an ID embedding that gradually takes over as evidence accumulates while the content vector carries the early period. Alongside that, reserve some exploration traffic specifically for new items so they accumulate evidence at all, and expect that without it the system has no mechanism to ever discover them.</p>"
+},
+{
 "id": "20-3d-spatial-autonomous-driving::0",
 "pageId": "20-3d-spatial-autonomous-driving",
 "page": "20-3d-spatial-autonomous-driving",

@@ -3273,10 +3273,130 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What this section will cover",
+    "title": "The funnel, before anything else",
     "parentTitle": "16 · Recommenders, Ranking & Search",
     "section": "Decision & Retrieval Systems",
-    "url": "topics/16-recommenders-ranking-search.html#checklist",
+    "url": "topics/16-recommenders-ranking-search.html#funnel",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "Collaborative filtering: the idea everything else refines",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#cf",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "Two-tower retrieval, and the constraint that shapes it",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#two-tower",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "Ranking: where the expensive model earns its keep",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#ranking",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "Sequence matters, and modelling it changes the answer",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#sequence-matters-and-modelling-it-changes-the-answer",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "Learning to rank: three ways to phrase the loss",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#ltr",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "The metrics, and what each one refuses to tell you",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#the-metrics-and-what-each-one-refuses-to-tell-you",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "The data lies, and it lies in a specific direction",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#feedback-loop",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "Cold start and exploration",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#cold-start",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "Making retrieval actually fast: ANN indexes",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#ann",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "Simulate the feedback loop until your catalogue collapses",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "What actually breaks",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
+    "title": "Where you meet this in the wild",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#in-the-wild",
     "tags": [],
     "summary": "",
     "color": "var(--c-rec)"
