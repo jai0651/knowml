@@ -2,6 +2,24 @@
 (function () {
   'use strict';
 
+  /* ---------- cross-document view transitions ----------
+     style.css opts into `@view-transition { navigation: auto }`. When Chrome
+     skips one — the next page painted before the cross-fade could start, or a
+     second navigation interrupted it — it rejects an internal promise that no
+     author code owns, so it surfaces as an unhandled rejection on a perfectly
+     normal link click. A skipped transition has no consequence beyond the
+     cross-fade not playing.
+
+     Matched narrowly on purpose: name, type and message all have to line up,
+     so a real AbortError from fetch or anything else still reaches the console. */
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    if (r && r.name === 'AbortError' && typeof DOMException !== 'undefined' &&
+        r instanceof DOMException && /transition was skipped/i.test(r.message || '')) {
+      e.preventDefault();
+    }
+  });
+
   /* ---------- theme ---------- */
   var THEME_KEY = 'np-theme';
   var DEFAULT_THEME = 'dark';
