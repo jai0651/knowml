@@ -8,7 +8,7 @@
    navigation flashed light before flipping to dark. */
 try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-theme")||"light")}catch(e){}</script>
 <title>Fine-tuning LLMs in Practice · KnowML</title>
-<meta name="description" content="The practitioner's path: when fine-tuning is the wrong answer, how to choose between full fine-tuning, LoRA and QLoRA, how to prepare data and chat templates, a working Unsloth pipeline end to end, and how to tell whether it actually worked.">
+<meta name="description" content="The practitioner's path: when fine-tuning is the wrong answer, the memory arithmetic behind full fine-tuning vs LoRA vs QLoRA, what rank and alpha actually control and why low rank works, how much data you need and what quality means, catastrophic forgetting and what mitigates it, and a working Unsloth pipeline end to end.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -31,7 +31,8 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 
 <div class="layout" id="layoutRoot">
 <aside class="sidebar-left" id="sidebarLeft">
-  <a href="../index.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--text-faint);border-bottom:1px solid var(--border-soft)">← Map &amp; Timeline</a>
+  <a href="../index.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--text-faint);border-bottom:1px solid var(--border-soft)">← Home</a>
+  <a href="../roadmaps.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">🧭 Roadmaps</a>
   <a href="./technique-map.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">🌳 Technique Map</a>
   <a href="../review.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">↺ Review &amp; drill</a>
   <a href="../practice.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">🏋️ Where to practise</a>
@@ -105,7 +106,16 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       <a href="./30-running-models-locally.html" data-page="30-running-models-locally"><span class="done"></span>30 · Running Models Locally</a>
       <a href="./31-llm-inference-serving.html" data-page="31-llm-inference-serving"><span class="done"></span>31 · LLM Inference &amp; Serving</a>
       <a href="./32-preference-optimization.html" data-page="32-preference-optimization"><span class="done"></span>32 · Preference Optimization</a>
-      <a href="../attention-lab.html"><span class="done"></span>🔬 Attention Lab <span class="lab-mark">interactive</span></a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--accent);color:var(--accent)"></span>The Labs</summary>
+    <div class="links">
+      <a href="../backprop-lab.html"><span class="done"></span>🔬 Backprop <span class="lab-mark">interactive</span></a>
+      <a href="../tokenizer-lab.html"><span class="done"></span>🔬 Tokenizer <span class="lab-mark">interactive</span></a>
+      <a href="../attention-lab.html"><span class="done"></span>🔬 Attention <span class="lab-mark">interactive</span></a>
+      <a href="../sampling-lab.html"><span class="done"></span>🔬 Sampling <span class="lab-mark">interactive</span></a>
+      <a href="../quantization-lab.html"><span class="done"></span>🔬 Quantization <span class="lab-mark">interactive</span></a>
     </div>
   </details>
   <details class="navgroup" open>
@@ -127,11 +137,11 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 
 <main class="content" id="content">
   <div class="topic-header">
-    <div class="crumbs"><a href="../index.html">Map &amp; Timeline</a> / Hands-on / 29</div>
+    <div class="crumbs"><a href="../index.html">Home</a> / Hands-on / 29</div>
     <h1>Fine-tuning LLMs in Practice</h1>
-    <p class="dek">Page 10 covers what SFT, LoRA and DPO <em>are</em>. This page is the part that gets you a working adapter: what to choose, what data to feed it, the code that runs, and how to tell whether any of it helped.</p>
+    <p class="dek">Page 10 covers what SFT, LoRA and DPO <em>are</em>. This page is the part that gets you a working adapter: the memory arithmetic that decides the method, what rank and alpha actually do, what data to feed it, what it quietly costs you, and how to tell whether any of it helped.</p>
     <div class="meta-row">
-      <span class="reading-time">~22 min · prerequisites: LoRA and SFT theory (<a href="./10-llm-architecture-training.html">10</a>)</span>
+      <span class="reading-time">~36 min · prerequisites: LoRA and SFT theory (<a href="./10-llm-architecture-training.html">10</a>)</span>
     </div>
   </div>
 
@@ -139,6 +149,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <div class="tldr">
       <div class="tldr-label">TL;DR</div>
       <p>Most fine-tuning projects should not have been fine-tuning projects. Work up the ladder first: prompt, few-shot, then retrieval. Fine-tune when you need <strong>behaviour</strong> the base model will not reliably produce, such as a house style, a rigid output format, or a domain's idiom. Once you commit, the method is chosen by your VRAM, not your ambition: <strong>QLoRA</strong> on a quantized base is what fits on one consumer GPU.</p>
+    <p>The arithmetic behind that: mixed-precision AdamW costs 16 bytes per <em>trainable</em> parameter, so a full 7B fine-tune is 108 GB while a rank-16 adapter on a 4-bit base is under 4. Three of those four bytes-per-parameter lines vanish when you freeze the base, which is the entire mechanism.</p>
     <p>Your dataset decides the outcome far more than any hyperparameter. Match the base model's chat template exactly, hold out a real eval set before you start, and remember that falling training loss is evidence of memorisation, not of usefulness. One sentence for an interview: fine-tuning reliably changes how a model behaves and unreliably changes what it knows.</p>
     </div>
   </section>
@@ -164,6 +175,28 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     </ul>
 
     <p>What it does not fix. It will not make a weak base model competent, and no amount of adapter training rescues a poor architecture choice. It is also a bad mechanism for facts that change.</p>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>Prompting</th><th>Few-shot</th><th>Retrieval</th><th>Fine-tuning</th></tr></thead>
+        <tbody>
+          <tr><td>Time to try a change</td><td>Seconds</td><td>Seconds</td><td>Minutes — reindex</td><td>Hours to days — retrain, then re-evaluate</td></tr>
+          <tr><td>Cost of fixing one wrong fact</td><td>Edit a sentence</td><td>Edit an example</td><td>Edit a document</td><td>Rebuild the dataset and train again</td></tr>
+          <tr><td>Can point at its source</td><td>No</td><td>No</td><td>Yes</td><td>No</td></tr>
+          <tr><td>Per-request token cost</td><td>Grows with the instruction</td><td>Grows fastest</td><td>Grows with retrieved context</td><td>Near zero — the behaviour is in the weights</td></tr>
+          <tr><td>What it genuinely fixes</td><td>Most things, if you try properly</td><td>Output format, usually</td><td>Knowledge, freshness, provenance</td><td>Default behaviour: style, format, idiom</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Read the bottom row against the rightmost column. Fine-tuning's one real advantage over everything to its left is that the behaviour becomes the <em>default</em> and stops costing tokens on every call. Every other row in that table is an argument for trying a cheaper rung first.</p>
+
+    <div class="callout callout-warn">
+      <span class="callout-label">Three questions that settle it before you write any code</span>
+      <p><strong>Would a perfect prompt fix this?</strong> If the model produces the right output when you ask carefully and fails when you ask casually, the problem is consistency — which is a genuine fine-tuning case. If it cannot produce the output at all, fine-tuning will not teach it to.</p>
+      <p><strong>Will the right answer be different next quarter?</strong> Then it belongs in a document. Weights give you no way to find what you baked in, no way to correct one fact, and no citation when someone asks where an answer came from.</p>
+      <p><strong>Could you write two hundred examples you would be happy to ship?</strong> If not, you do not have a dataset yet. The run will faithfully learn whatever inconsistency you actually have, and you will read the result as a modelling failure.</p>
+    </div>
 
     <div class="callout callout-teach">
       <span class="callout-label">Where the vendor guidance and the practitioner consensus disagree</span>
@@ -244,6 +277,17 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       <div class="diagram-caption">A rank-16 adapter on one 4096×4096 layer replaces 16.8M trainable parameters with 131k — under 1%. The saving compounds: optimizer state for Adam is roughly twice the trainable parameter count, so it shrinks by the same factor, and that is what moves fine-tuning from a multi-GPU job to a single card. At inference <code>BA</code> can be folded into <code>W</code>, so the served model has exactly the original shape and no extra latency.</div>
     </div>
 
+    <h3>The fourth family: prompt and prefix tuning</h3>
+
+    <p>LoRA is not the only way to train a small number of parameters, and the alternatives are worth knowing because they fail in an instructive direction.</p>
+
+    <ul>
+      <li><strong>Prompt tuning</strong> (Lester et al., 2021) freezes the entire network and learns a short sequence of continuous vectors prepended to the input embeddings. Nothing inside the model moves. Their finding: it only caught up with full model tuning at T5-XXL, 11B parameters.</li>
+      <li><strong>Prefix tuning</strong> (Li &amp; Liang, 2021) learns vectors at <em>every</em> layer rather than only at the input, which is why it holds up at smaller scales. The paper reports comparable performance while training about 0.1% of the parameters.</li>
+    </ul>
+
+    <p>Both spend context window at inference, and neither can be folded back into the weights — so they add latency that LoRA does not. They earn their place when the base must stay literally untouched, or when you cannot change the serving stack at all.</p>
+
     <h3>Starting hyperparameters</h3>
     <p>These are starting points, not tuned optima. They come from Unsloth's <a href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide" target="_blank" rel="noopener">LoRA hyperparameters guide</a>, and you should expect to move them.</p>
     <ul>
@@ -256,8 +300,249 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     </ul>
   </section>
 
+  <section id="memory">
+    <h2><span class="num">03</span>The memory arithmetic, line by line</h2>
+    <p class="lede">One 24 GB card, one 7B model. Full fine-tuning needs about 108 GB before a single activation exists; QLoRA needs under 4. Both numbers fall out of the same five-line ledger, and it is worth walking once rather than memorising the conclusion.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Worked example</span>
+        <span class="drv-goal">Where the 108 GB in a full 7B fine-tune actually goes</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">Llama-2-7B has 6,738,415,616 parameters. Assume the standard recipe: bf16 forward and backward, AdamW, no sharding. Every line is bytes per parameter.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\text{weights} = 2 \times 6.74\times10^{9} = 13.5\ \text{GB}$$</span></div>
+            <div class="drv-why">Two bytes per parameter, because the matmuls run in bf16 to reach the tensor cores. This is the only line most people count, and it is an eighth of the bill.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\text{gradients} = 2 \times 6.74\times10^{9} = 13.5\ \text{GB}$$</span></div>
+            <div class="drv-why">One gradient per trainable parameter, in the dtype the backward pass produced it in. <strong>This line is what LoRA deletes</strong>: a frozen weight has no gradient.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\text{fp32 master copy} = 4 \times 6.74\times10^{9} = 27.0\ \text{GB}$$</span></div>
+            <div class="drv-why">bf16 carries seven explicit mantissa bits, so its spacing near a value is about one part in 256. Add a relative update of <span>$10^{-4}$</span> to a bf16 weight and it rounds back to where it was. So the optimizer keeps an fp32 copy, updates that, and casts down for the next forward pass.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\text{Adam } m + v = (4 + 4) \times 6.74\times10^{9} = 53.9\ \text{GB}$$</span></div>
+            <div class="drv-why">A running first and second moment per parameter, both fp32. Four times the size of the weights they are optimising, and the single largest line in the ledger.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$(2 + 2 + 4 + 8) \times 6{,}738{,}415{,}616 = 107.8\ \text{GB}$$</span></div>
+            <div class="drv-why">Sixteen bytes per parameter, the same accounting page <a href="./28-gpu-architecture-cuda-distributed.html">28</a> uses for distributed training. Adding the four rounded lines above gives 107.9 rather than 107.8 — each one rounds up, and four of those add a tenth. The exact figure is 107.81 GB. Activations are on top of this and depend on batch and sequence length.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>Lines 2, 3 and 4 exist only for parameters you are training.</strong> That is 94.3 GB of the 107.8, and it is the entire reason parameter-efficient fine-tuning works. Freeze the base and those three lines shrink by whatever fraction of the model you left trainable — not by a little, by the same factor. Line 1 is the only one that stays, and quantization is what shrinks that.</div>
+      </div>
+    </details>
+
+    <p>So LoRA's memory argument is not really about the adapter being small. It is that three of the four lines are indexed by <em>trainable</em> parameters rather than by total parameters, and a rank-16 adapter makes that number about 0.6% of the model.</p>
+
+    <p>How small exactly? Each targeted matrix of shape <span>$d_{\text{out}} \times d_{\text{in}}$</span> gets an <span>$A$</span> of shape <span>$r \times d_{\text{in}}$</span> and a <span>$B$</span> of shape <span>$d_{\text{out}} \times r$</span>, so it costs <span>$r(d_{\text{in}} + d_{\text{out}})$</span> parameters instead of <span>$d_{\text{in}} d_{\text{out}}$</span>. Summed over Llama-2-7B's seven projections and 32 layers, at <span>$r = 16$</span>, that is 40.0M.</p>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">The whole ledger, for five configurations of the same model</span>
+      </summary>
+<pre><code># Llama-2-7B geometry, straight from its config.json.
+L, H, FF = 32, 4096, 11008
+BASE = 6_738_415_616                  # its real parameter count
+
+SHAPE = {"q": (H, H), "k": (H, H), "v": (H, H), "o": (H, H),
+         "gate": (H, FF), "up": (H, FF), "down": (FF, H)}
+
+def lora_params(r, targets):
+    """A is r x d_in, B is d_out x r, for every targeted matrix."""
+    return L * sum(r * (SHAPE[t][0] + SHAPE[t][1]) for t in targets)
+
+ALL7 = list(SHAPE)
+QV = ["q", "v"]
+
+print("%-22s %9s %8s %7s %7s %8s"
+      % ("", "trainable", "weights", "grads", "optim", "total"))
+for name, train, bytes_per_w in [
+        ("full fine-tune bf16", BASE, 2),
+        ("LoRA r=16, q+v", lora_params(16, QV), 2),
+        ("LoRA r=16, all 7", lora_params(16, ALL7), 2),
+        ("LoRA r=64, all 7", lora_params(64, ALL7), 2),
+        ("QLoRA r=16, all 7", lora_params(16, ALL7), 0.5)]:
+    w = BASE * bytes_per_w / 1e9
+    g = train * 2 / 1e9               # bf16 gradient per trainable
+    o = train * 12 / 1e9              # fp32 master + Adam m + Adam v
+    print("%-22s %8.1fM %7.1fG %6.2fG %6.2fG %7.1fG"
+          % (name, train / 1e6, w, g, o, w + g + o))
+print("\nactivations are on top of all of these and depend on"
+      "\nbatch, sequence length and gradient checkpointing.")</code></pre>
+      <div class="tryit-out"><strong>Compare the <code>grads</code> and <code>optim</code> columns down the rows.</strong> Full fine-tuning spends <code>13.48</code> and <code>80.86</code> GB; every LoRA row spends under half a gigabyte on both, because those columns are priced by <em>trainable</em> parameters. Now compare <code>weights</code> across the last two rows: identical adapters, <code>13.5</code> against <code>3.4</code> GB, purely from quantizing the frozen base. Two independent levers, and QLoRA is both of them at once.</div>
+    </details>
+
+    <p>One more thing that table settles: rank is cheap. Going from <code>r=16</code> to <code>r=64</code> costs 1.7 GB, which on a 24 GB card you can afford. The reason to keep rank low is overfitting risk, not memory.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The same 7B model, three ways — bars are linear in gigabytes
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 800 220" xmlns="http://www.w3.org/2000/svg">
+        <line x1="260" y1="24" x2="260" y2="176" stroke="#34d399" stroke-width="1.4" stroke-dasharray="5 4" opacity="0.5"/>
+        <text x="264" y="20" font-size="10" fill="#34d399">24 GB — one RTX 4090</text>
+        <line x1="540" y1="24" x2="540" y2="176" stroke="#f472b6" stroke-width="1.4" stroke-dasharray="5 4" opacity="0.5"/>
+        <text x="544" y="20" font-size="10" fill="#f472b6">80 GB — one H100</text>
+
+        <text x="132" y="50" text-anchor="end" font-size="11" font-weight="700" fill="#e9e9ef">full fine-tune</text>
+        <rect x="140" y="36" width="539" height="22" rx="4" fill="#f472b6" opacity="0.55"/>
+        <text x="687" y="52" font-size="10.5" fill="#a3a3b2">107.8 GB</text>
+
+        <text x="132" y="92" text-anchor="end" font-size="11" font-weight="700" fill="#e9e9ef">LoRA r=16</text>
+        <rect x="140" y="78" width="70" height="22" rx="4" fill="#fbbf24" opacity="0.65"/>
+        <text x="218" y="94" font-size="10.5" fill="#a3a3b2">14.0 GB — bf16 base, 40M trainable</text>
+
+        <text x="132" y="134" text-anchor="end" font-size="11" font-weight="700" fill="#e9e9ef">QLoRA r=16</text>
+        <rect x="140" y="120" width="20" height="22" rx="3" fill="#818cf8" opacity="0.85"/>
+        <text x="168" y="136" font-size="10.5" fill="#a3a3b2">3.9 GB — 4-bit base, same 40M trainable</text>
+
+        <line x1="140" y1="170" x2="740" y2="170" stroke="#6c6c7d" stroke-width="1"/>
+        <text x="140" y="186" text-anchor="middle" font-size="9.5" fill="#a3a3b2">0</text>
+        <text x="340" y="186" text-anchor="middle" font-size="9.5" fill="#a3a3b2">40</text>
+        <text x="540" y="186" text-anchor="middle" font-size="9.5" fill="#a3a3b2">80</text>
+        <text x="740" y="186" text-anchor="middle" font-size="9.5" fill="#a3a3b2">120 GB</text>
+        <text x="140" y="208" font-size="10" fill="#a4a4b3">weights + gradients + optimizer state only · activations add roughly 1.2 GB at batch 1, sequence 2048, with gradient checkpointing</text>
+      </svg>
+      <div class="diagram-caption">Bar lengths are the totals the Try it above prints, drawn against the same axis. The gap between the top bar and the 24 GB line is the reason the choice in section 02 is made by hardware: full fine-tuning a 7B model overshoots a 24 GB card four and a half times over, and needs at least two 80 GB cards. No amount of batch-size tuning changes that, because not one of those 107.8 GB depends on batch size.</div>
+    </div>
+
+    <h3>Does it actually fit in 24 GB?</h3>
+
+    <p>States are 3.9 GB for QLoRA — 3.4 for the 4-bit base plus roughly 0.1 GB of quantization constants, and 0.56 for the adapters, their gradients and their optimizer state. Then activations, which is the term people forget and the term that scales with your sequence length.</p>
+
+    <p>With gradient checkpointing on, you keep one hidden state per layer boundary: <span>$32 \times 2048 \times 4096 \times 2 = 0.54$</span> GB at batch 1. Add the logits and their fp32 copy for the loss, about 0.39 GB, and the recomputation peak inside one layer. Call it 1.2 GB.</p>
+
+    <p>Five gigabytes, on a 24 GB card. That headroom is what you spend on batch size and sequence length, both of which multiply the activation term and leave the other 3.9 GB untouched. LoRA on a bf16 base comes to about 15 GB by the same arithmetic, which also fits — with far less room to grow the sequence.</p>
+  </section>
+
+  <section id="lora-math">
+    <h2><span class="num">04</span>What LoRA is actually doing</h2>
+    <p class="lede">Page <a href="./10-llm-architecture-training.html">10</a> states the equation. This section is about what each symbol in it controls, because <code>r</code> and <code>lora_alpha</code> are the two knobs you will actually turn and they do completely different things.</p>
+
+    <div class="eq-block">
+      <span>$$h = Wx + \frac{\alpha}{r}\,BAx, \qquad B \in \mathbb{R}^{d_{\text{out}} \times r},\ A \in \mathbb{R}^{r \times d_{\text{in}}}$$</span>
+    </div>
+
+    <ul class="eq-explain">
+      <li><span class="sym">W</span> the pretrained weight. Frozen. No gradient, no optimizer state, and after quantization not even full precision.</li>
+      <li><span class="sym">A</span> initialised from a Gaussian. It projects the input down to <span>$r$</span> dimensions.</li>
+      <li><span class="sym">B</span> initialised to <strong>exactly zero</strong>, so <span>$BA = 0$</span> at step 0 and training starts from the pretrained model rather than near it.</li>
+      <li><span class="sym">α/r</span> a fixed scalar, not learned. It scales the whole update.</li>
+    </ul>
+
+    <p>The zero initialisation of <span>$B$</span> is a small detail with a large consequence: the first forward pass of fine-tuning is bit-identical to the base model's. There is no warm-up period where the adapter is random noise degrading a working model.</p>
+
+    <h3>Why a low rank is enough</h3>
+
+    <p>The claim is not that <span>$W$</span> is low rank. It plainly is not. The claim is about <span>$\Delta W$</span>, the <em>change</em> that adapting to one task requires.</p>
+
+    <p>The evidence predates LoRA. Aghajanyan et al. (2020) measured the intrinsic dimension of fine-tuning directly: RoBERTa-Large reaches 90% of full fine-tuning performance on MRPC while optimising 200 parameters inside a random low-dimensional subspace, and 774 on QQP. A 355M-parameter model, adapted by a few hundred numbers.</p>
+
+    <p>LoRA's bet is that if the useful update lives in a subspace that small, you can just parameterise a low-rank one directly and skip the random projection. You can watch the mechanism on a matrix small enough to take the SVD of.</p>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Train a full weight matrix on a narrow task, then look at the spectrum of what changed</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+d, k = 128, 3
+W0 = rng.normal(0, 0.05, (d, d))         # the "pretrained" weight
+
+# The new task only exercises a k-dimensional slice of the input
+# and only moves a k-dimensional slice of the output.
+U = np.linalg.qr(rng.normal(size=(d, k)))[0]
+V = np.linalg.qr(rng.normal(size=(d, k)))[0]
+W_task = W0 + U @ rng.normal(size=(k, k)) @ V.T
+
+W = W0.copy()
+for _ in range(600):                     # plain full-matrix SGD
+    X = rng.normal(size=(64, d))
+    Y = X @ W_task + rng.normal(0, 0.02, (64, d))   # noisy labels
+    W -= 0.05 * X.T @ (X @ W - Y) / 64
+
+s = np.linalg.svd(W - W0, compute_uv=False)
+energy = np.cumsum(s ** 2) / np.sum(s ** 2)
+print("delta W is a full %d x %d matrix (%d numbers)"
+      % (d, d, d * d))
+print("its top 8 singular values:", np.round(s[:8], 3))
+print("energy captured by rank 1..5:", np.round(energy[:5], 4))
+print("rank needed for 99% of it:",
+      int(np.searchsorted(energy, 0.99)) + 1,
+      " -- LoRA would store %d numbers at that rank"
+      % (2 * d * (int(np.searchsorted(energy, 0.99)) + 1)))</code></pre>
+      <div class="tryit-out"><strong>Look at the cliff between the third and fourth singular value: <code>0.435</code>, then <code>0.009</code>.</strong> Nothing constrained this optimisation — all 16,384 entries of a dense matrix, noisy labels, ordinary gradient descent — and the update it found is still rank 3, with 768 numbers reproducing 99.98% of it. Be clear on what that shows: the task really is rank 3 by construction, so this is the <em>mechanism</em>. The evidence is Aghajanyan's measurement above.</div>
+    </details>
+
+    <h3>What <code>r</code> and <code>alpha</code> each control</h3>
+
+    <p>They are routinely confused, including in tutorials. <code>r</code> is a capacity knob: it sets the rank of <span>$\Delta W$</span> and therefore how many independent directions the update can move in. <code>alpha</code> is not a capacity knob at all. It is a multiplier.</p>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Confirm which knob changes the rank and which one only changes the scale</span>
+      </summary>
+<pre><code>import numpy as np
+
+d = 256
+W = np.random.default_rng(0).normal(0, 0.02, (d, d))
+
+def delta_w(r, alpha, seed, zero_B=False):
+    g = np.random.default_rng(seed)
+    A = g.normal(0, 0.01, (r, d))                  # Gaussian init
+    B = np.zeros((d, r)) if zero_B else g.normal(0, 0.01, (d, r))
+    return (alpha / r) * (B @ A)                   # the effective dW
+
+# 1. B starts at exactly zero, so a fresh adapter is a no-op.
+print("fresh adapter leaves W untouched:",
+      np.array_equal(W + delta_w(16, 32, 1, zero_B=True), W))
+
+# 2. r is the capacity knob: it sets the RANK of the update.
+for r in (1, 4, 16, 64):
+    dw = delta_w(r, 16, 2)
+    print("r=%-3d rank(dW)=%-3d  stored %6d numbers (%5.2f%% of W)"
+          % (r, np.linalg.matrix_rank(dw), 2 * r * d,
+             100 * 2 * r * d / d ** 2))
+
+# 3. alpha is not a capacity knob. It is a plain multiplier.
+a16, a32 = delta_w(16, 16, 3), delta_w(16, 32, 3)
+print("alpha=32 is exactly 2x alpha=16:", np.allclose(a32, 2 * a16))
+print("same rank either way:", np.linalg.matrix_rank(a16),
+      np.linalg.matrix_rank(a32))</code></pre>
+      <div class="tryit-out"><strong><code>alpha=32</code> is exactly <code>2x alpha=16</code>, at identical rank.</strong> Doubling alpha is arithmetically the same as doubling <span>$B$</span>, so it acts as a learning-rate multiplier on the adapter, not as extra capacity. Setting <span>$\alpha = r$</span> or <span>$2r$</span> holds the effective scale <span>$\alpha/r$</span> fixed as rank changes, so the learning rate survives. And note <code>r=64</code> storing half of a 256-wide <span>$W$</span> — the same rank on a 4096-wide layer is 3.1%.</div>
+    </details>
+
+    <h3>Which layers to target</h3>
+
+    <p>Two published findings that look contradictory and are not.</p>
+
+    <ul>
+      <li>The LoRA paper's ablation, at a <em>fixed parameter budget</em>, found that spending it on <span>$W_q$</span> and <span>$W_v$</span> beat spending it on any single projection — and that a rank as low as 1 sufficed in that setting.</li>
+      <li>The QLoRA paper found that <em>matching full fine-tuning</em> required applying LoRA to all linear layers in the transformer block, not just the attention projections.</li>
+    </ul>
+
+    <p>They answer different questions. If the budget is genuinely binding, attention's query and value projections are where it buys the most. But the ledger in section 03 shows the budget usually is not binding: all seven projections at <span>$r=16$</span> cost 0.56 GB of gradients and optimizer state on a 24 GB card.</p>
+
+    <p>So the practical default is the second finding. Target everything, keep the rank modest, and treat the attention-only configuration as what you fall back to when memory is genuinely tight — which, after section 03, it rarely is.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The property that makes adapters an operational choice, not just a memory one</span>
+      <p>Because <span>$\Delta W = \frac{\alpha}{r}BA$</span> is a matrix of exactly <span>$W$</span>'s shape, it can be added into <span>$W$</span> once and thrown away. The served model has the original architecture, the original parameter count and the original latency. Prompt and prefix tuning cannot do this.</p>
+      <p>Or you keep it separate: a 40M-parameter adapter is roughly 80 MB in bf16, so one base model in memory can serve many tasks by swapping files. That also means you can turn a fine-tune <em>off</em>, which is the cheapest catastrophic-forgetting insurance available.</p>
+    </div>
+  </section>
+
   <section id="data">
-    <h2><span class="num">03</span>Data is the whole game</h2>
+    <h2><span class="num">05</span>Data is the whole game</h2>
     <p class="lede">Hyperparameters move results by a little. The dataset moves them by a lot. Budget your time accordingly.</p>
 
     <p>A supervised fine-tuning example is a conversation: an instruction, optionally a system message, and the response you wish the model had given. The model trains to predict the response tokens. That is the same next-token objective from <a href="./10-llm-architecture-training.html">10</a>, pointed at a much smaller and much more deliberate pile of text.</p>
@@ -277,6 +562,31 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 
     <p>The useful heuristic is directional. Teaching <strong>style or format</strong> needs far fewer examples than teaching a <strong>domain</strong>, because you are nudging a behaviour the model can already produce rather than installing something new. Start small, evaluate, and add data only where evaluation shows a gap.</p>
 
+    <p>Three anchors that are published results rather than folklore:</p>
+
+    <ul>
+      <li><strong>One thousand examples.</strong> LIMA (Zhou et al., 2023) fine-tuned a 65B base on exactly 1,000 hand-curated prompt-response pairs, with no RLHF at all, and reported performance competitive with models trained on vastly more. It is the strongest single piece of evidence that curation beats volume.</li>
+      <li><strong>A few hundred.</strong> Enough to move tone or lock an output format, where you are steering a behaviour the base can already produce on a good day.</li>
+      <li><strong>Tens of thousands upward.</strong> What a genuine domain shift takes — and the point at which the question from section 01 comes back, because retrieval may well be doing that job better.</li>
+    </ul>
+
+    <p>"Quality over quantity" is a slogan until you say what quality means. Operationally it means six specific things, and you can check every one of them by reading fifty examples.</p>
+
+    <ul>
+      <li><strong>Every response is one you would ship.</strong> Not acceptable, not close. The model will reproduce the average of what you give it, not the best of it.</li>
+      <li><strong>One convention, not several.</strong> If half the responses open with a greeting and half do not, you are training a coin flip.</li>
+      <li><strong>Lengths match the target.</strong> Response length is one of the easiest things to learn and one of the easiest to teach wrong.</li>
+      <li><strong>The prompts look like production.</strong> Clean, well-formed instructions teach the model to expect clean, well-formed instructions.</li>
+      <li><strong>Failure cases are present.</strong> Include the examples where the right answer is "I don't know" or a refusal, or the model will learn that an answer always exists.</li>
+      <li><strong>No near-duplicates.</strong> They inflate the apparent dataset size, get memorised first, and leak across a random train/eval split.</li>
+    </ul>
+
+    <div class="callout callout-warn">
+      <span class="callout-label">The synthetic data loop, and the way it goes wrong</span>
+      <p>Generating training data with a larger model is now the default, and it works. The standard shape: prompt a frontier model for candidate responses, filter them against an explicit written rubric, then read a random sample by hand before anything trains.</p>
+      <p>The filter is the part people skip, and skipping it produces a dataset with one voice, one sentence rhythm and one way of being wrong. You then fine-tune a smaller model to imitate exactly that. The symptom is a model that is fluent, plausible and strangely uniform — and no aggregate metric will tell you, because the eval set was generated the same way.</p>
+    </div>
+
     <h3>The unglamorous checklist</h3>
     <ul>
       <li><strong>Deduplicate.</strong> Near-duplicates inflate your apparent dataset size and quietly become memorised.</li>
@@ -288,7 +598,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
   </section>
 
   <section id="unsloth">
-    <h2><span class="num">04</span>Doing it with Unsloth</h2>
+    <h2><span class="num">06</span>Doing it with Unsloth</h2>
     <p><a href="https://github.com/unslothai/unsloth" target="_blank" rel="noopener">Unsloth</a> is a drop-in optimisation layer for fine-tuning on a single GPU. It is not a new algorithm. It rewrites the model's PyTorch modules as Triton kernels and derives the backward pass manually, so you run the same LoRA or QLoRA training with less memory and more speed.</p>
 
     <p>The property that matters most is the one that is easy to skip past: because it makes no approximations, the result is mathematically the same training you would have run anyway. You are buying throughput, not trading accuracy for it.</p>
@@ -382,7 +692,7 @@ model.save_pretrained_gguf("gguf_model", tokenizer,
   </section>
 
   <section id="evaluate">
-    <h2><span class="num">05</span>Did it work?</h2>
+    <h2><span class="num">07</span>Did it work?</h2>
     <p class="lede">Training loss going down tells you the model memorised your data. It says nothing about whether the model got better.</p>
 
     <p>The only measurement that counts is the same held-out eval set, scored before and after, ideally with outputs you read yourself. Set that up before training starts. Building an eval after you have a result is how you end up grading your own homework.</p>
@@ -390,15 +700,94 @@ model.save_pretrained_gguf("gguf_model", tokenizer,
     <h3>Three failures, and how each announces itself</h3>
     <ul>
       <li><strong>Overfitting.</strong> Training loss keeps dropping while held-out quality stalls or declines. Unsloth's guide flags training loss below roughly 0.2 as a memorisation signal rather than a success signal. Fix by cutting epochs, lowering the learning rate, or adding data.</li>
-      <li><strong>Catastrophic forgetting.</strong> Your task improves and unrelated general ability quietly rots. It is invisible unless you deliberately test capabilities you never trained on. Keep a small general-purpose probe set and run it every time.</li>
+      <li><strong>Catastrophic forgetting.</strong> Your task improves and unrelated general ability quietly rots. It is invisible unless you deliberately test capabilities you never trained on. Keep a small general-purpose probe set and run it every time. Section <a href="#forgetting">08</a> is about how much of it you can actually prevent.</li>
       <li><strong>Underfitting.</strong> Barely distinguishable from the base model. Raise the learning rate, raise rank, or train longer, in that order.</li>
     </ul>
 
     <p>One habit worth building. Keep base and fine-tuned outputs side by side for the same prompts, and read them. Aggregate scores hide the regressions that a human notices in ten seconds.</p>
   </section>
 
+  <section id="forgetting">
+    <h2><span class="num">08</span>Catastrophic forgetting, and what actually helps</h2>
+    <p class="lede">Your support model now answers in house style, and it has quietly stopped being able to write a Python function. Nothing in your evaluation could have told you, because your evaluation is made of support tickets.</p>
+
+    <p>The mechanism is not mysterious. General ability and your new behaviour ride on the same weights. Gradient descent on a narrow objective moves those weights toward whatever serves that objective, and it has no term that cares what else they were doing.</p>
+
+    <p>It is invisible by construction, which is the actual problem. Every metric you built points at the task you trained on, and on that task the numbers improve. Here is the shape of it, on a model small enough to train while you read this.</p>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Forget task A by learning task B — then try four ways of not doing that</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+D, HID = 16, 4                    # a deliberately tight shared trunk
+
+def task(w, n):
+    X = rng.normal(size=(n, D))
+    return X, (X @ w &gt; 0).astype(float)
+
+wA, wB = rng.normal(size=D), rng.normal(size=D)
+XA, yA = task(wA, 3000);  XB, yB = task(wB, 3000)
+TA, tA = task(wA, 2000);  TB, tB = task(wB, 2000)
+P0 = [rng.normal(0, .3, (D, HID)), np.zeros(HID),
+      rng.normal(0, .3, (HID, 2)), np.zeros(2)]
+
+def fwd(P, X):
+    h = np.maximum(X @ P[0] + P[1], 0)    # shared trunk
+    return h, h @ P[2] + P[3]             # two task heads
+
+def train(P, X, y, head, steps=600, lr=.5, trunk=True):
+    P = [q.copy() for q in P]
+    i = np.arange(len(X))
+    for _ in range(steps):
+        h, z = fwd(P, X)
+        gz = np.zeros_like(z)
+        gz[i, head] = (1 / (1 + np.exp(-z[i, head])) - y) / len(X)
+        gh = (gz @ P[2].T) * (h &gt; 0)
+        P[2] -= lr * h.T @ gz;  P[3] -= lr * gz.sum(0)
+        if trunk:
+            P[0] -= lr * X.T @ gh;  P[1] -= lr * gh.sum(0)
+    return P
+
+def show(tag, P):
+    a = ((fwd(P, TA)[1][:, 0] &gt; 0) == (tA &gt; 0)).mean()
+    b = ((fwd(P, TB)[1][:, 1] &gt; 0) == (tB &gt; 0)).mean()
+    print("%-27s A=%.3f  B=%.3f" % (tag, a, b))
+
+old, new = np.zeros(3000, int), np.ones(3000, int)
+P = train(P0, XA, yA, old)
+show("after task A", P)
+show("then task B, nothing else", train(P, XB, yB, new))
+show("  same, 1/10 learning rate", train(P, XB, yB, new, lr=.05))
+show("  same, trunk frozen", train(P, XB, yB, new, trunk=False))
+k = 150                                          # 5% replay
+Xm = np.vstack([XB, XA[:k]]);  ym = np.r_[yB, yA[:k]]
+hm = np.r_[new, np.zeros(k, int)]
+show("  same, 5% task-A replay", train(P, Xm, ym, hm))</code></pre>
+      <div class="tryit-out"><strong>Read it as one tradeoff curve, not four options.</strong> Task B alone drags task A from <code>0.996</code> to <code>0.759</code> without the model ever seeing a task-A example — the shared trunk moved. Freezing that trunk protects A perfectly and fails to learn B at all (<code>0.680</code>), which is what over-constraining looks like. A tenth of the learning rate is worse at both than the last row. 5% replay recovers A to <code>0.941</code> and keeps B at <code>0.994</code>.</div>
+    </details>
+
+    <p>Ordered by what they cost you, these are the levers that actually work.</p>
+
+    <ul>
+      <li><strong>Train less.</strong> Fewer epochs, a lower learning rate, and early stopping judged on a general probe rather than on training loss. This is the most common real fix and it is free — most forgetting comes from runs that went on too long.</li>
+      <li><strong>Constrain what can move.</strong> LoRA is already this: the base is untouched and the update is confined to rank <span>$r$</span> per matrix. Lowering rank and targeting fewer modules moves less of the model, at the cost of how much your task can change.</li>
+      <li><strong>Replay.</strong> Mix a few percent of general instruction data into the fine-tuning set. The demo above is the whole argument: 5% recovered most of what was lost and cost nothing at the new task.</li>
+      <li><strong>Do not merge the adapter.</strong> Keep it as a separate file and the base model is still there, unchanged, one flag away. You can serve both, compare them on the same prompts, and roll back in seconds.</li>
+      <li><strong>Measure it deliberately.</strong> Keep a small fixed probe set of capabilities you never trained on — code, arithmetic, a different language, instruction following — and run it at every checkpoint. Forgetting you cannot see is forgetting you will ship.</li>
+    </ul>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">There is no free corner of that curve</span>
+      <p>Every row of the demo trades the same two quantities. The frozen-trunk row preserves the old behaviour perfectly and learns nothing; training hard learns the new task perfectly and damages the old one. Replay and restraint move you along the curve, they do not escape it.</p>
+      <p>Which means the honest question is not "how do I avoid forgetting" but "how much general ability is this behaviour worth, and have I measured what I actually gave up?"</p>
+    </div>
+  </section>
+
   <section id="in-the-wild">
-    <h2><span class="num">06</span>Where you meet this in the wild</h2>
+    <h2><span class="num">09</span>Where you meet this in the wild</h2>
     <p class="lede">The pattern across all of these: fine-tuning wins where the requirement is a <em>consistent behaviour</em> that would otherwise cost a long prompt on every single call.</p>
 
     <div class="wild-grid">
@@ -458,7 +847,7 @@ model.save_pretrained_gguf("gguf_model", tokenizer,
   </section>
 
   <section id="interview">
-    <h2><span class="num">07</span>Interview questions</h2>
+    <h2><span class="num">10</span>Interview questions</h2>
 
     <details class="qa"><summary><span class="qa-level beginner">Beginner</span>When would you fine-tune instead of using RAG?</summary>
       <div class="qa-body"><p>Fine-tune when the gap is behavioural: style, tone, output format, or a domain's idiom that prompting only approximates. Use RAG when the gap is knowledge, especially knowledge that changes or needs to be cited. The operational argument is decisive. A fact in a document is updated by editing the document; a fact in the weights requires another training run and still gives you no provenance. The two compose well, and a common production shape is a fine-tuned model that formats and reasons over retrieved context.</p></div>
@@ -480,13 +869,22 @@ model.save_pretrained_gguf("gguf_model", tokenizer,
       <div class="qa-body"><p>Unknown, and the question is a trap. Falling training loss shows the model is fitting the training set, which is also exactly what memorisation looks like. The measurement that matters is held-out performance, scored before and after on a set you split off before training. Unsloth's guide treats training loss below roughly 0.2 as a memorisation warning rather than a success signal. You should also probe capabilities you never trained on, because catastrophic forgetting is invisible to any metric computed only on your task.</p></div>
     </details>
 
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does a full 7B fine-tune need over 100GB when QLoRA fits on a 24GB card?</summary>
+      <div class="qa-body"><p>Count bytes per parameter under mixed-precision AdamW. Two for the bf16 weights, two for the gradients, four for the fp32 master copy the optimizer updates — bf16 has too few mantissa bits to absorb small updates — and four each for Adam's first and second moments. Sixteen bytes per parameter, so 6.74 billion parameters is 107.8 GB before a single activation. The key structural fact is that only the first of those four lines is indexed by <em>total</em> parameters; the other twelve bytes are per <em>trainable</em> parameter. Freezing the base and training a rank-16 adapter across all seven projections leaves about 40M trainable parameters, roughly 0.6% of the model, so gradients and optimizer state collapse from 94 GB to about half a gigabyte. That still leaves 13.5 GB of frozen weights, which is what the 4-bit quantization in QLoRA attacks, taking it to about 3.4 GB. Total states under 4 GB, plus roughly 1 GB of activations at sequence 2048 with gradient checkpointing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What do rank and alpha control in LoRA, and which modules should you target?</summary>
+      <div class="qa-body"><p>The update is ΔW = (α/r)·BA, added to a frozen W. Rank r is the capacity knob: it is literally the rank of ΔW, so it sets how many independent directions the update can move in, and it determines the parameter count, r(d_in + d_out) per matrix. Alpha is not capacity — it is a plain scalar multiplier, so doubling alpha is arithmetically identical to doubling B, and it behaves like a learning-rate multiplier on the adapter. The convention of setting α = r or 2r keeps the effective scale α/r constant as you vary rank, so you do not re-tune the learning rate every time. On modules: the LoRA paper's ablation, at a fixed parameter budget, found query and value projections the best place to spend it. The QLoRA paper found that matching full fine-tuning required all linear layers. Those answer different questions, and since all seven projections at r=16 cost well under a gigabyte of optimizer state, the budget is usually not the binding constraint — so target everything and keep the rank modest.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you detect catastrophic forgetting, and what actually mitigates it?</summary>
+      <div class="qa-body"><p>You cannot detect it with your task metrics, because by construction they only measure the thing you trained on, and that improves. Detection requires a deliberate probe: a small fixed set of capabilities you never trained on — code, arithmetic, a second language, plain instruction following — scored at every checkpoint against the base model's own scores on the same set. Mitigations, cheapest first: train less, since most forgetting comes from too many epochs or too high a learning rate, with early stopping judged on the probe rather than on training loss. Then constrain what can move — LoRA at a modest rank is exactly that, since the base is frozen and the update is rank-limited per matrix. Then replay: mixing a few percent of general instruction data into the fine-tuning set recovers most of the loss for almost no cost to the new task. And keep the adapter unmerged, so the unchanged base is one flag away and you can roll back or A/B in seconds. None of these is free. Freezing enough to protect the old behaviour perfectly also prevents learning the new one, so the real question is how much general ability the behaviour is worth, and whether you measured what you gave up.</p></div>
+    </details>
     <details class="qa"><summary><span class="qa-level deep">Deep</span>You have one 24GB GPU and need a customer-support model in a specialised domain. Walk through your plan.</summary>
       <div class="qa-body"><p>Start by not fine-tuning. Establish a prompted baseline with retrieval over the support corpus, and measure it, because that may be the whole answer and it is the cheapest thing to maintain. Assume it leaves a gap in tone and format consistency rather than in knowledge, since knowledge is what retrieval already handles.</p><p>Then: pick a small instruct base that fits in 24GB when 4-bit quantized, so QLoRA rather than LoRA. Build a few thousand curated examples from real resolved tickets, deduplicated, with a held-out split made by time so near-duplicates cannot leak across it. Apply the base model's own chat template and mask instruction tokens. Start at rank 16, alpha 16, learning rate 2e-4, two epochs, targeting all seven linear modules.</p><p>Evaluate against the prompted baseline on held-out tickets, reading outputs rather than only scoring them, and separately probe general ability to catch forgetting. Keep retrieval in the final system regardless: the fine-tune supplies the voice and the format, retrieval supplies the facts and the citations.</p></div>
     </details>
   </section>
 
   <section id="resources">
-    <h2><span class="num">08</span>Go deeper</h2>
+    <h2><span class="num">11</span>Go deeper</h2>
     <div class="resource-grid">
       <a class="resource-card" href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide" target="_blank" rel="noopener">
         <div class="r-icon">📘</div>
@@ -508,6 +906,18 @@ model.save_pretrained_gguf("gguf_model", tokenizer,
         <div class="r-icon">📄</div>
         <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">QLoRA: Efficient Finetuning of Quantized LLMs</div><div class="r-sub">Dettmers et al., 2023 — arXiv:2305.14314</div></div>
       </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2012.13255" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Intrinsic Dimensionality Explains the Effectiveness of Language Model Fine-Tuning</div><div class="r-sub">Aghajanyan et al., 2020 — arXiv:2012.13255. The measurement section 04 rests on, and it predates LoRA.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2305.11206" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">LIMA: Less Is More for Alignment</div><div class="r-sub">Zhou et al., 2023 — arXiv:2305.11206. One thousand curated examples, no RLHF.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2104.08691" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">The Power of Scale for Parameter-Efficient Prompt Tuning</div><div class="r-sub">Lester et al., 2021 — arXiv:2104.08691. The soft-prompt alternative, and where it starts working.</div></div>
+      </a>
       <a class="resource-card" href="https://huggingface.co/blog/unsloth-trl" target="_blank" rel="noopener">
         <div class="r-icon">📄</div>
         <div class="r-body"><div class="r-kind">Article</div><div class="r-title">Make LLM Fine-tuning 2x faster with Unsloth and TRL</div><div class="r-sub">Hugging Face — the benchmark behind the speed claims. Note it was measured against Transformers 4.36.</div></div>
@@ -528,7 +938,7 @@ model.save_pretrained_gguf("gguf_model", tokenizer,
   </section>
 
   <section id="related">
-    <h2><span class="num">09</span>Related pages</h2>
+    <h2><span class="num">12</span>Related pages</h2>
     <div class="related-grid">
       <a class="related-card" href="./10-llm-architecture-training.html"><div class="rc-sec" style="color:var(--c-llm)">10 · The theory behind this</div><div class="rc-title">LLM Architecture &amp; Training</div><div class="rc-hook">SFT, RLHF, DPO and the LoRA maths. This page is the applied half of that one.</div></a>
       <a class="related-card" href="./30-running-models-locally.html"><div class="rc-sec" style="color:var(--c-practice)">30 · What comes next</div><div class="rc-title">Running Models Locally</div><div class="rc-hook">You exported a GGUF. This is how you work out what will actually fit and run.</div></a>

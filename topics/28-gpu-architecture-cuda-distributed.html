@@ -31,7 +31,8 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 
 <div class="layout" id="layoutRoot">
 <aside class="sidebar-left" id="sidebarLeft">
-  <a href="../index.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--text-faint);border-bottom:1px solid var(--border-soft)">← Map &amp; Timeline</a>
+  <a href="../index.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--text-faint);border-bottom:1px solid var(--border-soft)">← Home</a>
+  <a href="../roadmaps.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">🧭 Roadmaps</a>
   <a href="./technique-map.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">🌳 Technique Map</a>
   <a href="../review.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">↺ Review &amp; drill</a>
   <a href="../practice.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">🏋️ Where to practise</a>
@@ -105,7 +106,16 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       <a href="./30-running-models-locally.html" data-page="30-running-models-locally"><span class="done"></span>30 · Running Models Locally</a>
       <a href="./31-llm-inference-serving.html" data-page="31-llm-inference-serving"><span class="done"></span>31 · LLM Inference &amp; Serving</a>
       <a href="./32-preference-optimization.html" data-page="32-preference-optimization"><span class="done"></span>32 · Preference Optimization</a>
-      <a href="../attention-lab.html"><span class="done"></span>🔬 Attention Lab <span class="lab-mark">interactive</span></a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--accent);color:var(--accent)"></span>The Labs</summary>
+    <div class="links">
+      <a href="../backprop-lab.html"><span class="done"></span>🔬 Backprop <span class="lab-mark">interactive</span></a>
+      <a href="../tokenizer-lab.html"><span class="done"></span>🔬 Tokenizer <span class="lab-mark">interactive</span></a>
+      <a href="../attention-lab.html"><span class="done"></span>🔬 Attention <span class="lab-mark">interactive</span></a>
+      <a href="../sampling-lab.html"><span class="done"></span>🔬 Sampling <span class="lab-mark">interactive</span></a>
+      <a href="../quantization-lab.html"><span class="done"></span>🔬 Quantization <span class="lab-mark">interactive</span></a>
     </div>
   </details>
   <details class="navgroup" open>
@@ -127,7 +137,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 
 <main class="content" id="content">
   <div class="topic-header">
-    <div class="crumbs"><a href="../index.html">Map &amp; Timeline</a> / Systems, Safety &amp; Interview / 28</div>
+    <div class="crumbs"><a href="../index.html">Home</a> / Systems, Safety &amp; Interview / 28</div>
     <h1>GPU Architecture, CUDA &amp; Distributed Training</h1>
     <p class="dek">What a GPU actually is, why its hardware fits neural network math almost by accident, and the distributed training layer built on top of it. SIMT cores, warps, tensor cores, CUDA and Triton — then DDP, ZeRO, FSDP, tensor and pipeline parallelism, and how to choose between them with arithmetic rather than taste.</p>
     <div class="meta-row">
@@ -415,6 +425,45 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       <li><span class="sym">2(N-1)/N</span> N−1 steps of scatter-reduce plus N−1 steps of all-gather, each step moving 1/N of the data, for a total of <span>$2(N-1) \times S/N$</span> per GPU.</li>
       <li><span class="sym">The limit</span> as N grows large, <span>$2(N-1)/N \to 2$</span>. A constant, not something that scales with the number of GPUs.</li>
     </ul>
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Run both phases of a ring all-reduce and count the bytes</span>
+      </summary>
+<pre><code>import numpy as np
+
+N, S = 4, 12                            # ranks in the ring, elements each
+start = [np.arange(S, dtype=float) + 100 * r for r in range(N)]
+truth = sum(start)                      # what all-reduce must produce
+
+buf = [d.copy() for d in start]
+chunk = [slice(i * S // N, (i + 1) * S // N) for i in range(N)]
+sent = 0
+
+for step in range(N - 1):               # phase 1: scatter-reduce
+    nxt = [b.copy() for b in buf]
+    for r in range(N):
+        c = (r - step) % N              # the chunk rank r forwards now
+        nxt[(r + 1) % N][chunk[c]] += buf[r][chunk[c]]
+        sent += buf[r][chunk[c]].nbytes
+    buf = nxt
+
+for step in range(N - 1):               # phase 2: all-gather
+    nxt = [b.copy() for b in buf]
+    for r in range(N):
+        c = (r + 1 - step) % N          # now it relays, it does not add
+        nxt[(r + 1) % N][chunk[c]] = buf[r][chunk[c]]
+        sent += buf[r][chunk[c]].nbytes
+    buf = nxt
+
+print("every rank ends with the exact sum:",
+      all(np.array_equal(b, truth) for b in buf))
+print("rank 0 buffer:", buf[0].astype(int))
+print("bytes sent per rank:", sent // N)
+print("2(N-1)/N x S  predicts:", int(2 * (N - 1) / N * truth.nbytes))</code></pre>
+      <div class="tryit-out"><strong>The counted bytes and the formula agree exactly: <code>144</code> either way.</strong> That is the claim above turned into a measurement rather than an assertion. The other line worth staring at is the rank 0 buffer — every rank finishes holding the identical full sum, and no rank ever held more than one chunk of anybody else's data at a time. Raise <code>N</code> to 32 and re-run: the per-rank byte count barely moves, because <span>$2(N-1)/N$</span> is already within a few percent of 2 by <span>$N = 4$</span>.</div>
+    </details>
+
     <p>That limit is the elegant part. Doubling your GPU count doesn't double each GPU's communication burden. It stays roughly flat, approaching twice the data size and never exceeding it, no matter how large the ring gets.</p>
 
     <p>Compare a naive centralized parameter server. Every one of the N workers has to send its gradients to the server, and the server has to send updated weights back to all N workers, all through that one server's network link. That link's traffic grows linearly with N. It becomes the exact bottleneck you are trying to scale past, precisely as you add more GPUs to go faster.</p>
@@ -491,9 +540,9 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
         <rect x="533" y="172" width="188" height="26" rx="3" fill="#f472b6" opacity="0.7"/>
         <line x1="721" y1="166" x2="721" y2="222" stroke="#f472b6" stroke-width="1.4" stroke-dasharray="4 3"/>
         <text x="640" y="212" text-anchor="middle" font-size="10" fill="#f472b6">68 ms</text>
-        <text x="300" y="190" text-anchor="middle" font-size="10" fill="#6c6c7d">wire idle for the whole backward pass</text>
+        <text x="300" y="190" text-anchor="middle" font-size="10" fill="#a4a4b3">wire idle for the whole backward pass</text>
       </svg>
-      <div class="diagram-caption">Drawn to scale on a single time axis, from the numbers in the Try it below: eight layers at 6 ms of backward compute each, 50 MB of gradient per layer, 20 GB/s of usable bandwidth. The green bars sit under the blue ones because a bucket's all-reduce runs while the next layer down is still computing. What is left over at the end is one bucket in flight — 2.5 ms — instead of the full 20 ms of transfer.</div>
+      <div class="diagram-caption">Drawn to scale on a single time axis, from the numbers in the Try it below: eight layers at 6 ms of backward compute each, 50 MB of gradient per layer, 20 GB/s of usable bandwidth. Each green bar starts where a blue block ends, and travels the wire while the next block is still computing. What is left over at the end is one bucket in flight — 2.5 ms — instead of the full 20 ms of transfer.</div>
     </div>
 
     <details class="tryit">
@@ -529,7 +578,7 @@ for b in (400, 200, 100, 50, 25):
     print("bucket %3d MB               %6.1f ms" % (b, wall_clock(b)))
 print("\nthe floor is the compute (%.1f ms) plus ONE bucket in"
       " flight: 2.5 ms for 50 MB at this bandwidth." % compute)</code></pre>
-      <div class="tryit-out"><strong>Read the 400 MB row and the 50 MB row.</strong> A bucket the size of the whole model is the no-overlap case exactly — <code>68.0 ms</code> either way, because nothing can be sent until the last gradient exists. At 50 MB a bucket closes after every layer, and wall clock falls to <code>50.5 ms</code>: the 48 ms of compute plus one bucket still in flight. Going smaller than that buys nothing here, and in reality it starts costing, because this model charges nothing per message and NCCL does. That gap is why the default is a size rather than "as small as possible".</div>
+      <div class="tryit-out"><strong>Read the 400 MB row against the 50 MB row.</strong> A bucket the size of the whole model <em>is</em> the no-overlap case — <code>68.0 ms</code> either way, because nothing can be sent until the last gradient exists. At 50 MB a bucket closes after every layer and wall clock falls to <code>50.5 ms</code>: 48 ms of compute, plus one bucket still in flight. Below that it stops helping, and in reality starts costing, because this model charges nothing per message and NCCL does.</div>
     </details>
 
     <p>Two consequences that catch people out. Effective batch size is per-rank batch times world size, so adding GPUs silently changes your optimisation problem and your learning rate should move with it. And <code>no_sync()</code> exists so that gradient accumulation skips the all-reduce on every micro-step but the last.</p>
@@ -574,7 +623,7 @@ print("\nthe floor is the compute (%.1f ms) plus ONE bucket in"
       </div>
     </details>
 
-    <p>Now the wall. 120 GB does not fit on an 80 GB H100, and DDP does not help, because DDP's answer to eight GPUs is eight identical 120 GB copies. You have bought 640 GB of HBM and stored 120 GB of information in it.</p>
+    <p>Now the wall. 120 GB does not fit on an 80 GB H100, and adding GPUs does not help: DDP's answer to eight of them is eight identical 120 GB copies. You would be buying 640 GB of HBM to hold 120 GB of distinct state, and it still would not fit.</p>
 
     <p>Activations sit on top of all of this and none of the techniques in the next section shard them. Activation checkpointing is the orthogonal lever: store only layer boundaries, recompute the rest during backward, and trade roughly 30% more compute for a large drop in activation memory.</p>
 
@@ -631,7 +680,7 @@ print("\nGB per GPU. Weights + grads + optimizer only; activations"
 
         <text x="142" y="48" text-anchor="end" font-size="11.5" font-weight="700" fill="#e9e9ef">DDP</text>
         <rect x="150" y="34" width="600" height="24" rx="4" fill="#f472b6" opacity="0.55"/>
-        <text x="758" y="51" font-size="10.5" fill="#a3a3b2">120.0 GB · 2Ψ on the wire</text>
+        <text x="738" y="51" text-anchor="end" font-size="10.5" fill="#f3f3f8">120.0 GB · 2Ψ on the wire</text>
 
         <text x="142" y="92" text-anchor="end" font-size="11.5" font-weight="700" fill="#e9e9ef">ZeRO-1</text>
         <rect x="150" y="78" width="157" height="24" rx="4" fill="#fbbf24" opacity="0.6"/>
@@ -859,7 +908,7 @@ print("note the payload does NOT shrink as TP grows -- every"
 
         <text x="350" y="216" text-anchor="middle" font-size="10" fill="#f472b6">dashed = idle · 6 cells filling the pipe, 6 draining it · p(p−1) = 12</text>
       </svg>
-      <div class="diagram-caption">Solid cells are a stage working on the numbered microbatch; dashed cells are a GPU with nothing to do. Count them: three idle on stage 0, two on stage 1, and the mirror image on the way out — twelve in total, which is <span>$p(p-1)$</span> for any <span>$p$</span>. Only the forward sweep is drawn; the backward sweep has the same shape. Raising <span>$m$</span> from 8 to 32 leaves those twelve cells unchanged while the grid grows to 140, which is the whole of the <span>$(p-1)/(m+p-1)$</span> formula.</div>
+      <div class="diagram-caption">Solid cells are a stage working on the numbered microbatch; dashed cells are a GPU with nothing to do. Every stage has exactly three — a leading triangle while the pipe fills, a trailing one while it drains — so twelve in all, which is <span>$p(p-1)$</span> for any <span>$p$</span>. Only the forward sweep is drawn. Raising <span>$m$</span> from 8 to 32 leaves those twelve unchanged while the grid grows to 140.</div>
     </div>
 
     <details class="tryit">
@@ -890,7 +939,7 @@ for s, row in enumerate(grid(4, 8)):
     print("  stage %d  %s" % (s, "".join(row)))
 print("\nidle cells are always p(p-1) = %d: a triangle while the"
       " pipe fills and another while it drains." % (4 * 3))</code></pre>
-      <div class="tryit-out"><strong>The measured column and the formula column agree on every row</strong>, which is the point of counting rather than trusting. Read the first row as the pathology: <code>p=4, m=1</code> wastes 75% of the cluster, exactly the <span>$1/p$</span> utilisation from above. Then read down: at <code>m=4p</code> the waste is under 10% for both pipeline depths, which is GPipe's rule of thumb falling out of the arithmetic. The idle count is <code>12</code> for every <span>$p=4$</span> row and <code>56</code> for every <span>$p=8$</span> row — microbatches never remove a bubble, they only dilute it.</div>
+      <div class="tryit-out"><strong>The measured and formula columns agree on every row</strong>, which is the point of counting rather than trusting. The first row is the pathology: <code>p=4, m=1</code> wastes 75% of the cluster. Read down, and at <span>$m = 4p$</span> the waste is under 10% at both depths — GPipe's rule of thumb falling out of the arithmetic. The idle count stays <code>12</code> on every <span>$p=4$</span> row: microbatches dilute a bubble, they never remove one.</div>
     </details>
 
     <p>So why not push <span>$m$</span> to 1000? Two reasons. Smaller microbatches mean smaller matmuls, which run further from peak on hardware that wants big tiles. And the naive GPipe schedule holds the activations of every in-flight microbatch, so activation memory grows with <span>$m$</span>.</p>
@@ -919,7 +968,7 @@ print("\nidle cells are always p(p-1) = %d: a triangle while the"
         <rect x="308" y="20" width="180" height="40" rx="7" fill="#14141d" stroke="#34d399"/>
         <text x="398" y="38" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">DDP across all N</text>
         <text x="398" y="52" text-anchor="middle" font-size="10" fill="#a3a3b2">one bucketed all-reduce/step</text>
-        <text x="520" y="44" font-size="10" fill="#6c6c7d">cheapest. stop here.</text>
+        <text x="520" y="44" font-size="10" fill="#a4a4b3">cheapest. stop here.</text>
 
         <path d="M130,60 L130,88" stroke="#f472b6" stroke-width="1.8" fill="none"/>
         <text x="142" y="78" font-size="9.5" fill="#f472b6">no</text>
@@ -932,7 +981,7 @@ print("\nidle cells are always p(p-1) = %d: a triangle while the"
         <rect x="308" y="90" width="180" height="40" rx="7" fill="#14141d" stroke="#34d399"/>
         <text x="398" y="108" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">ZeRO / FSDP</text>
         <text x="398" y="122" text-anchor="middle" font-size="10" fill="#a3a3b2">stage 2 first, stage 3 only if it OOMs</text>
-        <text x="520" y="114" font-size="10" fill="#6c6c7d">stage 3 costs 1.5× traffic</text>
+        <text x="520" y="114" font-size="10" fill="#a4a4b3">stage 3 costs 1.5× traffic</text>
 
         <path d="M130,130 L130,158" stroke="#f472b6" stroke-width="1.8" fill="none"/>
         <text x="142" y="148" font-size="9.5" fill="#f472b6">no</text>
@@ -945,7 +994,7 @@ print("\nidle cells are always p(p-1) = %d: a triangle while the"
         <rect x="308" y="160" width="180" height="40" rx="7" fill="#14141d" stroke="#34d399"/>
         <text x="398" y="178" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">+ tensor parallel</text>
         <text x="398" y="192" text-anchor="middle" font-size="10" fill="#a3a3b2">degree ≤ GPUs per node</text>
-        <text x="520" y="184" font-size="10" fill="#6c6c7d">4 all-reduces per layer</text>
+        <text x="520" y="184" font-size="10" fill="#a4a4b3">4 all-reduces per layer</text>
 
         <path d="M130,200 L130,228" stroke="#f472b6" stroke-width="1.8" fill="none"/>
         <text x="142" y="218" font-size="9.5" fill="#f472b6">no</text>
@@ -957,7 +1006,7 @@ print("\nidle cells are always p(p-1) = %d: a triangle while the"
         <rect x="308" y="230" width="180" height="40" rx="7" fill="#14141d" stroke="#818cf8"/>
         <text x="398" y="248" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">+ pipeline across nodes</text>
         <text x="398" y="262" text-anchor="middle" font-size="10" fill="#a3a3b2">m ≥ 4p microbatches</text>
-        <text x="520" y="254" font-size="10" fill="#6c6c7d">bubble = (p−1)/m</text>
+        <text x="520" y="254" font-size="10" fill="#a4a4b3">bubble = (p−1)/m</text>
 
         <text x="20" y="298" font-size="10.5" font-weight="700" fill="#a3a3b2">Nesting order, innermost first:</text>
         <text x="205" y="298" font-size="10.5" fill="#34d399">tensor (NVLink)</text>
