@@ -37,10 +37,14 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
   text-transform: uppercase; color: var(--accent-text); flex-shrink: 0;
 }
 .rm-page .rm-title { font-size: 18px; font-weight: 800; letter-spacing: -.01em; color: var(--text); }
+/* Outside a track this sat hard right, which read fine on a full-width prose
+   block. Inside the map it left the estimate stranded half a screen from the
+   title it belongs to, so it now follows the title directly. */
 .rm-page .rm-time {
   margin-left: auto; font-family: var(--font-mono); font-size: 11.5px;
   color: var(--text-faint); flex-shrink: 0;
 }
+.rm-page .rm-track .rm-time { margin-left: 0; }
 .rm-page .rm-stage .order-strip { margin-bottom: 14px; }
 .rm-page .rm-stage p { font-size: 17px; margin-bottom: 16px; }
 
@@ -48,6 +52,174 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
    hole the width of two cards. Two abreast pairs them evenly instead. */
 .rm-page .rm-chooser { grid-template-columns: 1fr 1fr; }
 @media (max-width: 700px) { .rm-page .rm-chooser { grid-template-columns: 1fr; } }
+
+/* ---------- the map ----------
+   One node per stage on a rail. The rail is a pseudo-element on .rm-map rather
+   than a drawn SVG so it stretches with the flex row at any node count, and
+   wraps to a vertical stack on narrow screens without a second layout. */
+.rm-page .rm-track { margin: 0 0 20px; }
+.rm-page .rm-map {
+  position: relative; display: flex; gap: 10px; align-items: flex-start;
+  padding: 26px 4px 12px; margin-bottom: 6px;
+}
+/* One segment per gap, drawn on each node after the first, spanning from the
+   previous node's centre to this one. A single bar with percentage insets can
+   only be right for one node count, and the tracks have four and five. */
+.rm-page .rm-hint-tap { display: none; }
+.rm-page .rm-node-wrap { position: relative; flex: 1 1 0; min-width: 0; }
+.rm-page .rm-node-wrap + .rm-node-wrap::before {
+  content: ''; position: absolute; top: 45px; height: 2px;
+  left: calc(-50% - 10px); width: calc(100% + 10px);   /* 10px = the flex gap */
+  background: color-mix(in srgb, var(--track, var(--accent)) 42%, transparent);
+  pointer-events: none;
+}
+
+.rm-page .rm-node {
+  position: relative; z-index: 1;
+  display: flex; flex-direction: column; align-items: center; gap: 9px;
+  width: 100%; padding: 4px 6px 8px;
+  background: none; border: 0; cursor: pointer; font: inherit; text-align: center;
+  color: var(--text-dim);
+  transition: color .2s var(--ease), transform .2s var(--ease);
+}
+.rm-page .rm-dot {
+  display: grid; place-items: center;
+  width: 38px; height: 38px; border-radius: 50%;
+  font-family: var(--font-mono); font-size: 13px; font-weight: 700;
+  /* The --c-* palette is built for swatches on a dark card. As text on the
+     light page these measured 2.72:1; mixing half the track colour into the
+     body text colour self-corrects per theme — 6.28:1 light, 9.44:1 dark —
+     and keeps the hue. Same ratio the door cards on the homepage use. */
+  color: color-mix(in srgb, var(--track, var(--accent)) 50%, var(--text));
+  background: var(--bg);
+  border: 2px solid color-mix(in srgb, var(--track, var(--accent)) 70%, var(--bg));
+  transition: background-color .2s var(--ease), border-color .2s var(--ease),
+              box-shadow .2s var(--ease), color .2s var(--ease);
+}
+.rm-page .rm-node-label {
+  font-size: 12.5px; font-weight: 700; line-height: 1.3; letter-spacing: -.005em;
+}
+.rm-page .rm-node-help {
+  position: absolute; top: 2px; right: calc(50% - 30px);
+  width: 15px; height: 15px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 10px; font-weight: 800; line-height: 1;
+  color: var(--bg); background: var(--text-faint);
+  opacity: 0; transform: scale(.6);
+  transition: opacity .18s var(--ease), transform .18s var(--ease), background-color .18s var(--ease);
+}
+.rm-page .rm-node:hover, .rm-page .rm-node:focus-visible { color: var(--text); outline: none; }
+.rm-page .rm-node:hover .rm-dot, .rm-page .rm-node:focus-visible .rm-dot {
+  background: color-mix(in srgb, var(--track, var(--accent)) 16%, var(--bg));
+  border-color: var(--track, var(--accent));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--track, var(--accent)) 16%, transparent);
+}
+.rm-page .rm-node:hover .rm-node-help, .rm-page .rm-node:focus-visible .rm-node-help {
+  opacity: 1; transform: scale(1); background: var(--track, var(--accent));
+}
+.rm-page .rm-node.is-active .rm-dot {
+  background: color-mix(in srgb, var(--track, var(--accent)) 50%, var(--text));
+  color: var(--bg);
+  border-color: color-mix(in srgb, var(--track, var(--accent)) 50%, var(--text));
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--track, var(--accent)) 20%, transparent);
+}
+.rm-page .rm-node.is-active { color: var(--text); }
+
+/* ---------- the hover card ----------
+   Anchored to the node and centred on it, except at the ends of the rail where
+   centring would push it off the page — the first and last cards align to their
+   own edge instead. */
+.rm-page .rm-pop {
+  position: absolute; top: calc(100% - 2px); left: 50%; transform: translateX(-50%) translateY(4px);
+  z-index: 20; width: 252px; max-width: 70vw;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 13px 15px; text-align: left;
+  background: var(--bg-card); border: 1px solid var(--border-hover);
+  border-radius: 12px; box-shadow: var(--shadow-lg);
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity .18s var(--ease), transform .18s var(--ease), visibility .18s;
+}
+.rm-page .rm-node-wrap:first-child .rm-pop { left: 0; transform: translateX(0) translateY(4px); }
+.rm-page .rm-node-wrap:last-child  .rm-pop { left: auto; right: 0; transform: translateX(0) translateY(4px); }
+.rm-page .rm-node-wrap:hover .rm-pop,
+.rm-page .rm-node:focus-visible ~ .rm-pop { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+.rm-page .rm-node-wrap:first-child:hover .rm-pop,
+.rm-page .rm-node-wrap:first-child .rm-node:focus-visible ~ .rm-pop { transform: translateX(0) translateY(0); }
+.rm-page .rm-node-wrap:last-child:hover .rm-pop,
+.rm-page .rm-node-wrap:last-child .rm-node:focus-visible ~ .rm-pop { transform: translateX(0) translateY(0); }
+.rm-page .rm-pop-title {
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 700;
+  letter-spacing: .07em; text-transform: uppercase;
+  color: color-mix(in srgb, var(--track, var(--accent)) 50%, var(--text));
+}
+.rm-page .rm-pop-goal { font-family: var(--font-serif); font-size: 13px; line-height: 1.5; color: var(--text); }
+.rm-page .rm-pop-meta { font-size: 11.5px; color: var(--text-faint); font-family: var(--font-mono); }
+.rm-page .rm-pop-cta {
+  font-size: 11px; font-weight: 700; color: var(--text-faint);
+  border-top: 1px solid var(--border); padding-top: 7px; margin-top: 1px;
+}
+
+/* ---------- open / closed ----------
+   Gated on html.js-roadmap so the no-JS page keeps every stage visible. */
+html.js-roadmap .rm-page .rm-track .rm-stage { display: none; }
+html.js-roadmap .rm-page .rm-track .rm-stage.is-open { display: block; animation: rm-open .3s var(--ease); }
+html.rm-text-mode .rm-page .rm-track .rm-stage { display: block; }
+@keyframes rm-open { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+
+html.js-roadmap .rm-page .rm-track .rm-stage.is-open {
+  border-left-color: var(--track, var(--accent));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--track, var(--accent)) 5%, transparent), transparent 40%);
+  border-radius: 0 10px 10px 0;
+  padding-top: 4px; padding-bottom: 4px;
+}
+
+/* the nudge that tells you the map is clickable, shown only while nothing is */
+.rm-page .rm-empty {
+  font-size: 12.5px; color: var(--text-faint); font-style: italic;
+  padding: 2px 0 6px 22px; margin-bottom: 6px;
+}
+html.rm-text-mode .rm-page .rm-empty,
+.rm-page .rm-track:has(.rm-stage.is-open) .rm-empty { display: none; }
+
+/* ---------- map / full-text switch ---------- */
+.rm-modebar { display: flex; align-items: center; gap: 10px; margin: 0 0 30px; flex-wrap: wrap; }
+.rm-modebar-label { font-size: 12px; font-weight: 700; color: var(--text-faint); }
+.rm-modebar-group { display: inline-flex; background: var(--bg-2); border: 1px solid var(--border); border-radius: 999px; padding: 3px; }
+.rm-modebar button {
+  border: 0; background: none; cursor: pointer; font: inherit;
+  font-size: 12.5px; font-weight: 700; color: var(--text-dim);
+  padding: 6px 15px; border-radius: 999px;
+  transition: background-color .2s var(--ease), color .2s var(--ease);
+}
+.rm-modebar button:hover { color: var(--text); }
+.rm-modebar button.is-on { background: var(--bg-card); color: var(--text); box-shadow: var(--shadow-sm); }
+html:not(.js-roadmap) .rm-modebar { display: none; }
+
+/* ---------- narrow screens ----------
+   The rail goes vertical rather than letting five nodes fight over 360px. */
+@media (max-width: 780px) {
+  .rm-page .rm-map { flex-direction: column; gap: 2px; padding: 14px 0 8px; }
+  .rm-page .rm-node-wrap + .rm-node-wrap::before {
+    top: auto; bottom: 100%; left: 23px; width: 2px; height: 18px; }
+  .rm-page .rm-node { flex-direction: row; gap: 13px; text-align: left; padding: 5px 4px; }
+  .rm-page .rm-node-label { flex: 1; font-size: 13.5px; }
+  /* The card is permanently open on touch, so the "?" affordance has nothing
+     left to promise. */
+  .rm-page .rm-node-help { display: none; }
+  .rm-page .rm-hint-hover { display: none; }
+  .rm-page .rm-hint-tap { display: inline; }
+  .rm-page .rm-pop, .rm-page .rm-node-wrap:first-child .rm-pop, .rm-page .rm-node-wrap:last-child .rm-pop {
+    position: static; width: auto; max-width: none; opacity: 1; visibility: visible;
+    transform: none; box-shadow: none; background: none; border: 0; border-left: 2px solid var(--border);
+    border-radius: 0; margin: 0 0 6px 23px; padding: 2px 0 8px 20px;
+  }
+  .rm-page .rm-pop-cta { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rm-page .rm-stage.is-open { animation: none; }
+  .rm-page .rm-pop { transition: none; }
+}
 
 /* the one-line summary that closes each roadmap */
 .rm-page .rm-total {
@@ -88,6 +260,15 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <p>The skip lists are the important part. Most people stall because they tried to read everything in order and ran out of evenings somewhere around page 12.</p>
   </div>
 
+
+  <div class="rm-modebar">
+    <span class="rm-modebar-label">View</span>
+    <span class="rm-modebar-group">
+      <button type="button" data-rm-mode="map" class="is-on" aria-pressed="true">Map</button>
+      <button type="button" data-rm-mode="text" aria-pressed="false">Full text</button>
+    </span>
+    <span class="rm-modebar-label" style="font-weight:400">Map shows one stage at a time. Full text opens everything, for reading straight through or searching with <kbd>&#8984;F</kbd>.</span>
+  </div>
   <section id="pick">
     <h2><span class="num">01</span>Which one is yours</h2>
     <p class="lede">Pick by where you are now and what you want to be able to do, not by what sounds most advanced.</p>
@@ -130,7 +311,9 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <h2><span class="num">02</span>Roadmap A · Total beginner → can train a model</h2>
     <p class="lede">You know Python and no ML. Four stages. At the end you can take a messy CSV, build something that predicts, and defend the number you report.</p>
 
-    <div class="rm-stage">
+    <div class="rm-track" data-track="A" style="--track:var(--c-math)">
+      <div class="rm-empty"><span class="rm-hint-hover">Hover a stage for what it buys you · click to open it.</span><span class="rm-hint-tap">Tap a stage to open its reading list, checkpoint and skip list.</span></div>
+      <div class="rm-stage" data-node="The math" data-goal="Read a matrix shape off a matmul, and use Bayes' rule without looking it up.">
       <div class="rm-head">
         <span class="rm-num">Stage 1</span>
         <span class="rm-title">Only the math you will actually use</span>
@@ -155,7 +338,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="Classical ML" data-goal="Beat a logistic-regression baseline with gradient boosting, and report both numbers.">
       <div class="rm-head">
         <span class="rm-num">Stage 2</span>
         <span class="rm-title">The models that still win</span>
@@ -182,7 +365,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="Neural nets" data-goal="Derive a gradient by hand, then confirm it against finite differences.">
       <div class="rm-head">
         <span class="rm-num">Stage 3</span>
         <span class="rm-title">Neural networks, once, properly</span>
@@ -207,7 +390,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="Evaluation" data-goal="Say whether your model is over- or under-confident, and prove it with a calibration curve.">
       <div class="rm-head">
         <span class="rm-num">Stage 4</span>
         <span class="rm-title">Evaluate it honestly</span>
@@ -233,6 +416,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
         <p>Why: it is excellent material that assumes you know what an LLM does. It is stage 5 of roadmap B, not stage 4 of this one.</p>
       </div>
     </div>
+    </div>
 
     <div class="rm-total"><strong>Total: about 8 weeks of evenings.</strong> Five pages, read partially and deliberately, out of thirty-seven. Next stop is roadmap B.</div>
   </section>
@@ -241,7 +425,9 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <h2><span class="num">03</span>Roadmap B · Knows classical ML → understands modern LLMs</h2>
     <p class="lede">You are comfortable with regression, trees and cross-validation, and transformers are a fog. Five stages. Ends when you can read a transformer paper's architecture section without stopping.</p>
 
-    <div class="rm-stage">
+    <div class="rm-track" data-track="B" style="--track:var(--c-attention)">
+      <div class="rm-empty"><span class="rm-hint-hover">Hover a stage for what it buys you · click to open it.</span><span class="rm-hint-tap">Tap a stage to open its reading list, checkpoint and skip list.</span></div>
+      <div class="rm-stage" data-node="The bottleneck" data-goal="Name the one tensor every source token has to squeeze through in an encoder-decoder RNN.">
       <div class="rm-head">
         <span class="rm-num">Stage 1</span>
         <span class="rm-title">The bottleneck attention was built to remove</span>
@@ -265,7 +451,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="Attention" data-goal="Write every shape in one attention head from memory, batch through to output.">
       <div class="rm-head">
         <span class="rm-num">Stage 2</span>
         <span class="rm-title">Attention, until the shapes are automatic</span>
@@ -292,7 +478,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="NLP lineage" data-goal="Order word2vec → ELMo → BERT → GPT-2 → InstructGPT and say what each one added.">
       <div class="rm-head">
         <span class="rm-num">Stage 3</span>
         <span class="rm-title">How the field got from bag-of-words to ChatGPT</span>
@@ -317,7 +503,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="LLM training" data-goal="Judge whether a model is Chinchilla-undertrained, and by roughly what factor.">
       <div class="rm-head">
         <span class="rm-num">Stage 4</span>
         <span class="rm-title">The decoder-only stack, and how it is trained</span>
@@ -344,7 +530,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="RAG &amp; agents" data-goal="Read a new architecture paper end to end without looking anything up.">
       <div class="rm-head">
         <span class="rm-num">Stage 5</span>
         <span class="rm-title">What a language model cannot do alone</span>
@@ -370,6 +556,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
         <p>Why: plan → act → observe → repeat is the durable idea; the frameworks implementing it turn over every few months. Benchmark numbers go stale faster than anything else on this site.</p>
       </div>
     </div>
+    </div>
 
     <div class="rm-total"><strong>Total: about 6 weeks of evenings.</strong> Six pages plus the lab. From here, roadmap C builds, roadmap D consolidates.</div>
   </section>
@@ -378,7 +565,9 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <h2><span class="num">04</span>Roadmap C · Understands LLMs → can ship one</h2>
     <p class="lede">You can read the papers. You have never put a model behind an endpoint and watched p95 latency. Five stages, and this one needs a GPU you can actually use.</p>
 
-    <div class="rm-stage">
+    <div class="rm-track" data-track="C" style="--track:var(--c-practice)">
+      <div class="rm-empty"><span class="rm-hint-hover">Hover a stage for what it buys you · click to open it.</span><span class="rm-hint-tap">Tap a stage to open its reading list, checkpoint and skip list.</span></div>
+      <div class="rm-stage" data-node="VRAM maths" data-goal="Compute weights, KV cache and overhead separately, for any model at any context.">
       <div class="rm-head">
         <span class="rm-num">Stage 1</span>
         <span class="rm-title">What your hardware can actually hold</span>
@@ -403,7 +592,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="Serving" data-goal="Say whether prefill or decode dominates at a given batch size, and why it flips.">
       <div class="rm-head">
         <span class="rm-num">Stage 2</span>
         <span class="rm-title">The serving loop, and why it is bandwidth-bound</span>
@@ -430,7 +619,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="Fine-tuning" data-goal="Pick LoRA, QLoRA or full fine-tuning for a real dataset, and defend the rank.">
       <div class="rm-head">
         <span class="rm-num">Stage 3</span>
         <span class="rm-title">Make it yours</span>
@@ -457,7 +646,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="Multi-GPU" data-goal="Derive ring all-reduce's cost, and why it does not grow with the GPU count.">
       <div class="rm-head">
         <span class="rm-num">Stage 4</span>
         <span class="rm-title">Past one GPU</span>
@@ -484,7 +673,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="In production" data-goal="Write a rollback criterion an on-call engineer can act on at 3am.">
       <div class="rm-head">
         <span class="rm-num">Stage 5</span>
         <span class="rm-title">Keep it alive after launch</span>
@@ -510,6 +699,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
         <p>Why: the concept — one definition of a feature, used identically in training and serving — is what prevents training-serving skew. Which product implements it is a procurement question, and it will have changed before you need to answer it.</p>
       </div>
     </div>
+    </div>
 
     <div class="rm-total"><strong>Total: about 9 weeks of evenings</strong>, and it does not work without a GPU you can run jobs on. Rent one if you have to.</div>
   </section>
@@ -518,7 +708,9 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <h2><span class="num">05</span>Roadmap D · Interview prep &amp; consolidation</h2>
     <p class="lede">Shorter and denser, because you mostly know this. Four weeks, ordered by how often the material actually comes up, and wired into the drill pages throughout.</p>
 
-    <div class="rm-stage">
+    <div class="rm-track" data-track="D" style="--track:var(--c-interview)">
+      <div class="rm-empty"><span class="rm-hint-hover">Hover a stage for what it buys you · click to open it.</span><span class="rm-hint-tap">Tap a stage to open its reading list, checkpoint and skip list.</span></div>
+      <div class="rm-stage" data-node="Diagnose" data-goal="Know your two weakest question types before spending a week on the wrong one.">
       <div class="rm-head">
         <span class="rm-num">Stage 0</span>
         <span class="rm-title">Find the gaps before you plan anything</span>
@@ -545,7 +737,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="Core four" data-goal="Explain backprop, self-attention, bias-variance and accuracy's failure in 60 seconds each.">
       <div class="rm-head">
         <span class="rm-num">Stage 1</span>
         <span class="rm-title">The four pages that carry the most questions</span>
@@ -576,7 +768,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="System design" data-goal="Design a 10M-item recommender under a 30 ms budget, out loud, in 20 minutes.">
       <div class="rm-head">
         <span class="rm-num">Stage 2</span>
         <span class="rm-title">System design, out loud, on a clock</span>
@@ -605,7 +797,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="LLM questions" data-goal="Derive the DPO loss from the RLHF objective on a whiteboard in under 10 minutes.">
       <div class="rm-head">
         <span class="rm-num">Stage 3</span>
         <span class="rm-title">The modern-LLM questions</span>
@@ -636,7 +828,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </div>
 
-    <div class="rm-stage">
+    <div class="rm-stage" data-node="Drill" data-goal="Two clean passes of the review deck a week apart, with nothing still coming back.">
       <div class="rm-head">
         <span class="rm-num">Stage 4</span>
         <span class="rm-title">Drill until it is boring</span>
@@ -661,6 +853,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
         <p>New topics, in the last week. Pick nothing up that you have not already seen.</p>
         <p>Why: a half-learned topic you volunteer in an interview is worse than one you never mention. The last week is for compression and retrieval speed, not coverage.</p>
       </div>
+    </div>
     </div>
 
     <div class="rm-total"><strong>Total: about 4 weeks</strong>, assuming the material is already familiar. If stage 1 takes longer than a week, you want roadmap B first.</div>
@@ -746,6 +939,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script src="assets/js/app.js"></script>
+<script src="assets/js/roadmap-map.js"></script>
 <script src="assets/js/code-highlight.js"></script>
 <script src="assets/js/find-in-page.js"></script>
 <script src="assets/js/kml-modal.js"></script>
