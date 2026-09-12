@@ -18,7 +18,10 @@ MAXLINE = 74
 RUN = "--run" in sys.argv
 
 BLOCK = re.compile(
-    r'<details class="tryit">\s*'
+    # The `open` attribute was added later so the blocks default to expanded.
+    # Matching the tag literally made this checker find zero blocks and pass
+    # vacuously, which is worse than failing — tolerate any attributes.
+    r'<details class="tryit"[^>]*>\s*'
     r'<summary class="tryit-head">\s*'
     r'<span class="tryit-label">([^<]*)</span>\s*'
     r'<span class="tryit-what">(.*?)</span>\s*'
@@ -39,7 +42,7 @@ for path in sorted(glob.glob("topics/*.html")):
         src = open(path, encoding="utf-8").read()
     except FileNotFoundError:
         continue
-    raw_count = src.count('<details class="tryit">')
+    raw_count = len(re.findall(r'<details class="tryit"[^>]*>', src))
     found = BLOCK.findall(src)
     name = os.path.basename(path)
 
@@ -86,4 +89,14 @@ for path in sorted(glob.glob("topics/*.html")):
 
 print("\n%d Try it blocks checked%s, %d problem%s"
       % (total, " and executed" if RUN else "", problems, "" if problems == 1 else "s"))
+
+# A checker that matches nothing reports zero problems, which reads exactly like
+# success. That happened: adding the `open` attribute to every <details> made
+# the literal tag pattern above match none of them, and the suite went green
+# while checking nothing at all. The site has had Try it blocks since page 01;
+# finding none means the pattern has drifted, not that the blocks are gone.
+if total == 0:
+    print("FAIL: found no Try it blocks at all — the pattern has drifted from the markup")
+    sys.exit(1)
+
 sys.exit(1 if problems else 0)
