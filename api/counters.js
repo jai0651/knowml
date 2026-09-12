@@ -1,4 +1,5 @@
 import { getSql, isValidPageId, setCors } from "./_db.js";
+import { visitorHash, referrerHost, countryOf } from "./_admin.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -38,6 +39,20 @@ export default async function handler(req, res) {
           ON CONFLICT (page_id) DO UPDATE SET views = page_counters.views + 1
           RETURNING views, likes
         `;
+        // Record the event too, for the admin dashboard. Piggy-backing on the
+        // view POST keeps it at one request per pageview.
+        //
+        // Deliberately not awaited into the response path: analytics must never
+        // be the reason a reader's counter fails to render. If the page_views
+        // table is missing or the insert errors, the counter still returns.
+        try {
+          await sql`
+            INSERT INTO page_views (page_id, country, referrer, visitor)
+            VALUES (${pageId}, ${countryOf(req)}, ${referrerHost(req)}, ${visitorHash(req)})
+          `;
+        } catch (e) {
+          console.error("page_views insert failed (counter still served):", e.message);
+        }
       } else if (action === "like") {
         rows = await sql`
           INSERT INTO page_counters (page_id, views, likes)
