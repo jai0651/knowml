@@ -85,6 +85,14 @@
     g.style.flexBasis = '100%';
     return g;
   }
+  /* .lab-stage-inner centres its children, which is right for a matmul chain and
+     wrong when a 12-bar chart sits next to a one-row grid. */
+  function topAlign(stage) { stage.style.alignItems = 'flex-start'; return stage; }
+  function wideMeaning(html) {
+    var d = UI.el('div', 'lab-panel-meaning', html);
+    d.style.maxWidth = 'none';
+    return d;
+  }
   function badgeStack(badges) {
     var wrap = UI.el('div');
     wrap.style.cssText = 'display:flex;flex-direction:column;gap:10px;align-items:flex-start;';
@@ -163,7 +171,10 @@
       formula: 'z = h W_U \\in \\mathbb{R}^{1 \\times |V|}',
       note: 'The unembedding matrix <code>W_U</code> has one column per vocabulary token. Multiplying gives one number per token — the <strong>logit</strong>. Column <span>$j$</span> of the product is literally <span>$h \\cdot W_U[:,j]$</span>: how well the hidden state lines up with token <span>$j$</span>\'s direction. The largest logit here is <strong>' + f2(A.logits[A.argmax]) + '</strong> on "' + A.words[A.argmax] + '"; the smallest is ' + f2(Mo.maxOf(A.logits.map(function (v) { return -v; })) * -1) + '.',
       render: function (stage) {
-        stage.appendChild(UI.matrixPanel({ title: 'h', shapeLabel: '1 × ' + CFG.dModel, matrix: R2(A.h), rowLabels: ['h'], dim: true }));
+        stage.appendChild(UI.matrixPanel({
+          title: 'h', shapeLabel: '1 × d_model=' + CFG.dModel, matrix: R2(A.h), rowLabels: ['h'],
+          colLabels: A.h[0].map(function (_, i) { return 'd' + i; }), dim: true
+        }));
         stage.appendChild(UI.arrow('⊗', '× W_U (' + CFG.dModel + '×' + CFG.V + ')'));
         stage.appendChild(UI.matrixPanel({
           title: 'W_U — unembedding', shapeLabel: 'd_model=' + CFG.dModel + ' × |V|=' + CFG.V,
@@ -288,6 +299,7 @@
       formula: 'H(p) = -\\sum_i p_i \\log_2 p_i \\quad \\text{bits}, \\qquad 0 \\le H \\le \\log_2 |V| = ' + f2(MAXH),
       note: 'Everything the rest of this lab does — temperature, top-k, top-p — is a way of reshaping this one curve, so it helps to have a single number for how peaked it is. This row sits at <strong>' + f2(A.entropy) + ' bits</strong> against a ceiling of ' + f2(MAXH) + ', which is to say it behaves like a choice between <strong>' + f2(Math.pow(2, A.entropy)) + '</strong> equally-likely tokens rather than ' + CFG.V + '. The second context used later on this page — <em>' + B.prompt + ' ___</em> — sits at ' + f2(B.entropy) + ' bits, or ' + f2(Math.pow(2, B.entropy)) + ' effective choices. Same vocabulary size, completely different problem.',
       render: function (stage) {
+        topAlign(stage);
         stage.appendChild(UI.barsPanel({
           title: 'Entropy (bits)', unit: ' bits',
           items: [
@@ -378,6 +390,7 @@
       formula: 'H(p(T)) \\nearrow \\text{ with } T',
       note: 'Entropy rises monotonically with temperature, from ' + f2(TEMPS_A[0].entropy) + ' bits at <span>$T=' + CFG.temps[0] + '$</span> to ' + f2(TEMPS_A[TEMPS_A.length - 1].entropy) + ' bits at <span>$T=' + CFG.temps[CFG.temps.length - 1] + '$</span>, with the ceiling at <span>$\\log_2 ' + CFG.V + ' = ' + f2(MAXH) + '$</span>. This is the honest description of what the knob does: it is an entropy dial, not a "creativity" dial. Nothing about it knows which token is a good idea.',
       render: function (stage) {
+        topAlign(stage);
         stage.appendChild(UI.barsPanel({
           title: 'Entropy vs temperature', unit: ' bits',
           items: TEMPS_A.map(function (s) {
@@ -512,6 +525,7 @@
       formula: 'p\'_i / p_i = \\frac{1}{' + f3(TK_A.mass) + '} = ' + f3(TK_A.scale) + ' \\quad \\text{(identical for every survivor)}',
       note: 'Worth seeing explicitly, because this is the step people expect to be more interesting than it is. Nothing is reweighted, reranked or redistributed cleverly; every surviving token is multiplied by the same constant. The ratio between any two survivors before and after is unchanged — for instance "' + A.sortedWords[0] + '" : "' + A.sortedWords[1] + '" is ' + f2(A.sortedProbs[0] / A.sortedProbs[1]) + ' before and ' + f2(TK_A.renorm[A.order[0]] / TK_A.renorm[A.order[1]]) + ' after.',
       render: function (stage) {
+        topAlign(stage);
         stage.appendChild(table(
           ['token', 'p (before)', 'p′ (after)', 'p′ / p'],
           TK_A.keptIdx.map(function (i) {
@@ -519,10 +533,11 @@
           })
         ));
         stage.appendChild(UI.barsPanel({
-          title: 'Before and after, per surviving token',
-          items: TK_A.keptIdx.map(function (i) { return { label: '"' + A.words[i] + '" before', value: M.round(A.probs[i], 3), colorVar: 'var(--c-efficient)' }; })
-            .concat(TK_A.keptIdx.map(function (i) { return { label: '"' + A.words[i] + '" after', value: M.round(TK_A.renorm[i], 3), colorVar: CTX_COLORS.focused }; })),
-          meaning: 'Every bar grew by the same factor, ' + f3(TK_A.scale) + '×.'
+          title: 'Where the ' + pct(TK_A.dropped) + ' of dropped mass landed',
+          items: TK_A.keptIdx.map(function (i) {
+            return { label: '"' + A.words[i] + '"  +' + f4(TK_A.renorm[i] - A.probs[i]), value: M.round(TK_A.renorm[i] - A.probs[i], 4), colorVar: CTX_COLORS.focused };
+          }),
+          meaning: 'Each survivor absorbs the dropped mass in proportion to its own renormalised share, so "' + A.words[A.argmax] + '" — already the leader — takes ' + pct(TK_A.renorm[A.argmax]) + ' of it.'
         }));
       }
     });
@@ -558,6 +573,7 @@
       formula: null,
       note: 'Run the identical setting, <span>$k=' + CFG.k + '$</span>, on both contexts. On the focused row it keeps ' + pct(TK_A.mass) + ' of the mass — and to get there it had to include "' + A.words[TK_A.keptIdx[2]] + '" (' + pct(A.probs[TK_A.keptIdx[2]]) + ') and "' + A.words[TK_A.keptIdx[3]] + '" (' + pct(A.probs[TK_A.keptIdx[3]]) + '), tokens the model had all but ruled out. On the open row the same <span>$k$</span> keeps only ' + pct(TK_B.mass) + ', throwing away ' + pct(TK_B.dropped) + ' of the model\'s own opinion — including "' + B.words[B.order[CFG.k]] + '" at ' + pct(B.probs[B.order[CFG.k]]) + ', which is barely distinguishable from the "' + B.words[B.order[CFG.k - 1]] + '" at ' + pct(B.probs[B.order[CFG.k - 1]]) + ' that it kept. <strong>There is no k that is right for both rows</strong>, and a real model produces rows like both of these within the same sentence.',
       render: function (stage) {
+        topAlign(stage);
         stage.appendChild(UI.barsPanel({
           title: 'Mass kept by k = ' + CFG.k,
           items: [
@@ -657,6 +673,7 @@
       formula: null,
       note: 'Nothing about the setting changes — same <span>$p=' + CFG.p + '$</span>, same code. The cumulative row climbs much more slowly here (' + B.cum.slice(0, 4).map(function (v) { return f2(v); }).join(', ') + ', …), so the threshold is not reached until rank ' + TP_B.cutRank + ', and the nucleus comes out at <strong>' + TP_B.n + ' tokens</strong> instead of ' + TP_A.n + '. That is the property worth naming: <strong>top-p\'s candidate set resizes itself with the model\'s confidence</strong>, from ' + TP_A.n + ' to ' + TP_B.n + ' on this page, without anyone touching the setting.',
       render: function (stage) {
+        topAlign(stage);
         stage.appendChild(headsPanel({
           title: 'Cumulative rows, both contexts, cut at p = ' + CFG.p,
           heads: [
@@ -695,17 +712,18 @@
           var ctx = c[0], tk = c[1], tp = c[2], onlyK = c[3], onlyP = c[4];
           var g = UI.el('div', 'lab-heads-group');
           g.appendChild(UI.el('div', 'lab-heads-group-title', c[5] + ' — ' + ctx.prompt + ' ___'));
-          var lk = UI.el('div', 'lab-panel-meaning', 'top-k(' + CFG.k + ') keeps ' + tk.keptIdx.length + ' · ' + pct(tk.mass));
-          g.appendChild(lk);
-          g.appendChild(tokenChips(ctx, ctx.probs, ctx.words.map(function (_, i) { return tk.keep[i]; }), { order: ctx.order }));
-          var lp = UI.el('div', 'lab-panel-meaning', 'top-p(' + CFG.p + ') keeps ' + tp.n + ' · ' + pct(tp.mass));
+          g.appendChild(wideMeaning('top-k(' + CFG.k + ') keeps ' + tk.keptIdx.length + ' · ' + pct(tk.mass) + ' of the mass'));
+          g.appendChild(tokenChips(ctx, ctx.probs, tk.keep, { order: ctx.order }));
+          var lp = wideMeaning('top-p(' + CFG.p + ') keeps ' + tp.n + ' · ' + pct(tp.mass) + ' of the mass');
           lp.style.marginTop = '14px';
           g.appendChild(lp);
-          g.appendChild(tokenChips(ctx, ctx.probs, ctx.words.map(function (_, i) { return tp.keep[i]; }), { order: ctx.order }));
-          var d = UI.el('div', 'lab-panel-meaning', 'only top-k: <strong>' + (onlyK.length ? wordsOf(ctx, onlyK).join(', ') : '—') +
+          g.appendChild(tokenChips(ctx, ctx.probs, tp.keep, { order: ctx.order }));
+          var d = wideMeaning('only top-k: <strong>' + (onlyK.length ? wordsOf(ctx, onlyK).join(', ') : '—') +
             '</strong> &nbsp;·&nbsp; only top-p: <strong>' + (onlyP.length ? wordsOf(ctx, onlyP).join(', ') : '—') + '</strong>');
           d.style.marginTop = '14px';
           g.appendChild(d);
+          g.style.maxWidth = '100%';
+          g.style.flexBasis = '100%';
           stage.appendChild(g);
         });
         var differ = (ONLY_K_A.length + ONLY_P_A.length) > 0 && (ONLY_K_B.length + ONLY_P_B.length) > 0;
@@ -720,6 +738,7 @@
       formula: null,
       note: 'Put the four numbers next to each other. Top-k answers "' + CFG.k + '" to both rows because ' + CFG.k + ' is what it was told; top-p answers ' + TP_A.n + ' and ' + TP_B.n + ' because it is reading the row. The underlying observation, which is the one Holtzman et al. made in 2019, is that the number of genuinely plausible next tokens varies by more than an order of magnitude from position to position in ordinary text — so any method whose candidate set has a fixed size is wrong most of the time, in one direction or the other. In practice the two are often stacked, with a generous k as a safety rail and p doing the real work.',
       render: function (stage) {
+        topAlign(stage);
         stage.appendChild(UI.barsPanel({
           title: 'Candidate set size', unit: ' tokens',
           items: [
@@ -832,6 +851,7 @@
       formula: '\\hat{p}_i = \\frac{\\text{count}_i}{N}, \\qquad N = ' + CFG.draws,
       note: 'Repeat the same procedure ' + CFG.draws + ' times and count. The empirical frequencies should converge on the probabilities themselves — that is the entire claim being made when anyone says a model "samples from its distribution". The largest disagreement across all ' + CFG.V + ' tokens is <strong>' + f3(RUN.maxDev) + '</strong>, against a rough one-standard-deviation scale of <span>$1/\\sqrt{N} = ' + f3(1 / Math.sqrt(CFG.draws)) + '$</span>. No token is systematically over- or under-drawn.',
       render: function (stage) {
+        topAlign(stage);
         stage.appendChild(UI.matrixPanel({
           title: 'true p vs empirical frequency', shapeLabel: '3 × |V|=' + CFG.V,
           matrix: [B.probs, RUN.freqs, B.probs.map(function (v, i) { return Math.abs(v - RUN.freqs[i]); })],
@@ -855,8 +875,9 @@
     steps.push({
       title: 'Convergence: the error shrinks like 1/√N',
       formula: '\\mathbb{E}\\big[|\\hat{p}_i - p_i|\\big] \\sim \\sqrt{\\tfrac{p_i(1-p_i)}{N}}',
-      note: 'The same run, measured at ' + RUN.stages.length + ' points along the way. The worst-token error falls ' + RUN.stages.map(function (s) { return f3(s.maxDev); }).join(' → ') + ' as <span>$N$</span> goes ' + RUN.stages.map(function (s) { return s.n; }).join(' → ') + '. That is a ' + f1(devRatio) + '× improvement for a ' + nRatio + '× increase in draws, against the ' + f1(Math.sqrt(nRatio)) + '× a <span>$1/\\sqrt{N}$</span> law predicts — the right order, with the slack you would expect from a single run. This is also why you cannot read a model\'s distribution off a handful of generations: at <span>$N=' + stageFirst.n + '$</span> the measured frequencies are off by up to ' + pct(stageFirst.maxDev) + ' in absolute terms.',
+      note: 'The same run, measured at ' + RUN.stages.length + ' points along the way. The worst-token error falls ' + RUN.stages.map(function (s) { return f3(s.maxDev); }).join(' → ') + ' as <span>$N$</span> goes ' + RUN.stages.map(function (s) { return s.n; }).join(' → ') + '. That is an improvement of ' + f1(devRatio) + '× for a ' + nRatio + '× increase in draws, where a <span>$1/\\sqrt{N}$</span> law predicts ' + f1(Math.sqrt(nRatio)) + '× — the right order, with the slack you would expect from a single run. This is also why you cannot read a model\'s distribution off a handful of generations: at <span>$N=' + stageFirst.n + '$</span> the measured frequencies are off by up to ' + pct(stageFirst.maxDev) + ' in absolute terms.',
       render: function (stage) {
+        topAlign(stage);
         stage.appendChild(UI.barsPanel({
           title: 'Worst-token error vs number of draws',
           items: RUN.stages.map(function (s) {
@@ -879,6 +900,7 @@
       formula: 'P[\\text{sampled} = \\text{greedy}] = p_{\\max} = ' + f3(B.top1),
       note: 'Sampling agrees with greedy exactly as often as the top token is likely — predicted ' + pct(B.top1) + ', measured ' + pct(empiricalTop) + ' over ' + CFG.draws + ' draws. The other ' + pct(1 - empiricalTop) + ' of the time it produces something greedy structurally cannot. That is the whole trade: greedy is reproducible and, on flat rows like this one, prone to locking onto whichever token won by a hair and repeating the pattern that got it there; sampling covers the model\'s actual belief but gives up determinism and can draw from the tail. Every knob on the previous three tabs exists to move a row between those two failure modes — temperature reshapes it, top-k and top-p amputate the tail before the draw ever happens.',
       render: function (stage) {
+        topAlign(stage);
         stage.appendChild(UI.checkBadge(Math.abs(empiricalTop - B.top1) < 3 / Math.sqrt(CFG.draws),
           'agreement rate ' + f3(empiricalTop) + ' vs predicted ' + f3(B.top1) + ' — |Δ| = ' + f4(Math.abs(empiricalTop - B.top1))));
         stage.appendChild(UI.barsPanel({

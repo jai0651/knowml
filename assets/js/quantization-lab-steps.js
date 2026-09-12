@@ -478,7 +478,7 @@
     });
 
     steps.push({
-      title: 'Distinct weights that were merged into the same integer',
+      title: 'Distinct weights that were merged into one number',
       formula: null,
       note: 'A coarse grid does not just add noise — it destroys distinctions. The ordinary rows hold <strong>' + Mo.distinctWeights(Mo.Wout, ORD) + ' distinct float values</strong>, and they come out the other side as <strong>' + CS_OUT_ORD.distinct + ' distinct codes</strong>. ' + COL_OUT.nCollidedValues + ' different weights collapsed onto ' + COL_OUT.nGroups + ' shared codes, ' + COL_OUT.merged + ' distinctions gone; after dequantization those weights are, bit for bit, the same number. No later step can tell them apart again.',
       render: function (stage) {
@@ -531,7 +531,7 @@
       render: function (stage) {
         stage.appendChild(statsPanel({
           title: 'Per-row maximum, and the scale each row would want', fresh: true,
-          headers: ['row', 'α_i  →  α_i / ' + OUT8.qMax],
+          headers: ['row', 'max|W_i|  →  its own scale'],
           rows: PC8.rowPeak.map(function (p, i) {
             return { k: ROWL[i] + (i === CFG.outlierRow ? '  (holds the outlier)' : ''), v: n(p, 2) + '  →  ' + n(p / OUT8.qMax, 8), hi: i === CFG.outlierRow };
           }),
@@ -552,7 +552,7 @@
       formula: null,
       note: 'A quantization scheme is judged almost entirely on how it handles this. <strong>LLM.int8()</strong> splits the outlier channels out and runs them in fp16. <strong>SmoothQuant</strong> migrates the difficulty from activations into weights with a per-channel rescaling that the next linear layer absorbs. <strong>AWQ</strong> keeps a small fraction of salient channels at higher precision. <strong>GPTQ</strong> does not fix the range at all — it reorders and error-corrects the rounding decisions so that the damage lands where the loss cares least. Every one of them is a response to the ' + n(ERR_RATIO_OUT, 1) + '× on the previous step.',
       render: function (stage) {
-        stage.appendChild(UI.textCard('<strong>What the numbers on this tab actually said.</strong> One weight out of ' + (CFG.rows * CFG.cols) + ', worth ' + n(OUTLIER_RATIO, 1) + '× the next largest, cost the other ' + (CFG.rows * CFG.cols - 1) + ' weights ' + n(CS_OUT_ORD.lostBits, 1) + ' of their ' + CFG.bits8 + ' bits, merged ' + COL_OUT.merged + ' distinct values into shared codes, and multiplied their mean error by ' + n(ERR_RATIO_OUT, 1) + '. None of that was asserted — it was measured on this page, on ' + (CFG.rows * CFG.cols) + ' numbers you can read.', 'warn'));
+        stage.appendChild(UI.textCard('<strong>What the numbers on this tab actually said.</strong> One weight out of ' + (CFG.rows * CFG.cols) + ', worth ' + n(OUTLIER_RATIO, 1) + '× the next largest, cost the other ' + (CFG.rows * CFG.cols - 1) + ' weights ' + n(CS_OUT_ORD.lostBits, 1) + ' of their ' + CFG.bits8 + ' bits, merged ' + COL_OUT.nCollidedValues + ' genuinely different weights onto ' + COL_OUT.nGroups + ' shared codes, and multiplied their mean error by ' + n(ERR_RATIO_OUT, 1) + '. None of that was asserted — it was measured on this page, on ' + (CFG.rows * CFG.cols) + ' numbers you can read.', 'warn'));
         stage.appendChild(UI.textCard('The cheapest of the fixes needs no calibration data, no search, and no extra precision anywhere: just stop using one scale for the whole tensor. That is the next tab. Background on why these outliers appear at all is on page <a href="./topics/23-efficient-ai-systems.html">23</a>, and the serving-side consequences on page <a href="./topics/31-llm-inference-serving.html">31</a>.', 'note'));
       }
     });
@@ -573,7 +573,7 @@
         stage.appendChild(UI.arrow('↦', 'row-wise max'));
         stage.appendChild(statsPanel({
           title: 'The ' + CFG.rows + ' scales', shapeLabel: CFG.rows + '×1', fresh: true,
-          headers: ['row', 'α_i / ' + PC8.qMax],
+          headers: ['row', 'scale = max|W_i| / ' + PC8.qMax],
           rows: PC8.scales.map(function (s, i) {
             return { k: ROWL[i] + '   α=' + n(PC8.rowPeak[i], 2), v: n(s, 9), hi: i === CFG.outlierRow };
           }),
@@ -799,7 +799,7 @@
       render: function (stage) {
         stage.appendChild(statsPanel({
           title: 'Scales, int8 against int4', fresh: true,
-          headers: ['row', 'α_i / 127  →  α_i / ' + q4],
+          headers: ['row', 'scale at 8 bits  →  at 4 bits'],
           rows: PC4.scales.map(function (s, i) {
             return { k: ROWL[i] + '   α=' + n(PC4.rowPeak[i], 2), v: n(PC8C.scales[i], 6) + '  →  ' + n(s, 6) };
           }),
