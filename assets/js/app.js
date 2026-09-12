@@ -4,13 +4,19 @@
 
   /* ---------- theme ---------- */
   var THEME_KEY = 'np-theme';
-  function applyTheme(t) {
+  var DEFAULT_THEME = 'dark';
+  /* `remember` is the whole point of the second argument. The previous version
+     wrote to storage on every load, so merely visiting the site recorded the
+     default as though it were a decision — which is why flipping the default
+     needed a migration in the pre-paint script to undo. Only a real toggle
+     persists now, so an unset preference stays unset and follows the default. */
+  function applyTheme(t, remember) {
     document.documentElement.setAttribute('data-theme', t);
-    localStorage.setItem(THEME_KEY, t);
+    if (remember) localStorage.setItem(THEME_KEY, t);
     var btn = document.getElementById('themeToggle');
     if (btn) btn.textContent = t === 'dark' ? '☀' : '☽';
   }
-  applyTheme(localStorage.getItem(THEME_KEY) || 'light');
+  applyTheme(localStorage.getItem(THEME_KEY) || DEFAULT_THEME, false);
   document.addEventListener('DOMContentLoaded', function () {
     var btn = document.getElementById('themeToggle');
     if (btn) btn.addEventListener('click', function () {
@@ -18,7 +24,7 @@
          by default because it would also animate the load-time theme fix. */
       document.documentElement.classList.add('theme-anim');
       var cur = document.documentElement.getAttribute('data-theme');
-      applyTheme(cur === 'dark' ? 'light' : 'dark');
+      applyTheme(cur === 'dark' ? 'light' : 'dark', true);
     });
   });
 
