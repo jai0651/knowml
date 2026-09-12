@@ -535,7 +535,7 @@
         stage.appendChild(UI.barsPanel({
           title: 'Where the ' + pct(TK_A.dropped) + ' of dropped mass landed',
           items: TK_A.keptIdx.map(function (i) {
-            return { label: '"' + A.words[i] + '"  +' + f4(TK_A.renorm[i] - A.probs[i]), value: M.round(TK_A.renorm[i] - A.probs[i], 4), colorVar: CTX_COLORS.focused };
+            return { label: '"' + A.words[i] + '" gains', value: M.round(TK_A.renorm[i] - A.probs[i], 4), colorVar: CTX_COLORS.focused };
           }),
           meaning: 'Each survivor absorbs the dropped mass in proportion to its own renormalised share, so "' + A.words[A.argmax] + '" — already the leader — takes ' + pct(TK_A.renorm[A.argmax]) + ' of it.'
         }));
@@ -947,13 +947,13 @@
       var T = get('T'), k = get('k'), p = get('p');
       if (tabId === 'temperature') {
         var seq = [CFG.temps[1]].concat(CFG.temps);            // step 0 demos T = temps[1]
-        T.val = stepIndex < seq.length ? String(seq[stepIndex]) : (stepIndex === seq.length + 2 ? CFG.tempLimits.join(' / ') : 'swept');
+        T.val = stepIndex < seq.length ? seq[stepIndex].toFixed(1) : (stepIndex === seq.length + 2 ? CFG.tempLimits.join(' / ') : 'swept');
         k.val = '—'; p.val = '—';
       } else if (tabId === 'topk') {
         T.val = '1.0'; p.val = '—';
         k.val = stepIndex === 4 ? CFG.kSweep.join(' / ') : String(CFG.k);
       } else if (tabId === 'topp') {
-        T.val = stepIndex === 6 ? String(CFG.stackT) : '1.0';
+        T.val = stepIndex === 6 ? CFG.stackT.toFixed(1) : '1.0';
         k.val = stepIndex >= 4 ? (stepIndex === 6 ? String(CFG.stackK) : String(CFG.k)) : '—';
         p.val = String(stepIndex === 6 ? CFG.stackP : CFG.p);
       } else if (tabId === 'sample') {
