@@ -49,11 +49,79 @@
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  /* Copy button. Added here rather than in the markup so every existing and
+     future Try it block gets one for free, and so the source text is captured
+     before tokenize() replaces it with spans. */
+  function addCopy(pre, source) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tryit-copy';
+    btn.setAttribute('aria-label', 'Copy code to clipboard');
+    btn.innerHTML = ICON_COPY + '<span class="tryit-copy-label">Copy</span>';
+
+    var resetAt = 0;
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();          /* the button lives inside <details>; do not toggle it */
+      e.stopPropagation();
+      write(source).then(function (ok) {
+        btn.classList.toggle('is-done', ok);
+        btn.classList.toggle('is-failed', !ok);
+        btn.innerHTML = (ok ? ICON_DONE : ICON_COPY) +
+          '<span class="tryit-copy-label">' + (ok ? 'Copied' : 'Press ⌘C') + '</span>';
+        var mine = ++resetAt;
+        setTimeout(function () {
+          if (mine !== resetAt) return;   /* a later click owns the button now */
+          btn.classList.remove('is-done', 'is-failed');
+          btn.innerHTML = ICON_COPY + '<span class="tryit-copy-label">Copy</span>';
+        }, 1800);
+      });
+    });
+
+    /* wrap so the button can be positioned against the panel rather than the
+       <pre>, which scrolls horizontally on narrow screens */
+    var shell = document.createElement('div');
+    shell.className = 'tryit-codewrap';
+    pre.parentNode.insertBefore(shell, pre);
+    shell.appendChild(pre);
+    shell.appendChild(btn);
+  }
+
+  /* navigator.clipboard needs a secure context, so it is absent on plain http://
+     during local development. Fall back to a selection + execCommand, and if
+     even that fails, leave the text selected so ⌘C works. */
+  function write(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).then(function () { return true; },
+                                                      function () { return legacy(text); });
+    }
+    return Promise.resolve(legacy(text));
+  }
+  function legacy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:-9999px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  var ICON_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  var ICON_DONE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+
   function run() {
-    document.querySelectorAll('.tryit pre > code').forEach(function (code) {
+    /* .tryit blocks are the curated, runnable ones. Plain <pre><code> in the
+       prose (page 29's fine-tuning pipeline, for instance) gets the same
+       treatment — highlighted and copyable — without needing new markup. */
+    document.querySelectorAll('.tryit pre > code, .content > section pre > code').forEach(function (code) {
       if (code.dataset.hl) return;
       code.dataset.hl = '1';
-      code.innerHTML = tokenize(code.textContent);
+      var source = code.textContent;      /* capture before tokenising */
+      code.innerHTML = tokenize(source);
+      addCopy(code.parentNode, source);
     });
   }
 
