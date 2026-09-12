@@ -212,6 +212,46 @@
     });
   });
 
+  /* ---------- hero: pointer parallax on the 3D stage ----------
+     Progressive enhancement. The CSS resting state is already correct, so if
+     this never runs the hero is a composed static card rather than a broken
+     one. Skipped entirely for coarse pointers (no hover to track) and for
+     anyone who has asked for reduced motion. */
+  document.addEventListener('DOMContentLoaded', function () {
+    var stage = document.getElementById('hvStage');
+    var deck = document.getElementById('hvDeck');
+    if (!stage || !deck) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    if (window.matchMedia('(hover: none)').matches) return;
+
+    var MAX = 7;                 /* degrees; past ~8 the text starts to skew */
+    var raf = null, tx = 0, ty = 0;
+
+    function apply() {
+      raf = null;
+      deck.style.setProperty('--ry', (tx * MAX).toFixed(2) + 'deg');
+      deck.style.setProperty('--rx', (-ty * MAX).toFixed(2) + 'deg');
+      deck.style.setProperty('--gx', (50 + tx * 40).toFixed(1) + '%');
+      deck.style.setProperty('--gy', (30 + ty * 40).toFixed(1) + '%');
+    }
+    function onMove(e) {
+      var r = stage.getBoundingClientRect();
+      tx = (e.clientX - r.left) / r.width * 2 - 1;    /* -1 .. 1 */
+      ty = (e.clientY - r.top) / r.height * 2 - 1;
+      tx = Math.max(-1, Math.min(1, tx));
+      ty = Math.max(-1, Math.min(1, ty));
+      if (!raf) raf = requestAnimationFrame(apply);
+    }
+    /* track across the whole hero, not just the card, so the tilt responds
+       while the reader is still on the headline */
+    var hero = stage.closest('.hero') || stage;
+    hero.addEventListener('mousemove', onMove, { passive: true });
+    hero.addEventListener('mouseleave', function () {
+      tx = ty = 0;
+      if (!raf) raf = requestAnimationFrame(apply);
+    });
+  });
+
   /* ---------- diagram play/pause ---------- */
   document.addEventListener('click', function (e) {
     var btn = e.target.closest('[data-diagram-toggle]');
