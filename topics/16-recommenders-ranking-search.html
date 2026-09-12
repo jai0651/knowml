@@ -225,11 +225,11 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 
     <p>That is the whole idea, and it is worth seeing it work on numbers rather than taking it on trust.</p>
 
-    <div class="tryit">
-      <div class="tryit-head">
+    <details class="tryit">
+      <summary class="tryit-head">
         <span class="tryit-label">Try it</span>
         <span class="tryit-what">Factorize a tiny ratings matrix and watch the blanks fill in</span>
-      </div>
+      </summary>
 <pre><code>import numpy as np
 
 # 6 users x 6 items. 0 = never interacted, so the model never sees it.
@@ -255,9 +255,9 @@ for _ in range(6000):              # plain SGD, with weight decay
 P = U @ V.T
 print(&quot;shapes:&quot;, U.shape, &quot;@&quot;, V.T.shape, &quot;-&gt;&quot;, P.shape, &quot;\n&quot;)
 for (u, i) in [(0, 1), (3, 4), (2, 4), (5, 0)]:
-    print(f&quot;user {u}, item {i}: never observed -&gt; predicted {P[u, i]:.1f}&quot;)</code></pre>
+    print(f&quot;user {u}, item {i}: unseen -&gt; predicted {P[u, i]:.1f}&quot;)</code></pre>
       <div class="tryit-out"><strong>Look at the four predictions.</strong> Every one is a cell the model never saw. It puts user 0 on item 1 at <code>4.2</code> and user 3 on item 4 at <code>5.5</code>, but user 2 on item 4 at <code>1.0</code> — it has worked out which group each user belongs to and predicts accordingly. Nothing in the input said there were two groups. That fell out of forcing every user and item through <code>k=2</code> numbers, which is the entire mechanism.</div>
-    </div>
+    </details>
 
     <div class="callout callout-teach">
       <span class="callout-label">Why the low rank is doing the work</span>
@@ -282,33 +282,35 @@ for (u, i) in [(0, 1), (3, 4), (2, 4), (5, 0)]:
 
     <p>Because <span>$g_{\phi}(i)$</span> does not depend on the user, you can compute every item vector <em>offline</em>, once, and load them into an index. At request time you embed the user, then do approximate nearest neighbour search. The billion never gets touched.</p>
 
-    <div class="tryit">
-      <div class="tryit-head">
+    <details class="tryit">
+      <summary class="tryit-head">
         <span class="tryit-label">Try it</span>
         <span class="tryit-what">A two-tower model, in-batch negatives, and the shapes at every step</span>
-      </div>
+      </summary>
 <pre><code>import torch, torch.nn as nn, torch.nn.functional as F
 torch.manual_seed(0)
 
-D = 32                                   # embedding width
-user_tower = nn.Sequential(nn.Linear(64, 128), nn.ReLU(), nn.Linear(128, D))
-item_tower = nn.Sequential(nn.Linear(48, 128), nn.ReLU(), nn.Linear(128, D))
+D = 32                                 # embedding width
+user_tower = nn.Sequential(
+    nn.Linear(64, 128), nn.ReLU(), nn.Linear(128, D))
+item_tower = nn.Sequential(
+    nn.Linear(48, 128), nn.ReLU(), nn.Linear(128, D))
 
 B = 8
-user_feats = torch.randn(B, 64)          # (B, 64)
-item_feats = torch.randn(B, 48)          # (B, 48)  item i is the POSITIVE for user i
+user_feats = torch.randn(B, 64)        # (B, 64)
+item_feats = torch.randn(B, 48)        # (B, 48) item i is user i&#x27;s +ve
 
 u = F.normalize(user_tower(user_feats), dim=-1)   # (B, D)
 v = F.normalize(item_tower(item_feats), dim=-1)   # (B, D)
 
-logits = u @ v.T / 0.05                  # (B, B)  every user vs every item in the batch
-labels = torch.arange(B)                 # the diagonal is the positive
+logits = u @ v.T / 0.05                # (B, B) every user vs every item
+labels = torch.arange(B)               # the diagonal is the positive
 loss = F.cross_entropy(logits, labels)
 
-print("u", tuple(u.shape), "v", tuple(v.shape), "logits", tuple(logits.shape))
-print("loss", round(loss.item(), 3))</code></pre>
+print(&quot;u&quot;, tuple(u.shape), &quot;v&quot;, tuple(v.shape))
+print(&quot;logits&quot;, tuple(logits.shape), &quot;loss&quot;, round(loss.item(), 3))</code></pre>
       <div class="tryit-out"><strong>The trick is <code>logits</code> being <code>(B, B)</code>.</strong> Each row is one user scored against <em>every</em> item in the batch. The diagonal is the item they actually clicked; the other <code>B-1</code> are free negatives you did not have to sample. That is <em class="term">in-batch negative sampling</em>, and it is why batch size matters so much more here than in ordinary supervised training — it <em>is</em> your negative count.</div>
-    </div>
+    </details>
 
     <div class="callout callout-warn">
       <span class="callout-label">The bias that ships with free negatives</span>
@@ -371,26 +373,26 @@ print("loss", round(loss.item(), 3))</code></pre>
 
     <p><em class="term">Pairwise</em> asks a narrower and better-posed question. Given a clicked item and a skipped one, is the clicked one scored higher? <strong>BPR</strong> is the canonical version for implicit feedback.</p>
 
-    <div class="tryit">
-      <div class="tryit-head">
+    <details class="tryit">
+      <summary class="tryit-head">
         <span class="tryit-label">Try it</span>
         <span class="tryit-what">The BPR loss, which is three lines and one good idea</span>
-      </div>
+      </summary>
 <pre><code>import torch, torch.nn.functional as F
 
 # For one user: an item they clicked, and one they saw but skipped.
 s_pos = torch.tensor([2.10, 1.80, 1.50])   # scores for clicked items
 s_neg = torch.tensor([1.30, 1.10, 1.90])   # scores for skipped items
 
-# BPR maximises P(positive ranked above negative) = sigmoid(s_pos - s_neg).
+# BPR maximises P(positive above negative) = sigmoid(s_pos - s_neg).
 margin = s_pos - s_neg
-loss = -F.logsigmoid(margin).mean()
+per_pair = -F.logsigmoid(margin)
 
-print(&quot;margins:&quot;, [round(m, 2) for m in margin.tolist()])
-print(&quot;per-pair loss:&quot;, [round(x, 3) for x in (-F.logsigmoid(margin)).tolist()])
-print(&quot;total loss:&quot;, round(loss.item(), 4))</code></pre>
-      <div class="tryit-out"><strong>Only the difference appears.</strong> The third pair is ranked wrong — the skipped item scores higher — so its margin is negative and its loss is <code>0.913</code> against <code>0.371</code> and <code>0.403</code> for the two correct pairs. Notice what is absent: any target value. BPR never claims an item deserves a 4.2 — only that it belongs above another one. For implicit feedback, where no ratings exist, that is the only honest thing to ask.</div>
-    </div>
+print(&quot;margins:  &quot;, [round(m, 2) for m in margin.tolist()])
+print(&quot;per-pair: &quot;, [round(x, 3) for x in per_pair.tolist()])
+print(&quot;total:    &quot;, round(per_pair.mean().item(), 4))</code></pre>
+      <div class="tryit-out"><strong>Only the difference appears.</strong> The third pair is ranked wrong — the skipped item scores higher — so its margin is negative and its per-pair loss is <code>0.913</code> against <code>0.371</code> and <code>0.403</code> for the two correct pairs. Notice what is absent: any target value. BPR never claims an item deserves a 4.2 — only that it belongs above another one. For implicit feedback, where no ratings exist, that is the only honest thing to ask.</div>
+    </details>
 
     <p><em class="term">Listwise</em> goes after the metric itself. The trouble is that ranking metrics are step functions of the ordering — swap two items and NDCG jumps discontinuously — so they have no usable gradient. LambdaRank sidesteps this by defining the gradient directly, weighting each pair by how much swapping it would move NDCG.</p>
 
@@ -701,6 +703,7 @@ print(&quot;total loss:&quot;, round(loss.item(), 4))</code></pre>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script src="../assets/js/app.js"></script>
+<script src="../assets/js/code-highlight.js"></script>
 <script src="../assets/js/find-in-page.js"></script>
 <script src="../assets/js/kml-modal.js"></script>
 <script src="../assets/js/review.js"></script>
