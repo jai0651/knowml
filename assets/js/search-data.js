@@ -971,7 +971,7 @@ window.SEARCH_INDEX = [
       "full"
     ],
     "summary": "Quantize a weight matrix to INT8 and inspect the error cell by cell — then plant one outlier, watch it consume the numeric range, and fix it with per-channel scales.",
-    "color": "var(--c-efficient)"
+    "color": "var(--c-gpu)"
   },
   {
     "kind": "section",
