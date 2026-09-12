@@ -5315,6 +5315,96 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Data parallel, exactly: what DDP does at every step",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#ddp",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
+    "title": "Why buckets, and why the default is 25 MiB",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#why-buckets-and-why-the-default-is-25-mib",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
+    "title": "The memory ledger, and the wall data parallel runs into",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#ledger",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
+    "title": "ZeRO, stage by stage: what is sharded and what it costs",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#zero",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
+    "title": "FSDP versus DeepSpeed ZeRO: what is actually different",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#fsdp-versus-deepspeed-zero-what-is-actually-different",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
+    "title": "Tensor parallelism: splitting one matrix multiply across GPUs",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#tensor-parallel",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
+    "title": "Pipeline parallelism, and the bubble you pay for it",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#pipeline",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
+    "title": "Choosing: N GPUs, a model of size M",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#choosing",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
+    "title": "Four concrete cases, on one node of 8 × 80 GB",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#four-concrete-cases-on-one-node-of-8-80-gb",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
     "title": "Why this hardware, and why this algorithm",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
@@ -5329,6 +5419,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
     "url": "topics/28-gpu-architecture-cuda-distributed.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
+    "title": "And the ones that only appear above one node",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#and-the-ones-that-only-appear-above-one-node",
     "tags": [],
     "summary": "",
     "color": "var(--c-gpu)"
@@ -5365,10 +5465,80 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "The fourth family: prompt and prefix tuning",
+    "parentTitle": "29 · Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html#the-fourth-family-prompt-and-prefix-tuning",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
     "title": "Starting hyperparameters",
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
     "url": "topics/29-finetuning-llms.html#starting-hyperparameters",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "The memory arithmetic, line by line",
+    "parentTitle": "29 · Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html#memory",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Does it actually fit in 24 GB?",
+    "parentTitle": "29 · Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html#does-it-actually-fit-in-24-gb",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "What LoRA is actually doing",
+    "parentTitle": "29 · Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html#lora-math",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Why a low rank is enough",
+    "parentTitle": "29 · Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html#why-a-low-rank-is-enough",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "What r and alpha each control",
+    "parentTitle": "29 · Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html#what-r-and-alpha-each-control",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Which layers to target",
+    "parentTitle": "29 · Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html#which-layers-to-target",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
@@ -5449,6 +5619,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
     "url": "topics/29-finetuning-llms.html#three-failures-and-how-each-announces-itself",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Catastrophic forgetting, and what actually helps",
+    "parentTitle": "29 · Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html#forgetting",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"

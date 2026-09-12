@@ -6,13 +6,20 @@ import re, json, glob, os, html
 
 ROOT = "/Users/jai/Desktop/ML/site"
 
-# page -> accent colour, taken from the topic cards on the home page
-with open(os.path.join(ROOT, "index.html"), encoding="utf-8") as f:
+# page -> accent colour, taken from the topic cards on the browse page. These
+# used to live on index.html; they moved to sections.html when the homepage was
+# cut down to a set of entry points, and this script silently produced an empty
+# colour map for one commit before anyone noticed.
+with open(os.path.join(ROOT, "sections.html"), encoding="utf-8") as f:
     index_src = f.read()
 COLORS = dict(
     (m.group(2), m.group(1))
     for m in re.finditer(r'style="border-top-color:var\((--c-[a-z0-9]+)\)" href="topics/([^"]+)\.html"', index_src)
 )
+if not COLORS:
+    raise SystemExit("build-question-bank: found no topic-card colours in sections.html — "
+                     "the card markup moved again; fix the pattern above rather than "
+                     "shipping a bank with no colours.")
 
 QA_RE = re.compile(
     r'<details class="qa">\s*'

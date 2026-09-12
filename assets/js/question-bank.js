@@ -2329,6 +2329,50 @@ window.KML_QUESTIONS = [
 "pageTitle": "GPU Architecture, CUDA & Distributed Training",
 "group": "Systems, Safety & Interview",
 "color": "var(--c-gpu)",
+"level": "intermediate",
+"q": "Walk through exactly what DistributedDataParallel does in one training step.",
+"a": "<p>Once at startup, rank 0 broadcasts its weights so every rank begins with byte-identical parameters and optimizer state. Then each step: every rank runs a forward pass on its own shard of the global batch with no communication at all, and computes a local loss. The backward pass is also local arithmetic, but as each parameter's gradient is produced it is appended to a bucket — PyTorch defaults to 25 MiB — and the moment a bucket fills, its all-reduce is launched asynchronously. Because backward runs from the last layer to the first, the last layers' gradients go on the wire while the earlier layers are still computing, which is what overlaps communication with compute. At the end of backward, DDP waits on the outstanding collectives; every rank now holds the same averaged gradient bit for bit. The optimizer step then runs purely locally on each rank. Weights never cross the wire after startup: identical inputs plus an identical gradient produce identical weights, so synchronisation is a consequence rather than an operation.</p>"
+},
+{
+"id": "28-gpu-architecture-cuda-distributed::6",
+"pageId": "28-gpu-architecture-cuda-distributed",
+"page": "28-gpu-architecture-cuda-distributed",
+"pageTitle": "GPU Architecture, CUDA & Distributed Training",
+"group": "Systems, Safety & Interview",
+"color": "var(--c-gpu)",
+"level": "deep",
+"q": "What does each ZeRO stage shard, and what does each cost in communication?",
+"a": "<p>Mixed-precision Adam costs 16 bytes per parameter: 2 for the fp16 weights, 2 for the fp16 gradients, and 12 for the fp32 master copy plus Adam's two moments. Stage 1 shards only that 12-byte optimizer tier, leaving 4Ψ + 12Ψ/N per rank. Stage 2 also shards gradients, reduce-scattering each bucket during backward instead of all-reducing it, leaving 2Ψ + 14Ψ/N. Stage 3 shards the parameters too, all-gathering each layer's weights just before it is used and dropping them afterwards, leaving 16Ψ/N. The communication answer surprises people: stages 1 and 2 are free. A ring all-reduce already <em>is</em> a reduce-scatter plus an all-gather, 2Ψ of traffic, and those stages just stop in between to update the slice each rank owns. Stage 3 costs 3Ψ — 1.5× — because the weights must be gathered in the forward pass and again in the backward pass. Worse than the ratio suggests, those gathers are on the critical path in front of every layer rather than hidden behind the backward pass, so on a slow interconnect stage 2 is frequently faster while stage 3 is the only one that fits.</p>"
+},
+{
+"id": "28-gpu-architecture-cuda-distributed::7",
+"pageId": "28-gpu-architecture-cuda-distributed",
+"page": "28-gpu-architecture-cuda-distributed",
+"pageTitle": "GPU Architecture, CUDA & Distributed Training",
+"group": "Systems, Safety & Interview",
+"color": "var(--c-gpu)",
+"level": "intermediate",
+"q": "A four-stage pipeline with eight microbatches — how much of the cluster is idle, and what would you change?",
+"a": "<p>With p stages and m microbatches, the schedule takes m + p − 1 time steps against an ideal of m, so the bubble is (p − 1) steps. As a fraction of wall clock that is (p−1)/(m+p−1) = 3/11 ≈ 27%; expressed as overhead against the ideal it is (p−1)/m = 3/8, which is the form the Megatron-LM paper quotes. The absolute number of idle cells is p(p−1) = 12 and it never changes — raising m dilutes the bubble rather than removing it. So the fix is more microbatches: GPipe's guidance is that the overhead becomes negligible around m ≥ 4p, which here means 16 or more. The limits on pushing m higher are that smaller microbatches run the matmuls further from peak, and that the naive schedule holds activations for every in-flight microbatch. A 1F1B schedule fixes the second by alternating forward and backward once the pipe is full, capping activation memory at p microbatches for the same bubble.</p>"
+},
+{
+"id": "28-gpu-architecture-cuda-distributed::8",
+"pageId": "28-gpu-architecture-cuda-distributed",
+"page": "28-gpu-architecture-cuda-distributed",
+"pageTitle": "GPU Architecture, CUDA & Distributed Training",
+"group": "Systems, Safety & Interview",
+"color": "var(--c-gpu)",
+"level": "deep",
+"q": "FSDP or DeepSpeed ZeRO — what is genuinely different and what is just naming?",
+"a": "<p>The algorithm is the same, and most of the apparent difference is vocabulary. PyTorch's own docs map FULL_SHARD onto ZeRO stage 3 and SHARD_GRAD_OP onto stage 2, with NO_SHARD being plain DDP; \"shard\" versus \"partition\" and \"FSDP unit\" versus \"parameter group\" name the same objects. Neither is an approximation, so they reach the same loss curve and the memory and traffic arithmetic is identical. What is actually different is operational. FSDP lives in PyTorch core and composes with DTensor, device meshes and torch.compile; DeepSpeed is a separate engine with its own config file, launcher and checkpoint format, and ships things FSDP does not — CPU and NVMe offload, a pipeline engine, MoE support. Sharding granularity differs too: FSDP shards whatever you wrap, so a careless auto_wrap_policy that makes the whole model one unit gives you DDP's memory profile with stage 3's communication, which is the classic FSDP performance bug. Choose on dependencies and on whether you need offload, not on expected quality.</p>"
+},
+{
+"id": "28-gpu-architecture-cuda-distributed::9",
+"pageId": "28-gpu-architecture-cuda-distributed",
+"page": "28-gpu-architecture-cuda-distributed",
+"pageTitle": "GPU Architecture, CUDA & Distributed Training",
+"group": "Systems, Safety & Interview",
+"color": "var(--c-gpu)",
 "level": "deep",
 "q": "You're handed a cluster with several GPUs per node on NVLink, and InfiniBand between nodes. How do you lay out tensor, pipeline, and data parallelism across it, and why?",
 "a": "<p>Tensor parallelism goes inside a node, on the NVLink-connected GPUs, because it communicates partial results within every layer — many times per forward and backward pass — and needs the fastest possible link or that communication dominates the compute. Pipeline parallelism can cross the InfiniBand link between nodes, since it only passes activations at stage boundaries, which is far less frequent and far more tolerant of a slower link. Data parallelism replicates the whole tensor-parallel-plus-pipeline-parallel unit across as many groups of nodes as you have, synchronizing gradients once per step via ring all-reduce over InfiniBand — tolerable specifically because ring all-reduce keeps each GPU's communication burden bounded regardless of how many replicas you add. Getting this backwards — for instance splitting a single layer tensor-parallel-style across InfiniBand — turns the network into the bottleneck and leaves the GPUs' raw compute capacity mostly unused, since they'd spend most of their time waiting on data that has to cross the slower link on every layer.</p>"
@@ -2390,6 +2434,39 @@ window.KML_QUESTIONS = [
 },
 {
 "id": "29-finetuning-llms::5",
+"pageId": "29-finetuning-llms",
+"page": "29-finetuning-llms",
+"pageTitle": "Fine-tuning LLMs in Practice",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Why does a full 7B fine-tune need over 100GB when QLoRA fits on a 24GB card?",
+"a": "<p>Count bytes per parameter under mixed-precision AdamW. Two for the bf16 weights, two for the gradients, four for the fp32 master copy the optimizer updates — bf16 has too few mantissa bits to absorb small updates — and four each for Adam's first and second moments. Sixteen bytes per parameter, so 6.74 billion parameters is 107.8 GB before a single activation. The key structural fact is that only the first of those four lines is indexed by <em>total</em> parameters; the other twelve bytes are per <em>trainable</em> parameter. Freezing the base and training a rank-16 adapter across all seven projections leaves about 40M trainable parameters, roughly 0.6% of the model, so gradients and optimizer state collapse from 94 GB to about half a gigabyte. That still leaves 13.5 GB of frozen weights, which is what the 4-bit quantization in QLoRA attacks, taking it to about 3.4 GB. Total states under 4 GB, plus roughly 1 GB of activations at sequence 2048 with gradient checkpointing.</p>"
+},
+{
+"id": "29-finetuning-llms::6",
+"pageId": "29-finetuning-llms",
+"page": "29-finetuning-llms",
+"pageTitle": "Fine-tuning LLMs in Practice",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "What do rank and alpha control in LoRA, and which modules should you target?",
+"a": "<p>The update is ΔW = (α/r)·BA, added to a frozen W. Rank r is the capacity knob: it is literally the rank of ΔW, so it sets how many independent directions the update can move in, and it determines the parameter count, r(d_in + d_out) per matrix. Alpha is not capacity — it is a plain scalar multiplier, so doubling alpha is arithmetically identical to doubling B, and it behaves like a learning-rate multiplier on the adapter. The convention of setting α = r or 2r keeps the effective scale α/r constant as you vary rank, so you do not re-tune the learning rate every time. On modules: the LoRA paper's ablation, at a fixed parameter budget, found query and value projections the best place to spend it. The QLoRA paper found that matching full fine-tuning required all linear layers. Those answer different questions, and since all seven projections at r=16 cost well under a gigabyte of optimizer state, the budget is usually not the binding constraint — so target everything and keep the rank modest.</p>"
+},
+{
+"id": "29-finetuning-llms::7",
+"pageId": "29-finetuning-llms",
+"page": "29-finetuning-llms",
+"pageTitle": "Fine-tuning LLMs in Practice",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "How would you detect catastrophic forgetting, and what actually mitigates it?",
+"a": "<p>You cannot detect it with your task metrics, because by construction they only measure the thing you trained on, and that improves. Detection requires a deliberate probe: a small fixed set of capabilities you never trained on — code, arithmetic, a second language, plain instruction following — scored at every checkpoint against the base model's own scores on the same set. Mitigations, cheapest first: train less, since most forgetting comes from too many epochs or too high a learning rate, with early stopping judged on the probe rather than on training loss. Then constrain what can move — LoRA at a modest rank is exactly that, since the base is frozen and the update is rank-limited per matrix. Then replay: mixing a few percent of general instruction data into the fine-tuning set recovers most of the loss for almost no cost to the new task. And keep the adapter unmerged, so the unchanged base is one flag away and you can roll back or A/B in seconds. None of these is free. Freezing enough to protect the old behaviour perfectly also prevents learning the new one, so the real question is how much general ability the behaviour is worth, and whether you measured what you gave up.</p>"
+},
+{
+"id": "29-finetuning-llms::8",
 "pageId": "29-finetuning-llms",
 "page": "29-finetuning-llms",
 "pageTitle": "Fine-tuning LLMs in Practice",
