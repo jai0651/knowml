@@ -322,6 +322,37 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     </ul>
 
     <p>The decoder gets there by masking out future positions before the softmax, setting their scores to <span>$-\infty$</span>. Same mechanism, one masking triangle.</p>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Run scaled dot-product attention by hand, mask and all</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+T, d_k = 4, 8                    # 4 tokens, 8-dim queries and keys
+Q = rng.normal(size=(T, d_k))
+K = rng.normal(size=(T, d_k))
+V = rng.normal(size=(T, 3))      # values need not share d_k
+
+scores = Q @ K.T / np.sqrt(d_k)  # (T, T): everyone against everyone
+future = np.triu(np.ones((T, T), dtype=bool), k=1)
+scores[future] = -np.inf         # token t may not read past t
+
+m = scores.max(axis=1, keepdims=True)
+W = np.exp(scores - m)
+W /= W.sum(axis=1, keepdims=True)     # softmax, one row at a time
+Z = W @ V
+
+print(&quot;Q&quot;, Q.shape, &quot;K.T&quot;, K.T.shape, &quot;scores&quot;, scores.shape)
+print(&quot;W&quot;, W.shape, &quot;V&quot;, V.shape, &quot;Z&quot;, Z.shape, &quot;\n&quot;)
+print(np.round(scores, 2), &quot;\n&quot;)
+print(np.round(W, 3))
+print(&quot;row sums:&quot;, W.sum(axis=1))
+print(&quot;Z[0] is exactly V[0]:&quot;, np.allclose(Z[0], V[0]))</code></pre>
+      <div class="tryit-out"><strong>Every row of <code>W</code> sums to exactly <code>1.</code>, including the first one.</strong> The mask sets the strict upper triangle to <code>-inf</code>, and <code>exp(-inf)</code> is <code>0</code>, so row 0 has nowhere to look but itself — its weight is forced to <code>1.000</code> and the output <code>Z[0]</code> comes back as literally <code>V[0]</code>. The first token of a causal model gets no context at all, in every layer, forever. Row 3 is the only unconstrained one: <code>0.102 / 0.031 / 0.684 / 0.183</code>, dominated by token 2 because <code>1.4</code> was its largest score. Notice too that <code>scores</code> is <code>(4, 4)</code> while <code>V</code> is <code>(4, 3)</code> — the attention matrix is square in sequence length and knows nothing about how wide the values are.</div>
+    </details>
   </section>
 
   <section id="math">
@@ -370,12 +401,75 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       </div>
     </details>
 
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Watch the variance grow with d_k, and the softmax collapse</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+def dots(d_k, n=200_000):        # n independent q.k scores
+    q = rng.normal(size=(n, d_k))
+    k = rng.normal(size=(n, d_k))
+    return (q * k).sum(1)
+
+for d_k in (8, 64, 512):
+    s = dots(d_k)
+    print(f&quot;d_k={d_k:4d}  var(q.k)={s.var():7.1f}&quot;
+          f&quot;   var after /sqrt(d_k)={s.var()/d_k:.2f}&quot;)
+
+def softmax(x):
+    e = np.exp(x - x.max())
+    return e / e.sum()
+
+d_k = 512                        # one query against six keys
+s = rng.normal(size=(6, d_k)) @ rng.normal(size=d_k)
+p_raw, p_sc = softmax(s), softmax(s / np.sqrt(d_k))
+print(&quot;\nraw scores:      &quot;, np.round(s, 1))
+print(&quot;unscaled softmax:&quot;, np.round(p_raw, 4))
+print(&quot;scaled softmax:  &quot;, np.round(p_sc, 4))
+print(f&quot;smallest weight: {p_raw.min():.1e} unscaled,&quot;
+      f&quot; {p_sc.min():.1e} scaled&quot;)</code></pre>
+      <div class="tryit-out"><strong><code>var(q.k)</code> comes out <code>8.0</code>, <code>63.8</code>, <code>510.9</code> — it simply <em>is</em> <span>$d_k$</span>.</strong> Dividing by <span>$\sqrt{d_k}$</span> pins it at <code>1.00</code> in all three cases, which is the derivation above in one line of output. The second half shows why anyone should care. At <span>$d_k=512$</span> the raw scores span <code>-70.6</code> to <code>25.6</code>, and softmax turns that into a weight of <code>1.6e-42</code> on the weakest key. The gradient flowing back through that entry is not small, it is gone. Scaled, the same six scores give <code>0.0056</code> through <code>0.3959</code>: still a clear preference, still differentiable everywhere.</div>
+    </details>
+
     <h3>Multi-head attention</h3>
     <p>Running one attention function gives the model exactly one notion of "relevance." In practice you want several. One head might learn to track subject-verb agreement, another coreference, another local syntax. Multi-head attention runs <span>$h$</span> independent, smaller attention operations in parallel and concatenates the results:</p>
     <div class="eq-block">
       <span>$$\begin{aligned}\text{MultiHead}(Q,K,V) &= \text{Concat}(\text{head}_1, \dots, \text{head}_h)\,W^{O} \\[4pt] \text{head}_i &= \text{Attention}(QW_i^{Q}, KW_i^{K}, VW_i^{V})\end{aligned}$$</span>
     </div>
     <p>If <span>$d_{model}=512$</span> and <span>$h=8$</span>, each head works in <span>$d_k = 64$</span> dimensions. That is the same total compute as one 512-dim head. The difference is what you get for it: <strong>8 independent subspaces</strong> to specialize in, instead of one that has to average everything together.</p>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Split one tensor into heads and confirm nothing was computed</span>
+      </summary>
+<pre><code>import torch
+torch.manual_seed(0)
+
+T, d_model, H = 5, 12, 3         # 5 tokens, 3 heads of width 4
+d_h = d_model // H
+x = torch.randn(T, d_model)      # one projection&#x27;s output, e.g. Q
+
+heads = x.view(T, H, d_h).transpose(0, 1)   # (H, T, d_h)
+print(&quot;x&quot;, tuple(x.shape), &quot;-&gt; heads&quot;, tuple(heads.shape))
+
+# No arithmetic happened: the heads share x&#x27;s memory.
+print(&quot;same storage:&quot;, heads.data_ptr() == x.data_ptr())
+print(&quot;head 1, token 0:&quot;, [round(v, 3) for v in heads[1, 0].tolist()])
+print(&quot;x[0, 4:8]      :&quot;, [round(v, 3) for v in x[0, 4:8].tolist()])
+
+# Each head gets its own (T, T) attention map, for the same FLOPs.
+A = torch.softmax(heads @ heads.transpose(-2, -1) / d_h**0.5, -1)
+print(&quot;attention maps:&quot;, tuple(A.shape))
+
+back = heads.transpose(0, 1).reshape(T, d_model)   # the Concat step
+assert torch.equal(back, x)
+print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></pre>
+      <div class="tryit-out"><strong><code>same storage: True</code> is the whole trick.</strong> Splitting <code>(5, 12)</code> into three heads of width 4 is a <code>view</code> and a <code>transpose</code> — the split itself runs no arithmetic at all, and <code>heads[1, 0]</code> prints <code>0.849, 0.692, -0.316, -2.115</code> because those are the very same bytes as <code>x[0, 4:8]</code>. What the reshape buys is <code>(3, 5, 5)</code>: three independent attention maps where one head would have given you one. The <span>$\text{Concat}$</span> in the equation above is that reshape run backwards, and <code>torch.equal(back, x)</code> is <code>True</code> — bit-for-bit, not approximately. Multi-head does not cost more; it spends the same <span>$d_{model}$</span> on more opinions.</div>
+    </details>
 
     <div class="ref-figure">
       <div class="rf-img-wrap"><img src="https://jalammar.github.io/images/t/transformer_attention_heads_qkv.png" alt="Multiple attention heads each producing their own Q, K, V projections" loading="lazy"></div>
@@ -643,6 +737,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script src="../assets/js/app.js"></script>
+<script src="../assets/js/code-highlight.js"></script>
 <script src="../assets/js/find-in-page.js"></script>
 <script src="../assets/js/kml-modal.js"></script>
 <script src="../assets/js/review.js"></script>

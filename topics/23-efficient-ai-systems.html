@@ -334,6 +334,36 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <p>The systems consequence is what matters here. Cache size grows linearly with (tokens generated) × (layers) × (heads) × (head dimension), per request. For long conversations or long contexts this routinely becomes the dominant consumer of GPU memory during serving, often larger than the model's own weights.</p>
     <p>Every technique below exists because that cache is large, grows unpredictably per request, and has to be managed without wasting the GPU memory it lives in.</p>
 
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Size the KV cache from the formula and find where it overtakes the weights</span>
+      </summary>
+<pre><code># Llama-3-8B: 32 layers, 8 KV heads after GQA, head dim 128, fp16.
+L, KVH, HD, BY = 32, 8, 128, 2
+W_GB = 8.03e9 * BY / 1e9              # fp16 weights: 16.1 GB, and fixed
+
+kv_tok = L * KVH * HD * 2 * BY        # x2 because K and V are both cached
+print(&quot;KV per token per sequence:&quot;, kv_tok / 1024, &quot;KB&quot;)
+print(&quot;weights&quot;, round(W_GB, 1), &quot;GB on an 80 GB card\n&quot;)
+
+print(f&quot;{&#x27;ctx&#x27;:&gt;7} {&#x27;batch 1&#x27;:&gt;9} {&#x27;batch 32&#x27;:&gt;10}&quot;)
+for ctx in (2048, 8192, 32768, 131072):
+    one = kv_tok * ctx / 1e9
+    b32 = one * 32
+    tag = &quot;&quot;
+    if b32 &gt; W_GB:
+        tag = &quot;1 seq &gt; weights&quot; if one &gt; W_GB else &quot;b32 &gt; weights&quot;
+    if b32 &gt; 80 - W_GB:
+        tag += &quot;  OOM&quot;
+    print(f&quot;{ctx:&gt;7} {one:8.1f}G {b32:9.1f}G  {tag}&quot;)
+
+mha = L * 32 * HD * 2 * BY * 32768 / 1e9   # the same model without GQA
+print(f&quot;\n32k ctx, 1 seq:  GQA {kv_tok*32768/1e9:.1f} GB&quot;
+      f&quot;   MHA {mha:.1f} GB&quot;)</code></pre>
+      <div class="tryit-out"><strong>The crossover arrives earlier than it feels like it should.</strong> At <code>128.0</code> KB per token per sequence, 32 concurrent requests at an 8k context need <code>34.4</code> GB of cache — more than double the <code>16.1</code> GB of weights all 32 are sharing. At 32k it is <code>137.4</code> GB and the card is long gone. A single 131,072-token sequence carries <code>17.2</code> GB by itself, more than the whole model. That is what the last line is about: the same 32k sequence costs <code>17.2</code> GB under plain multi-head attention and <code>4.3</code> GB with the 8 KV heads of GQA. Grouped-query attention is not a modelling nicety — it is a 4x cut to the thing that actually decides how many users fit on the box.</div>
+    </details>
+
     <h3>PagedAttention</h3>
     <p>Naive KV cache implementations reserve one contiguous block of memory per request, sized for the maximum sequence length it might reach. Most requests never get that long, so most of that reserved memory sits wasted. Worse: because it's reserved contiguously, that wasted memory can't even be reused for a different request in the meantime.</p>
     <p>This is exactly the fragmentation problem operating systems solved decades ago with virtual memory paging. <strong>PagedAttention</strong>, introduced with vLLM, applies the same idea to KV caches:</p>
@@ -436,6 +466,36 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       <div class="diagram-caption">Both axes are logarithmic, and the two straight lines come off a datasheet: the diagonal is peak memory bandwidth, the flat ceiling is peak compute. Where they meet is the <strong>ridge point</strong>, and which side of it your operation falls on is what "memory-bound" actually means. Note carefully what batching does. It does not lift decode off the roof — it slides it <em>along</em> the roof toward the ridge. That is why the win is real but bounded: once you reach the ridge, more batching buys nothing, and prefill is over on the right because it has high intensity inherently, not because someone batched it harder.</div>
     </div>
 
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Count the bytes and the FLOPs in one decode step, at batch 1 and batch 256</span>
+      </summary>
+<pre><code># Llama-3-8B shapes, fp16 weights, decoding on one H100.
+P = 8.03e9                      # parameters
+L, KVH, HD = 32, 8, 128         # layers, KV heads (GQA), head dim
+CTX = 4096                      # tokens already sitting in the cache
+
+w_bytes = P * 2                 # every weight is read on every step
+kv_tok = L * KVH * HD * 2 * 2   # K and V, fp16, per token, per seq
+ridge = 989e12 / 3.35e12        # peak FLOP/s divided by peak bytes/s
+
+print(&quot;weights&quot;, w_bytes / 1e9, &quot;GB   KV per token&quot;, kv_tok / 1024, &quot;KB&quot;)
+print(&quot;ridge point&quot;, round(ridge, 1), &quot;FLOPs/byte\n&quot;)
+
+for B in (1, 8, 32, 256):
+    moved = w_bytes + kv_tok * CTX * B   # weights plus the whole cache
+    flops = 2 * P * B                    # 2 FLOPs per param per token
+    ai = flops / moved
+    side = &quot;compute&quot; if ai &gt; ridge else &quot;MEMORY&quot;
+    print(f&quot;batch {B:4d}  {moved/1e9:6.1f} GB moved  AI {ai:6.2f}&quot;
+          f&quot;  {side}-bound&quot;)
+
+pre = 2 * P * 2048 / (w_bytes + kv_tok * 2048)   # a 2048-token prefill
+print(f&quot;\nprefill 2048   AI {pre:6.2f}  compute-bound&quot;)</code></pre>
+      <div class="tryit-out"><strong>Batching slides you along the roof, then stops helping.</strong> Batch 1 gets <code>0.97</code> FLOPs per byte. Batch 32 gets <code>15.46</code>. Batch 256 gets <code>26.78</code> — eight times the batch bought 1.7x the intensity. The reason is the middle column: the weights are a fixed <code>16.06</code> GB, but the KV cache is <code>128.0</code> KB per token per sequence, so beyond batch 8 you are mostly paying to re-read cache, and cache bytes scale with the batch exactly like the useful work does. Every decode row is still <code>MEMORY-bound</code> against an H100 ridge of <code>295.2</code>. The last line is the same weights on the same chip doing one pass over 2048 prompt tokens — <code>2014.33</code>, the only number here that clears the ridge.</div>
+    </details>
+
     <p>Keep this conceptual rather than memorizing exact ridge-point numbers for specific chips. What an interviewer is checking is whether you understand that <strong>this ratio</strong>, not raw FLOPs or raw bandwidth in isolation, determines your bottleneck.</p>
   </section>
 
@@ -493,6 +553,39 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       <p>LLM inference is memory-bandwidth-bound. Shrinking the weights shrinks <em>exactly the thing you're bottlenecked on</em>: bytes moved through memory. Meanwhile, leaving activations at higher precision keeps the actual arithmetic reasonably accurate.</p>
       <p>You get most of the speed and memory benefit without touching the more precision-sensitive parts of the computation.</p>
     </div>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Quantize a weight matrix to int8 and watch one outlier row wreck the rest</span>
+      </summary>
+<pre><code>import torch
+torch.manual_seed(0)
+
+W = torch.randn(512, 512) * 0.02  # a plausible weight matrix
+W[7] *= 40                        # one outlier channel -- real LLMs
+                                  # have them, and they set the scale
+
+def fake_quant(w, per_channel):
+    if per_channel:
+        amax = w.abs().amax(dim=1, keepdim=True)  # one scale per row
+    else:
+        amax = w.abs().max()                      # one scale for all
+    s = amax / 127                                # symmetric int8
+    q = torch.clamp((w / s).round(), -127, 127).to(torch.int8)
+    return q, q.float() * s                       # dequantised back
+
+for name, pc in ((&quot;per-tensor&quot;, False), (&quot;per-channel&quot;, True)):
+    q, deq = fake_quant(W, pc)
+    err = (W - deq).abs()
+    codes = q[0].unique().numel()   # distinct levels a normal row uses
+    print(f&quot;{name:12s} q {tuple(q.shape)} {q.dtype}&quot;)
+    print(f&quot;  max err {err.max():.5f}  mean err {err.mean():.6f}&quot;
+          f&quot;  row 0 uses {codes:3d}/255 codes&quot;)
+
+print(&quot;fp16&quot;, W.numel() * 2 / 1e6, &quot;MB  -&gt;  int8&quot;, W.numel() / 1e6, &quot;MB&quot;)</code></pre>
+      <div class="tryit-out"><strong>One row ruins it for everyone.</strong> Row 7 is 40x larger than the rest, and under a single per-tensor scale it alone sets the step size — so row 0, a completely ordinary row, lands on only <code>8</code> of the 255 available int8 codes. Give every row its own scale and row 0 uses <code>132</code>, and mean absolute error drops from <code>0.005321</code> to <code>0.000139</code>: 38x better for the cost of one extra float per row. Max error barely moves (<code>0.01066</code> to <code>0.01065</code>) because it belongs to the outlier row itself, which is poorly served either way — which is why you look at the mean here, not the max. Both cost the same <code>0.262144</code> MB, half of fp16.</div>
+    </details>
 
     <p><strong>Distillation</strong> trains a smaller "student" model to match the behavior of a larger "teacher", typically on the teacher's output distribution rather than only hard labels. The result is a genuinely smaller, cheaper model, not a compressed version of the same one.</p>
 
@@ -708,6 +801,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script src="../assets/js/app.js"></script>
+<script src="../assets/js/code-highlight.js"></script>
 <script src="../assets/js/find-in-page.js"></script>
 <script src="../assets/js/kml-modal.js"></script>
 <script src="../assets/js/review.js"></script>

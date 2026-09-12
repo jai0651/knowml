@@ -199,6 +199,39 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       <p>That is the difference between an autoencoder that can only reconstruct memorized inputs and a VAE that can generate new ones.</p>
     </div>
 
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Same seed, same sample, and only one of them has a gradient</span>
+      </summary>
+<pre><code>import torch
+from torch.distributions import Normal
+r = lambda t: [round(v, 3) for v in t.tolist()]
+
+mu = torch.tensor([0.5, -1.0], requires_grad=True)
+sd = torch.tensor([0.8, 0.3], requires_grad=True)
+q = Normal(mu, sd)            # what the encoder emits for one input
+
+torch.manual_seed(0)
+z_bad = q.sample()            # the draw happens inside the graph
+print(&quot;sample() &quot;, r(z_bad), &quot;grad_fn&quot;, z_bad.grad_fn)
+try:
+    z_bad.sum().backward()
+except RuntimeError as e:
+    print(&quot;backward:&quot;, str(e).split(&quot; and&quot;)[0])
+
+torch.manual_seed(0)
+z_ok = q.rsample()            # the randomness is pushed out to eps
+print(&quot;rsample()&quot;, r(z_ok), &quot;grad_fn&quot;, type(z_ok.grad_fn).__name__)
+z_ok.sum().backward()
+print(&quot;dL/dmu   &quot;, r(mu.grad), &quot; dL/dsd&quot;, r(sd.grad))
+
+torch.manual_seed(0)
+eps = torch.randn(2)          # the same draw, written out by hand
+print(&quot;by hand  &quot;, r(mu + sd * eps), &quot; eps   &quot;, r(eps))</code></pre>
+      <div class="tryit-out"><strong>Both draws are the same two numbers.</strong> <code>sample()</code> and <code>rsample()</code> both return <code>[1.733, -1.088]</code> — same seed, same <code>eps</code> — but the first arrives with <code>grad_fn None</code> and <code>backward()</code> flatly refuses it. The second carries an <code>AddBackward0</code>, because it was built as <code>mu + sd * eps</code>, which the last line reproduces by hand. Then look at <code>dL/dsd</code>: <code>[1.541, -0.293]</code>, which is exactly the <code>eps</code> that was drawn. Moving the randomness outside turned it into a constant the gradient flows <em>past</em> rather than an operation it has to flow <em>through</em>. That is the reparameterization trick, and without it the encoder half of a VAE cannot be trained at all.</div>
+    </details>
+
     <h3>GANs: two networks playing a game</h3>
     <p>A <strong>GAN</strong> trains two networks against each other:</p>
     <ul>
@@ -356,6 +389,39 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <h2><span class="num">04</span>The equations, term by term</h2>
     <p>The forward process is designed so you can jump straight to any noise level <span>$t$</span> in one step, without simulating all the steps before it: <span>$x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\, \epsilon$</span>.</p>
     <p>Here <span>$\epsilon \sim \mathcal{N}(0, I)$</span> is fresh Gaussian noise, and <span>$\bar\alpha_t$</span> is a known, fixed schedule value that decreases from near 1 (almost no noise) to near 0 (almost pure noise) as <span>$t$</span> increases. That is the whole forward process: no network involved, just algebra.</p>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Jump 400 noising steps in one multiply, and watch the signal go</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+T = 1000
+betas = np.linspace(1e-4, 0.02, T)      # the DDPM linear schedule
+abar = np.cumprod(1.0 - betas)          # alpha-bar_t, one per step
+x0 = np.array([0.9, -0.7, 0.5, -0.3])   # a 4-pixel &quot;image&quot;
+
+# The slow way: 400 real noising steps, on 20k copies at once.
+x = np.repeat(x0[None], 20000, axis=0)
+for t in range(400):
+    z = rng.normal(size=x.shape)
+    x = np.sqrt(1 - betas[t]) * x + np.sqrt(betas[t]) * z
+print(&quot;x&quot;, tuple(x.shape))
+print(&quot;400 steps:&quot;, np.round(x.mean(0), 3),
+      &quot;+/-&quot;, round(float(x.std(0).mean()), 3))
+
+a = abar[399]                           # the same law, no loop at all
+print(&quot;1 step:   &quot;, np.round(np.sqrt(a) * x0, 3),
+      &quot;+/-&quot;, round(float(np.sqrt(1 - a)), 3))
+
+for t in (0, 250, 500, 999):
+    xt = np.sqrt(abar[t]) * x0 + np.sqrt(1 - abar[t]) * rng.normal(size=4)
+    print(f&quot;t={t:4d} sqrt(abar)={np.sqrt(abar[t]):.3f}&quot;,
+          &quot;x_t=&quot;, np.round(xt, 2))</code></pre>
+      <div class="tryit-out"><strong>The two middle lines agree.</strong> Four hundred chained noising steps land on mean <code>[0.392 -0.307 0.223 -0.126]</code> with spread <code>0.895</code>; the closed form gets <code>[0.398 -0.309 0.221 -0.133]</code> and <code>0.897</code> from a single multiply and no loop. That is the only reason training is affordable — each image gets one random <span>$t$</span>, never a trajectory. The other column worth reading is <code>sqrt(abar)</code>. By <code>t=500</code>, the halfway point, only <code>0.279</code> of the original signal is left, and by <code>t=999</code> it is <code>0.006</code> and <code>x_t</code> has no visible relation to <code>x0</code>. A linear <span>$\beta$</span> schedule does most of its damage early, which is the complaint that later cosine schedules were built to fix.</div>
+    </details>
     <p>Before the diffusion loss, the VAE's. Diffusion inherits its whole argument, so it is worth having this one straight first.</p>
 
     <details class="derivation">
@@ -393,6 +459,36 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
         </ol>
         <div class="drv-payoff"><strong>What this actually tells you.</strong> The gap between the true log-likelihood and the ELBO is <em>exactly</em> <span>$D_{\mathrm{KL}}(q \,\|\, p(z \mid x))$</span>. So maximising the ELBO does two jobs at once: it pushes the likelihood up, and it drags your encoder toward the true posterior. And it does the second one without ever computing that posterior, which was the intractable thing you started out trying to avoid.</div>
       </div>
+    </details>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Turn the KL dial and watch the other half of the ELBO pay for it</span>
+      </summary>
+<pre><code>import torch
+
+x = torch.tensor(2.0)      # one data point; the decoder is the identity
+
+def terms(mu, logsd):
+    sd = logsd.exp()
+    recon = (mu - x) ** 2 + sd ** 2          # E_q[(x - z)^2], exactly
+    kl = 0.5 * (mu ** 2 + sd ** 2 - 1) - logsd
+    return recon, kl
+
+print(f&quot;{&#x27;beta&#x27;:&gt;5}{&#x27;mu&#x27;:&gt;8}{&#x27;sigma&#x27;:&gt;8}{&#x27;recon&#x27;:&gt;8}{&#x27;KL&#x27;:&gt;8}&quot;)
+for beta in [0.01, 0.1, 1.0, 4.0, 50.0]:
+    p = torch.zeros(2, requires_grad=True)   # [mu, log sigma]
+    opt = torch.optim.Adam([p], lr=0.02)
+    for _ in range(4000):                    # this is all training does
+        recon, kl = terms(p[0], p[1])
+        opt.zero_grad()
+        (recon + beta * kl).backward()       # the only knob is beta
+        opt.step()
+    recon, kl = terms(p[0], p[1])
+    print(f&quot;{beta:5.2f}{p[0]:8.3f}{p[1].exp():8.3f}&quot;
+          f&quot;{recon:8.3f}{kl:8.3f}&quot;)</code></pre>
+      <div class="tryit-out"><strong>Read the last two columns against each other.</strong> At <code>beta=0.01</code> reconstruction is <code>0.005</code> and the KL is <code>4.134</code>; at <code>beta=50</code> they have swapped places, <code>4.660</code> and <code>0.003</code>. No setting buys both. The <code>beta=50</code> row is <em class="term">posterior collapse</em> in two numbers: <code>mu=0.077</code>, <code>sigma=0.981</code> — the encoder has stopped encoding and just emits the prior <span>$\mathcal{N}(0,1)$</span> whatever the input, which costs nothing on the KL term and is worth nothing to the decoder. And note that the honest VAE, <code>beta=1</code>, already drags <span>$\mu$</span> to <code>1.333</code> for a point sitting at <code>2.0</code>. That gap is where the blur comes from.</div>
     </details>
 
     <p>Training the reverse process reduces, after the derivation settles, to a strikingly simple objective:</p>
@@ -815,6 +911,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script src="../assets/js/app.js"></script>
+<script src="../assets/js/code-highlight.js"></script>
 <script src="../assets/js/find-in-page.js"></script>
 <script src="../assets/js/kml-modal.js"></script>
 <script src="../assets/js/review.js"></script>

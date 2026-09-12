@@ -333,6 +333,28 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
     <p>The <em class="term">curse of dimensionality</em> is what breaks k-NN in high-dimensional feature spaces. It's worth being able to state concretely rather than just naming it. As the number of dimensions grows, the volume of the space grows so much faster than the data filling it that distances between points stop being informative.</p>
       <p>For many common distance metrics, the ratio between the distance to the nearest neighbor and the distance to the farthest neighbor converges toward 1. Everything ends up roughly equidistant from everything else. "Nearest" stops meaning "similar" and starts meaning "arbitrary," and k-NN's entire premise quietly stops holding.</p>
 
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Watch nearest and farthest converge as dimensions pile up</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+n = 500                          # 500 points, one query, unit cube
+print(&quot;    d   nearest  farthest    ratio&quot;)
+for d in [2, 5, 20, 100, 1000, 10000]:
+    P = rng.random((n, d))       # (500, d) the &quot;training set&quot;
+    q = rng.random(d)            # (d,)     the point to classify
+    dist = np.linalg.norm(P - q, axis=1)    # (500,) one per point
+    lo, hi = dist.min(), dist.max()
+    print(f&quot;{d:5d} {lo:9.3f} {hi:9.3f} {lo / hi:8.3f}&quot;)
+
+print(&quot;\nshapes on the last row: P&quot;, P.shape, &quot; q&quot;, q.shape,
+      &quot; dist&quot;, dist.shape)</code></pre>
+      <div class="tryit-out"><strong>The ratio column only moves one way.</strong> At <code>d=2</code> the nearest point sits at <code>0.024</code> of the farthest distance, so "nearest" means something. By <code>d=10000</code> the ratio is <code>0.967</code> — the closest of 500 points is barely 3% nearer than the most distant one. Watch the nearest distance itself climb from <code>0.030</code> to <code>40.210</code> while the gap to the farthest hardly widens at all: every point has drifted out to roughly the same radius. Nothing is broken. That is simply what a unit cube in 10,000 dimensions is like, and it is why k-NN stops carrying signal long before you notice it has.</div>
+    </details>
+
     <h3>Naive Bayes</h3>
     <p><strong>Naive Bayes</strong> applies Bayes' theorem (see 01) to classification with one deliberate simplification. It assumes every feature is <em>conditionally independent</em> of every other feature, given the class. That assumption is almost always technically false. In a document, the word "loan" and the word "interest" are obviously not independent given the class "finance."</p>
       <div class="callout callout-teach">
@@ -387,12 +409,83 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
       <p>A circle has no corners. So that first point of contact is, generically, some point on the smooth curve where every coordinate is nonzero. Coefficients get shrunk, but not zeroed. A diamond has corners sticking out right where an ellipse is likely to touch it first, and those corners are exactly the points where one or more coordinates are zero.</p>
       <p>Geometrically, the elliptical contours are simply much more likely to first touch a pointy corner than a smooth curve is to touch anywhere in particular. That is why lasso routinely zeroes out coefficients entirely, and ridge, no matter how large <span>$\lambda$</span> gets, essentially never does. This is a very common interview question precisely because the geometric argument is short, visual, and either you can draw it or you can't.</p>
 
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Fit the same data with ridge and lasso and compare the coefficients</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+n, d, lam = 60, 8, 12.0
+X = rng.normal(size=(n, d))
+X[:, 3] = X[:, 0] + 0.05 * rng.normal(size=n)   # a near-duplicate
+beta = np.array([3., 0., 0., 0., -2., 0., 1.5, 0.])
+y = X @ beta + 0.5 * rng.normal(size=n)
+
+# Ridge is smooth everywhere, so there is no kink to land on.
+ridge = np.linalg.solve(X.T @ X + lam * np.eye(d), X.T @ y)
+
+# Lasso has no closed form. The max(., 0) below IS the diamond&#x27;s
+# corner: once a feature&#x27;s pull drops under lam/2, it snaps flat.
+lasso = np.zeros(d)
+for _ in range(400):
+    for j in range(d):
+        rho = X[:, j] @ (y - X @ lasso + X[:, j] * lasso[j])
+        pull = max(abs(rho) - lam / 2, 0.0)
+        lasso[j] = np.sign(rho) * pull / (X[:, j] @ X[:, j])
+
+print(&quot;X&quot;, X.shape, &quot; truly nonzero:&quot;, np.flatnonzero(beta).tolist())
+print(&quot;ridge:&quot;, np.round(ridge, 3) + 0.)
+print(&quot;lasso:&quot;, np.round(lasso, 3) + 0.)
+print(&quot;exactly 0.0  -&gt;  ridge&quot;, int((ridge == 0).sum()),
+      &quot; lasso&quot;, int((lasso == 0).sum()))</code></pre>
+      <div class="tryit-out"><strong>Last line: ridge <code>0</code>, lasso <code>5</code>.</strong> Not "small" — exactly <code>0.</code>, and the three lasso kept are indices <code>0, 4, 6</code>, precisely the three that were ever real. Then look at columns 0 and 3, which are near-duplicates by construction: ridge splits the credit between them, <code>1.292</code> and <code>1.255</code>, while lasso gives one of them <code>2.813</code> and the other nothing. Ridge's junk coefficients (<code>-0.081</code>, <code>0.054</code>, <code>0.015</code>) are tiny, but tiny still means you ship all eight features and compute all eight at inference time. That is the whole practical difference the diamond's corners buy you.</div>
+    </details>
+
     <h3>Why boosting and bagging are fundamentally different moves</h3>
     <p>It's tempting to think of bagging and boosting as two flavors of "combine a bunch of trees." They're attacking opposite ends of the bias-variance tradeoff. <strong>Bagging</strong> starts from strong, low-bias, high-variance base learners (deep, largely unpruned trees) and averages many independent copies of them.</p>
     <p>Averaging is a <em>variance-reduction</em> operation, and it does essentially nothing for bias: if every individual tree is systematically wrong in the same direction, averaging them just reproduces that same systematic error.</p>
       <p>That's precisely why random feature subsampling matters so much for bagging specifically. It's the mechanism that keeps the trees' errors decorrelated enough for averaging to keep paying off as you add more of them.</p>
     <p><strong>Boosting</strong> starts from weak, high-bias, low-variance base learners (shallow trees, sometimes just stumps) and chains them sequentially, each one targeting exactly the error the current ensemble hasn't explained yet. That's a <em>bias-reduction</em> operation. The ensemble's representational capacity grows with every round, letting it fit relationships no single weak learner could capture alone.</p>
       <p>The cost shows up when you stop regularizing. Unless you rein it in (small learning rate, limited tree depth, early stopping, row/column subsampling), boosting will keep driving training error toward zero by continuing to fit whatever is left, including noise. That's exactly the overfitting risk bagging mostly doesn't have. Adding more trees to a random forest essentially never hurts. Adding more rounds to an unregularized boosted model eventually does.</p>
+
+    <details class="tryit">
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Give bagging and boosting the same 30 stumps and compare</span>
+      </summary>
+<pre><code>import numpy as np
+rng, n = np.random.default_rng(0), 200
+x = np.sort(rng.random(n))
+y = np.sin(4 * x) + 0.1 * rng.normal(size=n)   # the target curve
+
+def stump(xs, rs, grid):     # depth-1 tree: one split, two means
+    best = (np.inf, None)
+    for t in np.quantile(xs, np.linspace(.05, .95, 19)):
+        L = xs &lt;= t
+        a, b = rs[L].mean(), rs[~L].mean()
+        sse = ((rs - np.where(L, a, b)) ** 2).sum()
+        if sse &lt; best[0]:
+            best = (sse, np.where(grid &lt;= t, a, b))
+    return best[1]
+
+# Bagging: 30 stumps on bootstrap resamples, averaged in parallel.
+bag = np.array([stump(x[i], y[i], x)
+                for i in rng.integers(0, n, (30, n))])
+
+# Boosting: 30 stumps in series, each fitting what is left over.
+F = np.full(n, y.mean())
+for _ in range(30):
+    F = F + 0.3 * stump(x, y - F, x)
+
+print(&quot;bag members&quot;, bag.shape, &quot; they disagree by&quot;,
+      round(bag.std(0).mean(), 3))
+for tag, p in [(&quot;one stump&quot;, stump(x, y, x)),
+               (&quot;bagged x30&quot;, bag.mean(0)), (&quot;boosted x30&quot;, F)]:
+    print(f&quot;{tag:12s} MSE {((y - p) ** 2).mean():.4f}&quot;)</code></pre>
+      <div class="tryit-out"><strong>Bagging barely moves the number.</strong> Thirty stumps averaged take MSE from <code>0.0903</code> to <code>0.0807</code>. The same thirty stumps chained instead of averaged reach <code>0.0156</code>, roughly six times better, with not one extra parameter. The reason is on the first printed line: the 30 bagged members disagree with each other by only <code>0.065</code> on average, so there was hardly any variance for averaging to remove. A stump is already a low-variance model and its error is almost all bias — which is exactly the error boosting attacks. Averaging only pays when the base learner is high-variance, which is why bagging is paired with deep unpruned trees and boosting with shallow ones.</div>
+    </details>
   </section>
 
   <section id="tradeoffs">
@@ -608,6 +701,7 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("np-
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script src="../assets/js/app.js"></script>
+<script src="../assets/js/code-highlight.js"></script>
 <script src="../assets/js/find-in-page.js"></script>
 <script src="../assets/js/kml-modal.js"></script>
 <script src="../assets/js/review.js"></script>
