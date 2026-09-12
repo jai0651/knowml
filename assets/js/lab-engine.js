@@ -1,4 +1,4 @@
-/* KnowML — Attention Lab: linear-algebra engine + deterministic worked example.
+/* KnowML — shared lab engine: linear algebra + a seeded RNG.
    Every number the page shows is computed here, live, from a seeded RNG — nothing
    is hand-typed and hand-verified. That is the only way to promise the numbers
    are actually correct at every step. */

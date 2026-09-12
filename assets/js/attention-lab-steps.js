@@ -699,9 +699,7 @@
     return steps;
   }
 
-  window.KMLLabSteps = {
-    PRE: PRE, DEC: DEC, MQA: MQA, GQA: GQA, MLA: MLA, FLASH: FLASH, PAGED: PAGED,
-    TABS: [
+  var TABS = [
       { id: 'mha', label: 'Multi-Head Attention', short: 'MHA', color: 'var(--c-attention)', build: buildMHA },
       { id: 'kvcache', label: 'KV Cache', short: 'Cache', color: 'var(--c-practice)', build: buildKVCache },
       { id: 'mqa', label: 'Multi-Query Attention', short: 'MQA', color: 'var(--accent-2)', build: buildMQA },
@@ -709,6 +707,34 @@
       { id: 'mla', label: 'Multi-Head Latent Attention', short: 'MLA', color: 'var(--accent)', build: buildMLA },
       { id: 'paged', label: 'PagedAttention', short: 'Paged', color: 'var(--c-efficient)', build: buildPaged },
       { id: 'flash', label: 'FlashAttention', short: 'Flash', color: 'var(--c-frontier)', build: buildFlash }
-    ]
+  ];
+
+  window.KMLLabSteps = { PRE: PRE, DEC: DEC, MQA: MQA, GQA: GQA, MLA: MLA, FLASH: FLASH, PAGED: PAGED, TABS: TABS };
+
+  /* The contract the shared controller (lab-app.js) reads. */
+  window.KML_LAB = {
+    tabs: TABS,
+    dims: [
+      { sym: 'B', val: '1', def: 'Batch — how many independent sequences run side by side. Fixed to 1 throughout: batch just stacks an extra, fully independent copy of everything below. Nothing in this page interacts across the batch axis.' },
+      { sym: 'T', val: '4', def: 'Sequence length — how many tokens exist so far. Starts at 4 (the prefill), grows to 5 once a token is generated.' },
+      { sym: 'd_model', val: String(CFG.dModel), def: 'Model / embedding dimension — the width of every token\'s vector. The one number that stays constant through an entire layer.' },
+      { sym: 'H', val: String(CFG.H), def: 'Query heads — how many independent attention "subspaces" the model splits d_model into.' },
+      { sym: 'd_h', val: String(CFG.dH), def: 'Per-head dimension = d_model / H. Each head\'s Q, K, V rows live in this many dimensions.' }
+    ],
+    dimsFor: {
+      gqa: [{ sym: 'G', val: String(CFG.gqaGroups), def: 'GQA groups — how many distinct key/value heads exist. Query heads are split evenly across them.' }],
+      mqa: [{ sym: 'G', val: '1', def: 'MQA is GQA with exactly one group — every query head shares the same single key/value head.' }],
+      mla: [{ sym: 'd_c', val: String(CFG.dC), def: 'MLA latent dimension — the width of the compressed vector that gets cached, instead of full-width K and V.' }],
+      paged: [{ sym: 'blk', val: String(CFG.blockSize), def: 'Block size — how many tokens\' worth of K/V live in one fixed-size physical block.' }],
+      flash: [{ sym: 'blk', val: String(CFG.blockSize), def: 'Tile size — how many rows/columns of the score matrix are computed together in one pass through fast memory.' }]
+    },
+    /* T grows as you step through the decode tab, so it is rewritten live */
+    dimFix: function (tabId, stepIndex, list) {
+      var T = list.filter(function (d) { return d.sym === 'T'; })[0];
+      if (!T) return;
+      if (tabId === 'paged') T.val = '5';
+      else if (tabId === 'kvcache') T.val = stepIndex >= 1 ? '4→5' : '4';
+      else T.val = '4';
+    }
   };
 })();

@@ -1,35 +1,36 @@
-/* KnowML — Attention Lab: app controller. Tab switching, step navigation,
-   the persistent dimension key, and wiring KaTeX into dynamically-built steps. */
+/* KnowML — shared lab controller: tab switching, step navigation, the chip
+   strip of dimensions, and re-rendering KaTeX into dynamically-built steps.
+
+   A lab supplies a global window.KML_LAB before this script runs:
+
+     window.KML_LAB = {
+       tabs:    [{ id, label, short, color, build() -> [steps] }],
+       dims:    [{ sym, val, def }],            // always shown
+       dimsFor: { tabId: [{ sym, val, def }] }, // appended on that tab
+       dimFix:  function (tabId, stepIndex, list) { ... }  // optional live edits
+     }
+
+   A step is { title, formula|null, note, render(stageEl) }. */
 (function () {
   'use strict';
-  var UI = window.KMLLabUI, CFG = window.KMLLabModel.CFG, TABS = window.KMLLabSteps.TABS;
+  var UI = window.KMLLabUI;
+  var LAB = window.KML_LAB || {};
+  var TABS = LAB.tabs || [];
 
   var state = { tabIndex: 0, stepIndex: 0, steps: [] };
 
   var els = {};
   function q(id) { return document.getElementById(id); }
 
-  var DIM_BASE = [
-    { sym: 'B', val: '1', def: 'Batch — how many independent sequences run side by side. Fixed to 1 throughout: batch just stacks an extra, fully independent copy of everything below. Nothing in this page interacts across the batch axis.' },
-    { sym: 'T', val: null, def: 'Sequence length — how many tokens exist so far. Starts at 4 (the prefill), grows to 5 once a token is generated.' },
-    { sym: 'd_model', val: String(CFG.dModel), def: 'Model / embedding dimension — the width of every token\'s vector. The one number that stays constant through an entire layer.' },
-    { sym: 'H', val: String(CFG.H), def: 'Query heads — how many independent attention "subspaces" the model splits d_model into.' },
-    { sym: 'd_h', val: String(CFG.dH), def: 'Per-head dimension = d_model / H. Each head\'s Q, K, V rows live in this many dimensions.' }
-  ];
-  var DIM_EXTRA = {
-    gqa: [{ sym: 'G', val: String(CFG.gqaGroups), def: 'GQA groups — how many distinct key/value heads exist. Query heads are split evenly across them.' }],
-    mqa: [{ sym: 'G', val: '1', def: 'MQA is GQA with exactly one group — every query head shares the same single key/value head.' }],
-    mla: [{ sym: 'd_c', val: String(CFG.dC), def: 'MLA latent dimension — the width of the compressed vector that gets cached, instead of full-width K and V.' }],
-    paged: [{ sym: 'blk', val: String(CFG.blockSize), def: 'Block size — how many tokens\' worth of K/V live in one fixed-size physical block.' }],
-    flash: [{ sym: 'blk', val: String(CFG.blockSize), def: 'Tile size — how many rows/columns of the score matrix are computed together in one pass through fast memory.' }]
-  };
+  var DIM_BASE = LAB.dims || [];
+  var DIM_EXTRA = LAB.dimsFor || {};
 
   function renderDimKey() {
     var tab = TABS[state.tabIndex];
     var list = DIM_BASE.map(function (d) { return Object.assign({}, d); });
-    if (tab.id === 'kvcache' || tab.id === 'paged') list[1].val = (tab.id === 'paged') ? '5' : (state.stepIndex >= 1 ? '4→5' : '4');
-    else list[1].val = '4';
-    (DIM_EXTRA[tab.id] || []).forEach(function (d) { list.push(d); });
+    (DIM_EXTRA[tab.id] || []).forEach(function (d) { list.push(Object.assign({}, d)); });
+    /* a lab can rewrite values that change as you step, e.g. a growing cache */
+    if (typeof LAB.dimFix === 'function') LAB.dimFix(tab.id, state.stepIndex, list);
 
     var prevDefs = els.dimstrip.querySelector('.lab-dimdefs');
     var defsWereOpen = !!(prevDefs && prevDefs.open);

@@ -1,8 +1,9 @@
-/* KnowML — Attention Lab: generic renderer. Turns the plain-array matrices from
-   attention-lab-model.js into labeled, colored grids, plus the small set of
-   non-matrix visuals (cache, block table, physical pool, bar comparison) that
-   PagedAttention and the cache-size callouts need. One mounting function per
-   visual kind; every step function composes them and nothing else. */
+/* KnowML — shared lab renderer. Turns plain arrays-of-arrays into labelled,
+   colour-coded grids, plus the non-matrix visuals a lab tends to need: caches,
+   block tables, pools, bar comparisons, check badges. One mounting function per
+   visual kind; a lab's step functions compose these and nothing else.
+
+   Used by every lab page. Keep it free of any one lab's vocabulary. */
 (function () {
   'use strict';
   var M = window.KMLLabMath;
