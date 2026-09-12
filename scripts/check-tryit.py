@@ -31,7 +31,14 @@ BLOCK = re.compile(
 problems = 0
 total = 0
 for path in sorted(glob.glob("topics/*.html")):
-    src = open(path, encoding="utf-8").read()
+    # check-equation-overflow.sh writes transient topics/_of_*.html copies; skip
+    # them, and tolerate one vanishing mid-run rather than crashing the check.
+    if os.path.basename(path).startswith("_of_"):
+        continue
+    try:
+        src = open(path, encoding="utf-8").read()
+    except FileNotFoundError:
+        continue
     raw_count = src.count('<details class="tryit">')
     found = BLOCK.findall(src)
     name = os.path.basename(path)

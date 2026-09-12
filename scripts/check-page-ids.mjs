@@ -23,7 +23,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const files = [
   ...readdirSync(path.join(ROOT, 'topics'))
-    .filter(f => f.endsWith('.html'))
+    // check-equation-overflow.sh writes transient topics/_of_*.html copies of
+    // real pages. They duplicate a real data-page-id by construction, so they
+    // trip the duplicate check if the script is interrupted before cleanup.
+    .filter(f => f.endsWith('.html') && !f.startsWith('_of_'))
     .map(f => path.join('topics', f)),
   'index.html',
   'review.html',

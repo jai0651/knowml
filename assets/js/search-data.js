@@ -238,11 +238,31 @@ window.SEARCH_INDEX = [
     "section": "Decision & Retrieval Systems",
     "url": "topics/17-time-series-forecasting.html",
     "tags": [
-      "Time Series & Forecasting",
-      "Decision & Retrieval Systems",
-      "checklist"
+      "Time Series",
+      "Forecasting",
+      "ARIMA",
+      "stationarity",
+      "differencing",
+      "seasonality",
+      "exponential smoothing",
+      "lag features",
+      "backtesting",
+      "rolling origin",
+      "leakage",
+      "DeepAR",
+      "N-BEATS",
+      "Temporal Fusion Transformer",
+      "PatchTST",
+      "M4",
+      "M5",
+      "LightGBM",
+      "seasonal naive",
+      "quantile",
+      "anomaly detection",
+      "Kalman",
+      "full"
     ],
-    "summary": "Time Series & Forecasting — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "You cannot shuffle: ordinary cross-validation leaks the future into the past. Stationarity, differencing, lag features, why gradient-boosted trees keep winning, and rolling-origin backtesting.",
     "color": "var(--c-ts)"
   },
   {
@@ -251,10 +271,26 @@ window.SEARCH_INDEX = [
     "url": "topics/18-graph-ml.html",
     "tags": [
       "Graph ML",
-      "Decision & Retrieval Systems",
-      "checklist"
+      "GNN",
+      "message passing",
+      "GCN",
+      "GraphSAGE",
+      "GAT",
+      "graph attention",
+      "node classification",
+      "link prediction",
+      "over-smoothing",
+      "over-squashing",
+      "neighbour sampling",
+      "transductive",
+      "inductive",
+      "knowledge graph",
+      "embeddings",
+      "adjacency matrix",
+      "graph transformer",
+      "full"
     ],
-    "summary": "Graph ML — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Message passing is the whole field: gather, aggregate, update. GCN, GraphSAGE and GAT as variations on the middle step, plus over-smoothing, neighbour sampling and why splitting a graph is subtle.",
     "color": "var(--c-graph)"
   },
   {
@@ -262,11 +298,25 @@ window.SEARCH_INDEX = [
     "section": "Embodied & Frontier",
     "url": "topics/19-scientific-structured-ai.html",
     "tags": [
-      "Scientific & Structured AI",
-      "Embodied & Frontier",
-      "checklist"
+      "Scientific AI",
+      "AlphaFold",
+      "protein folding",
+      "molecular property",
+      "equivariance",
+      "invariance",
+      "PINN",
+      "physics-informed",
+      "neural operator",
+      "PDE",
+      "symbolic regression",
+      "inductive bias",
+      "materials",
+      "weather",
+      "drug discovery",
+      "GNN",
+      "full"
     ],
-    "summary": "Scientific & Structured AI — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Inductive bias is what makes scientific ML work. Equivariance, protein structure, molecular property prediction, physics-informed networks and neural operators — and why symmetry beats more data here.",
     "color": "var(--c-sci)"
   },
   {
@@ -299,10 +349,23 @@ window.SEARCH_INDEX = [
     "url": "topics/22-world-models.html",
     "tags": [
       "World Models",
-      "Embodied & Frontier",
-      "checklist"
+      "Dreamer",
+      "PlaNet",
+      "RSSM",
+      "latent dynamics",
+      "model-based RL",
+      "compounding error",
+      "imagination",
+      "planning",
+      "MuZero",
+      "JEPA",
+      "video prediction",
+      "Genie",
+      "sample efficiency",
+      "simulator",
+      "full"
     ],
-    "summary": "World Models — mapped section of the KnowML ML/AI revision course. Full subtopic checklist, write-up coming next.",
+    "summary": "Learn a simulator so the agent can practise inside it. Latent dynamics, the Dreamer line, planning in imagination, and the compounding error that caps how far you can dream.",
     "color": "var(--c-world)"
   },
   {
@@ -3430,30 +3493,430 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What this section will cover",
+    "title": "The constraint that makes this a different subject",
     "parentTitle": "17 · Time Series & Forecasting",
     "section": "Decision & Retrieval Systems",
-    "url": "topics/17-time-series-forecasting.html#checklist",
+    "url": "topics/17-time-series-forecasting.html#no-shuffle",
     "tags": [],
     "summary": "",
     "color": "var(--c-ts)"
   },
   {
     "kind": "section",
-    "title": "What this section will cover",
+    "title": "Stationarity, and why differencing is the first move",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#stationarity",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Decomposition, seasonality and the baseline you skipped",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#seasonality",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Baselines are not a formality",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#baselines-are-not-a-formality",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "The classical toolkit, in one pass",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#classical",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Turning a series into a table",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#features",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Gradient-boosted trees, and why they keep winning",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#trees",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Deep forecasting: four architectures worth knowing",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#deep",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Foundation models for forecasting",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#foundation",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Probabilistic forecasts, quantiles and anomalies",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#probabilistic",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Anomaly detection is forecasting with the residual kept",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#anomaly-detection-is-forecasting-with-the-residual-kept",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Backtesting that you can trust",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#backtesting",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Build one honest backtest, then break it five ways and price each break",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "What actually breaks",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Where you meet this in the wild",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Message passing is the whole field",
     "parentTitle": "18 · Graph ML",
     "section": "Decision & Retrieval Systems",
-    "url": "topics/18-graph-ml.html#checklist",
+    "url": "topics/18-graph-ml.html#message-passing",
     "tags": [],
     "summary": "",
     "color": "var(--c-graph)"
   },
   {
     "kind": "section",
-    "title": "What this section will cover",
+    "title": "The graph as matrices",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#matrices",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "GCN: the aggregator with nothing learned in it",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#gcn",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "GraphSAGE: sampling, and the inductive jump",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#graphsage",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "GAT: let the weights be learned",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#gat",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Nodes, edges, graphs: three levels of prediction",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#tasks",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Your samples are not independent",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#splitting",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Neighbour explosion, and why a minibatch is a subgraph",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#scaling",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Over-smoothing and over-squashing",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#depth",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Knowledge graphs and embeddings",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#knowledge-graphs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Beyond message passing",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#beyond",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Classify nodes that have no informative features, then smooth it to death",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "What actually breaks",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Where you meet this in the wild",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Why this is a different game",
     "parentTitle": "19 · Scientific & Structured AI",
     "section": "Embodied & Frontier",
-    "url": "topics/19-scientific-structured-ai.html#checklist",
+    "url": "topics/19-scientific-structured-ai.html#different-game",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Invariance and equivariance, precisely",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#equivariance",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "What the symmetry buys, measured",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#what-it-buys",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Molecules: graphs, point clouds and forces",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#molecules",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Protein structure prediction, mechanism first",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#folding",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Designing molecules and proteins",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#generation",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Physics-informed neural networks",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#pinn",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Neural operators: learning the solver, not the solution",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#operators",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Symbolic regression, and outputs you can check",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#symbolic",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "The same shape, in two other fields",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#the-same-shape-in-two-other-fields",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "The loop around the model",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#loop",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Fit a toy interatomic potential three ways, then run it",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "What actually breaks",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Where you meet this in the wild",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#in-the-wild",
     "tags": [],
     "summary": "",
     "color": "var(--c-sci)"
@@ -3840,10 +4303,120 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What this section will cover",
+    "title": "The trade you are making",
     "parentTitle": "22 · World Models",
     "section": "Embodied & Frontier",
-    "url": "topics/22-world-models.html#checklist",
+    "url": "topics/22-world-models.html#trade",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "What a world model actually is",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#what",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "Compounding error, and where the bill arrives",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#compounding",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "Latent dynamics: predict in a space built for predicting",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#latent",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "PlaNet, the RSSM, and the Dreamer line",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#dreamer",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "Planning inside the model",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#planning",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "Video prediction as a world model",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#video",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "JEPA: predict representations, not pixels",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#jepa",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "Evaluating a world model",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#evaluation",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "Plot the imagination-horizon curve and find where it turns over",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "What actually breaks",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "Where you meet this in the wild",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#in-the-wild",
     "tags": [],
     "summary": "",
     "color": "var(--c-world)"
