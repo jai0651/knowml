@@ -1,6 +1,6 @@
 /* home-scroll.js — scroll-driven motion for the homepage.
 
-   Two mechanisms, both progressive enhancement:
+   Three mechanisms, all progressive enhancement:
 
      1. REVEAL. Elements marked [data-reveal] fade and lift in when they first
         enter the viewport. The hidden starting state lives behind
@@ -15,7 +15,10 @@
         cannot fight the pointer parallax in app.js, which writes a different
         set of properties into the same composed transform.
 
-   Both are skipped entirely under prefers-reduced-motion. */
+     3. TILT. Cards marked [data-tilt] get --tx/--ty from pointer position, for
+        the same reason and by the same route.
+
+   All three are skipped entirely under prefers-reduced-motion. */
 (function () {
   'use strict';
 
@@ -73,8 +76,11 @@
       });
     }
 
+    if (reduced) return;
+    initTilt();
+
     /* ---------- 2 · scrub ---------- */
-    if (reduced || !scrubTargets.length) return;
+    if (!scrubTargets.length) return;
 
     var heroDeck = document.getElementById('hvDeck');
     var raf = null;
@@ -113,5 +119,38 @@
     window.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('resize', onScroll, { passive: true });
     measure();
+
   });
+
+  /* ---------- 3 · pointer tilt on the door cards ----------
+     Same trick as the hero deck, one card at a time: write --tx/--ty as
+     normalised pointer position and let CSS turn them into a rotation. Only for
+     devices with a real pointer — on touch there is nothing to track, and a card
+     left stuck at a tilt reads as a rendering bug. */
+  function initTilt() {
+    if (window.matchMedia('(hover: none)').matches) return;
+
+    var raf = null, el = null, tx = 0, ty = 0;
+
+    function apply() {
+      raf = null;
+      if (!el) return;
+      el.style.setProperty('--tx', tx.toFixed(3));
+      el.style.setProperty('--ty', ty.toFixed(3));
+    }
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tilt]'), function (card) {
+      card.addEventListener('pointermove', function (e) {
+        var r = card.getBoundingClientRect();
+        el = card;
+        tx = Math.max(-1, Math.min(1, (e.clientX - r.left) / r.width * 2 - 1));
+        ty = Math.max(-1, Math.min(1, (e.clientY - r.top) / r.height * 2 - 1));
+        if (!raf) raf = requestAnimationFrame(apply);
+      }, { passive: true });
+      card.addEventListener('pointerleave', function () {
+        el = card; tx = ty = 0;
+        if (!raf) raf = requestAnimationFrame(apply);
+      }, { passive: true });
+    });
+  }
 })();
