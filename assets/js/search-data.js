@@ -732,6 +732,33 @@ window.SEARCH_INDEX = [
     "color": "var(--c-challenge)"
   },
   {
+    "title": "Where to Practice",
+    "section": "Map & Timeline",
+    "url": "practice.html",
+    "tags": [
+      "practice",
+      "Deep-ML",
+      "Kaggle",
+      "competitions",
+      "ML Contests",
+      "Codewars",
+      "PennyLane",
+      "Karpathy",
+      "Zero to Hero",
+      "ARENA",
+      "Hugging Face",
+      "Papers with Code",
+      "exercises",
+      "drills",
+      "coding challenges",
+      "leaderboard",
+      "projects",
+      "full"
+    ],
+    "summary": "Drill sites, competition platforms and build-from-scratch courses — what each one actually trains, and which fixes the gap you have.",
+    "color": "var(--accent)"
+  },
+  {
     "kind": "section",
     "title": "Why interviewers test this, and where it comes from",
     "parentTitle": "01 · Math & Stats Foundations",
