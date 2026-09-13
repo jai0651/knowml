@@ -27,7 +27,7 @@ STRICT = "--check-strict" in sys.argv   # non-zero exit if anything is stale, fo
 def load(p): return (ROOT / p).read_text(encoding="utf-8")
 
 PARTIALS = {n: load(f"partials/{n}.html") for n in
-            ("head", "topnav", "searchmodal", "notesdrawer")}
+            ("head", "topnav", "searchmodal", "notesdrawer", "tocrail")}
 PAGES    = json.loads(load("content/pages.json"))
 MANIFEST = json.loads(load("content/manifest.json"))
 
@@ -95,6 +95,7 @@ REGIONS = [
     ("searchmodal", r'<div class="search-modal".*?\n</div>'),
     ("notesdrawer", r'<div class="notes-drawer".*?\n</div>'),
     ("sidebar",     r'<aside class="sidebar-left".*?</aside>'),
+    ("tocrail",     r'<aside class="sidebar-right".*?</aside>'),
 ]
 
 def build():

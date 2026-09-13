@@ -123,7 +123,22 @@
     });
     toc.appendChild(frag);
 
+    /* The collapsed rail: one tick per heading, mirroring the list. Built from
+       the same pass so the two can never disagree about how many there are. */
+    var rail = document.getElementById('tocRail');
+    if (rail) {
+      var rf = document.createDocumentFragment();
+      heads.forEach(function (h) {
+        var i = document.createElement('i');
+        if (h.tagName === 'H3') i.className = 'lvl3';
+        i.setAttribute('data-for', h.id);
+        rf.appendChild(i);
+      });
+      rail.appendChild(rf);
+    }
+
     var links = toc.querySelectorAll('a');
+    var ticks = rail ? rail.querySelectorAll('i') : [];
     var io = new IntersectionObserver(function (entries) {
       entries.forEach(function (entry) {
         var id = entry.target.id;
@@ -132,10 +147,41 @@
         if (entry.isIntersecting) {
           links.forEach(function (l) { l.classList.remove('active'); });
           link.classList.add('active');
+          Array.prototype.forEach.call(ticks, function (tk) {
+            tk.classList.toggle('active', tk.getAttribute('data-for') === id);
+          });
         }
       });
     }, { rootMargin: '-15% 0px -70% 0px' });
     heads.forEach(function (h) { io.observe(h); });
+
+    /* Hover opens it on a pointer device; the toggle is how you open it without
+       one. Clicking a heading closes it again, because on touch the panel sits
+       over the very content you just asked to jump to. */
+    var drawer = document.getElementById('tocDrawer');
+    var toggle = document.getElementById('tocToggle');
+    if (drawer && toggle) {
+      toggle.addEventListener('click', function () {
+        var open = drawer.classList.toggle('is-open');
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+      toc.addEventListener('click', function (e) {
+        if (!e.target.closest('a')) return;
+        drawer.classList.remove('is-open');
+        toggle.setAttribute('aria-expanded', 'false');
+      });
+      document.addEventListener('click', function (e) {
+        if (drawer.contains(e.target)) return;
+        drawer.classList.remove('is-open');
+        toggle.setAttribute('aria-expanded', 'false');
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape' || !drawer.classList.contains('is-open')) return;
+        drawer.classList.remove('is-open');
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.focus();
+      });
+    }
   }
 
   /* ---------- search ---------- */
