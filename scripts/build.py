@@ -21,7 +21,8 @@ the change reversible and means nothing about the 2.5MB of prose moves.
 import json, re, sys, glob, os, pathlib, html as H
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CHECK = "--check" in sys.argv
+CHECK  = "--check" in sys.argv or "--check-strict" in sys.argv
+STRICT = "--check-strict" in sys.argv   # non-zero exit if anything is stale, for CI
 
 def load(p): return (ROOT / p).read_text(encoding="utf-8")
 
@@ -55,7 +56,7 @@ def sidebar_html(prefix, current_id):
     o.append(f'  <a href="{prefix}index.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--text-faint);border-bottom:1px solid var(--border-soft)">⌂ Home</a>')
     for label, href in [("🧭 Roadmaps", f"{prefix}roadmaps.html"), ("🌳 Technique Map", "./technique-map.html"),
                         ("↺ Review &amp; drill", f"{prefix}review.html"), ("🏋️ Where to practise", f"{prefix}practice.html")]:
-        cls = ' class="active"' if False else ''
+        cls = ' class="active"' if (href.endswith("technique-map.html") and current_id == "technique-map") else ''
         o.append(f'  <a{cls} href="{href}" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">{label}</a>')
     o.append('  <div class="sb-primary">')
     for label, href in [("Browse all sections", "sections.html"), ("Roadmaps", "roadmaps.html"),
@@ -105,10 +106,13 @@ def build():
         out = src
         ctx = dict(cfg)
         ctx["here"] = HERE.get(os.path.basename(rel), "")
-        ctx["description"] = H.escape(cfg["description"], quote=False).replace('"', "&quot;")
+        desc = H.escape(cfg["description"], quote=False).replace('"', "&quot;")
+        ctx["descMeta"] = f'<meta name="description" content="{desc}">' if desc else ""
         ctx["title"] = H.escape(cfg["title"], quote=False)
         ctx["notesPlaceholder"] = cfg.get("notesPlaceholder", "")
         ctx["headExtra"] = cfg.get("headExtra", "")
+        ctx["hamburgerStyle"] = ' style="visibility:hidden"' if cfg.get("hamburgerHidden") else ""
+        ctx["hamburgerGlyph"] = "" if cfg.get("hamburgerHidden") else "\u2630"
 
         for name, pat in REGIONS:
             m = re.search(pat, out, re.S)
@@ -132,3 +136,6 @@ if __name__ == "__main__":
     print(f"{len(changed)} pages {verb}, {same} already identical")
     for c in changed[:12]: print("   ", c)
     if len(changed) > 12: print(f"    … and {len(changed)-12} more")
+    if STRICT and changed:
+        print("\nFAIL: pages are out of sync with partials/ — run `npm run build` and commit the result.")
+        sys.exit(1)
