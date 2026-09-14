@@ -50,6 +50,9 @@ RULES = {
  "34-model-atlas-speech-audio":    (r"\b(speech|audio|word error rate|spectrogram|mel.?spectrogram)\b", None),
  "35-model-atlas-vision-generative":(r"\b(image|vision|fid|generat|diffusion)\b", None),
  "36-millennium-prize-problems":   (r"\b(np-?(hard|complete)|travelling salesman|satisfiability|prime factor|navier|riemann)\b", None),
+ "38-llm-inference-at-scale":      (r"\b(kv cache|paged attention|continuous batch|speculative decod|prefill|decode|quantiz|fp8|int8|throughput|goodput|latency|serving|batching|expert rout|moe)\b", "Inference"),
+ "39-realtime-voice-ai":           (r"\b(streaming|latency|audio|speech|buffer|chunk|real.?time|jitter|voice)\b", None),
+ "40-diffusion-video-inference":   (r"\b(diffusion|denois|ddim|sampler|timestep|guidance|cache|distill|latent|video|frame)\b", None),
  "37-ai-in-industry":              (r"\b(forecast|fraud|recommend|anomaly|churn|credit|medical|financial)\b", "Financial Engineering"),
 }
 

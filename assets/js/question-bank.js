@@ -1022,7 +1022,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-genai)",
 "level": "beginner",
 "q": "Why isn't a plain autoencoder a generative model, but a VAE is?",
-"a": "<p>A plain autoencoder's latent space is shaped only by reconstruction loss — there's no guarantee that a random point in that space decodes to anything sensible, so you can't sample from it. A VAE adds a KL-divergence term that pulls every input's latent distribution toward a fixed prior (usually standard Gaussian), which forces the latent space to be smooth and densely packed with no gaps — so sampling any point from that prior and decoding it gives a plausible output, not just memorized reconstructions.</p>"
+"a": "<p>A plain autoencoder's latent space is shaped only by reconstruction loss. Nothing guarantees that a random point in it decodes to anything sensible, so you cannot sample from it. A VAE adds a KL-divergence term that pulls every input's latent distribution toward a fixed prior, usually a standard Gaussian. That forces the space to be smooth and densely packed, with no gaps, so any point drawn from the prior decodes to a plausible output rather than a memorized reconstruction.</p>"
 },
 {
 "id": "12-generative-models::2",
@@ -1033,7 +1033,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-genai)",
 "level": "intermediate",
 "q": "Why do diffusion models train more stably than GANs?",
-"a": "<p>GAN training is an adversarial minimax game between two networks with no fixed target — the \"correct\" gradient for the generator keeps changing as the discriminator updates, and nothing guarantees convergence rather than oscillation or collapse. Diffusion training has a single fixed correct answer at every step (the noise actually added), so it reduces to ordinary supervised regression with a simple L2 loss — no adversary, no oscillation, a loss curve that actually tracks improvement.</p>"
+"a": "<p>GAN training is an adversarial minimax game between two networks with no fixed target. The \"correct\" gradient for the generator keeps changing as the discriminator updates, and nothing guarantees convergence rather than oscillation or collapse. Diffusion training has one fixed correct answer at every step, the noise actually added, so it reduces to ordinary supervised regression with an L2 loss. There is no adversary to oscillate against, and the loss curve tracks improvement.</p>"
 },
 {
 "id": "12-generative-models::3",
@@ -3146,5 +3146,269 @@ window.KML_QUESTIONS = [
 "level": "deep",
 "q": "Which scientific problems should you expect machine learning to make progress on next?",
 "a": "<p>The ones whose structure resembles the successes rather than the disappointments. Look for three things: a large body of consistent, well-measured historical data; a well-posed output the model can be asked for; and a verification signal that is cheap, fast and not gameable. Protein folding had all three, with the Protein Data Bank, coordinates as output, and CASP as a blind benchmark. Weather had all three, with reanalysis archives, gridded forecasts, and tomorrow as the judge. Conversely, expect slow progress where the verifier is a wet-lab experiment, a multi-year trial or a human expert's opinion, because throughput on hypotheses stops being the constraint. The corollary is that building a cheap verifier for a field is often a higher-leverage contribution than building a better model for it.</p>"
+},
+{
+"id": "38-llm-inference-at-scale::0",
+"pageId": "38-llm-inference-at-scale",
+"page": "38-llm-inference-at-scale",
+"pageTitle": "LLM Inference at Scale",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "beginner",
+"q": "What is prefill/decode disaggregation, and what does it cost?",
+"a": "<p>It runs the two phases of a request on separate GPU pools instead of sharing one. The motivation is that the phases want different machines: prefill is compute-bound and latency-sensitive, so it prefers wide tensor parallelism and small batches, while decode is memory-bandwidth-bound and prefers the largest batch the KV pool allows. A single pool must pick one configuration for both, and two pools do not. The cost is that prefill produces the KV cache and decode consumes it, so that cache has to cross an interconnect. Whether the cost is acceptable is arithmetic rather than opinion: the transfer time as a fraction of the prefill time is the KV bytes per token times the achieved FLOP rate, divided by twice the parameter count times the link bandwidth. On NVLink that fraction is well under one percent; on commodity Ethernet it is tens of percent.</p>"
+},
+{
+"id": "38-llm-inference-at-scale::1",
+"pageId": "38-llm-inference-at-scale",
+"page": "38-llm-inference-at-scale",
+"pageTitle": "LLM Inference at Scale",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "beginner",
+"q": "Why is FP8 weight quantization roughly twice as fast rather than just smaller?",
+"a": "<p>Because the tensor cores have a separate, faster path for it. An H100 datasheet lists 1,979 TFLOPS for BF16 and 3,958 for FP8, a factor of exactly two, and that ratio comes from the numeric format rather than from any other hardware difference. The memory saving is real too and matters more during decode, which is bandwidth-bound, but the compute doubling is what helps prefill. The two encodings are E4M3, with four exponent bits and three mantissa bits, and E5M2, which trades a mantissa bit for range. E4M3 is the usual choice for weights and activations because precision matters more than range once a scaling factor is applied, and E5M2 appears more often for gradients and occasionally for KV cache.</p>"
+},
+{
+"id": "38-llm-inference-at-scale::2",
+"pageId": "38-llm-inference-at-scale",
+"page": "38-llm-inference-at-scale",
+"pageTitle": "LLM Inference at Scale",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Why does MXFP4 work when plain INT4 with one scale does not?",
+"a": "<p>Because of where the scaling factor lives. A single per-tensor scale has to cover the largest magnitude in the tensor, and weight distributions have outliers, so one large value forces a step size that rounds almost everything else to zero. MXFP4 as specified by OCP puts an E8M0 scale on every block of 32 elements, so an outlier only distorts its own block and the other blocks keep sensible scales. The cost is the scale storage, which works out to four bits per element plus eight bits per thirty-two, or 4.25 bits per weight. NVFP4 halves the block to 16 elements and uses an E4M3 scale, reaching 4.5 bits with finer adaptation, and NVIDIA reports around one percent or less accuracy degradation against FP8 on reasoning benchmarks. The general principle is that low-bit quantization is a question about granularity, not about bit width alone.</p>"
+},
+{
+"id": "38-llm-inference-at-scale::3",
+"pageId": "38-llm-inference-at-scale",
+"page": "38-llm-inference-at-scale",
+"pageTitle": "LLM Inference at Scale",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "You want to serve 500 customer LoRA adapters on one base model. What dominates the cost?",
+"a": "<p>Not storage. A rank-16 adapter on an 8B model with adapted attention projections is about 13.6M parameters, or 27 MB in BF16, so 500 of them are under 14 GB and sit comfortably beside a 16 GB base model. What dominates is bandwidth during decode, and specifically the number of <em>distinct</em> adapters in a batch rather than the batch size, because requests sharing an adapter read it once. At rank 16 with 32 distinct adapters the extra read is about five percent of the base weights; at rank 64 with 128 distinct it approaches ninety percent, and the adapters cost nearly as much as the model. The second constraint is that the LoRA path cannot be one GEMM, since each sequence needs its own matrices, which is what Punica's SGMV kernel and S-LoRA's unified paging exist to solve. Practically, cap the maximum rank fleet-wide, because serving buffers are sized for the largest adapter admitted.</p>"
+},
+{
+"id": "38-llm-inference-at-scale::4",
+"pageId": "38-llm-inference-at-scale",
+"page": "38-llm-inference-at-scale",
+"pageTitle": "LLM Inference at Scale",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "intermediate",
+"q": "Why does decode need a different attention kernel from prefill?",
+"a": "<p>Because FlashAttention parallelises over batch, heads and blocks of queries, and at decode time there is exactly one query per request, so that third dimension disappears. Only batch times heads is left to fill the GPU, and the Flash-Decoding authors note that if the batch is smaller than the SM count, 108 on an A100, the kernel uses a small part of the device, with batch one using under one percent of it. The fix is split-K applied to the sequence: divide the keys and values into chunks, attend to each in parallel, store one extra log-sum-exp scalar per row per split, then rescale and combine in a cheap second pass. The win is largest exactly when the context is long and the batch is small, which is when parallelism over batch is scarcest, and the reported speedup reaches eight times for very long sequences.</p>"
+},
+{
+"id": "38-llm-inference-at-scale::5",
+"pageId": "38-llm-inference-at-scale",
+"page": "38-llm-inference-at-scale",
+"pageTitle": "LLM Inference at Scale",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "You have 32 requests at 8k context on a 70B model and 64 GB of host RAM free. Should you offload the KV cache?",
+"a": "<p>It depends entirely on whether that KV is being read every step, and the two answers are opposite. Active decoding KV is read in full on every token: 32 requests at 8,192 tokens and 320 KiB per token is 85.9 GB per step, which takes about 26 ms over H100 HBM at 3.35 TB/s and about 1.34 seconds over PCIe Gen5 at 64 GB/s. That is a factor of fifty on the inner loop and it destroys the product. Cached prefixes that nobody is currently reading are the opposite case, because the real comparison is fetching them against recomputing them. Fetching costs the KV bytes divided by the link bandwidth, recomputing costs twice the parameter count times the tokens divided by the achieved FLOP rate, and fetching wins whenever the link exceeds the same break-even bandwidth as before. For this model that break-even is under 1 GB/s, so PCIe is roughly seventy times faster than it needs to be. The rule is to offload KV that will be read once, later, and never KV that will be read on every step.</p>"
+},
+{
+"id": "38-llm-inference-at-scale::6",
+"pageId": "38-llm-inference-at-scale",
+"page": "38-llm-inference-at-scale",
+"pageTitle": "LLM Inference at Scale",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "Your expert-parallel MoE deployment is at a third of its expected throughput. How do you diagnose it?",
+"a": "<p>Start by logging tokens per expert per step, because expert load imbalance is the default explanation and it is invisible in ordinary metrics. A step finishes when the busiest expert finishes, so the maximum load sets the clock while the mean looks fine, and every idle GPU reports as healthy. A modest popularity skew in the router produces imbalance factors approaching an order of magnitude, which is precisely the gap you are describing. Second, check whether tokens are crossing nodes: intra-node all-to-all over NVLink and cross-node over RDMA differ by roughly a factor of nine in DeepEP's own benchmarks, which is why DeepSeek-V3 constrains each token to at most four nodes. Third, compare against a profile with simulated perfect balance; the LMSYS report found default imbalance cost twenty percent against DeepSeek's profile while perfect balance narrowed the gap to six. Mitigations are per-expert routing bias, which DeepSeek applies to routing scores only so the gating values are undistorted, and duplicating high-load experts as redundant copies.</p>"
+},
+{
+"id": "38-llm-inference-at-scale::7",
+"pageId": "38-llm-inference-at-scale",
+"page": "38-llm-inference-at-scale",
+"pageTitle": "LLM Inference at Scale",
+"group": "Hands-on",
+"color": "var(--c-practice)",
+"level": "deep",
+"q": "Your server's throughput went up 40% after a change and users are complaining. Explain and fix.",
+"a": "<p>Almost certainly the change raised concurrency, and throughput and goodput diverge past a point. Throughput rises monotonically with concurrency until the hardware saturates, but goodput, meaning the tokens delivered inside the latency contract, peaks much earlier and then falls to zero. In a simple model of an 8B on one H100 with a two-second TTFT target, goodput peaks around twenty-four concurrent requests while throughput keeps climbing to roughly twice that level at a concurrency where SLO attainment is zero. So the 40% is real and useless. The fix is to make goodput the reported metric, sweep concurrency to find its peak on your own traffic, and then defend that operating point with admission control rather than a longer queue. vLLM exposes this directly: cap queued prefill tokens at the target TTFT times the prefill throughput and reject beyond it, so clients get an immediate rejection they can retry rather than a slow response they cannot use. Keep a KV watermark as well, since preemption and recompute under cache pressure is the other way a throughput gain turns into a latency loss.</p>"
+},
+{
+"id": "39-realtime-voice-ai::0",
+"pageId": "39-realtime-voice-ai",
+"page": "39-realtime-voice-ai",
+"pageTitle": "Real-Time Voice AI: The Latency Budget",
+"group": "Hands-on",
+"color": "var(--c-speech)",
+"level": "beginner",
+"q": "Why is 800 ms the wrong number for a voice agent?",
+"a": "<p>Because human conversation does not work at that speed. Stivers and colleagues measured the gap between a question and its answer across ten languages and found a unimodal distribution in every one, with modes between 0 and 200 ms and a cross-linguistic median of about 100 ms. Even the slowest language mean, Danish at 469 ms, is far below 800.</p>\n      <p>Telephony reaches a compatible conclusion from the other side. ITU-T G.114 treats one-way mouth-to-ear delay under 150 ms as essentially transparent and over 400 ms as unacceptable for planning.</p>\n      <p>A turn that takes 800 ms is therefore not slightly slow. It is outside the range in which conversational gaps have been observed, which is why it reads as a machine rather than as hesitation.</p>"
+},
+{
+"id": "39-realtime-voice-ai::1",
+"pageId": "39-realtime-voice-ai",
+"page": "39-realtime-voice-ai",
+"pageTitle": "Real-Time Voice AI: The Latency Budget",
+"group": "Hands-on",
+"color": "var(--c-speech)",
+"level": "beginner",
+"q": "What is endpointing and why is it not the same as voice activity detection?",
+"a": "<p>Voice activity detection answers whether a frame of audio contains speech. It is cheap, essentially solved, and runs in well under a millisecond per chunk on a CPU.</p>\n      <p>Endpointing answers a different and much harder question: has this person finished their turn, or are they pausing mid-thought. The acoustic evidence for those two cases is identical, because both are silence.</p>\n      <p>A fixed silence threshold is the naive policy, and it has exactly two behaviours: cutting people off when a hesitation runs long, and adding its full value as dead air to every completed turn. Semantic endpointing improves on it by reading the partial transcript, since the words distinguish an unfinished account number where the silence cannot.</p>"
+},
+{
+"id": "39-realtime-voice-ai::2",
+"pageId": "39-realtime-voice-ai",
+"page": "39-realtime-voice-ai",
+"pageTitle": "Real-Time Voice AI: The Latency Budget",
+"group": "Hands-on",
+"color": "var(--c-speech)",
+"level": "intermediate",
+"q": "Your agent takes 900 ms per turn. The LLM's time to first token is 200 ms. Where do you look, and in what order?",
+"a": "<p>At endpointing first, because it is usually the largest single item and it is invisible in any model metric. Published operating points put a semantic endpointer at roughly 295 ms of mean latency for a 10% false-cutoff rate and 543 ms for 5%, so the difference between two reasonable settings exceeds the entire model turn.</p>\n      <p>Second, at whether text is buffered to a sentence boundary before synthesis starts. At 40 tokens per second that silently adds around 500 ms for a 20-token sentence.</p>\n      <p>Third, at transport. Two network legs plus two jitter buffers is commonly 200 ms or more, and nobody looks at it.</p>\n      <p>Only then at the recogniser, and specifically at whether its chunk delay genuinely overlaps the user's speech rather than being paid after the last word. The general rule: the terms nobody measures are larger than the term everybody optimises.</p>"
+},
+{
+"id": "39-realtime-voice-ai::3",
+"pageId": "39-realtime-voice-ai",
+"page": "39-realtime-voice-ai",
+"pageTitle": "Real-Time Voice AI: The Latency Budget",
+"group": "Hands-on",
+"color": "var(--c-speech)",
+"level": "intermediate",
+"q": "Why can a streaming ASR model afford lookahead almost for free in a voice agent?",
+"a": "<p>Because chunk delay overlaps the utterance instead of appending to it. A recogniser emitting with 160 ms of right context is 160 ms behind the audio at every instant, but the user is still talking, so that lag costs no turn latency at all.</p>\n      <p>Only the final chunk's delay lands after the last word, and even that runs concurrently with the endpointer deciding whether the turn is over.</p>\n      <p>NVIDIA's cache-aware streaming numbers show the accuracy side is also mild: moving chunk latency from 0.16 s to 0.56 s improved word error rate only from 7.84% to 7.22%, about 0.16 points per 100 ms.</p>\n      <p>So lookahead is the wrong knob to fight over. The right question is how much of it is still unpaid at the moment the endpointer commits.</p>"
+},
+{
+"id": "39-realtime-voice-ai::4",
+"pageId": "39-realtime-voice-ai",
+"page": "39-realtime-voice-ai",
+"pageTitle": "Real-Time Voice AI: The Latency Budget",
+"group": "Hands-on",
+"color": "var(--c-speech)",
+"level": "intermediate",
+"q": "Why does a voice agent use WebRTC rather than a WebSocket?",
+"a": "<p>Because TCP's ordering guarantee is the wrong guarantee for live audio. A lost segment is retransmitted and every later segment queues behind it, so a single loss stalls the stream by at least a round trip.</p>\n      <p>Audio that arrives 200 ms late has missed its playout slot and is useless, so concealing 20 ms of missing sound is strictly better than waiting. WebRTC carries media over SRTP on UDP, which turns a loss into a hole rather than a stall, and pairs it with an adaptive jitter buffer that time-stretches audio to absorb arrival spread.</p>\n      <p>It also brings the rest of the real-time stack. RFC 7874 makes Opus mandatory and says endpoints should include acoustic echo cancellation, which you need for barge-in. WebSockets remain reasonable for control messages and for server-to-server hops on a reliable network.</p>"
+},
+{
+"id": "39-realtime-voice-ai::5",
+"pageId": "39-realtime-voice-ai",
+"page": "39-realtime-voice-ai",
+"pageTitle": "Real-Time Voice AI: The Latency Budget",
+"group": "Hands-on",
+"color": "var(--c-speech)",
+"level": "deep",
+"q": "Walk through implementing barge-in properly. What breaks in the naive version?",
+"a": "<p>Three problems, and the third is the one that ships broken. First, you must hear the user through your own output, which requires acoustic echo cancellation with the playback signal as reference. The hard condition is double-talk, both parties speaking at once, which is precisely what barge-in is, and what the ICASSP AEC challenges exist to measure.</p>\n      <p>Second, you must stop, and stopping is not instantaneous. Frames already handed to the playout buffer will be heard. With an 80 ms buffer and 20 ms frames, assume roughly 100 ms of speech reaches the ear after you cancel.</p>\n      <p>Third, and most often wrong, you must repair conversation state. The naive implementation writes the full generated response into history, so the model believes it delivered a sentence the user never heard and will not repeat the information.</p>\n      <p>The fix is to truncate the assistant turn at the point audio actually stopped, which requires the synthesiser to return timing marks aligning text to emitted samples. Cancellation must also reach the language model, or an orphaned generation arrives later and answers the previous question.</p>\n      <p>Finally, backchannels like \"mhm\" should not trigger any of this, and telling them apart needs the words rather than the energy.</p>"
+},
+{
+"id": "39-realtime-voice-ai::6",
+"pageId": "39-realtime-voice-ai",
+"page": "39-realtime-voice-ai",
+"pageTitle": "Real-Time Voice AI: The Latency Budget",
+"group": "Hands-on",
+"color": "var(--c-speech)",
+"level": "deep",
+"q": "You are choosing between a cascade and a speech-to-speech model in 2026. Argue both sides with specifics.",
+"a": "<p>The cascade's case is operational. Every intermediate is a string, so you can log it, filter it, apply mature text guardrails, constrain tool calls, run evals and hand transcripts to compliance. Each component swaps independently, which matters in a field where the best recogniser and the best synthesiser come from different labs.</p>\n      <p>Its costs are concrete: three serial models, three services that can each fail mid-turn, and a transcript that destroys prosody, emotion and the timing of overlapped speech. A careful 2026 self-hosted build of exactly this shape measured 755 ms to first audio.</p>\n      <p>The speech-to-speech case is latency and fidelity. Moshi reports 160 ms theoretical, an 80 ms frame plus 80 ms of acoustic delay, and about 200 ms in practice on an L4. GPT-4o's system card claims a 320 ms average. Interruption is close to native because a full-duplex model never maintained a turn state to unwind.</p>\n      <p>Its cost is observability. There is no transcript unless you run a parallel recogniser, which reintroduces the component you removed, and constraining generation mid-stream is harder.</p>\n      <p>The practical tiebreaker is deployment. The same 2026 comparison found an end-to-end model at 702 ms through a hosted API and 146 seconds run locally, so self-hosted and regulated deployments still mostly pick the cascade.</p>"
+},
+{
+"id": "39-realtime-voice-ai::7",
+"pageId": "39-realtime-voice-ai",
+"page": "39-realtime-voice-ai",
+"pageTitle": "Real-Time Voice AI: The Latency Budget",
+"group": "Hands-on",
+"color": "var(--c-speech)",
+"level": "deep",
+"q": "How does packet loss reach your word error rate, and what would you do about it?",
+"a": "<p>It reaches it through concealment rather than through silence. When a packet is lost the decoder synthesises plausible audio to bridge the gap, tuned to be inoffensive to a human ear, and your recogniser was trained on neither the artefact nor the discontinuity.</p>\n      <p>The damage is a knee rather than a slope. A study over G.722 telephony found a clean-trained recogniser holding up to around 10% loss before degrading roughly in proportion, while a model trained on network-distorted speech pushed that knee to about 15%.</p>\n      <p>The mitigations stack. At the transport layer, enable Opus in-band forward error correction, which carries a low-bitrate copy of the previous frame in the next packet and recovers isolated losses with no retransmission and no round trip. It covers only one frame back, so bursts defeat it.</p>\n      <p>Size the jitter buffer from measured arrival statistics rather than a constant, since a shallow buffer converts jitter into loss.</p>\n      <p>At the model layer, either fine-tune on audio degraded the way your production path degrades it, or put a front-end adaptation network ahead of a frozen recogniser, as Dissen and colleagues did with Whisper at Interspeech 2024.</p>\n      <p>Above all, measure word error rate on audio captured at the far end of your own transport. A benchmark number from clean files describes a system you are not running.</p>"
+},
+{
+"id": "40-diffusion-video-inference::0",
+"pageId": "40-diffusion-video-inference",
+"page": "40-diffusion-video-inference",
+"pageTitle": "Diffusion & Video at Inference Time",
+"group": "Hands-on",
+"color": "var(--c-genai)",
+"level": "beginner",
+"q": "Why is a diffusion model expensive to run compared with a GAN?",
+"a": "<p>Because quality comes from an iterative loop rather than a single pass. A GAN generator produces its output in one forward evaluation. A diffusion sampler integrates a reverse process, and each increment of that integration is a full forward pass of a large network.</p>\n      <p>The other two components barely count. The text encoder runs once per request and the decoder runs once at the end, so a 50-step generation is essentially 50 network evaluations, doubled to 100 if classifier-free guidance is on.</p>\n      <p>That is the whole cost model, and it is why every acceleration technique for diffusion is ultimately about reducing the number of function evaluations or making each one cheaper.</p>"
+},
+{
+"id": "40-diffusion-video-inference::1",
+"pageId": "40-diffusion-video-inference",
+"page": "40-diffusion-video-inference",
+"pageTitle": "Diffusion & Video at Inference Time",
+"group": "Hands-on",
+"color": "var(--c-genai)",
+"level": "beginner",
+"q": "What does classifier-free guidance cost at inference, and how do people avoid it?",
+"a": "<p>It doubles the forward passes. Each step evaluates the model once with the prompt and once without, then extrapolates away from the unconditional prediction, so a 50-step guided generation is 100 passes rather than 50.</p>\n      <p>The usual fix is guidance distillation: train a student that takes the guidance scale as an input and reproduces the combined output in a single pass. FLUX.1 [dev] ships this way, and HunyuanVideo reports about 1.9 times acceleration from it.</p>\n      <p>A cheaper partial fix is to apply guidance only over an interval of noise levels, which removes the second pass outside that interval and, in the paper that proposed it, also improved sample quality.</p>"
+},
+{
+"id": "40-diffusion-video-inference::2",
+"pageId": "40-diffusion-video-inference",
+"page": "40-diffusion-video-inference",
+"pageTitle": "Diffusion & Video at Inference Time",
+"group": "Hands-on",
+"color": "var(--c-genai)",
+"level": "intermediate",
+"q": "You need to get from 50 steps to 10. What do you try, and in what order?",
+"a": "<p>Start with things that do not touch the weights. Swap the sampler for a higher-order ODE solver, since that changes the step floor by roughly a square root and costs nothing. Then check whether guidance can be limited to an interval, which removes a second pass from the steps outside it.</p>\n      <p>Next, feature caching. Measure the speedup at two intervals, fit the reuse model, and you get both the achievable range and the ceiling from the same two measurements.</p>\n      <p>Only then reach for distillation, because it costs a training run and changes the model's behaviour. Guidance distillation first, since it removes a factor of two with little quality argument. Step distillation last, because it is the one that costs diversity.</p>"
+},
+{
+"id": "40-diffusion-video-inference::3",
+"pageId": "40-diffusion-video-inference",
+"page": "40-diffusion-video-inference",
+"pageTitle": "Diffusion & Video at Inference Time",
+"group": "Hands-on",
+"color": "var(--c-genai)",
+"level": "intermediate",
+"q": "What does a 4-step distilled model give up, and how would you measure it?",
+"a": "<p>Mostly diversity, not fidelity. The DMD2 authors put their 4-step and 1-step students at FID 19.32 and 19.01 against an SDXL teacher at 19.36, so on a distribution metric the student is level, and they separately report a degradation in image diversity.</p>\n      <p>The mechanism is that distilled models fix their image structure in the first evaluation, where a base model spreads structural decisions over many steps. With one evaluation there is nowhere for the seed to change composition, so it changes only surface detail.</p>\n      <p>FID will not show this, because it compares distributions over thousands of samples. Measure it directly: generate many samples of a single prompt with different seeds, embed them, and compare mean pairwise distance against the base model on the same prompts.</p>"
+},
+{
+"id": "40-diffusion-video-inference::4",
+"pageId": "40-diffusion-video-inference",
+"page": "40-diffusion-video-inference",
+"pageTitle": "Diffusion & Video at Inference Time",
+"group": "Hands-on",
+"color": "var(--c-genai)",
+"level": "intermediate",
+"q": "Why do straighter probability paths need fewer sampling steps?",
+"a": "<p>Because Euler integration of a straight line is exact at any step size. All the discretisation error comes from curvature, so a perfectly straight path can be traversed in one step and a curved one cannot.</p>\n      <p>The subtlety is that a linear interpolant does not by itself give a straight flow. The marginal velocity field averages over every data point a given noise sample might become, and that average bends. Straightness is a property of the coupling between noise and data, not of the schedule.</p>\n      <p>Reflow fixes this by running the learned ODE, recording where each noise sample actually lands, and retraining on those pairs. With one destination per starting point the paths stop crossing and the induced field is straight.</p>"
+},
+{
+"id": "40-diffusion-video-inference::5",
+"pageId": "40-diffusion-video-inference",
+"page": "40-diffusion-video-inference",
+"pageTitle": "Diffusion & Video at Inference Time",
+"group": "Hands-on",
+"color": "var(--c-genai)",
+"level": "deep",
+"q": "Derive the speedup from feature caching and state its limit.",
+"a": "<p>Let the full network cost 1 and the cached path cost a fraction r of it, and run the full network once every N steps. Average cost per step is (1 + (N-1)r)/N, so the speedup is N divided by that, which is N/(1 + (N-1)r).</p>\n      <p>Take N to infinity and the speedup tends to 1/r. The interval is a knob but the reuse fraction is a ceiling, so a scheme is characterised by how cheap its cheap path is rather than by how far apart the full evaluations are spaced.</p>\n      <p>This is usable in reverse. DeepCache report 2.30 times on Stable Diffusion v1.5 at interval 5; inverting gives r of about 0.293 and a ceiling near 3.4 times, which tells you not to spend a week tuning the interval. It also predicts that caching will not compose with a 4-step model, because the interval cannot exceed the step count.</p>"
+},
+{
+"id": "40-diffusion-video-inference::6",
+"pageId": "40-diffusion-video-inference",
+"page": "40-diffusion-video-inference",
+"pageTitle": "Diffusion & Video at Inference Time",
+"group": "Hands-on",
+"color": "var(--c-genai)",
+"level": "deep",
+"q": "Why is generating a five-second video not the same as generating 120 images?",
+"a": "<p>Because the whole clip is one attention sequence. Split N tokens into k per-frame groups and attend within each and you pay k times (N/k) squared, which is N squared over k. Attend jointly and you pay N squared. The ratio is exactly k, the number of latent frames.</p>\n      <p>Concretely, HunyuanVideo compresses 129 frames of 1280 by 720 by 8 in space and 4 in time, patchifies by 2 spatially, and gets 33 by 45 by 80, which is 118,800 tokens. That is 33 times the tokens of one frame and 1,089 times the attention, so 33 times more attention work per frame of output.</p>\n      <p>Two consequences. Temporal compression in the autoencoder is worth more than any sampler change, since dropping it here would cost about 15 times on attention. And doubling the clip length roughly quadruples the dominant term, so duration budgets are not linear.</p>"
+},
+{
+"id": "40-diffusion-video-inference::7",
+"pageId": "40-diffusion-video-inference",
+"page": "40-diffusion-video-inference",
+"pageTitle": "Diffusion & Video at Inference Time",
+"group": "Hands-on",
+"color": "var(--c-genai)",
+"level": "deep",
+"q": "How does serving a diffusion model differ from serving an LLM?",
+"a": "<p>The roofline position is opposite. One denoiser pass moves 2P bytes of weights and does roughly 2PTB operations over T tokens per sample and B samples, so arithmetic intensity is TB. For LLM decode T is 1 and intensity is the batch size; for a 1024 pixel image T is about 4,096 and for a five-second clip it is over 100,000.</p>\n      <p>Against an H100's ridge point near 295 operations per byte, a diffusion step is compute-bound at batch 1. Batching therefore buys much less than it does during decode, and raising it mostly adds latency.</p>\n      <p>The rest follows. There is no KV cache, so capacity is weights plus activations rather than context length. Scaling out means sequence parallelism over one sample rather than more concurrent requests. Weight-only quantisation gains little, because bytes moved was never the constraint. And hardware should be chosen on arithmetic throughput rather than on memory bandwidth.</p>"
 }
 ];

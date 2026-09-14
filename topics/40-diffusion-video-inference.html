@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>/* Set the theme before first paint. Without this the page renders with the
+   hardcoded data-theme below, then app.js corrects it ~600 lines later, so every
+   navigation flashed before settling.
+
+   The migration matters as much as the default. The previous build defaulted to
+   light AND wrote that default to storage on every single load, so a stored
+   "light" is almost never a choice someone made — with light as the default, the
+   only toggle worth making was the one to dark. Clearing a stored "light" once
+   is what lets the new dark default actually reach people who never picked
+   anything. Anyone who genuinely wants light toggles once and is remembered,
+   because app.js now only persists on a real toggle. */
+try{var k="np-theme",v=localStorage.getItem(k);
+if(!localStorage.getItem("np-theme-v2")){if(v==="light"){localStorage.removeItem(k);v=null}localStorage.setItem("np-theme-v2","1")}
+document.documentElement.setAttribute("data-theme",v||"dark")}catch(e){}
+/* A skipped cross-document view transition rejects a promise no author code
+   owns. It can fire before any deferred script has run, so the listener has to
+   be registered here rather than in app.js. Matched narrowly: everything else,
+   including unrelated AbortErrors, still reaches the console. */
+addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name==="AbortError"&&/transition was skipped/i.test(r.message||""))e.preventDefault()});</script>
+<title>Diffusion &amp; Video at Inference Time · KnowML</title>
+<meta name="description" content="Making diffusion and video models cheap enough to serve: step reduction and ODE solvers, progressive and adversarial distillation, rectified flow, feature caching and its derivable ceiling, why guidance costs double, the token arithmetic of a video clip, and why diffusion serving is compute-bound.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<link rel="icon" type="image/svg+xml" href="../assets/img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../assets/img/favicon-32.png">
+<link rel="apple-touch-icon" href="../assets/img/apple-touch-icon.png">
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body data-section="40-diffusion-video-inference" data-page-id="40-diffusion-video-inference">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topnav">
+  <button class="iconbtn hamburger" id="hamburger" aria-label="Menu">☰</button>
+  <a class="backbtn" id="backBtn" href="../index.html" data-fallback="../index.html" title="Back"><span class="bb-arrow">←</span><span class="bb-label">Home</span></a>
+  <a class="brand" href="../index.html"><img class="brand-logo" src="../assets/img/logo.svg" alt="" width="22" height="22">KnowML</a>
+  <div class="spacer"></div>
+  <nav class="navlinks">
+    <a href="../sections.html">Browse</a>
+    <a href="../roadmaps.html">Roadmaps</a>
+    <a href="../labs.html">Labs</a>
+    <a href="../practice.html">Practice</a>
+    <a href="../map.html">Map</a>
+  </nav>
+  <button class="navbtn" id="searchTrigger">🔍 <span class="navbtn-label">Search everything</span> <kbd>⌘K</kbd></button>
+  <button class="iconbtn" id="notesToggleTop" data-notes-toggle title="My notes">✎</button>
+  <button class="iconbtn" id="themeToggle" title="Toggle theme">☾</button>
+</header>
+
+<div class="layout" id="layoutRoot">
+<aside class="sidebar-left" id="sidebarLeft">
+  <a href="../index.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--text-faint);border-bottom:1px solid var(--border-soft)">⌂ Home</a>
+  <a href="../roadmaps.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">🧭 Roadmaps</a>
+  <a href="./technique-map.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">🌳 Technique Map</a>
+  <a href="../review.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">↺ Review &amp; drill</a>
+  <a href="../practice.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">🏋️ Where to practise</a>
+  <div class="sb-primary">
+    <a href="../sections.html">Browse all sections</a>
+    <a href="../roadmaps.html">Roadmaps</a>
+    <a href="../labs.html">The Labs</a>
+    <a href="../practice.html">Where to practise</a>
+    <a href="../map.html">Site map</a>
+  </div>
+
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-math);color:var(--c-math)"></span>Foundations</summary>
+    <div class="links">
+      <a href="./01-math-foundations.html" data-page="01-math-foundations"><span class="done"></span>01 · Math &amp; Stats Foundations</a>
+      <a href="./02-classical-ml.html" data-page="02-classical-ml"><span class="done"></span>02 · Classical Supervised ML</a>
+      <a href="./03-unsupervised-self-supervised.html" data-page="03-unsupervised-self-supervised"><span class="done"></span>03 · Unsupervised &amp; Self-Supervised</a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-nn);color:var(--c-nn)"></span>Neural Nets &amp; Vision</summary>
+    <div class="links">
+      <a href="./04-neural-network-fundamentals.html" data-page="04-neural-network-fundamentals"><span class="done"></span>04 · Neural Network Fundamentals</a>
+      <a href="./05-cnn-vision-foundations.html" data-page="05-cnn-vision-foundations"><span class="done"></span>05 · CNNs &amp; Vision</a>
+      <a href="./06-modern-vision-foundation-models.html" data-page="06-modern-vision-foundation-models"><span class="done"></span>06 · Vision Foundation Models</a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-attention);color:var(--c-attention)"></span>Sequence, Attention &amp; LLMs</summary>
+    <div class="links">
+      <a href="./07-sequence-modeling-pre-transformer.html" data-page="07-sequence-modeling-pre-transformer"><span class="done"></span>07 · Sequence Modeling Pre-Transformer</a>
+      <a href="./08-attention-transformers.html" data-page="08-attention-transformers"><span class="done"></span>08 · Attention &amp; Transformers</a>
+      <a href="./09-nlp-evolution.html" data-page="09-nlp-evolution"><span class="done"></span>09 · NLP Evolution</a>
+      <a href="./10-llm-architecture-training.html" data-page="10-llm-architecture-training"><span class="done"></span>10 · LLM Architecture &amp; Training</a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-genai);color:var(--c-genai)"></span>Generative &amp; Multimodal</summary>
+    <div class="links">
+      <a href="./11-rag-agents-reasoning.html" data-page="11-rag-agents-reasoning"><span class="done"></span>11 · RAG, Agents &amp; Reasoning</a>
+      <a href="./12-generative-models.html" data-page="12-generative-models"><span class="done"></span>12 · Generative Models</a>
+      <a href="./13-speech-audio.html" data-page="13-speech-audio"><span class="done"></span>13 · Speech &amp; Audio</a>
+      <a href="./14-multimodal-ai.html" data-page="14-multimodal-ai"><span class="done"></span>14 · Multimodal AI</a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-rl);color:var(--c-rl)"></span>Decision &amp; Retrieval Systems</summary>
+    <div class="links">
+      <a href="./15-reinforcement-learning.html" data-page="15-reinforcement-learning"><span class="done"></span>15 · Reinforcement Learning</a>
+      <a href="./16-recommenders-ranking-search.html" data-page="16-recommenders-ranking-search"><span class="done"></span>16 · Recommenders &amp; Ranking</a>
+      <a href="./17-time-series-forecasting.html" data-page="17-time-series-forecasting"><span class="done"></span>17 · Time Series</a>
+      <a href="./18-graph-ml.html" data-page="18-graph-ml"><span class="done"></span>18 · Graph ML</a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-world);color:var(--c-world)"></span>Embodied &amp; Frontier</summary>
+    <div class="links">
+      <a href="./19-scientific-structured-ai.html" data-page="19-scientific-structured-ai"><span class="done"></span>19 · Scientific / Structured AI</a>
+      <a href="./20-3d-spatial-autonomous-driving.html" data-page="20-3d-spatial-autonomous-driving"><span class="done"></span>20 · 3D, Spatial &amp; AD</a>
+      <a href="./21-robotics-embodied-ai.html" data-page="21-robotics-embodied-ai"><span class="done"></span>21 · Robotics &amp; Embodied AI</a>
+      <a href="./22-world-models.html" data-page="22-world-models"><span class="done"></span>22 · World Models</a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-interview);color:var(--c-interview)"></span>Systems, Safety &amp; Interview</summary>
+    <div class="links">
+      <a href="./23-efficient-ai-systems.html" data-page="23-efficient-ai-systems"><span class="done"></span>23 · Efficient AI &amp; Systems</a>
+      <a href="./24-mlops.html" data-page="24-mlops"><span class="done"></span>24 · ML Engineering &amp; MLOps</a>
+      <a href="./25-evaluation-reliability-safety.html" data-page="25-evaluation-reliability-safety"><span class="done"></span>25 · Evaluation &amp; Safety</a>
+      <a href="./26-frontier-2026.html" data-page="26-frontier-2026"><span class="done"></span>26 · 2026 Frontier Map</a>
+      <a href="./27-interview-mastery.html" data-page="27-interview-mastery"><span class="done"></span>27 · Interview Mastery</a>
+      <a href="./28-gpu-architecture-cuda-distributed.html" data-page="28-gpu-architecture-cuda-distributed"><span class="done"></span>28 · GPU Architecture, CUDA &amp; Distributed Training</a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-practice);color:var(--c-practice)"></span>Hands-on</summary>
+    <div class="links">
+      <a href="./29-finetuning-llms.html" data-page="29-finetuning-llms"><span class="done"></span>29 · Fine-tuning LLMs in Practice</a>
+      <a href="./30-running-models-locally.html" data-page="30-running-models-locally"><span class="done"></span>30 · Running Models Locally</a>
+      <a href="./32-preference-optimization.html" data-page="32-preference-optimization"><span class="done"></span>32 · Preference Optimization</a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-practice);color:var(--c-practice)"></span>Inference &amp; Serving</summary>
+    <div class="links">
+      <a href="./31-llm-inference-serving.html" data-page="31-llm-inference-serving"><span class="done"></span>31 · LLM Inference &amp; Serving</a>
+      <a href="./38-llm-inference-at-scale.html" data-page="38-llm-inference-at-scale"><span class="done"></span>38 · LLM Inference at Scale</a>
+      <a href="./39-realtime-voice-ai.html" data-page="39-realtime-voice-ai"><span class="done"></span>39 · Real-Time Voice AI</a>
+      <a class="active" href="./40-diffusion-video-inference.html" data-page="40-diffusion-video-inference"><span class="done"></span>40 · Diffusion &amp; Video Inference</a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--accent);color:var(--accent)"></span>The Labs</summary>
+    <div class="links">
+      <a href="../backprop-lab.html"><span class="done"></span>🔬 Backprop <span class="lab-mark">interactive</span></a>
+      <a href="../tokenizer-lab.html"><span class="done"></span>🔬 Tokenizer <span class="lab-mark">interactive</span></a>
+      <a href="../attention-lab.html"><span class="done"></span>🔬 Attention <span class="lab-mark">interactive</span></a>
+      <a href="../sampling-lab.html"><span class="done"></span>🔬 Sampling <span class="lab-mark">interactive</span></a>
+      <a href="../quantization-lab.html"><span class="done"></span>🔬 Quantization <span class="lab-mark">interactive</span></a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-atlas);color:var(--c-atlas)"></span>Model Atlas</summary>
+    <div class="links">
+      <a href="./33-model-atlas-language.html" data-page="33-model-atlas-language"><span class="done"></span>33 · Model Atlas: Language Models</a>
+      <a href="./34-model-atlas-speech-audio.html" data-page="34-model-atlas-speech-audio"><span class="done"></span>34 · Model Atlas: Speech &amp; Audio</a>
+      <a href="./35-model-atlas-vision-generative.html" data-page="35-model-atlas-vision-generative"><span class="done"></span>35 · Model Atlas: Vision &amp; Generative Media</a>
+    </div>
+  </details>
+  <details class="navgroup" open>
+    <summary><span class="chev">▸</span><span class="swatch" style="background:var(--c-challenge);color:var(--c-challenge)"></span>Grand Challenges</summary>
+    <div class="links">
+      <a href="./36-millennium-prize-problems.html" data-page="36-millennium-prize-problems"><span class="done"></span>36 · Millennium Prize Problems</a>
+      <a href="./37-ai-in-industry.html" data-page="37-ai-in-industry"><span class="done"></span>37 · AI in Industry</a>
+    </div>
+  </details>
+</aside>
+
+<main class="content" id="content">
+  <div class="topic-header">
+    <div class="crumbs"><a href="../index.html">Home</a> / Hands-on / 40</div>
+    <h1>Diffusion &amp; Video at Inference Time</h1>
+    <p class="dek">Page 12 explains how diffusion works. This page is about the bill. A published sampler spends a hundred forward passes on one image, and the same loop over five seconds of video runs for half an hour.</p>
+    <div class="meta-row">
+      <span class="reading-time">~26 min · prerequisites: the reverse process (12), roofline &amp; arithmetic intensity (23)</span>
+    </div>
+  </div>
+
+  <section id="tldr">
+    <div class="tldr">
+      <div class="tldr-label">TL;DR</div>
+      <p>Diffusion quality comes from a loop, and the loop is the whole bill. Fifty steps, doubled by guidance, is a hundred forward passes of a large network per image. Every technique on this page is a way of cutting that number.</p>
+      <p>Four levers, ordered by what they cost you. A better ODE solver is free. Feature caching is free and has a ceiling you can derive. Guidance distillation costs a training run and removes the factor of two. Step distillation costs a training run and some diversity.</p>
+      <p>Video is not images times frames. Joint attention over a clip costs a factor equal to the number of latent frames more than attending to each frame alone, so temporal compression in the autoencoder is worth more than any sampler change.</p>
+      <p>One sentence for an interview: diffusion serving is compute-bound where LLM serving is bandwidth-bound, which inverts nearly every instinct from page <a href="./31-llm-inference-serving.html">31</a>.</p>
+    </div>
+  </section>
+
+  <section id="budget">
+    <h2><span class="num">01</span>The bill, in forward passes</h2>
+    <p class="lede">One number governs this entire page. Count it before anything else.</p>
+
+    <p>A text-to-image pipeline has three parts and the costs are not close. The text encoder runs once. The decoder runs once, at the end. The denoiser runs once per step, and twice per step when guidance is on.</p>
+
+    <p>That last line is the budget. Page <a href="./12-generative-models.html">12</a> makes the point in passing; this page starts from it.</p>
+
+    <p>The unit is the <em class="term">number of function evaluations</em>, or NFE: how many times the large network is run to produce one output. NFE is what you are billed for, and it is the only quantity the rest of this page moves.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Every way of cutting the loop, on one log axis
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 360" xmlns="http://www.w3.org/2000/svg">
+        <line x1="286.00" y1="52" x2="286.00" y2="290.0" stroke="rgba(255,255,255,.13)" stroke-width="1"/>
+        <text x="286.00" y="46" text-anchor="middle" font-size="10" class="dim">1</text>
+        <line x1="392.63" y1="52" x2="392.63" y2="290.0" stroke="rgba(255,255,255,.13)" stroke-width="1"/>
+        <text x="392.63" y="46" text-anchor="middle" font-size="10" class="dim">10</text>
+        <line x1="499.27" y1="52" x2="499.27" y2="290.0" stroke="rgba(255,255,255,.13)" stroke-width="1"/>
+        <text x="499.27" y="46" text-anchor="middle" font-size="10" class="dim">100</text>
+        <line x1="605.90" y1="52" x2="605.90" y2="290.0" stroke="rgba(255,255,255,.13)" stroke-width="1"/>
+        <text x="605.90" y="46" text-anchor="middle" font-size="10" class="dim">1000</text>
+        <text x="462.00" y="30" text-anchor="middle" font-size="10.5" class="dim">forward passes of the denoiser, per image (log scale, each gridline is 10x)</text>
+        <text x="24" y="78.0" font-size="10.5" fill="#e9e9ef">DDPM ancestral, 1000 steps, guided</text>
+        <text x="24" y="91.0" font-size="9.5" class="dim">the sampler as published</text>
+        <rect x="286.00" y="66.5" width="352.00" height="15.0" rx="3" fill="#f472b6" opacity="0.85"/>
+        <text x="645.00" y="78.0" font-size="10.5" font-weight="700" fill="#f472b6">2000</text>
+        <text x="24" y="116.0" font-size="10.5" fill="#e9e9ef">DDIM, 50 steps, guided</text>
+        <text x="24" y="129.0" font-size="9.5" class="dim">same weights, non-Markovian</text>
+        <rect x="286.00" y="104.5" width="213.27" height="15.0" rx="3" fill="#fb923c" opacity="0.85"/>
+        <text x="506.27" y="116.0" font-size="10.5" font-weight="700" fill="#fb923c">100</text>
+        <text x="24" y="154.0" font-size="10.5" fill="#e9e9ef">DPM-Solver++, 20 steps, guided</text>
+        <text x="24" y="167.0" font-size="9.5" class="dim">same weights, 2nd-order ODE</text>
+        <rect x="286.00" y="142.5" width="170.83" height="15.0" rx="3" fill="#fbbf24" opacity="0.85"/>
+        <text x="463.83" y="154.0" font-size="10.5" font-weight="700" fill="#fbbf24">40</text>
+        <text x="24" y="192.0" font-size="10.5" fill="#e9e9ef">guidance-distilled, 20 steps</text>
+        <text x="24" y="205.0" font-size="9.5" class="dim">the x2 folded into the weights</text>
+        <rect x="286.00" y="180.5" width="138.73" height="15.0" rx="3" fill="#a3e635" opacity="0.85"/>
+        <text x="431.73" y="192.0" font-size="10.5" font-weight="700" fill="#a3e635">20</text>
+        <text x="24" y="230.0" font-size="10.5" fill="#e9e9ef">step-distilled, 4 steps</text>
+        <text x="24" y="243.0" font-size="9.5" class="dim">new weights, a training run</text>
+        <rect x="286.00" y="218.5" width="64.20" height="15.0" rx="3" fill="#34d399" opacity="0.85"/>
+        <text x="357.20" y="230.0" font-size="10.5" font-weight="700" fill="#34d399">4</text>
+        <text x="24" y="268.0" font-size="10.5" fill="#e9e9ef">one-step distilled</text>
+        <text x="24" y="281.0" font-size="9.5" class="dim">new weights, adversarial loss</text>
+        <rect x="286.00" y="256.5" width="1.60" height="15.0" rx="3" fill="#38bdf8" opacity="0.85"/>
+        <text x="294.60" y="268.0" font-size="10.5" font-weight="700" fill="#38bdf8">1</text>
+        <line x1="286.00" y1="290.0" x2="638.00" y2="290.0" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
+        <text x="24" y="316.0" font-size="10.5" class="dim">Top to bottom is 2000 passes down to 1, a factor of 2000. Every row below the second</text>
+        <text x="24" y="332.0" font-size="10.5" class="dim">is a different kind of intervention, and the last two cost a training run to obtain.</text>
+      </svg>
+      <div class="diagram-caption">The bars use a log scale, so each gridline is ten times the one before and the bottom bar sits genuinely at 1. Read the labels, not the lengths. The top three rows are one checkpoint sampled differently and cost nothing to try. The bottom three change the weights, which means a training run and a quality argument you have to have first.</div>
+    </div>
+
+    <p>Two thousand passes down to one is a factor of two thousand. Nobody gets all of it, and the rows are not interchangeable, but the range is why this is a subject rather than a setting.</p>
+  </section>
+
+  <section id="steps">
+    <h2><span class="num">02</span>What one step actually buys</h2>
+    <p class="lede">A step is one increment of a numerical integration. Once you see it that way, the question of where quality falls off has a precise answer.</p>
+
+    <p>Sampling is solving the reverse ODE that page <a href="./12-generative-models.html">12</a> derives. The network supplies the derivative; the sampler integrates it. Step count is not a quality dial. It is a discretisation, and fewer steps means a coarser one.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">Why a second-order solver needs roughly the square root of the steps</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">Take the sampling ODE <span>$\dot{x} = v(x, t)$</span> integrated from <span>$t=0$</span> to <span>$t=1$</span> in <span>$N$</span> equal steps of size <span>$h = 1/N$</span>. Assume <span>$v$</span> is smooth enough for a Taylor expansion, which is the usual assumption and the one that fails near <span>$t=1$</span>.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$x(t+h) = x(t) + h\,\dot{x}(t) + \tfrac{1}{2}h^{2}\ddot{x}(t) + O(h^{3})$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> plain Taylor. An Euler step keeps the first two terms and discards the rest, so it is wrong by <span>$O(h^{2})$</span> on that single step.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\text{global error} \;\approx\; N \cdot O(h^{2}) \;=\; O(h) \;=\; O(1/N)$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> you take <span>$N$</span> steps and each contributes its own error. One power of <span>$h$</span> is eaten by the step count, which is the standard result that local order two gives global order one.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\text{second-order method:}\quad N \cdot O(h^{3}) = O(h^{2}) = O(1/N^{2})$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> a method that also cancels the <span>$\ddot{x}$</span> term is locally wrong by <span>$O(h^{3})$</span>, so the same accounting leaves <span>$O(1/N^{2})$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\frac{C_{1}}{N_{1}} = \frac{C_{2}}{N_{2}^{2}} \quad\Longrightarrow\quad N_{2} = \sqrt{N_{1} C_{2} / C_{1}}$$</span></div>
+            <div class="drv-why"><strong>Why this is the payoff:</strong> equate the two error budgets and the second-order step count is the square root of the first. Ignore the constants and <span>$N_1 = 1000$</span> becomes <span>$N_2 \approx 32$</span>.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff">The constants are not one and the smoothness assumption degrades at the ends of the schedule, so treat 32 as an order of magnitude rather than a number. It lands in the right place: DPM-Solver carries "Sampling in Around 10 Steps" in its own title, and reports 10 to 20 evaluations with a 4 to 16 times speedup over training-free samplers, with no change to the weights.</div>
+      </div>
+    </details>
+
+    <h3>DDIM versus ancestral sampling</h3>
+
+    <p>The original DDPM sampler injects fresh noise at every step. That is what makes it ancestral: the trajectory is stochastic, so skipping steps does not approximate the same path more coarsely, it walks a different path.</p>
+
+    <p>DDIM removes the injected noise. The reverse process becomes deterministic, the sample is a function of the initial noise alone, and skipping steps is now ordinary numerical error rather than a different random walk. Its authors report samples 10 to 50 times faster in wall-clock terms than DDPM.</p>
+
+    <div class="callout callout-teach">
+      <div class="callout-label">The reason determinism buys steps</div>
+      <p>Once the path is fixed, a coarse integration of it is an approximation of a specific answer. You can talk about error, measure it against a fine reference, and reduce it with a better solver.</p>
+      <p>With noise injected each step there is no fixed answer to approximate. This is why every fast sampler on the list is deterministic, and why the stochastic ones are still preferred when you want variety more than speed.</p>
+    </div>
+
+    <h3>Where quality actually falls off</h3>
+
+    <p>Truncation error accumulates along the trajectory, not on the output. So under-stepping does not give you a noisy version of the right image. It lands you somewhere else and gives you a clean version of a slightly different one.</p>
+
+    <p>That is the symptom to watch for. Composition drifts, fine texture thins, prompt adherence weakens, and nothing looks broken. Cutting steps until an image looks bad is the wrong test, because the image stops being the right image well before it stops looking plausible.</p>
+
+    <p>The practical floor for training-free samplers sits around ten evaluations. Below that, no amount of solver cleverness helps, because the error is no longer dominated by discretisation. Getting lower means changing the weights, which is section 04.</p>
+  </section>
+
+  <section id="cfg">
+    <h2><span class="num">03</span>Guidance costs double, and nobody says so</h2>
+    <p class="lede">Every quoted step count for a guided model is half the real forward-pass count. This is the single most common accounting error in the subject.</p>
+
+    <p><em class="term">Classifier-free guidance</em>, from Ho and Salimans, evaluates the model twice per step, once with the prompt and once without, then extrapolates away from the unconditional prediction:</p>
+
+    <div class="eq-block"><span>$$\tilde{\epsilon}_{\theta}(x_t, c) = \epsilon_{\theta}(x_t, \varnothing) + w\left[\epsilon_{\theta}(x_t, c) - \epsilon_{\theta}(x_t, \varnothing)\right]$$</span></div>
+
+    <p class="eq-explain">Two evaluations of <span>$\epsilon_\theta$</span> per step. The guidance scale <span>$w$</span> is free; the second evaluation is not.</p>
+
+    <p>So 50 steps with guidance is 100 forward passes. You can stack the conditional and unconditional inputs into one batch of two, which saves kernel launches and nothing else. The arithmetic is the same, and section 09 explains why that matters here and would not for an LLM.</p>
+
+    <h3>Folding the factor of two into the weights</h3>
+
+    <p>Meng and colleagues train a student conditioned on the guidance scale to reproduce the combined output of both branches in one pass. The scale survives as an input; the second forward pass does not.</p>
+
+    <p>This is standard in current open checkpoints. The FLUX.1 [dev] model card says the model was "trained using guidance distillation". HunyuanVideo distils "the combined output for unconditional and conditional inputs into a single student model", and reports roughly 1.9 times acceleration from that alone.</p>
+
+    <div class="callout callout-warn">
+      <div class="callout-label">What you lose when guidance is baked in</div>
+      <p>A guidance-distilled model no longer has an unconditional branch to extrapolate from. Negative prompts, which are just a different conditional in that slot, stop working the way they did, and the guidance scale becomes a learned input with its own trained range rather than a free multiplier.</p>
+      <p>People tune it anyway, well outside the range it was distilled over, and then report that the model is insensitive to guidance. It is not insensitive. It is answering a question about a number it was taught to interpret.</p>
+    </div>
+
+    <h3>The cheaper alternative, if you keep the two branches</h3>
+
+    <p>Kynkäänniemi and colleagues found that guidance is "clearly harmful toward the beginning of the chain (high noise levels), largely unnecessary toward the end (low noise levels), and only beneficial in the middle". Restricting it to an interval improved ImageNet-512 FID from 1.81 to 1.40 in their setting.</p>
+
+    <p>Note what that buys twice over. Steps outside the interval need one pass instead of two, so a limited interval is cheaper and, in their measurements, better. It is the rare change that does not trade anything.</p>
+  </section>
+
+  <section id="checkpoint-1">
+    <div class="checkpoint">
+      <span class="checkpoint-label">Where you are</span>
+      <p>You have the budget in forward passes, the reason a better solver cuts it for free, and the reason guidance doubles it. That is everything you can do without touching the weights.</p>
+      <p>The next three sections each change something. Distillation changes the weights, rectified flow changes the training objective, and caching changes what the network is asked to compute.</p>
+    </div>
+  </section>
+
+  <section id="distillation">
+    <h2><span class="num">04</span>Distillation: buying steps with a training run</h2>
+    <p class="lede">Below roughly ten evaluations you cannot integrate your way out. You train a new model to take bigger jumps, and you pay for it in something other than compute.</p>
+
+    <p>Four families, in the order they appeared. Each one is a different answer to the same question: what should a student be trained to match?</p>
+
+    <ul>
+      <li><strong>Progressive distillation</strong> (Salimans and Ho, 2022). Train a student to take one step that lands where two teacher steps land, then make that student the teacher and repeat. Each round halves the step count. They take a model from 8192 steps to 4, reporting FID 3.0 on CIFAR-10 at 4 steps.</li>
+      <li><strong>Consistency models</strong> (Song and colleagues, 2023). Train so that every point on a trajectory maps directly to that trajectory's endpoint. If that property holds, one evaluation is enough. They report one-step FID of 3.55 on CIFAR-10 and 6.20 on ImageNet 64.</li>
+      <li><strong>Latent consistency models</strong> (Luo and colleagues, 2023). The same property distilled into an existing latent diffusion model rather than trained from scratch. Their result is 2 to 4 step generation at 768 by 768, from about 32 A100 hours of distillation.</li>
+      <li><strong>Adversarial distillation</strong> (Sauer and colleagues, 2023, shipped as SDXL-Turbo). Add a discriminator, so the student is pushed toward the image manifold rather than only toward the teacher's answer. One to four steps, matching SDXL in four by their evaluation.</li>
+    </ul>
+
+    <p>The later work mixes them. SDXL-Lightning describes itself as combining "progressive and adversarial distillation to achieve a balance between quality and mode coverage", which names the tradeoff in its own abstract. DMD2 adds a GAN loss to distribution matching and reports one-step FID of 1.28 on ImageNet 64 and 8.35 zero-shot on COCO.</p>
+
+    <h3>What a 4-step or 1-step model gives up, concretely</h3>
+
+    <p>Not sharpness. That is the surprise. The DMD2 authors put their 4-step student at FID 19.32 and their 1-step student at 19.01 against an SDXL teacher at 19.36 with 50 steps and guidance scale 6. On a distribution metric the student is level with its teacher.</p>
+
+    <p>What moves is diversity. The same paper states that "our distilled generator experiences a slight degradation in image diversity compared to the teacher models". FID over thousands of samples is not the metric that would show it.</p>
+
+    <p>Gandikota and Bau give the mechanism. They find that "distilled models commit to their final image structure almost immediately at the first timestep, while base models distribute structural decisions across many steps", and that distilled models "possess variational directions needed for diversity yet fail to activate them".</p>
+
+    <div class="callout callout-warn">
+      <div class="callout-label">The symptom, in the words a user will use</div>
+      <p>"Every seed gives me the same picture." The seed still changes texture and small details. It has stopped changing composition, because composition was decided in the first evaluation and there is only one.</p>
+      <p>This matters enormously for a gallery product where the user regenerates until something surprises them, and not at all for an interactive canvas where the user is steering. Decide which one you are building before you pick a step count.</p>
+    </div>
+  </section>
+
+  <section id="rectified-flow">
+    <h2><span class="num">05</span>Rectified flow: straighten the path, and the steps come free</h2>
+    <p class="lede">If you have to integrate a curve you need steps. A straight line needs one, at any resolution. That sentence is the entire idea.</p>
+
+    <p>Liu, Gong and Liu proposed learning an ODE whose paths are "as straight as possible" between noise and data. Their claim is that recursively rectifying yields "nearly straight flows that give high quality results even with a single Euler discretization step".</p>
+
+    <p>The part worth understanding is what does the straightening, because it is not the interpolant. Training on a linear interpolant still gives a curved flow, because the marginal velocity field averages over every data point a given noise sample might become.</p>
+
+    <p><em class="term">Reflow</em> fixes the coupling instead. Run the learned ODE to see where each noise sample actually lands, then retrain on those pairs. Now each noise sample has one destination, the paths stop crossing, and the field they induce is straight by construction.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Curved path, straight path, and the Euler error at one step</span>
+      </summary>
+<pre><code>import numpy as np
+
+# A 1-D flow from noise (t=0) to a 3-point data set (t=1), on the
+# linear interpolant x_t = (1-t)z + t*x0 that rectified flow uses.
+data = np.array([-2.0, 0.5, 3.0])
+
+def v_indep(x, t):        # marginal velocity, z drawn independently
+    s = max(1.0 - t, 1e-6)
+    lp = -0.5 * ((x[:, None] - t * data[None, :]) / s) ** 2
+    w = np.exp(lp - lp.max(1, keepdims=True))
+    m = (w * data[None, :]).sum(1) / w.sum(1)      # E[x0 | x_t = x]
+    return (m - x) / s
+
+def euler(x0, n, v):
+    x = x0.copy()
+    for i in range(n):
+        x = x + v(x, i / n) / n
+    return x
+
+grid = np.linspace(-6, 6, 4001)          # solve the ODE on a grid once
+endp = euler(grid, 2000, v_indep)        # z -&gt; x1(z), the coupling
+
+def v_reflow(x, t):       # same endpoints, re-paired: straight by
+    g = (1 - t) * grid + t * endp        # construction
+    o = np.argsort(g)
+    z = np.interp(x, g[o], grid[o])
+    return np.interp(z, grid, endp) - z
+
+rng = np.random.default_rng(0)
+z = rng.normal(size=6000)
+ref = euler(z, 2000, v_indep)
+
+print(&quot;Euler steps    mean |error| vs the 2000-step solution&quot;)
+print(&quot;               independent coupling   after reflow&quot;)
+for n in (1, 2, 4, 8, 16):
+    a = np.abs(euler(z, n, v_indep) - ref).mean()
+    b = np.abs(euler(z, n, v_reflow) - ref).mean()
+    print(f&quot;{n:&gt;7}                 {a:&gt;8.4f}       {b:&gt;8.4f}&quot;)
+
+for name, v in ((&quot;independent&quot;, v_indep), (&quot;reflowed&quot;, v_reflow)):
+    x, L = z.copy(), 0.0                 # arc length of the path
+    for i in range(2000):
+        s = v(x, i / 2000) / 2000
+        L += np.abs(s).mean()
+        x = x + s
+    print(f&quot;{name:&gt;12}: arc length {L:.4f}, endpoint distance &quot;
+          f&quot;{np.abs(x - z).mean():.4f}&quot;)</code></pre>
+      <div class="tryit-out"><strong>The right-hand column does not move.</strong> After reflow, one Euler step is as accurate as sixteen, because no curvature is left to discretise: arc length <code>1.1292</code> against an endpoint distance of <code>1.1292</code>. The left column halves its error each time the steps double, which is section 02's <span>$O(1/N)$</span>. The interpolant is linear in both columns. Only the pairing changed.</div>
+    </details>
+
+    <p>Scaling Rectified Flow Transformers, the Stable Diffusion 3 paper, is what settled the argument in practice. Esser and colleagues report that rectified flow "surpasses conventional diffusion methods for high-resolution text-to-image" at scale, and the formulation is now what current open image and video models train under. HunyuanVideo states plainly that it uses "Flow Matching for model training".</p>
+  </section>
+
+  <section id="caching">
+    <h2><span class="num">06</span>Feature caching, and the ceiling you can derive</h2>
+    <p class="lede">Adjacent denoising steps compute nearly the same thing. Reusing what they share is the cheapest win here, and the size of the win is not a mystery.</p>
+
+    <p>DeepCache is the canonical version for UNets. It exploits what its authors call "the inherent temporal redundancy observed in the sequential denoising steps", reusing high-level features across adjacent steps while updating the low-level ones cheaply. No retraining.</p>
+
+    <p>They report 2.3 times on Stable Diffusion v1.5 for a 0.05 drop in CLIP score, and 4.1 times on LDM-4-G for a 0.22 rise in FID on ImageNet.</p>
+
+    <p>The cost model is one line. Run the full network on one step in every <span>$N$</span>, and a cheap partial path costing a fraction <span>$r$</span> of it on the other <span>$N-1$</span>:</p>
+
+    <div class="eq-block"><span>$$\text{speedup}(N, r) = \frac{N}{1 + (N-1)r} \quad\xrightarrow{\;N \to \infty\;}\quad \frac{1}{r}$$</span></div>
+
+    <p class="eq-explain">The interval you choose is a knob. The reuse fraction <span>$r$</span> is a ceiling, and the knob cannot get past it.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">The cache reuse model, its ceiling, and why it stops helping</span>
+      </summary>
+<pre><code># Uniform feature caching: run the full network on 1 step in every N,
+# reuse cached features on the other N-1 at a fraction r of the cost.
+# Cost per step = (1 + (N-1)*r) / N, so the speedup is:
+speedup = lambda N, r: N / (1 + (N - 1) * r)
+
+print(&quot;         r=0.10  r=0.20  r=0.29  r=0.40&quot;)
+for N in (2, 3, 5, 10, 20, 10**7):
+    row = &quot;  &quot;.join(f&quot;{speedup(N, r):6.2f}&quot;
+                    for r in (.10, .20, .29, .40))
+    print(f&quot;{(&#x27;N -&gt; inf&#x27; if N &gt; 100 else &#x27;N = %d&#x27; % N):&gt;8} {row}&quot;)
+print(&quot;  the last row is the 1/r ceiling: the interval cannot&quot;)
+print(&quot;  buy you more than the cheap path already costs&quot;)
+
+# Invert it. DeepCache report 2.30x on Stable Diffusion v1.5 at N=5.
+N, s = 5, 2.30
+r = (N / s - 1) / (N - 1)
+print(f&quot;\n{s}x at N={N} implies a cheap path costing r = {r:.3f}&quot;)
+print(f&quot;which caps that configuration at 1/r = {1/r:.2f}x&quot;)
+
+# Caching composes with step reduction, and that is the catch: the
+# interval can never exceed the number of steps you have left.
+print(&quot;\nsteps  cfg  cache   NFE   full-pass equivalents&quot;)
+for steps, cfg, on in ((50, 2, 0), (50, 2, 1), (20, 1, 0),
+                       (4, 1, 0), (4, 1, 1)):
+    frac = (1 + (steps - 1) * r) / steps if on else 1.0
+    print(f&quot;{steps:&gt;5} {cfg:&gt;4}x  {&#x27;on &#x27; if on else &#x27;off&#x27;:&gt;5}&quot;
+          f&quot; {steps*cfg:&gt;5}   {steps*cfg*frac:&gt;8.1f}&quot;)</code></pre>
+      <div class="tryit-out"><strong>The <code>N -&gt; inf</code> row is the point.</strong> Push the interval as far as you like and the speedup stops at <code>1/r</code>, because the cheap path is still paid on nearly every step. Inverting DeepCache's <code>2.30x</code> at <code>N=5</code> gives <code>r = 0.293</code>, capping that configuration at <code>3.41x</code>. The last table is the awkward part: at 4 steps there is barely an interval to have.</div>
+    </details>
+
+    <p>That limit is the useful part. A reuse scheme is characterised by how cheap its cheap path is, not by how far apart you space the full evaluations, and a single measurement at any interval pins down both.</p>
+
+    <h3>Where the artefacts appear</h3>
+
+    <p>DeepCache's own reading of their results: below an interval of 5 "there is only a slight reduction in the quality", while at an interval of 20 the degradation is "non-negligible". What changes at that point is specific and worth quoting, because it tells you what to look for.</p>
+
+    <p>They describe "subtle details such as the color of clothing and the shape of the cat" being modified. Not corruption. Drift. The image stays coherent and stops being the image the uncached sampler would have produced, which is exactly the failure a spot check does not catch.</p>
+
+    <h3>Uniform intervals are the wrong shape</h3>
+
+    <p>TeaCache starts from the observation that "differences among model outputs are not uniform across timesteps". Some neighbouring steps change the output a great deal and some barely at all, so spacing full evaluations evenly spends effort in the wrong places.</p>
+
+    <p>It estimates how much the output will change using the timestep embedding, which is available before the expensive part runs, and skips adaptively. Its authors report up to 4.41 times on Open-Sora-Plan for a 0.07 percent drop in VBench score.</p>
+
+    <div class="callout callout-warn">
+      <div class="callout-label">Caching and step distillation do not stack</div>
+      <p>Both are harvesting the same redundancy: the fact that consecutive steps agree. A 4-step model has already spent it. There are only three steps to skip, the interval cannot exceed the step count, and the remaining steps disagree with each other far more than 50 steps of the base model did.</p>
+      <p>Expect the two techniques to be substitutes, and measure the combination rather than assuming the speedups multiply.</p>
+    </div>
+  </section>
+
+  <section id="video">
+    <h2><span class="num">07</span>Video is not images times frames</h2>
+    <p class="lede">The arithmetic in this section is the most important on the page and it is four lines long.</p>
+
+    <p>A modern video model is a diffusion transformer over a three-dimensional latent. A causal autoencoder compresses the clip in space and in time, the latent is cut into patches, and all of those patches become one flat sequence that attends to itself.</p>
+
+    <p>HunyuanVideo publishes every number needed to price that. Its autoencoder uses a temporal factor of 4, a spatial factor of 8 and 16 latent channels. The transformer is 13B parameters, 3072 wide, with 20 dual-stream and 40 single-stream blocks, and its documented 720p configuration is 129 frames at 1280 by 720 in 50 steps.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Price a five-second 720p clip from the published constants</span>
+      </summary>
+<pre><code># HunyuanVideo&#x27;s published 720p configuration, from its paper and repo:
+W, H, F, STEPS = 1280, 720, 129, 50
+CS, CT, CH = 8, 4, 16        # VAE: 8x spatial, 4x temporal, 16 chans
+PS, PT = 2, 1                # patch size on the latent, spatial/temp
+D, BLOCKS = 24 * 128, 20 + 40   # width 3072, 60 attention blocks
+PARAMS = 13e9
+
+def tokens(w, h, f, ct=CT):
+    lf = (f - 1) // ct + 1 if ct &gt; 1 else f
+    return lf * (h // CS // PS) * (w // CS // PT // PS), lf
+
+N, LF = tokens(W, H, F)
+print(f&quot;latent grid: {LF} x {H//CS} x {W//CS}, patched -&gt; {N:,} tokens&quot;)
+print(f&quot;pixels per latent value: {CT*CS*CS*3/CH:.0f}x compression&quot;)
+
+attn = 4 * N**2 * D          # QK^T and AV, summed over heads
+print(f&quot;attention matmuls: {attn/1e12:,.1f} TFLOP per block, &quot;
+      f&quot;{attn*BLOCKS/1e15:,.2f} PFLOP per step&quot;)
+clip = attn * BLOCKS * STEPS
+print(f&quot;{STEPS} steps -&gt; {clip/1e15:,.0f} PFLOP of attention alone&quot;)
+print(f&quot;the repo reports 1904 s on one GPU, so {clip/1904/1e12:,.0f}&quot;
+      &quot; TFLOP/s sustained on that term&quot;)
+
+# Why video is not images times frames.
+one, _ = tokens(W, H, 1, ct=1)
+print(f&quot;\none 720p frame is {one:,} tokens; {LF} of them held jointly&quot;)
+print(f&quot;is {N//one}x the tokens and {(N/one)**2:,.0f}x the attention,&quot;)
+print(f&quot;so {(N/one)**2/(N/one):,.0f}x more attention work per frame&quot;)
+
+flat, _ = tokens(W, H, F, ct=1)      # drop temporal compression
+print(f&quot;\nno temporal compression: {flat:,} tokens, &quot;
+      f&quot;{(flat/N)**2:.1f}x the attention cost&quot;)
+
+act = N * D * 2
+print(f&quot;\nweights in bf16: {PARAMS*2/1e9:.0f} GB; one full-width &quot;
+      f&quot;activation: {act/1e6:.0f} MB&quot;)
+print(f&quot;Q, K, V and output at once: {4*act/1e9:.1f} GB, before any&quot;
+      &quot; of the MLP&quot;)</code></pre>
+      <div class="tryit-out"><strong>Three numbers worth carrying.</strong> <code>118,800</code> tokens for five seconds, longer than many LLM context windows, and it is the output rather than the prompt. <code>1,089x</code> the attention of one frame for 33 latent frames, so <code>33x</code> more work per frame than generating them separately. And <code>15.3x</code>, which is what temporal compression is worth before the transformer runs at all.</div>
+    </details>
+
+    <h3>The rule that makes video expensive</h3>
+
+    <p>Split <span>$N$</span> tokens into <span>$k$</span> per-frame groups and attend within each. That costs <span>$k \cdot (N/k)^2 = N^2/k$</span>. Attend over all of them jointly and it costs <span>$N^2$</span>. The ratio is exactly <span>$k$</span>:</p>
+
+    <div class="eq-block"><span>$$\frac{\text{joint 3D attention}}{\text{per-frame attention}} = \frac{N^{2}}{N^{2}/k} = k$$</span></div>
+
+    <p class="eq-explain">Where <span>$k$</span> is the number of <em>latent</em> frames, not output frames. That distinction is what the autoencoder is for.</p>
+
+    <p>So temporal coherence is not free and it is not cheap. It costs a factor equal to the latent frame count, on the dominant term, on every step. That is the price of the thing that makes a video a video rather than a flipbook.</p>
+
+    <p>It also explains where the engineering effort has gone. Temporal compression divides <span>$k$</span> and attention is quadratic, so the 4 times compression in the autoencoder is worth about 15 times on attention. No sampler change is worth 15 times.</p>
+
+    <h3>Frame count scaling and the memory wall</h3>
+
+    <p>Doubling the clip length doubles <span>$k$</span>, doubles the token count, and quadruples attention. A ten-second clip is not two five-second clips, and a capacity plan built at five seconds does not survive the product asking for ten.</p>
+
+    <p>Memory follows the same shape. The weights are a fixed 26 GB in bf16, but one full-width activation at 118,800 tokens is 730 MB, and the attention inputs and output alone are 2.9 GB before the MLP. HunyuanVideo's repository asks for 60 GB at this configuration.</p>
+
+    <p>One caveat on that 520 PFLOP figure: it counts the two attention matmuls and nothing else, so it is a floor on the cost of a step rather than an estimate of it. The projections, the MLPs and the normalisations all sit on top.</p>
+
+    <p>Sliding Tile Attention measured where the time goes: generating "a 5-second 720P video, attention alone takes 800 out of 945 seconds of total inference time". At that ratio, halving the step count cannot help you as much as making attention sub-quadratic.</p>
+
+    <p>Which is what the recent work does. Sparse VideoGen separates spatial from temporal heads and reports 2.28 and 2.33 times end to end on CogVideoX-v1.5 and HunyuanVideo. Radial Attention exploits spatiotemporal energy decay for an <span>$O(n \log n)$</span> scheme, reporting up to 3.7 times on inference.</p>
+
+    <div class="callout callout-teach">
+      <div class="callout-label">Why page 31's best idea does not transfer</div>
+      <p>Prefix caching works for an LLM because the sequence is the prompt: it arrives fixed, it is often shared, and its keys and values can be computed once and kept.</p>
+      <p>In a diffusion transformer the sequence <em>is the output</em>. Every token changes at every step, so there is no prefix, no KV cache, and nothing to share between two users asking for different videos. The redundancy that does exist is across timesteps, which is section 06, and it is a much smaller prize.</p>
+    </div>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">08</span>Build this</h2>
+    <p class="lede">The claim you should least take on trust is that quality degrades gracefully with step count. Measure your own frontier, on your own checkpoint, in an afternoon.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Find the step floor and the cache ceiling, then measure what you lost</span>
+        <span class="proj-meta">~4 hours · diffusers + one GPU</span>
+      </div>
+      <p>Take one checkpoint and one fixed set of 32 prompts. You are not looking for the best images. You are looking for the step count where the sampler stops reproducing its own 100-step answer, which is a different and much sharper question.</p>
+      <ol class="proj-steps">
+        <li>Generate a reference set at 100 steps with a fixed seed per prompt. This is ground truth for everything that follows, and it is the only thing you compare against.</li>
+        <li>Sweep step counts over 2, 4, 8, 16, 32 and 50 for DDIM and for a second-order solver, same seeds throughout. Record LPIPS against the reference and CLIP score against the prompt.</li>
+        <li>Plot both. LPIPS will move long before CLIP does. Note the step count where each one starts to bend, and note that they are not the same number.</li>
+        <li>Enable feature caching at intervals 2, 3, 5 and 10 at your chosen step count. Fit <span>$N/(1+(N-1)r)$</span> to the measured speedups and read off <span>$r$</span>.</li>
+        <li>Now measure diversity rather than quality. Generate 32 samples of one prompt with 32 different seeds, from the base model and from a distilled few-step model. Embed all 64 and compare mean pairwise distance within each group.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> your fitted <span>$r$</span> predicts the speedup at an interval you did not fit, and when the extrapolated ceiling <span>$1/r$</span> turns out to be a number you would not have guessed from the interval-2 measurement alone.</div>
+      <div class="proj-stretch"><strong>What step 5 teaches.</strong> The metrics in steps 2 and 3 will say the distilled model is fine. The pairwise distance in step 5 is where the loss shows, and the gap between those readings is section 04's whole argument. Look at the images too: the distilled group tends to share a composition and differ only in surface.</div>
+    </div>
+  </section>
+
+  <section id="checkpoint-2">
+    <div class="checkpoint">
+      <span class="checkpoint-label">Where you are</span>
+      <p>You now have every lever: solvers, guidance, distillation, straightened paths, caching, and the token arithmetic that makes video its own problem.</p>
+      <p>What remains is putting it on a machine. Section 09 is the part that surprises people who arrive from LLM serving, and it is one division.</p>
+    </div>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">09</span>Serving diffusion, and why it is not LLM serving</h2>
+    <p class="lede">Page 31 taught you that batching is nearly free and bandwidth is the enemy. Both halves of that invert here, and the reason is one line of arithmetic.</p>
+
+    <p>Repeat page 31's roofline count for one denoiser pass. A model with <span>$P$</span> parameters in bf16 moves <span>$2P$</span> bytes of weights. It does about two floating-point operations per parameter per token, over <span>$T$</span> tokens per sample and <span>$B$</span> samples:</p>
+
+    <div class="eq-block"><span>$$\text{intensity} = \frac{2PTB}{2P} = TB$$</span></div>
+
+    <p class="eq-explain">Same derivation as decode, one extra factor. For LLM decode <span>$T = 1$</span> and the intensity is <span>$B$</span>. Here <span>$T$</span> is the whole latent.</p>
+
+    <p>A 1024 pixel image with an 8 times autoencoder and a patch size of 2 is 4,096 tokens. The five-second clip above is 118,800. An H100 SXM lists 989 bf16 TFLOP/s against 3.35 TB/s, putting its ridge point near 295 operations per byte.</p>
+
+    <p>So a diffusion step is past the ridge at batch 1, by a factor of roughly 14 for that image and 400 for that clip. Argus, a text-to-image serving system, states the consequence directly: these models are "highly compute-bound".</p>
+
+    <p>Four things follow, and each contradicts an instinct from page 31.</p>
+
+    <ul>
+      <li><strong>Batching buys much less.</strong> The arithmetic units were already saturated at batch 1, so a larger batch mostly adds latency. There is no equivalent of the decode batching cliff, because you are not waiting on memory.</li>
+      <li><strong>There is no KV cache to run out of.</strong> No per-request state grows with time. Capacity is weights plus activations, and activations scale with resolution and clip length rather than with how long a user has been talking.</li>
+      <li><strong>Scaling out means splitting one sample.</strong> More GPUs cannot serve more requests per second at the same latency if one request already fills the device. This is why video inference reaches for sequence parallelism across GPUs rather than for more concurrency.</li>
+      <li><strong>Quantisation pays differently.</strong> Weight-only quantisation is the standard LLM win because it cuts bytes moved, and bytes moved is not the constraint here. You need low-precision arithmetic, meaning FP8 activations as well as weights, or you get nothing.</li>
+    </ul>
+
+    <div class="callout callout-teach">
+      <div class="callout-label">One thing that is easier here</div>
+      <p>Requests in a diffusion batch all run the same number of steps and finish together. The ragged-completion problem that makes continuous batching essential for an LLM barely exists, because generation length is a server setting rather than something the model decides.</p>
+      <p>The scheduling problem that replaces it is admission: one request can occupy the whole device for minutes, and there is no chunking trick that makes a denoising step interruptible.</p>
+    </div>
+
+    <p>The hardware conclusion is blunt. Choose on arithmetic throughput per pound, not bandwidth per pound. A card that wins on LLM decode because of its memory system can lose here, and the ranking you carry over from a serving benchmark will be the wrong ranking.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">10</span>What actually breaks</h2>
+    <p class="lede">Almost none of these are crashes. They are quality regressions that no dashboard is watching for.</p>
+
+    <ul>
+      <li><strong>Caching drift passes the spot check.</strong> Details move and the image stays plausible, so nobody notices in review. The only way to see it is to diff against an uncached reference at a fixed seed.</li>
+      <li><strong>The step count was tuned on one sampler and copied to another.</strong> Twenty steps of a second-order solver and twenty of DDIM are not the same amount of integration. The number is not portable.</li>
+      <li><strong>A distilled model is benchmarked at 4 steps against a base model at 50.</strong> That comparison measures the distillation, not the checkpoint, and it is how a worse model wins an evaluation.</li>
+      <li><strong>Diversity collapse arrives as a support ticket.</strong> FID over thousands of samples is a distribution distance and will not show it. Per-prompt pairwise distance will.</li>
+      <li><strong>Guidance scale stopped doing anything.</strong> The checkpoint is guidance-distilled, the scale is now a trained input with a range, and it is being driven outside it.</li>
+      <li><strong>The video memory plan was made at five seconds.</strong> Attention is quadratic in clip length. Doubling the duration roughly quadruples the dominant term and the budget was linear.</li>
+      <li><strong>Batch size was raised to improve throughput and only raised latency.</strong> Section 09. The arithmetic units were busy already.</li>
+      <li><strong>A negative prompt quietly stopped applying.</strong> It was a second conditional in the unconditional slot, and the model no longer evaluates that slot.</li>
+    </ul>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">11</span>Where you meet this in the wild</h2>
+    <p class="lede">The same budget, four different things worth spending it on.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card">
+        <div class="wild-head"><strong>A hosted image API</strong></div>
+        <p>Throughput per GPU is the unit economics and nobody is watching a progress bar. Every free lever gets pulled and the paid ones get a quality review.</p>
+        <p class="reach reach-yes">Guidance-distilled checkpoint, a second-order solver in the 20s, caching on, FP8 arithmetic.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>An interactive canvas</strong></div>
+        <p>The user is drawing and the image updates as they move. A latency budget under a couple of hundred milliseconds leaves room for one to four evaluations and nothing else.</p>
+        <p class="reach reach-yes">A distilled few-step model. The diversity loss costs nothing here, because the user is the source of variation.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>A video product</strong></div>
+        <p>Minutes per clip on one GPU. The step count is already low and attention is most of the remaining bill, so the work is in the attention kernel and in splitting one sample across devices.</p>
+        <p class="reach reach-yes">Sparse or tiled attention, sequence parallelism, the most aggressive autoencoder you can tolerate.</p>
+        <p class="reach reach-no">Not more concurrency. One request already owns the device.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>On-device generation</strong></div>
+        <p>A phone or a laptop, where the constraint is memory and sustained power rather than peak throughput. Token count is the thing to attack, before step count.</p>
+        <p class="reach reach-yes">A deeply compressing autoencoder plus a small step count. SANA's 32 times compression is the shape of the answer.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">12</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why is a diffusion model expensive to run compared with a GAN?</summary>
+      <div class="qa-body"><p>Because quality comes from an iterative loop rather than a single pass. A GAN generator produces its output in one forward evaluation. A diffusion sampler integrates a reverse process, and each increment of that integration is a full forward pass of a large network.</p>
+      <p>The other two components barely count. The text encoder runs once per request and the decoder runs once at the end, so a 50-step generation is essentially 50 network evaluations, doubled to 100 if classifier-free guidance is on.</p>
+      <p>That is the whole cost model, and it is why every acceleration technique for diffusion is ultimately about reducing the number of function evaluations or making each one cheaper.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What does classifier-free guidance cost at inference, and how do people avoid it?</summary>
+      <div class="qa-body"><p>It doubles the forward passes. Each step evaluates the model once with the prompt and once without, then extrapolates away from the unconditional prediction, so a 50-step guided generation is 100 passes rather than 50.</p>
+      <p>The usual fix is guidance distillation: train a student that takes the guidance scale as an input and reproduces the combined output in a single pass. FLUX.1 [dev] ships this way, and HunyuanVideo reports about 1.9 times acceleration from it.</p>
+      <p>A cheaper partial fix is to apply guidance only over an interval of noise levels, which removes the second pass outside that interval and, in the paper that proposed it, also improved sample quality.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>You need to get from 50 steps to 10. What do you try, and in what order?</summary>
+      <div class="qa-body"><p>Start with things that do not touch the weights. Swap the sampler for a higher-order ODE solver, since that changes the step floor by roughly a square root and costs nothing. Then check whether guidance can be limited to an interval, which removes a second pass from the steps outside it.</p>
+      <p>Next, feature caching. Measure the speedup at two intervals, fit the reuse model, and you get both the achievable range and the ceiling from the same two measurements.</p>
+      <p>Only then reach for distillation, because it costs a training run and changes the model's behaviour. Guidance distillation first, since it removes a factor of two with little quality argument. Step distillation last, because it is the one that costs diversity.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What does a 4-step distilled model give up, and how would you measure it?</summary>
+      <div class="qa-body"><p>Mostly diversity, not fidelity. The DMD2 authors put their 4-step and 1-step students at FID 19.32 and 19.01 against an SDXL teacher at 19.36, so on a distribution metric the student is level, and they separately report a degradation in image diversity.</p>
+      <p>The mechanism is that distilled models fix their image structure in the first evaluation, where a base model spreads structural decisions over many steps. With one evaluation there is nowhere for the seed to change composition, so it changes only surface detail.</p>
+      <p>FID will not show this, because it compares distributions over thousands of samples. Measure it directly: generate many samples of a single prompt with different seeds, embed them, and compare mean pairwise distance against the base model on the same prompts.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why do straighter probability paths need fewer sampling steps?</summary>
+      <div class="qa-body"><p>Because Euler integration of a straight line is exact at any step size. All the discretisation error comes from curvature, so a perfectly straight path can be traversed in one step and a curved one cannot.</p>
+      <p>The subtlety is that a linear interpolant does not by itself give a straight flow. The marginal velocity field averages over every data point a given noise sample might become, and that average bends. Straightness is a property of the coupling between noise and data, not of the schedule.</p>
+      <p>Reflow fixes this by running the learned ODE, recording where each noise sample actually lands, and retraining on those pairs. With one destination per starting point the paths stop crossing and the induced field is straight.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Derive the speedup from feature caching and state its limit.</summary>
+      <div class="qa-body"><p>Let the full network cost 1 and the cached path cost a fraction r of it, and run the full network once every N steps. Average cost per step is (1 + (N-1)r)/N, so the speedup is N divided by that, which is N/(1 + (N-1)r).</p>
+      <p>Take N to infinity and the speedup tends to 1/r. The interval is a knob but the reuse fraction is a ceiling, so a scheme is characterised by how cheap its cheap path is rather than by how far apart the full evaluations are spaced.</p>
+      <p>This is usable in reverse. DeepCache report 2.30 times on Stable Diffusion v1.5 at interval 5; inverting gives r of about 0.293 and a ceiling near 3.4 times, which tells you not to spend a week tuning the interval. It also predicts that caching will not compose with a 4-step model, because the interval cannot exceed the step count.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why is generating a five-second video not the same as generating 120 images?</summary>
+      <div class="qa-body"><p>Because the whole clip is one attention sequence. Split N tokens into k per-frame groups and attend within each and you pay k times (N/k) squared, which is N squared over k. Attend jointly and you pay N squared. The ratio is exactly k, the number of latent frames.</p>
+      <p>Concretely, HunyuanVideo compresses 129 frames of 1280 by 720 by 8 in space and 4 in time, patchifies by 2 spatially, and gets 33 by 45 by 80, which is 118,800 tokens. That is 33 times the tokens of one frame and 1,089 times the attention, so 33 times more attention work per frame of output.</p>
+      <p>Two consequences. Temporal compression in the autoencoder is worth more than any sampler change, since dropping it here would cost about 15 times on attention. And doubling the clip length roughly quadruples the dominant term, so duration budgets are not linear.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How does serving a diffusion model differ from serving an LLM?</summary>
+      <div class="qa-body"><p>The roofline position is opposite. One denoiser pass moves 2P bytes of weights and does roughly 2PTB operations over T tokens per sample and B samples, so arithmetic intensity is TB. For LLM decode T is 1 and intensity is the batch size; for a 1024 pixel image T is about 4,096 and for a five-second clip it is over 100,000.</p>
+      <p>Against an H100's ridge point near 295 operations per byte, a diffusion step is compute-bound at batch 1. Batching therefore buys much less than it does during decode, and raising it mostly adds latency.</p>
+      <p>The rest follows. There is no KV cache, so capacity is weights plus activations rather than context length. Scaling out means sequence parallelism over one sample rather than more concurrent requests. Weight-only quantisation gains little, because bytes moved was never the constraint. And hardware should be chosen on arithmetic throughput rather than on memory bandwidth.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">13</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/2010.02502" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Denoising Diffusion Implicit Models</div><div class="r-sub">Song, Meng &amp; Ermon. The deterministic sampler behind section 02, reporting samples 10 to 50 times faster than DDPM. arXiv:2010.02502</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2206.00927" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">DPM-Solver: A Fast ODE Solver for Diffusion Probabilistic Model Sampling in Around 10 Steps</div><div class="r-sub">Lu et al. 10 to 20 evaluations and a 4 to 16 times speedup, with no change to the weights. arXiv:2206.00927</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2207.12598" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Classifier-Free Diffusion Guidance</div><div class="r-sub">Ho &amp; Salimans. Where the second forward pass per step comes from. arXiv:2207.12598</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2210.03142" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">On Distillation of Guided Diffusion Models</div><div class="r-sub">Meng et al. Guidance distillation: one student, conditioned on the scale, in place of two branches. arXiv:2210.03142</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2404.07724" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Applying Guidance in a Limited Interval Improves Sample and Distribution Quality</div><div class="r-sub">Kynkäänniemi et al. Cheaper and better: guidance helps only in the middle of the schedule. arXiv:2404.07724</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2202.00512" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Progressive Distillation for Fast Sampling of Diffusion Models</div><div class="r-sub">Salimans &amp; Ho. Halve the step count, repeat. 8192 steps down to 4, FID 3.0 on CIFAR-10. arXiv:2202.00512</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2303.01469" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Consistency Models</div><div class="r-sub">Song et al. Map every point on a trajectory to its endpoint, then jump. arXiv:2303.01469</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2310.04378" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Latent Consistency Models</div><div class="r-sub">Luo et al. The same property distilled into a latent diffusion model. 2 to 4 steps at 768 px, about 32 A100 hours. arXiv:2310.04378</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2311.17042" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Adversarial Diffusion Distillation</div><div class="r-sub">Sauer et al. Score distillation plus a discriminator, shipped as SDXL-Turbo. arXiv:2311.17042</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2402.13929" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">SDXL-Lightning: Progressive Adversarial Diffusion Distillation</div><div class="r-sub">Lin, Wang &amp; Yang. Names the trade in its own abstract: quality against mode coverage. arXiv:2402.13929</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2405.14867" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Improved Distribution Matching Distillation for Fast Image Synthesis</div><div class="r-sub">Yin et al. DMD2, and the FID table in section 04 showing what one-step does and does not cost. arXiv:2405.14867</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2503.10637" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Distilling Diversity and Control in Diffusion Models</div><div class="r-sub">Gandikota &amp; Bau. Why distilled models lose diversity: structure is fixed at the first timestep. arXiv:2503.10637</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2209.03003" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow</div><div class="r-sub">Liu, Gong &amp; Liu. Rectification, reflow, and one-step Euler. The source for section 05. arXiv:2209.03003</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2403.03206" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Scaling Rectified Flow Transformers for High-Resolution Image Synthesis</div><div class="r-sub">Esser et al. The Stable Diffusion 3 paper, and what settled rectified flow as standard practice. arXiv:2403.03206</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2312.00858" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">DeepCache: Accelerating Diffusion Models for Free</div><div class="r-sub">Ma, Fang &amp; Wang. 2.3 times on SD v1.5 for 0.05 CLIP, and the interval study section 06 inverts. arXiv:2312.00858</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2411.19108" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Timestep Embedding Tells: It's Time to Cache for Video Diffusion Model</div><div class="r-sub">Liu et al. TeaCache. Adaptive rather than uniform reuse, up to 4.41 times on Open-Sora-Plan. arXiv:2411.19108</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2412.03603" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">HunyuanVideo: A Systematic Framework For Large Video Generative Models</div><div class="r-sub">Kong et al. Every constant used in section 07: the 4 by 8 by 8 autoencoder, the block counts, the guidance distillation. arXiv:2412.03603</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2408.06072" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">CogVideoX: Text-to-Video Diffusion Models with An Expert Transformer</div><div class="r-sub">Yang et al. The 3D causal autoencoder at 8 by 8 by 4, stated plainly. arXiv:2408.06072</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2502.04507" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Fast Video Generation with Sliding Tile Attention</div><div class="r-sub">Zhang et al. Where the 800-of-945-seconds measurement comes from, and a kernel that attacks it. arXiv:2502.04507</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2506.19852" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Radial Attention: O(n log n) Sparse Attention with Energy Decay for Long Video Generation</div><div class="r-sub">Li et al. Spatiotemporal energy decay turned into a sparsity pattern. arXiv:2506.19852</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2502.01776" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Sparse VideoGen: Accelerating Video Diffusion Transformers with Spatial-Temporal Sparsity</div><div class="r-sub">Xi et al. Spatial heads and temporal heads, separated and sparsified at inference. arXiv:2502.01776</div></div>
+      </a>
+      <a class="resource-card" href="https://huggingface.co/black-forest-labs/FLUX.1-dev" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Model card</div><div class="r-title">FLUX.1 [dev]</div><div class="r-sub">The source for the guidance-distillation line quoted in section 03, on a checkpoint you can download.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2410.10629" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">SANA: Efficient High-Resolution Image Synthesis with Linear Diffusion Transformers</div><div class="r-sub">Xie et al. A 32 times autoencoder, which attacks token count rather than step count. arXiv:2410.10629</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2511.06724" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Argus: Quality-Aware High-Throughput Text-to-Image Inference Serving System</div><div class="r-sub">Agarwal, Mitra &amp; Iqbal. A serving system built around the fact that these models are compute-bound. arXiv:2511.06724</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/hao-ai-lab/FastVideo" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">FastVideo</div><div class="r-sub">Distillation, sparse attention and distributed inference for video models, in one framework. The practical version of sections 04 and 07.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/xdit-project/xDiT" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">xDiT</div><div class="r-sub">Sequence and pipeline parallelism for diffusion transformers. What you reach for when one sample already fills the device.</div></div>
+      </a>
+      <a class="resource-card" href="https://huggingface.co/docs/diffusers/index" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">Diffusers</div><div class="r-sub">Where the samplers, the distilled checkpoints and the caching hooks all live behind one interface. Start the project in section 08 here.</div></div>
+      </a>
+      <a class="resource-card" href="https://resources.nvidia.com/en-us-gpu-resources/h100-datasheet-24306" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Datasheet</div><div class="r-title">NVIDIA H100 Tensor Core GPU</div><div class="r-sub">The two numbers section 09 divides to get a ridge point. Do the division for whatever card you actually have.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/454" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Autoregressive Video Chunk FPS Calculator</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/401" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Exponential Moving Average (EMA) for Diffusion Model Weights</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/434" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Prefix Cache Hit Rate Calculator</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/302" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Diffusion Reconstruction Loss</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/304" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Forward &amp; Backward Diffusion Process</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/303" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Forward Diffusion Process</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="../practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">14</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="./12-generative-models.html"><div class="rc-sec" style="color:var(--c-genai)">12 · Prerequisite</div><div class="rc-title">Generative Models</div><div class="rc-hook">The forward and reverse process, the ELBO, noise schedules and what the loop is actually doing. Read it first.</div></a>
+      <a class="related-card" href="./31-llm-inference-serving.html"><div class="rc-sec" style="color:var(--c-practice)">31 · The mirror image</div><div class="rc-title">LLM Inference &amp; Serving</div><div class="rc-hook">Same roofline derivation, opposite answer. Section 09 is an argument with this page.</div></a>
+      <a class="related-card" href="./23-efficient-ai-systems.html"><div class="rc-sec" style="color:var(--c-efficient)">23 · The theory</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Distillation, quantisation and the roofline as general techniques, before they meet a denoising loop.</div></a>
+      <a class="related-card" href="./35-model-atlas-vision-generative.html"><div class="rc-sec" style="color:var(--c-atlas)">35 · Which checkpoint</div><div class="rc-title">Model Atlas: Vision &amp; Generative Media</div><div class="rc-hook">The current image and video models, their licences and what each one is good at.</div></a>
+      <a class="related-card" href="./28-gpu-architecture-cuda-distributed.html"><div class="rc-sec" style="color:var(--c-gpu)">28 · One layer down</div><div class="rc-title">GPU Architecture, CUDA &amp; Distributed Training</div><div class="rc-hook">Why the ridge point is where it is, and what sequence parallelism costs in communication.</div></a>
+    </div>
+  </section>
+
+  <section id="techmap-embed">
+    <h2>Other techniques for this problem</h2>
+    <p class="dek">A scoped slice of the full <a href="./technique-map.html">Technique Map</a>: every technique this page covers, grouped by what it solves.</p>
+    <div id="ttEmbed"></div>
+  </section>
+
+  <nav class="prevnext"><a class="prev" href="./39-realtime-voice-ai.html"><div class="pn-dir">← Previous</div><div class="pn-title">39 · Real-Time Voice AI</div></a></nav>
+</main>
+
+
+
+
+<aside class="sidebar-right" id="sidebarRight">
+  <div class="tocd" id="tocDrawer">
+    <div class="tocd-rail" id="tocRail" aria-hidden="true"></div>
+    <button class="tocd-toggle" id="tocToggle" type="button" aria-expanded="false" aria-controls="tocDrawer" title="Contents"><span></span><span></span><span></span></button>
+    <div class="tocd-panel">
+      <div class="toc-block">
+        <div class="toc-title">On this page</div>
+        <div class="toc" id="toc"></div>
+      </div>
+      <button class="sidebar-notes-btn" id="markDoneBtn">Mark as revised</button>
+    </div>
+  </div>
+</aside>
+</div>
+
+<button class="to-top" id="toTop" title="Back to top">↑</button>
+
+<div class="select-toolbar" id="selectToolbar">
+  <button class="sw-yellow" data-color="yellow" title="Highlight yellow"></button>
+  <button class="sw-green" data-color="green" title="Highlight green"></button>
+  <button class="sw-pink" data-color="pink" title="Highlight pink"></button>
+  <button class="sw-blue" data-color="blue" title="Highlight blue"></button>
+  <button class="sw-note" data-note title="Add note">+ Note</button>
+  <button class="sw-comment" data-comment title="Add comment">💬</button>
+  <button class="sw-remove" data-remove title="Remove highlight">🗑</button>
+</div>
+
+<div class="search-modal" id="searchModal">
+  <div class="search-box">
+    <div class="search-input-row">
+      <span class="si-icon">🔍</span>
+      <input id="searchInput" type="text" placeholder="Search every topic, term, model…" autocomplete="off" />
+      <kbd>Esc</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+    <div class="search-hint"><span>↑↓ navigate</span><span>↵ open</span><span>esc close</span></div>
+  </div>
+</div>
+
+<div class="notes-drawer" id="notesDrawer">
+  <div class="notes-head"><h3>My Notes — 40 Diffusion &amp; Video at Inference Time</h3><button class="iconbtn" id="notesClose">✕</button></div>
+  <div class="notes-body">
+    <h4>Free notes</h4>
+    <textarea id="freeNotes" placeholder="Jot down anything — mnemonics, gaps to revisit, your own phrasing…"></textarea>
+    <h4>Highlights on this page</h4>
+    <div id="hlList"></div>
+  </div>
+  <div class="notes-foot">
+    <button id="exportNotes">⇩ Export .md</button>
+    <button id="clearNotes">Clear page</button>
+  </div>
+</div>
+
+<script src="../assets/js/search-data.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script src="../assets/js/app.js"></script>
+<script src="../assets/js/back-link.js"></script>
+<script src="../assets/js/code-highlight.js"></script>
+<script src="../assets/js/find-in-page.js"></script>
+<script src="../assets/js/kml-modal.js"></script>
+<script src="../assets/js/review.js"></script>
+<script src="../assets/js/question-index.js"></script>
+<script src="../assets/js/review-widget.js"></script>
+<script src="../assets/js/anchor.js"></script>
+<script src="../assets/js/notes.js"></script>
+<script src="../assets/js/community.js"></script>
+<script src="../assets/js/techtree.js"></script>
+<script src="../assets/js/techtree-data.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    if (window.KMLTechTree && window.KML_TECHTREE_FOR_PAGE) {
+      window.KMLTechTree.render(document.getElementById('ttEmbed'), window.KML_TECHTREE_FOR_PAGE('40-diffusion-video-inference'), './');
+    }
+  });
+</script>
+</body>
+</html>

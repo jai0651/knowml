@@ -11,7 +11,7 @@ window.SEARCH_INDEX = [
       "Foundations",
       "full"
     ],
-    "summary": "Everything around modern AI in one place — 37 sections, five interactive labs, four learning roadmaps, a model atlas and 279 interview questions.",
+    "summary": "Machine learning and modern AI, from the maths up. Linear algebra through to agents, with the systems work underneath: inference at scale, real-time voice, diffusion serving.",
     "color": "var(--c-map)"
   },
   {
@@ -974,6 +974,73 @@ window.SEARCH_INDEX = [
     "color": "var(--c-gpu)"
   },
   {
+    "title": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html",
+    "tags": [
+      "disaggregation",
+      "prefill decode",
+      "KV cache quantization",
+      "KV offload",
+      "multi-LoRA",
+      "FP8",
+      "MXFP4",
+      "NVFP4",
+      "FlashInfer",
+      "FlashDecoding",
+      "expert parallel",
+      "MoE serving",
+      "goodput",
+      "SLA",
+      "full"
+    ],
+    "summary": "Prefill/decode disaggregation, KV quantization and offload, multi-LoRA serving, four-bit formats, decode-time kernels, expert-parallel MoE and why goodput beats throughput.",
+    "color": "var(--c-practice)"
+  },
+  {
+    "title": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html",
+    "tags": [
+      "voice agent",
+      "turn latency",
+      "endpointing",
+      "barge-in",
+      "VAD",
+      "streaming ASR",
+      "streaming TTS",
+      "full-duplex",
+      "speech-to-speech",
+      "WebRTC",
+      "Opus",
+      "jitter buffer",
+      "full"
+    ],
+    "summary": "The turn-latency budget decomposed to milliseconds: endpointing, barge-in, streaming ASR lookahead, TTS first chunk, cascaded versus speech-to-speech, and transport.",
+    "color": "var(--c-speech)"
+  },
+  {
+    "title": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html",
+    "tags": [
+      "diffusion inference",
+      "NFE",
+      "step distillation",
+      "consistency model",
+      "LCM",
+      "rectified flow",
+      "DeepCache",
+      "TeaCache",
+      "feature caching",
+      "classifier-free guidance",
+      "video diffusion",
+      "full"
+    ],
+    "summary": "Cutting the sampling loop: solvers, feature caching, guidance and step distillation, rectified flow, and why video is not images times frames.",
+    "color": "var(--c-genai)"
+  },
+  {
     "kind": "section",
     "title": "Why interviewers test this, and where it comes from",
     "parentTitle": "01 · Math & Stats Foundations",
@@ -1189,6 +1256,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "01 · Math & Stats Foundations",
     "section": "Foundations",
     "url": "topics/01-math-foundations.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-math)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "01 · Math & Stats Foundations",
+    "section": "Foundations",
+    "url": "topics/01-math-foundations.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-math)"
@@ -1435,6 +1512,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "02 · Classical Supervised ML",
+    "section": "Foundations",
+    "url": "topics/02-classical-ml.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-classical)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
@@ -1605,6 +1692,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "03 · Unsupervised & Self-Supervised",
+    "section": "Foundations",
+    "url": "topics/03-unsupervised-self-supervised.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-unsup)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
@@ -1709,6 +1806,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
     "url": "topics/04-neural-network-fundamentals.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-nn)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "04 · Neural Network Fundamentals",
+    "section": "Neural Nets & Vision",
+    "url": "topics/04-neural-network-fundamentals.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-nn)"
@@ -1889,6 +1996,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-vision)"
@@ -2085,6 +2202,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
@@ -2205,6 +2332,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "07 · Sequence Modeling Pre-Transformer",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/07-sequence-modeling-pre-transformer.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sequence)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
@@ -2289,6 +2426,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-attention)"
@@ -2449,6 +2596,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/09-nlp-evolution.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-nlp)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "09 · NLP Evolution",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/09-nlp-evolution.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-nlp)"
@@ -2675,6 +2832,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "10 · LLM Architecture & Training",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/10-llm-architecture-training.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-llm)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
@@ -2869,6 +3036,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
     "url": "topics/11-rag-agents-reasoning.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rag)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "11 · RAG, Agents & Reasoning",
+    "section": "Generative & Multimodal",
+    "url": "topics/11-rag-agents-reasoning.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-rag)"
@@ -3099,6 +3276,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
     "url": "topics/12-generative-models.html#evaluation-is-the-real-bottleneck",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "12 · Generative Models",
+    "section": "Generative & Multimodal",
+    "url": "topics/12-generative-models.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
@@ -3395,6 +3582,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "14 · Multimodal AI",
+    "section": "Generative & Multimodal",
+    "url": "topics/14-multimodal-ai.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-multimodal)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
@@ -3509,6 +3706,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
     "url": "topics/15-reinforcement-learning.html#why-dqn-needs-a-replay-buffer-and-a-target-network",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rl)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "15 · Reinforcement Learning",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/15-reinforcement-learning.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-rl)"
@@ -3795,6 +4002,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
     "title": "Message passing is the whole field",
     "parentTitle": "18 · Graph ML",
     "section": "Decision & Retrieval Systems",
@@ -3929,6 +4146,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "18 · Graph ML",
     "section": "Decision & Retrieval Systems",
     "url": "topics/18-graph-ml.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-graph)"
@@ -4265,6 +4492,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
+    "section": "Embodied & Frontier",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-3d)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
@@ -4455,6 +4692,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
     "title": "The trade you are making",
     "parentTitle": "22 · World Models",
     "section": "Embodied & Frontier",
@@ -4569,6 +4816,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "22 · World Models",
     "section": "Embodied & Frontier",
     "url": "topics/22-world-models.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-world)"
@@ -4765,6 +5022,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
@@ -4849,6 +5116,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
     "url": "topics/24-mlops.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-mlops)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "24 · ML Engineering & MLOps",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/24-mlops.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-mlops)"
@@ -4985,6 +5262,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "25 · Evaluation, Reliability & Safety",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/25-evaluation-reliability-safety.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-eval)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "26 · 2026 Frontier Map",
     "section": "Systems, Safety & Interview",
@@ -5115,6 +5402,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "26 · 2026 Frontier Map",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/26-frontier-2026.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-frontier)"
+  },
+  {
+    "kind": "section",
     "title": "The six-question framework",
     "parentTitle": "27 · Interview Mastery",
     "section": "Systems, Safety & Interview",
@@ -5199,6 +5496,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "27 · Interview Mastery",
     "section": "Systems, Safety & Interview",
     "url": "topics/27-interview-mastery.html#practice",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-interview)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "27 · Interview Mastery",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/27-interview-mastery.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-interview)"
@@ -5445,6 +5752,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
     "title": "The decision before the decision",
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
@@ -5645,6 +5962,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "29 · Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
     "title": "The question everybody asks first",
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
@@ -5709,6 +6036,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
     "url": "topics/30-running-models-locally.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "30 · Running Models Locally",
+    "section": "Hands-on",
+    "url": "topics/30-running-models-locally.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
@@ -5835,6 +6172,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "31 · LLM Inference & Serving",
+    "section": "Hands-on",
+    "url": "topics/31-llm-inference-serving.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
     "title": "Why supervised fine-tuning is not enough",
     "parentTitle": "32 · Preference Optimization: RLHF, DPO & GRPO",
     "section": "Hands-on",
@@ -5949,6 +6296,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "32 · Preference Optimization: RLHF, DPO & GRPO",
     "section": "Hands-on",
     "url": "topics/32-preference-optimization.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "32 · Preference Optimization: RLHF, DPO & GRPO",
+    "section": "Hands-on",
+    "url": "topics/32-preference-optimization.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
@@ -6079,6 +6436,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "33 · Model Atlas: Language Models",
     "section": "Model Atlas",
     "url": "topics/33-model-atlas-language.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-atlas)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "33 · Model Atlas: Language Models",
+    "section": "Model Atlas",
+    "url": "topics/33-model-atlas-language.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-atlas)"
@@ -6325,6 +6692,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "35 · Model Atlas: Vision & Generative Media",
+    "section": "Model Atlas",
+    "url": "topics/35-model-atlas-vision-generative.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-atlas)"
+  },
+  {
+    "kind": "section",
     "title": "Why a prize, and why these seven",
     "parentTitle": "36 · The Millennium Prize Problems",
     "section": "Grand Challenges",
@@ -6539,6 +6916,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#pick",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-challenge)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "section": "Grand Challenges",
+    "url": "topics/37-ai-in-industry.html#practice-problems",
     "tags": [],
     "summary": "",
     "color": "var(--c-challenge)"
