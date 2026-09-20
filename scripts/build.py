@@ -18,7 +18,7 @@ the change reversible and means nothing about the 2.5MB of prose moves.
 
 --check reports what would change without writing, which is what CI wants.
 """
-import json, re, sys, glob, os, pathlib, html as H
+import json, re, sys, glob, os, pathlib, hashlib, html as H
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECK  = "--check" in sys.argv or "--check-strict" in sys.argv
@@ -98,6 +98,51 @@ REGIONS = [
     ("tocrail",     r'<aside class="sidebar-right".*?</aside>'),
 ]
 
+ASSET_DIRS = ("assets/js", "assets/css", "assets/vendor")
+_HASHES = {}
+
+def asset_hash(rel):
+    """Short content hash for an asset, so its URL changes when the file does.
+
+    Vercel serves static files as `max-age=0, must-revalidate` unless told
+    otherwise. That caches the bytes but not the round trip, so every navigation
+    re-validated 16 assets and paid ~190ms of 304s before the page could settle.
+    Stamping the URL is what makes `immutable` safe to set in vercel.json: the
+    HTML stays revalidated, and the assets it points at can be cached forever
+    because a changed file is a changed URL.
+    """
+    if rel not in _HASHES:
+        f = ROOT / rel
+        _HASHES[rel] = hashlib.sha256(f.read_bytes()).hexdigest()[:8] if f.exists() else None
+    return _HASHES[rel]
+
+
+_ASSET_URL = re.compile(r'(?P<attr>\b(?:src|href))="(?P<pre>(?:\.\./)*)(?P<path>assets/[^"?]+)(?:\?v=[0-9a-f]+)?"')
+
+def stamp_assets(out):
+    """Append ?v=<hash> to every local js/css/vendor URL. Idempotent: an existing
+       stamp is stripped by the pattern and rewritten from current content."""
+    def one(m):
+        path = m.group("path")
+        if not path.startswith(ASSET_DIRS):
+            return m.group(0)
+        h = asset_hash(path)
+        if not h:
+            return m.group(0)
+        return '%s="%s%s?v=%s"' % (m.group("attr"), m.group("pre"), path, h)
+    return _ASSET_URL.sub(one, out)
+
+
+_BODY_SCRIPT = re.compile(r'<script src="((?:\.\./)*assets/js/[^"]+)"></script>')
+
+def defer_scripts(out):
+    """Every page shipped 14 synchronous <script> tags, each one blocking the
+       parser. They have no inline dependants and no document.write, and app.js
+       already handles KaTeX being either ready or not, so `defer` is safe and
+       preserves their relative order."""
+    return _BODY_SCRIPT.sub(lambda m: '<script defer src="%s"></script>' % m.group(1), out)
+
+
 def build():
     changed, same = [], 0
     for rel, cfg in PAGES.items():
@@ -123,6 +168,9 @@ def build():
             else:
                 new = render(PARTIALS[name], ctx).rstrip("\n")
             out = out[:m.start()] + new + out[m.end():]
+
+        out = defer_scripts(out)
+        out = stamp_assets(out)
 
         if out != src:
             changed.append(rel)

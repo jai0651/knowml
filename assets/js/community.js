@@ -91,6 +91,18 @@
     if (el) el.textContent = n;
   }
 
+  function countView(pid) {
+    var sessionKey = 'viewed:' + pid;
+    if (sessionStorage.getItem(sessionKey)) return;
+    sessionStorage.setItem(sessionKey, '1');
+    apiPost('/api/counters', { pageId: pid, action: 'view' })
+      .then(function (data) {
+        var el = document.getElementById('pcViewCount');
+        if (el) el.textContent = data.views;
+      })
+      .catch(function () {});
+  }
+
   function initCommunityBar() {
     var pid = pageId();
     if (!pid || !isTopicPage()) return;
@@ -99,15 +111,15 @@
         mountCommunityBar(renderCommunityBar(counts));
         wireLikeButton();
         wireCommentButton();
-        var sessionKey = 'viewed:' + pid;
-        if (!sessionStorage.getItem(sessionKey)) {
-          sessionStorage.setItem(sessionKey, '1');
-          apiPost('/api/counters', { pageId: pid, action: 'view' })
-            .then(function (data) {
-              var el = document.getElementById('pcViewCount');
-              if (el) el.textContent = data.views;
-            })
-            .catch(function () {});
+        /* A prerendered page runs all of this before anybody has decided to
+           visit it. The speculation rules in partials/head.html prerender on
+           hover, so counting a view here would credit every page the pointer
+           crossed. Wait for activation; if the reader never clicks, the
+           document is discarded and no view is ever recorded. */
+        if (document.prerendering) {
+          document.addEventListener('prerenderingchange', function () { countView(pid); }, { once: true });
+        } else {
+          countView(pid);
         }
       })
       .catch(function (err) {
