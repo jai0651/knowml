@@ -178,7 +178,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   <div class="topic-header">
     <div class="crumbs"><a href="../index.html">Home</a> / Hands-on / 30</div>
     <h1>Running Models Locally</h1>
-    <p class="dek">Everybody asks the same question first: will this model run on my machine? You can answer it with arithmetic instead of trial and error, and the arithmetic takes about a minute.</p>
+    <p class="dek">Will this model run on my machine? About a minute of arithmetic answers that, and the same arithmetic tells you how fast it will be once it does.</p>
     <div class="meta-row">
       <span class="reading-time">~20 min · prerequisites: KV cache (08), quantization theory (23)</span>
     </div>
@@ -187,27 +187,27 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   <section id="tldr">
     <div class="tldr">
       <div class="tldr-label">TL;DR</div>
-      <p>Three things occupy your VRAM: model weights, the KV cache, and framework overhead. Weights dominate at short context, and the KV cache overtakes them at long context. Compute both rather than guessing.</p>
-    <p>Quantization is the main lever, and the format you pick is decided by the runtime you use, not by quality alone: GGUF for llama.cpp and Ollama, AWQ or GPTQ for vLLM, bitsandbytes NF4 for QLoRA fine-tuning rather than serving.</p>
-    <p>Names mislead — Q4_K_M is not 4 bits per weight, it measures 4.89. Once the model fits, memory bandwidth sets your speed, not FLOPs, which is why a smaller quantization generates tokens faster on identical hardware. One sentence for an interview: local inference is a memory-capacity problem first and a memory-bandwidth problem second, and compute almost never enters into it.</p>
+      <p>Three things occupy your VRAM: model weights, the KV cache, and framework overhead. Weights dominate at short context; the KV cache overtakes them at long context. Compute both. Guessing is how a model that loaded fine at 2k context runs out of memory at 32k.</p>
+    <p>Quantization is the main lever, and your runtime picks the format for you, not quality: GGUF for llama.cpp and Ollama, AWQ or GPTQ for vLLM, bitsandbytes NF4 for QLoRA fine-tuning (that one isn't a serving format at all).</p>
+    <p>Names mislead. Q4_K_M isn't 4 bits per weight, it measures 4.89. Once the model fits, memory bandwidth sets your speed and FLOPs barely matter, so a smaller quantization generates tokens faster on identical hardware. One sentence for an interview: local inference is a memory-capacity problem first, a memory-bandwidth problem second, and a compute problem almost never.</p>
     </div>
   </section>
 
   <section id="the-question">
-    <h2><span class="num">01</span>The question everybody asks first</h2>
-    <p class="lede">"Will this run on my machine?" is answerable in advance. Most people find out by downloading 40 GB and watching it fail.</p>
+    <h2><span class="num">01</span>What everybody asks first</h2>
+    <p class="lede">"Will this run on my machine?" is answerable in advance. Most people answer it by downloading 40 GB and watching it fail.</p>
 
-    <p>Page <a href="./23-efficient-ai-systems.html">23</a> covers why quantization works and how PagedAttention manages a KV cache. This page is the practical counterpart. It answers what fits, what to install, and what to expect once it runs.</p>
+    <p>Page <a href="./23-efficient-ai-systems.html">23</a> covers why quantization works and how PagedAttention manages a KV cache. This page is the practical counterpart: what fits, what to install, and what to expect once it's running.</p>
 
-    <p>The mental model is short. Your GPU has a fixed pool of memory, and three things compete for it:</p>
+    <p>Your GPU has one fixed pool of memory, and three things compete for it:</p>
 
     <ul>
       <li><strong>Model weights.</strong> Fixed once you choose a model and a quantization level. Usually the largest single item.</li>
       <li><strong>KV cache.</strong> Grows linearly with context length and with the number of concurrent requests. Small at 2k context, dominant at 128k.</li>
-      <li><strong>Overhead.</strong> Activations, CUDA context, the framework itself. Not huge, but it is not zero, and people forget it.</li>
+      <li><strong>Overhead.</strong> Activations, CUDA context, the framework itself. Not huge, but it isn't zero (a few hundred megabytes to about a gigabyte), and people forget it.</li>
     </ul>
 
-    <p>If the sum exceeds your VRAM, one of three things happens. The load fails outright, the runtime silently offloads layers to CPU and slows down by an order of magnitude, or you hit an out-of-memory error partway through a long conversation. That last one is the KV cache growing past your headroom.</p>
+    <p>If the sum exceeds your VRAM you get one of three outcomes: the load fails outright, the runtime quietly offloads layers to CPU and slows down by an order of magnitude, or you hit an out-of-memory error partway through a long conversation. That last one is the KV cache growing past your headroom, and it's the one that catches people.</p>
 
     <div class="diagram">
       <div class="diagram-title">The same 24 GB card, four ways — drawn to scale, 20 px per GB
@@ -264,14 +264,14 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
         <text x="180" y="326" font-size="11" class="dim">Rows 3 and 4 are identical weights on an identical card. Only the context length moved,</text>
         <text x="180" y="342" font-size="11" class="dim">and it took the card from 27% full to nearly full.</text>
       </svg>
-      <div class="diagram-caption">Everything here is one scale, 20 px per GB, so the bars are comparable and the top two genuinely run off the chart rather than being drawn short. The KV figures assume an 8B GQA model — 32 layers, 8 KV heads, head dim 128, FP16 — which works out to 128 KB per token, so 0.5 GB at 4k and 16 GB at 128k. That is the whole reason "will model X fit in Y GB" is unanswerable without a context length attached, and why an out-of-memory error can arrive an hour into a conversation rather than at load time.</div>
+      <div class="diagram-caption">Everything here is drawn at one scale, 20 px per GB, so the bars are comparable and the top two really do run off the chart instead of being drawn short. KV figures assume an 8B GQA model (32 layers, 8 KV heads, head dim 128, FP16), so 128 KB per token: 0.5 GB at 4k, 16 GB at 128k. That's why "will model X fit in Y GB" is unanswerable without a context length attached, and why an out-of-memory error can arrive an hour into a conversation instead of at load time.</div>
     </div>
   </section>
 
   <section id="arithmetic">
-    <h2><span class="num">02</span>The arithmetic, done once, properly</h2>
+    <h2><span class="num">02</span>Do the arithmetic once</h2>
 
-    <p>Learn to compute this and you never have to trust a compatibility table again. The formula has two real terms and one fudge factor.</p>
+    <p>Learn to compute this and you'll never have to trust a compatibility table again. Two real terms and one fudge factor.</p>
 
     <details class="derivation">
       <summary>
@@ -279,23 +279,23 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
         <span class="drv-goal">Does Llama 3 8B fit in 8 GB of VRAM at 8k context?</span>
       </summary>
       <div class="drv-body">
-        <p class="drv-given">Every number below comes from the model's published <code>config.json</code> and from llama.cpp's own measurements. The arithmetic is illustrative in the sense that your framework overhead will differ, but the weight and cache terms are exact.</p>
+        <p class="drv-given">Every number below comes from the model's published <code>config.json</code> and from llama.cpp's own measurements. Your framework overhead will differ, so treat that one term as illustrative. The weight and cache terms are exact.</p>
         <ol class="drv-steps">
           <li>
             <div class="drv-eq"><span>$$\text{weights} = N_{\text{params}} \times \frac{\text{bits per weight}}{8} \;\text{bytes}$$</span></div>
-            <div class="drv-why"><strong>The naive version, and why it is wrong.</strong> People assume 4-bit means half a byte per parameter. Llama 3 8B has 8,030,261,248 parameters, so that predicts 4.0 GB. The real Q4_K_M file is 4.58 GiB. The name is not the footprint.</div>
+            <div class="drv-why"><strong>The naive version, and why it's wrong.</strong> People assume 4-bit means half a byte per parameter. Llama 3 8B has 8,030,261,248 parameters, so that predicts 4.0 GB. The real Q4_K_M file is 4.58 GiB. A name isn't a footprint.</div>
           </li>
           <li>
             <div class="drv-eq"><span>$$8.03 \times 10^9 \times \frac{4.8944}{8} \;=\; 4.91 \times 10^9 \;\text{bytes} \;=\; 4.58\ \text{GiB}$$</span></div>
-            <div class="drv-why"><strong>Why 4.89 and not 4.00:</strong> k-quants store a scale and a minimum per block of weights, and the <code>_M</code> variant deliberately keeps some tensors at higher precision. Both cost bits. llama.cpp publishes the measured figure of 4.8944 bits per weight for this model, and that matches the observed file size exactly.</div>
+            <div class="drv-why"><strong>Why 4.89 and not 4.00:</strong> k-quants store a scale and a minimum per block of weights, and the <code>_M</code> variant deliberately keeps some tensors at higher precision. Both cost bits. llama.cpp publishes a measured 4.8944 bits per weight for this model, and that matches the observed file size exactly.</div>
           </li>
           <li>
             <div class="drv-eq"><span>$$\begin{aligned}\text{KV bytes/token} = 2 \;\times\;& n_{\text{layers}} \times n_{\text{kv heads}} \\ \times\;& d_{\text{head}} \times \text{bytes}\end{aligned}$$</span></div>
-            <div class="drv-why"><strong>Why the leading 2:</strong> you cache a key <em>and</em> a value for every token, at every layer. The term everybody gets wrong is <span>$n_{\text{kv heads}}$</span>. With grouped-query attention that is far smaller than the number of attention heads, and using the wrong one inflates your estimate several-fold.</div>
+            <div class="drv-why"><strong>Why the leading 2:</strong> you cache a key <em>and</em> a value for every token, at every layer. The term everybody gets wrong is <span>$n_{\text{kv heads}}$</span>. With grouped-query attention it's far smaller than the number of attention heads, and picking the wrong one inflates your estimate several-fold.</div>
           </li>
           <li>
             <div class="drv-eq"><span>$$\begin{aligned}2 \times 32 \times 8 \times 128 \times 2 \;&=\; 131{,}072 \;\text{bytes} \\ &=\; 128\ \text{KiB per token}\end{aligned}$$</span></div>
-            <div class="drv-why"><strong>Where these come from:</strong> Llama 3 8B's config gives 32 layers, 8 key-value heads, and a head dimension of 128 (hidden size 4096 over 32 attention heads). The final 2 is bytes per element for an FP16 cache. Note it has 32 attention heads but only 8 KV heads.</div>
+            <div class="drv-why"><strong>Where these come from:</strong> Llama 3 8B's config gives 32 layers, 8 key-value heads, and a head dimension of 128 (hidden size 4096 over 32 attention heads). The final 2 is bytes per element for an FP16 cache. Note the 32 attention heads against only 8 KV heads.</div>
           </li>
           <li>
             <div class="drv-eq"><span>$$131{,}072 \times 8192 \;=\; 1{,}073{,}741{,}824 \;\text{bytes} \;=\; 1.00\ \text{GiB}$$</span></div>
@@ -303,36 +303,36 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
           </li>
           <li>
             <div class="drv-eq"><span>$$4.58 + 1.00 + \approx\!0.7 \;\approx\; 6.3\ \text{GiB total}$$</span></div>
-            <div class="drv-why"><strong>The fudge factor.</strong> Activations, the CUDA context and framework allocations are real but modest. Budget several hundred megabytes to roughly a gigabyte. This total leaves usable headroom inside 8 GB, so the answer is yes.</div>
+            <div class="drv-why"><strong>The fudge factor.</strong> Activations, the CUDA context and framework allocations are real but modest. Budget several hundred megabytes to roughly a gigabyte. That total leaves usable headroom inside 8 GB, so yes, it fits. Doubling the context to 16k costs exactly one more gibibyte, and that is the term to watch.</div>
           </li>
         </ol>
-        <div class="drv-payoff"><strong>The habit worth forming.</strong> Compute the weight term and the cache term separately, because they scale differently. Weights are fixed the moment you pick a file. The cache grows with every token of context and with every concurrent request. A model that loads comfortably at 2k context can run out of memory at 32k on the same card, and that surprise is the single most common local-inference failure.</div>
+        <div class="drv-payoff"><strong>The habit worth forming.</strong> Compute the weight term and the cache term separately, because they scale differently. Weights are fixed the moment you pick a file. Cache grows with every token of context and every concurrent request. A model that loads comfortably at 2k can run out of memory at 32k on the same card, and that's probably the most common local-inference surprise there is.</div>
       </div>
     </details>
 
-    <p>The rule of thumb practitioners quote is <strong>roughly 0.6 to 0.7 GB per billion parameters at Q4_K_M</strong>. That is a useful sanity check and it agrees with the calculation above. It is only a rule of thumb because it silently assumes a 4-bit k-quant, ignores context length entirely, and says nothing about how many KV heads the architecture uses.</p>
+    <p>Practitioners quote <strong>roughly 0.6 to 0.7 GB per billion parameters at Q4_K_M</strong>, and that agrees with the calculation above (4.58 GiB is 4.92 GB, over 8.03B parameters, so 0.61), so it's a fine sanity check. It stays a rule of thumb because it silently assumes a 4-bit k-quant, ignores context length, and says nothing about how many KV heads the architecture has.</p>
   </section>
 
   <section id="formats">
-    <h2><span class="num">03</span>The formats you will actually meet</h2>
+    <h2><span class="num">03</span>Formats you'll actually meet</h2>
 
-    <p>Quantization format looks like a quality decision. In practice it is a <em>compatibility</em> decision, because each runtime consumes its own format. Pick the runtime first and the format usually follows.</p>
+    <p>Quantization format looks like a quality decision. In practice it's a <em>compatibility</em> decision, because each runtime eats its own format. Pick the runtime first and the format usually follows.</p>
 
     <ul>
-      <li><strong>GGUF</strong> is the native format for <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener">llama.cpp</a>, and therefore for Ollama and LM Studio, which build on it. It is the only one of these designed for CPU and for hybrid CPU-plus-GPU execution.</li>
-      <li><strong>GPTQ</strong> is a post-training weight quantization algorithm aimed at GPU inference. Widely supported, including by vLLM.</li>
-      <li><strong>AWQ</strong> is activation-aware weight quantization. It protects the weights that matter most based on observed activation magnitudes, and is a common choice for GPU serving.</li>
-      <li><strong>bitsandbytes NF4</strong> quantizes on load rather than ahead of time. It is the standard path for QLoRA fine-tuning, not a serving format. See <a href="./29-finetuning-llms.html">29</a>.</li>
+      <li><strong>GGUF</strong> is the native format for <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener">llama.cpp</a>, and therefore for Ollama and LM Studio, which build on it. It's the only one of these designed for CPU and for hybrid CPU-plus-GPU execution.</li>
+      <li><strong>GPTQ</strong> is a post-training weight quantization algorithm aimed at GPU inference. Widely supported, vLLM included.</li>
+      <li><strong>AWQ</strong> is activation-aware weight quantization. It protects the weights that matter most (the ones whose observed activations are largest), and it's a common choice for GPU serving.</li>
+      <li><strong>bitsandbytes NF4</strong> quantizes on load instead of ahead of time. It's the standard path for QLoRA fine-tuning, and it isn't a serving format. See <a href="./29-finetuning-llms.html">29</a>.</li>
     </ul>
 
     <div class="callout callout-teach">
       <span class="callout-label">The naming trap that costs people a GPU</span>
-      <p>Q4_K_M reads like "4 bits per weight." It measures <strong>4.8944</strong>. Q8_0 is not 8 bits either, it is 8.50.</p>
-      <p>The <em>Q4</em> is the base block type. The <em>K</em> means k-quants, a block-wise scheme carrying a scale and minimum per block. The <em>M</em> is the medium mix, which keeps selected tensors at higher precision than the name suggests.</p>
-      <p>Budget from measured bits per weight, never from the digit in the filename. A 22% underestimate is exactly enough to make a model you thought would fit refuse to load.</p>
+      <p>Q4_K_M reads like "4 bits per weight." It measures <strong>4.8944</strong>. Q8_0 isn't 8 bits either, it's 8.50.</p>
+      <p><em>Q4</em> is the base block type. <em>K</em> means k-quants, a block-wise scheme carrying a scale and a minimum per block. <em>M</em> is the medium mix, and it keeps selected tensors at higher precision than the name suggests.</p>
+      <p>Budget from measured bits per weight, never from the digit in the filename. A 22% underestimate is exactly enough to make a model you'd budgeted for refuse to load.</p>
     </div>
 
-    <p>llama.cpp publishes measured figures for Llama 3.1 8B, which make the real size ladder concrete:</p>
+    <p>llama.cpp publishes measured figures for Llama 3.1 8B. Here's the real size ladder:</p>
 
     <div class="tbl-wrap">
       <table class="cmp">
@@ -344,92 +344,92 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       </table>
     </div>
 
-    <p>On quality, the honest answer is that degradation is gradual. It depends on both the model and the task. <strong>Q4_K_M is the widely used default</strong> because it sits at a good size-to-quality point.</p>
+    <p>On quality, degradation is usually gradual, and how gradual seems to depend on both the model and the task. <strong>Q4_K_M is the widely used default</strong> because it sits at a good size-to-quality point.</p>
 
-    <p>Below roughly 4 bits per weight is where users start reporting noticeable losses. The very low quants exist for cases where fitting at all matters more than fidelity. Measure on your own task rather than trusting a general claim, including this one.</p>
+    <p>Below roughly 4 bits per weight is where users start reporting noticeable losses. The very low quants exist for when fitting at all matters more than fidelity. Measure on your own task instead of trusting a general claim, this one included.</p>
   </section>
 
   <section id="tools">
-    <h2><span class="num">04</span>The tools, and which one to pick</h2>
+    <h2><span class="num">04</span>Which tool to pick</h2>
 
-    <p>The tools split cleanly by what you are doing, not by feature count. Ask whether you are serving one user or many.</p>
+    <p>Tools split cleanly by what you're doing, not by feature count. Ask whether you're serving one user or many.</p>
 
     <ul>
       <li><strong>One user, your own machine.</strong> <a href="https://ollama.com/" target="_blank" rel="noopener">Ollama</a> for the shortest path from nothing to a running model. <a href="https://lmstudio.ai/" target="_blank" rel="noopener">LM Studio</a> if you want a GUI. <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener">llama.cpp</a> directly when you need control over build flags, quantization and runtime settings. The first two are wrappers around the third.</li>
-      <li><strong>Many concurrent users.</strong> <a href="https://docs.vllm.ai/en/latest/" target="_blank" rel="noopener">vLLM</a>, TGI or SGLang. These implement continuous batching and paged KV cache, which is what turns idle GPU time into throughput. Page <a href="./23-efficient-ai-systems.html">23</a> explains the mechanisms.</li>
+      <li><strong>Many concurrent users.</strong> <a href="https://docs.vllm.ai/en/latest/" target="_blank" rel="noopener">vLLM</a>, TGI or SGLang. These implement continuous batching and a paged KV cache, and that's what turns idle GPU time into throughput. Page <a href="./23-efficient-ai-systems.html">23</a> explains the mechanisms.</li>
       <li><strong>Apple Silicon.</strong> <a href="https://github.com/ml-explore/mlx" target="_blank" rel="noopener">MLX</a> is built for it, though llama.cpp also runs well on Metal.</li>
     </ul>
 
-    <p>The common mistake is reaching for a serving framework to run a single local chat. vLLM's advantages are throughput advantages. With one user and a batch size of one, you are paying setup complexity for benefits you cannot access.</p>
+    <p>A common mistake is reaching for a serving framework to run a single local chat. vLLM's advantages are throughput advantages. With one user and a batch size of one, you're paying setup complexity for benefits you can't reach.</p>
   </section>
 
   <section id="hardware">
     <h2><span class="num">05</span>Hardware tiers, honestly</h2>
 
-    <p>The guidance below follows from the arithmetic in section 02, applied at Q4_K_M with a modest context. Treat the model sizes as what fits comfortably, not as hard ceilings.</p>
+    <p>Everything below follows from the arithmetic in section 02, applied at Q4_K_M with a modest context. Treat the model sizes as what fits comfortably, not as hard ceilings (context length moves these more than anything else).</p>
 
     <ul>
-      <li><strong>8 GB VRAM.</strong> 7B and 8B models fit at 4-bit with room for a normal context. This is the entry point where local inference stops being painful.</li>
-      <li><strong>12 to 16 GB.</strong> Comfortable 7B to 14B, and longer contexts without watching the cache. The extra headroom mostly buys context, not parameters.</li>
+      <li><strong>8 GB VRAM.</strong> 7B and 8B models fit at 4-bit with room for a normal context (4k to 8k, going by the worked example above). That's roughly the entry point where local inference stops being painful.</li>
+      <li><strong>12 to 16 GB.</strong> Comfortable 7B to 14B, and longer contexts without watching the cache. And the extra headroom mostly buys context, not parameters.</li>
       <li><strong>24 GB.</strong> 30B-class models at 4-bit, or a smaller model with a large context. A meaningful step up.</li>
       <li><strong>48 GB and above.</strong> 70B-class territory. llama.cpp measures a 70B at 43.1 GB in Q4_K_M, so 48 GB works with care and multi-GPU is more comfortable.</li>
-      <li><strong>Apple Silicon.</strong> Unified memory changes the calculation, because CPU and GPU share one pool. A machine with substantial unified memory can hold models that would need a very expensive discrete GPU. Bandwidth varies by chip tier and is what governs speed.</li>
-      <li><strong>CPU only.</strong> Works, thanks to GGUF. Expect generation slow enough to feel like waiting rather than conversing, because you are limited by system RAM bandwidth.</li>
+      <li><strong>Apple Silicon.</strong> Unified memory changes the calculation, because CPU and GPU share one pool. A machine with plenty of it can hold models that'd otherwise need a very expensive discrete GPU. Bandwidth varies by chip tier, and bandwidth is what governs speed.</li>
+      <li><strong>CPU only.</strong> Works, thanks to GGUF. Expect generation slow enough to feel like waiting instead of conversing, because you're limited by system RAM bandwidth.</li>
     </ul>
 
-    <p>For scale at the top end, llama.cpp's own table puts Llama 3.1 405B at 249.1 GB even in Q4_K_M, against 1,625.1 GB unquantized. Some models are not a local option at any consumer tier.</p>
+    <p>For scale at the top end, llama.cpp's own table puts Llama 3.1 405B at 249.1 GB even in Q4_K_M, against 1,625.1 GB unquantized. Some models aren't a local option at any consumer tier.</p>
   </section>
 
   <section id="speed">
     <h2><span class="num">06</span>What actually makes it slow</h2>
 
-    <p>Once a model fits, the question changes to speed, and the answer surprises people. Your bottleneck is <em class="term">memory bandwidth</em>, meaning how fast bytes move between memory and the compute units. It is rarely arithmetic throughput.</p>
+    <p>Once a model fits, the question becomes speed, and the answer surprises people. Your bottleneck is <em class="term">memory bandwidth</em> (how fast bytes move between memory and the compute units). It's rarely arithmetic throughput.</p>
 
-    <p>Generating one token requires reading every weight in the model. A 4.58 GiB model must move 4.58 GiB per token. At batch size one, each of those bytes does a tiny amount of arithmetic before the next is needed, so the GPU spends most of its time waiting. Page <a href="./23-efficient-ai-systems.html">23</a> formalises this as arithmetic intensity.</p>
+    <p>Generating one token means reading every weight in the model. So a 4.58 GiB model moves 4.58 GiB per token (per token, not per request). At batch size one each of those bytes does a tiny amount of arithmetic before the next one's needed, so the GPU spends most of its time waiting. Page <a href="./23-efficient-ai-systems.html">23</a> formalises this as arithmetic intensity.</p>
 
     <div class="callout callout-teach">
-      <span class="callout-label">The measurement that proves it</span>
+      <span class="callout-label">What llama.cpp's benchmarks show</span>
       <p>In llama.cpp's published benchmarks for Llama 3.1 8B, <strong>text generation gets faster as the quantization gets smaller</strong>: roughly 72 tokens/sec at Q4_K_M against 51 at Q8_0 and 29 at F16.</p>
-      <p>Prompt processing behaves in the opposite way. It stays broadly flat across quantizations, and F16 is actually the fastest of them.</p>
-      <p>That divergence is the whole story. Prefill processes many tokens at once against each loaded weight, so it is compute-bound and quantization does not help it. Generation produces one token at a time, so it is bandwidth-bound and shrinking the weights directly shrinks the work. Same model, same hardware, two opposite conclusions.</p>
-      <p><em>The source table does not state which hardware produced these figures, so read the pattern rather than the absolute numbers.</em></p>
+      <p>Prompt processing does the opposite. It stays broadly flat across quantizations, and F16 is the fastest of them.</p>
+      <p>That divergence is the thing to take away. Prefill processes many tokens at once against each loaded weight, so it's compute-bound and quantization doesn't help it. Generation produces one token at a time, so it's bandwidth-bound and shrinking the weights shrinks the work directly. Same model, same hardware, two opposite conclusions.</p>
+      <p><em>The source table doesn't say which hardware produced these figures, so read the pattern and not the absolute numbers.</em></p>
     </div>
 
-    <p>Two practical consequences follow.</p>
+    <p>So two things follow.</p>
 
     <ul>
-      <li><strong>Offloading layers to CPU is expensive.</strong> When a model does not fit, runtimes will place some layers in system RAM. Every token then crosses the PCIe bus, which is far slower than VRAM. A partial offload can cost more speed than dropping to a smaller quantization would have.</li>
-      <li><strong>Batch size one is the worst case.</strong> It is also the normal case locally. Batching amortises weight loading across requests, which is precisely why serving frameworks exist and why they do little for a single chat session.</li>
+      <li><strong>Offloading layers to CPU is expensive.</strong> When a model doesn't fit, runtimes put some layers in system RAM. Every token then crosses the PCIe bus (far slower than VRAM), so a partial offload can cost more speed than just dropping to a smaller quantization would have.</li>
+      <li><strong>Batch size one is the worst case.</strong> It's also the normal case locally. Batching amortises weight loading across requests, so serving frameworks help enormously at volume and barely at all in a single chat session.</li>
     </ul>
   </section>
 
   <section id="in-the-wild">
     <h2><span class="num">07</span>Where you meet this in the wild</h2>
-    <p class="lede">Local inference is not usually about saving money. It is about the constraints an API cannot satisfy.</p>
+    <p class="lede">Local inference usually isn't about saving money. It's about constraints an API can't satisfy.</p>
 
     <div class="wild-grid">
       <div class="wild-card" style="--wc:var(--c-practice)">
         <div class="wc-domain">Coding assistants</div>
         <div class="wc-what">Completion that never leaves the laptop</div>
-        <div class="wc-body">Proprietary code that cannot be sent to a third party, plus latency low enough for inline completion. Small models are competitive here because the task is narrow and the context is local.</div>
+        <div class="wc-body">Proprietary code that can't be sent to a third party, plus latency low enough for inline completion. Small models compete well here, because the task is narrow and the context is already on the machine.</div>
       </div>
 
       <div class="wild-card" style="--wc:var(--c-eval)">
         <div class="wc-domain">Regulated data</div>
-        <div class="wc-what">When the data legally cannot leave</div>
-        <div class="wc-body">Health records, legal discovery, defence work. The requirement is not cost or speed. It is that no bytes cross an organisational boundary, which rules out a hosted API regardless of its terms.</div>
+        <div class="wc-what">When the data legally can't leave</div>
+        <div class="wc-body">Health records, legal discovery, defence work. The requirement isn't cost or speed, it's that no bytes cross an organisational boundary, and that rules out a hosted API whatever its terms say.</div>
       </div>
 
       <div class="wild-card" style="--wc:var(--c-robot)">
         <div class="wc-domain">Edge and offline</div>
         <div class="wc-what">No network to depend on</div>
-        <div class="wc-body">Vehicles, field equipment, remote sites, air-gapped networks. Here the model must fit a fixed hardware budget that nobody will upgrade, so quantization is a requirement rather than an optimisation.</div>
+        <div class="wc-body">Vehicles, field equipment, remote sites, air-gapped networks. The model has to fit a fixed hardware budget nobody's going to upgrade, so quantization stops being an optimisation and becomes a requirement.</div>
       </div>
 
       <div class="wild-card" style="--wc:var(--c-mlops)">
         <div class="wc-domain">Bulk processing</div>
         <div class="wc-what">Millions of small, tolerant jobs</div>
-        <div class="wc-body">Classification, tagging and extraction over a large corpus. Per-token API pricing scales linearly with volume while owned hardware does not, so high-volume low-stakes work is where local economics genuinely win.</div>
+        <div class="wc-body">Classification, tagging and extraction over a large corpus. Per-token API pricing scales linearly with volume and owned hardware doesn't, so high-volume low-stakes work is where local economics genuinely win.</div>
       </div>
 
       <div class="wild-card" style="--wc:var(--c-unsup)">
@@ -443,18 +443,18 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <div class="reach-col reach-yes">
         <div class="reach-head">Run it locally when</div>
         <ul>
-          <li><strong>Data cannot leave.</strong> Regulatory or contractual, and no pricing argument overrides it.</li>
+          <li><strong>Data can't leave.</strong> Regulatory or contractual, and no pricing argument overrides it.</li>
           <li>You need to <strong>work below the API surface</strong>: logits, activations, custom sampling, your own fine-tuned weights.</li>
           <li>Volume is <strong>high and per-call value is low</strong>, so per-token pricing dominates your costs.</li>
-          <li>You need <strong>offline operation</strong>, or latency that a network round trip cannot meet.</li>
+          <li>You need <strong>offline operation</strong>, or latency a network round trip can't meet.</li>
         </ul>
       </div>
       <div class="reach-col reach-no">
         <div class="reach-head">Use an API when</div>
         <ul>
-          <li>You want <strong>frontier quality</strong>. The largest models are not a local option at consumer scale.</li>
-          <li>Traffic is <strong>spiky or low</strong>. Idle hardware still costs money; idle API calls do not.</li>
-          <li>You would be <strong>paying an engineer</strong> to babysit inference infrastructure that is not your product.</li>
+          <li>You want <strong>frontier quality</strong>. The largest models aren't a local option at consumer scale.</li>
+          <li>Traffic is <strong>spiky or low</strong>. Idle hardware still costs money; idle API calls don't.</li>
+          <li>You'd be <strong>paying an engineer</strong> to babysit inference infrastructure that isn't your product.</li>
           <li>You need <strong>elastic concurrency</strong>. One local GPU serving many users is a queue, not a service.</li>
         </ul>
       </div>
@@ -465,31 +465,31 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <h2><span class="num">08</span>Interview questions</h2>
 
     <details class="qa"><summary><span class="qa-level beginner">Beginner</span>How do you estimate whether a model fits on a given GPU?</summary>
-      <div class="qa-body"><p>Add three terms. Weights are parameter count times bits per weight divided by eight, using the measured bits per weight rather than the number in the quantization name. KV cache is 2 × layers × KV heads × head dimension × bytes per element, per token, multiplied by your context length and concurrency. Then add several hundred megabytes to about a gigabyte of framework overhead. As a sanity check, Q4_K_M lands near 0.6 to 0.7 GB per billion parameters before cache.</p></div>
+      <div class="qa-body"><p>Add three terms. Weights are parameter count times bits per weight divided by eight, using the measured bits per weight, not the number in the quantization name. KV cache is 2 × layers × KV heads × head dimension × bytes per element, per token, multiplied by your context length and concurrency. Then add several hundred megabytes to about a gigabyte of framework overhead. As a sanity check, Q4_K_M lands near 0.6 to 0.7 GB per billion parameters before cache.</p></div>
     </details>
 
     <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why is Q4_K_M not 4 bits per weight?</summary>
-      <div class="qa-body"><p>Because k-quants store a scale and a minimum for each block of weights, and the medium mix deliberately keeps some tensors at higher precision. llama.cpp measures Q4_K_M at 4.8944 bits per weight for Llama 3.1 8B, about 22% above the naive assumption. Budgeting from the filename rather than the measured figure is a common way to discover a model does not fit only after downloading it.</p></div>
+      <div class="qa-body"><p>Because k-quants store a scale and a minimum for each block of weights, and the medium mix deliberately keeps some tensors at higher precision. llama.cpp measures Q4_K_M at 4.8944 bits per weight for Llama 3.1 8B, about 22% above the naive assumption. Budget from the filename instead of the measured figure and you'll discover the model doesn't fit only after downloading it.</p></div>
     </details>
 
-    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does the KV cache formula use KV heads rather than attention heads?</summary>
-      <div class="qa-body"><p>Because grouped-query attention shares each key-value head across several query heads, so only the KV heads are actually stored. Llama 3 8B has 32 attention heads but 8 KV heads, which makes its cache four times smaller than the multi-head equivalent: 128 KiB per token instead of 512 KiB. Using attention heads in the formula overestimates cache memory by exactly that ratio, which is enough to reject a configuration that would have worked.</p></div>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does the KV cache formula use KV heads and not attention heads?</summary>
+      <div class="qa-body"><p>Because grouped-query attention shares each key-value head across several query heads, so only the KV heads are actually stored. Llama 3 8B has 32 attention heads but 8 KV heads, so its cache is four times smaller than the multi-head equivalent: 128 KiB per token instead of 512 KiB. Use attention heads in the formula and you overestimate cache memory by exactly that ratio, which is enough to reject a configuration that would've worked.</p></div>
     </details>
 
     <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>A model loads fine but runs out of memory after a long conversation. What happened?</summary>
-      <div class="qa-body"><p>The KV cache grew past the remaining headroom. Weights are a fixed cost paid at load, but the cache grows linearly with every token in the context. A model that leaves a gigabyte free after loading will exhaust it once the conversation reaches a length whose cache exceeds that gigabyte. Fixes are to cap context length, use a smaller quantization to free capacity, or quantize the cache itself if the runtime supports it.</p></div>
+      <div class="qa-body"><p>Your KV cache grew past the remaining headroom. Weights are a fixed cost paid at load; the cache grows linearly with every token in the context. A model that leaves a gigabyte free after loading will exhaust it once the conversation's cache passes that gigabyte. Fixes: cap context length, drop to a smaller quantization to free capacity, or quantize the cache itself if your runtime supports it.</p></div>
     </details>
 
     <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does a smaller quantization generate tokens faster on the same hardware?</summary>
-      <div class="qa-body"><p>Because generation is memory-bandwidth-bound. Producing each token requires reading every weight, so halving the bytes per weight roughly halves the bytes moved per token. llama.cpp's benchmarks show this directly: about 72 tokens/sec at Q4_K_M against 29 at F16 for Llama 3.1 8B. Prompt processing does not follow the same pattern, staying roughly flat across quantizations, because prefill processes many tokens per weight load and is compute-bound instead.</p></div>
+      <div class="qa-body"><p>Because generation is memory-bandwidth-bound. Producing each token requires reading every weight, so halving the bytes per weight roughly halves the bytes moved per token. llama.cpp's benchmarks show this directly: about 72 tokens/sec at Q4_K_M against 29 at F16 for Llama 3.1 8B. Prompt processing doesn't follow the same pattern and stays roughly flat across quantizations, because prefill processes many tokens per weight load and is compute-bound instead.</p></div>
     </details>
 
     <details class="qa"><summary><span class="qa-level deep">Deep</span>Your model needs 26 GB and you have a 24 GB card. Walk through the options.</summary>
-      <div class="qa-body"><p>Take the cheapest quality loss first. Drop one quantization step, since Q5_K_M to Q4_K_M is roughly a 14% size reduction and usually closes a 2 GB gap on its own. Next, reduce maximum context length, which shrinks the cache term without touching weights at all, and check whether your runtime can quantize the KV cache to 8-bit. Offloading layers to CPU should be near-last, because every offloaded layer crosses PCIe on every token and typically costs more throughput than a smaller quantization would have. Adding a second GPU works but introduces communication between devices, which is only worth it when quality genuinely cannot be compromised.</p></div>
+      <div class="qa-body"><p>Take the cheapest quality loss first. Drop one quantization step, since Q5_K_M to Q4_K_M is roughly a 14% size reduction and usually closes a 2 GB gap on its own. Next, reduce maximum context length, which shrinks the cache term without touching weights at all, and check whether your runtime can quantize the KV cache to 8-bit. Offloading layers to CPU comes near-last, because every offloaded layer crosses PCIe on every token and usually costs more throughput than a smaller quantization would have. A second GPU works, but it adds communication between devices, and that's only worth it when quality genuinely can't be compromised.</p></div>
     </details>
 
     <details class="qa"><summary><span class="qa-level deep">Deep</span>When is running locally genuinely cheaper than an API?</summary>
-      <div class="qa-body"><p>When utilisation is high and quality requirements are modest. Hardware is a fixed cost that you pay whether or not it is busy, while API pricing is proportional to use, so local wins on sustained high-volume workloads and loses on spiky or low ones. The comparison also has to include engineering time, which is usually the largest hidden cost. The honest framing is that most local deployments are justified by privacy, offline operation, or model access rather than by cost, and treating cost as the primary argument usually means the arithmetic has not been done.</p></div>
+      <div class="qa-body"><p>When utilisation is high and quality requirements are modest. Hardware is a fixed cost you pay whether or not it's busy, while API pricing is proportional to use, so local wins on sustained high-volume workloads and loses on spiky or low ones. Include engineering time too, since that's usually the largest hidden cost. Most local deployments are justified by privacy, offline operation or model access, not by cost, and treating cost as the main argument usually means nobody's done the arithmetic.</p></div>
     </details>
   </section>
 
@@ -550,7 +550,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <div class="related-grid">
       <a class="related-card" href="./23-efficient-ai-systems.html"><div class="rc-sec" style="color:var(--c-efficient)">23 · The theory behind this</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Why quantization works, how PagedAttention manages the cache, and the arithmetic-intensity argument in full.</div></a>
       <a class="related-card" href="./29-finetuning-llms.html"><div class="rc-sec" style="color:var(--c-practice)">29 · Pairs with this</div><div class="rc-title">Fine-tuning LLMs in Practice</div><div class="rc-hook">Train your own adapter, export it to GGUF, then run it with everything on this page.</div></a>
-      <a class="related-card" href="./08-attention-transformers.html"><div class="rc-sec" style="color:var(--c-attention)">08 · Prerequisite</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">Where the KV cache and grouped-query attention are introduced, which the memory arithmetic depends on.</div></a>
+      <a class="related-card" href="./08-attention-transformers.html"><div class="rc-sec" style="color:var(--c-attention)">08 · Prerequisite</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">Where the KV cache and grouped-query attention are introduced. The memory arithmetic leans on both.</div></a>
       <a class="related-card" href="./28-gpu-architecture-cuda-distributed.html"><div class="rc-sec" style="color:var(--c-gpu)">28 · Goes deeper</div><div class="rc-title">GPU Architecture, CUDA &amp; Distributed Training</div><div class="rc-hook">What memory bandwidth means at the hardware level, and why it binds before compute does.</div></a>
     </div>
   </section>

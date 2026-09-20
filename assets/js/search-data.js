@@ -5972,7 +5972,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The question everybody asks first",
+    "title": "What everybody asks first",
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
     "url": "topics/30-running-models-locally.html#the-question",
@@ -5982,7 +5982,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The arithmetic, done once, properly",
+    "title": "Do the arithmetic once",
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
     "url": "topics/30-running-models-locally.html#arithmetic",
@@ -5992,7 +5992,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The formats you will actually meet",
+    "title": "Formats you'll actually meet",
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
     "url": "topics/30-running-models-locally.html#formats",
@@ -6002,7 +6002,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The tools, and which one to pick",
+    "title": "Which tool to pick",
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
     "url": "topics/30-running-models-locally.html#tools",
@@ -6929,5 +6929,655 @@ window.SEARCH_INDEX = [
     "tags": [],
     "summary": "",
     "color": "var(--c-challenge)"
+  },
+  {
+    "kind": "section",
+    "title": "What changes when the unit is a fleet",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#fleet",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Prefill/decode disaggregation, and where the crossover is",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#disagg",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "The cost, derived",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#the-cost-derived",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "The KV cache: make it narrower, or move it off the GPU",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#kv",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Quantizing the cache",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#quantizing-the-cache",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Offloading the cache",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#offloading-the-cache",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Multi-LoRA: hundreds of models, one set of weights",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#lora",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "FP8 and MXFP4: where the scale factors live",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#fp",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "What actually gets quantized",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#what-actually-gets-quantized",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Microscaling: the scale moves inside the tensor",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#microscaling-the-scale-moves-inside-the-tensor",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Decode needs its own attention kernel",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#kernels",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Expert-parallel MoE serving",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#moe",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "The all-to-all, priced",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#the-all-to-all-priced",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Imbalance is the real cost",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#imbalance-is-the-real-cost",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "SLA-aware scheduling, and why throughput is the wrong target",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#goodput",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Measure your own break-even bandwidth, then predict a disaggregated split before you build it",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "What actually breaks",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Where you meet this in the wild",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "The clock you are running against",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#clock",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Where the milliseconds go",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#waterfall",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Endpointing: deciding that you stopped",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#endpointing",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Fixed thresholds, and why they cannot win",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#fixed-thresholds-and-why-they-cannot-win",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Semantic endpointing moves the curve",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#semantic-endpointing-moves-the-curve",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Barge-in, and the state it corrupts",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#barge-in",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Hearing the user through your own voice",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#hearing-the-user-through-your-own-voice",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Audio you cannot take back",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#audio-you-cannot-take-back",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Deciding it was an interruption at all",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#deciding-it-was-an-interruption-at-all",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Streaming ASR: what a chunk costs",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#streaming-asr",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Why you cannot just chunk an offline model",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#why-you-cannot-just-chunk-an-offline-model",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "The third knob is the one nobody sets",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#the-third-knob-is-the-one-nobody-sets",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Streaming TTS: only the first chunk matters",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#streaming-tts",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "The chunking decision that costs half a second",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#the-chunking-decision-that-costs-half-a-second",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Where the vocoder sits in this",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#where-the-vocoder-sits-in-this",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Cascade or speech-to-speech",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#cascade",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Transport: why WebRTC, and what loss does",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#transport",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Why not HTTP",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#why-not-http",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Opus, and the 25 ms you pay before sending anything",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#opus-and-the-25-ms-you-pay-before-sending-anything",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "The jitter buffer is a latency knob, not a detail",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#the-jitter-buffer-is-a-latency-knob-not-a-detail",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "What concealment does to the recogniser",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#what-concealment-does-to-the-recogniser",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Instrument one turn, then move exactly one number",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "What actually breaks",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#breaks",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Where you meet this in the wild",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "The bill, in forward passes",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#budget",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "What one step actually buys",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#steps",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "DDIM versus ancestral sampling",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#ddim-versus-ancestral-sampling",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Where quality actually falls off",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#where-quality-actually-falls-off",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Guidance costs double, and nobody says so",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#cfg",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Folding the factor of two into the weights",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#folding-the-factor-of-two-into-the-weights",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "The cheaper alternative, if you keep the two branches",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#the-cheaper-alternative-if-you-keep-the-two-branches",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Distillation: buying steps with a training run",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#distillation",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "What a 4-step or 1-step model gives up, concretely",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#what-a-4-step-or-1-step-model-gives-up-concretely",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Rectified flow: straighten the path, and the steps come free",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#rectified-flow",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Feature caching, and the ceiling you can derive",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#caching",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Where the artefacts appear",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#where-the-artefacts-appear",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Uniform intervals are the wrong shape",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#uniform-intervals-are-the-wrong-shape",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Video is not images times frames",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#video",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "The rule that makes video expensive",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#the-rule-that-makes-video-expensive",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Frame count scaling and the memory wall",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#frame-count-scaling-and-the-memory-wall",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Find the step floor and the cache ceiling, then measure what you lost",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#build",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Serving diffusion, and why it is not LLM serving",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#serving",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "What actually breaks",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Where you meet this in the wild",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Now write it yourself",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#practice-problems",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
   }
 ];
