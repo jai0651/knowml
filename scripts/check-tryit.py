@@ -13,9 +13,23 @@ With --run it also executes each snippet using PY (below) and reports output.
 """
 import glob, html, os, re, subprocess, sys
 
-PY = "/tmp/tryit-venv/bin/python"
+# Where the snippets get executed. /tmp was the original home and macOS empties
+# it, so the interpreter can vanish between runs; keep a repo-local venv as the
+# preferred location and let CI point at its own with $TRYIT_PY.
+PY = (os.environ.get("TRYIT_PY")
+      or next((p for p in (".venv-tryit/bin/python", "/tmp/tryit-venv/bin/python")
+               if os.path.exists(p)), ".venv-tryit/bin/python"))
 MAXLINE = 74
 RUN = "--run" in sys.argv
+
+# --run with no interpreter used to SKIP every block and exit 0: 47 blocks
+# "checked", none executed, suite green. Missing tooling is a failed run, not a
+# passed one.
+if RUN and not os.path.exists(PY):
+    print("FAIL: no interpreter at %s — nothing would be executed.\n"
+          "      python3 -m venv .venv-tryit && .venv-tryit/bin/python -m pip install numpy torch"
+          % PY)
+    sys.exit(1)
 
 BLOCK = re.compile(
     # The `open` attribute was added later so the blocks default to expanded.
@@ -77,8 +91,6 @@ for path in sorted(glob.glob("topics/*.html")):
             continue
 
         if RUN:
-            if not os.path.exists(PY):
-                print("  SKIP %s: %s not found" % (tag, PY)); continue
             r = subprocess.run([PY, "-c", code], capture_output=True, text=True, timeout=120)
             if r.returncode != 0:
                 print("  FAIL %s: raised at runtime\n%s"

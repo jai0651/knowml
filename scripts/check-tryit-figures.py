@@ -11,7 +11,9 @@ Any number in a <code> span inside the caption must appear in stdout.
 """
 import re, sys, glob, html, subprocess, os
 
-PY = "/tmp/tryit-venv/bin/python"
+PY = (os.environ.get("TRYIT_PY")
+      or next((p for p in (".venv-tryit/bin/python", "/tmp/tryit-venv/bin/python")
+               if os.path.exists(p)), ".venv-tryit/bin/python"))
 BLOCK = re.compile(
     r'<span class="tryit-what">(.*?)</span>.*?<pre><code>(.*?)</code></pre>\s*'
     r'<div class="tryit-out">(.*?)</div>', re.S)
@@ -30,8 +32,12 @@ def quoted_numbers(caption_html):
 
 def main(argv):
     files = argv or sorted(glob.glob("topics/*.html"))
+    # Skipping used to return 0, so a missing venv turned this whole checker
+    # into a no-op that reported success. It now fails.
     if not os.path.exists(PY):
-        print(f"SKIP: {PY} not found"); return 0
+        print(f"FAIL: no interpreter at {PY} — no caption would be cross-checked.\n"
+              f"      python3 -m venv .venv-tryit && .venv-tryit/bin/python -m pip install numpy torch")
+        return 1
     checked = problems = 0
     for f in files:
         src = open(f, encoding="utf-8").read()
