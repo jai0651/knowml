@@ -155,6 +155,26 @@ def defer_scripts(out):
     return _BODY_SCRIPT.sub(lambda m: '<script defer src="%s"></script>' % m.group(1), out)
 
 
+_SECTION_H2 = re.compile(r'<section id="([^"]+)"[^>]*>\s*<h2[^>]*>(?:<span class="num">(.*?)</span>)?(.*?)</h2>', re.S)
+_TH_TOC = re.compile(r'<nav class="th-toc"[^>]*>.*?</nav>', re.S)
+
+def chapter_toc(out):
+    """The "In this chapter" card under a topic header, generated from the
+    page's own <section><h2> list so it can never drift from the headings.
+    This is the one piece of <main> the build owns, and only on pages that
+    opted in by carrying an empty <nav class="th-toc">."""
+    if not _TH_TOC.search(out): return out
+    items = []
+    for sid, num, title in _SECTION_H2.findall(out):
+        n = H.unescape(re.sub(r"<[^>]+>", "", num or "")).strip()
+        n = n if n.isdigit() else "·"
+        t = re.sub(r"<[^>]+>", "", title).strip()
+        items.append(f'<li><a href="#{sid}"><span class="tn">{H.escape(n)}</span>{t}</a></li>')
+    nav = ('<nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div>'
+           '<ol>' + "".join(items) + '</ol></nav>')
+    return _TH_TOC.sub(lambda m: nav, out, count=1)
+
+
 def build():
     changed, same = [], 0
     for rel, cfg in PAGES.items():
@@ -181,6 +201,7 @@ def build():
                 new = render(PARTIALS[name], ctx).rstrip("\n")
             out = out[:m.start()] + new + out[m.end():]
 
+        out = chapter_toc(out)
         out = defer_scripts(out)
         out = stamp_assets(out)
 

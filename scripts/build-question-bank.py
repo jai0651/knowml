@@ -46,7 +46,10 @@ for path in sorted(glob.glob(os.path.join(ROOT, "topics", "*.html"))):
     title = html.unescape(text_of(h1.group(1))) if h1 else page_id
     crumbs = re.search(r'<div class="crumbs">(.*?)</div>', src, re.DOTALL)
     group = ""
-    if crumbs:
+    chip = re.search(r'<span class="th-chip"[^>]*>(.*?)</span>', src, re.DOTALL)
+    if chip:
+        group = html.unescape(text_of(chip.group(1))).strip()
+    elif crumbs:
         # strip tags first — the crumb's own <a href="../index.html"> contains a slash
         parts = [p.strip() for p in html.unescape(text_of(crumbs.group(1))).split("/")]
         if len(parts) >= 2:

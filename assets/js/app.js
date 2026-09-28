@@ -84,6 +84,12 @@
       doneBtn.textContent = isDone ? '✓ Marked as revised' : 'Mark as revised';
       doneBtn.classList.toggle('is-active', isDone);
     }
+    /* The header copy of the same toggle, on pages with the chapter header. */
+    document.querySelectorAll('[data-mark-done]').forEach(function (b) {
+      var on = done.indexOf(document.body.getAttribute('data-page-id')) >= 0;
+      b.classList.toggle('is-active', on);
+      b.querySelector('.th-done-lbl').textContent = on ? 'Completed' : 'Mark as complete';
+    });
     injectSidebarProgress(done.length, links.length);
   }
 
@@ -354,6 +360,9 @@
     var doneBtn = document.getElementById('markDoneBtn');
     if (doneBtn) doneBtn.addEventListener('click', function () {
       NP_toggleDone(document.body.getAttribute('data-page-id'));
+    });
+    document.querySelectorAll('[data-mark-done]').forEach(function (b) {
+      b.addEventListener('click', function () { NP_toggleDone(document.body.getAttribute('data-page-id')); });
     });
     /* KaTeX rewrites the DOM as it renders. notes.js anchors highlights on
        character offsets into that DOM, so it waits for this signal rather than

@@ -99,7 +99,9 @@ check('selection through a <strong> paints', !r.skip && r.crosses && r.marks > 1
 
 await reset();
 r = await highlight(c => {
-  const ps = [...c.querySelectorAll('p')].filter(x => x.textContent.trim().length > 60);
+  // Body paragraphs only: the header's dek is now followed by buttons and the
+  // chapter-contents card, which a real two-paragraph selection never crosses.
+  const ps = [...c.querySelectorAll('p')].filter(x => !x.closest('.topic-header') && x.textContent.trim().length > 60);
   if (ps.length < 2) return null;
   const r2 = document.createRange();
   r2.setStart(ps[0].firstChild, 0);

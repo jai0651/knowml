@@ -45,6 +45,8 @@
   function mountCommunityBar(bar) {
     var header = document.querySelector('.topic-header');
     if (!header) return; /* topic pages only — not the homepage */
+    var top = header.querySelector('.th-top');
+    if (top) { top.appendChild(bar); return; }  /* chapter header: top-right, beside the chip */
     var metaRow = header.querySelector('.meta-row');
     if (metaRow) { metaRow.insertAdjacentElement('afterend', bar); return; }
     header.appendChild(bar);
