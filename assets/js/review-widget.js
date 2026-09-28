@@ -39,8 +39,8 @@
       btn.className = 'sb-drill-btn';
       btn.id = 'sbDrill';
       btn.href = '../review.html?page=' + encodeURIComponent(slug);
-      btn.innerHTML = '↺ Drill this section <span style="opacity:.6;font-weight:600">' + m.known + '/' + m.total + '</span>';
-      if (host) host.insertAdjacentElement('afterend', btn);
+      btn.innerHTML = '<span>Drill this section</span><span class="sb-drill-count">' + m.known + '/' + m.total + '</span>';
+      if (host) host.appendChild(btn);
       else sb.insertBefore(btn, sb.firstChild);
     }
   });

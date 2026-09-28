@@ -53,11 +53,23 @@ def sidebar_html(prefix, current_id):
     """Generated from the manifest, so a new section appears in all 38 sidebars
     by adding one manifest entry rather than by editing 38 files."""
     o = ['<aside class="sidebar-left" id="sidebarLeft">']
-    o.append(f'  <a href="{prefix}index.html" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--text-faint);border-bottom:1px solid var(--border-soft)">⌂ Home</a>')
-    for label, href in [("🧭 Roadmaps", f"{prefix}roadmaps.html"), ("🌳 Technique Map", "./technique-map.html"),
-                        ("↺ Review &amp; drill", f"{prefix}review.html"), ("🏋️ Where to practise", f"{prefix}practice.html")]:
-        cls = ' class="active"' if (href.endswith("technique-map.html") and current_id == "technique-map") else ''
-        o.append(f'  <a{cls} href="{href}" style="display:block;padding:8px;margin-bottom:8px;font-size:12.5px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border-soft)">{label}</a>')
+    # Line icons (Lucide paths) instead of emoji: emoji render in four
+    # different styles across platforms and made the rail look pasted together.
+    ico = {
+        "home": '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>',
+        "map": '<path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/>',
+        "tree": '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M6 8.5v1.5a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8.5M12 13v2.5"/>',
+        "review": '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+        "practice": '<path d="M6.5 6.5v11M17.5 6.5v11M3 9.5v5M21 9.5v5M6.5 12h11"/>',
+    }
+    svg = lambda k: f'<svg viewBox="0 0 24 24" aria-hidden="true">{ico[k]}</svg>'
+    o.append('  <nav class="sb-tools" aria-label="Site">')
+    for key, label, href in [("home", "Home", f"{prefix}index.html"), ("map", "Roadmaps", f"{prefix}roadmaps.html"),
+                             ("tree", "Technique map", "./technique-map.html"), ("review", "Review &amp; drill", f"{prefix}review.html"),
+                             ("practice", "Where to practise", f"{prefix}practice.html")]:
+        cls = ' class="active"' if (key == "tree" and current_id == "technique-map") else ''
+        o.append(f'    <a{cls} href="{href}">{svg(key)}<span>{label}</span></a>')
+    o.append('  </nav>')
     o.append('  <div class="sb-primary">')
     for label, href in [("Browse all sections", "sections.html"), ("Roadmaps", "roadmaps.html"),
                         ("The Labs", "labs.html"), ("Where to practise", "practice.html"), ("Site map", "map.html")]:

@@ -97,9 +97,8 @@
       el.className = 'sidebar-progress';
       el.id = 'sidebarProgress';
       el.innerHTML = '<div class="sp-row"><span class="sp-label">Your progress</span><span class="sp-count" id="spCount"></span></div><div class="sp-track"><div class="sp-fill" id="spFill"></div></div>';
-      var backLink = sb.querySelector('a[href*="index.html"]');
-      if (backLink && backLink.nextSibling) backLink.parentNode.insertBefore(el, backLink.nextSibling);
-      else sb.insertBefore(el, sb.firstChild);
+      // First thing in the rail: one card for reading progress, recall and drill.
+      sb.insertBefore(el, sb.firstChild);
     }
     document.getElementById('spCount').textContent = count + ' / ' + total;
     document.getElementById('spFill').style.width = pct + '%';

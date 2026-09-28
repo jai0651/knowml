@@ -10,7 +10,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "beginner",
 "q": "Walk me through gradient descent, step by step.",
-"a": "<p>Start with some initial parameters, usually random. Compute the loss on a batch of data. Use the chain rule to compute the gradient of that loss with respect to every parameter — the direction of steepest increase. Take a step in the opposite direction, scaled by the learning rate. Repeat until the loss stops improving. Stochastic gradient descent is the same loop, just estimating the gradient from a random minibatch instead of the full dataset each step.</p>"
+"a": "<p>Start from some parameters, usually random. Compute the loss on a batch. Use the chain rule to get the gradient of the loss with respect to every parameter; it points toward steepest increase. Step the other way, scaled by the learning rate, and repeat until the loss stops improving. Stochastic gradient descent is the same loop with the gradient estimated from a random minibatch.</p>"
 },
 {
 "id": "01-math-foundations::1",
@@ -21,7 +21,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "beginner",
 "q": "What's the difference between a derivative, a gradient, and a Jacobian?",
-"a": "<p>A derivative is the slope of a scalar function of one variable. A gradient is the vector of partial derivatives of a scalar function of several variables — one slope per input dimension. A Jacobian generalizes further: the matrix of partial derivatives when the function itself outputs a vector, not just a scalar — every output's sensitivity to every input.</p>"
+"a": "<p>A derivative is the slope of a scalar function of one variable. A gradient is the vector of partial derivatives of a scalar function of several variables, one slope per input. A Jacobian is the matrix of partial derivatives of a function that outputs a vector: every output's sensitivity to every input.</p>"
 },
 {
 "id": "01-math-foundations::2",
@@ -32,7 +32,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "beginner",
 "q": "State Bayes' theorem and explain each term.",
-"a": "<p><span>$P(\\theta\\mid D) = \\dfrac{P(D\\mid\\theta)P(\\theta)}{P(D)}$</span>. <span>$P(\\theta)$</span> is the prior belief before seeing data. <span>$P(D\\mid\\theta)$</span> is the likelihood — how probable the data is under that hypothesis. <span>$P(\\theta\\mid D)$</span> is the posterior — the updated belief after seeing the data. <span>$P(D)$</span> is the evidence, the total probability of the data marginalized over every hypothesis, usually the hardest term to compute.</p>"
+"a": "<p><span>$P(\\theta\\mid D) = \\dfrac{P(D\\mid\\theta)P(\\theta)}{P(D)}$</span>. <span>$P(\\theta)$</span> is the prior, the belief before the data. <span>$P(D\\mid\\theta)$</span> is the likelihood of the data under that hypothesis. <span>$P(\\theta\\mid D)$</span> is the posterior, the updated belief. <span>$P(D)$</span> is the evidence, the data's probability summed over every hypothesis, and usually the hardest term to compute. The classic trap is the base rate: at 1% prevalence, a test that fires on 90% of positives and 5% of negatives is right only about 15% of the time it fires.</p>"
 },
 {
 "id": "01-math-foundations::3",
@@ -43,7 +43,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "beginner",
 "q": "Why do we use cross-entropy loss for classification instead of mean squared error?",
-"a": "<p>Cross-entropy is the maximum-likelihood loss for a categorical target — minimizing it is literally maximizing the probability the model assigns to the correct class, no extra assumptions needed. MSE implicitly assumes Gaussian-distributed continuous errors, the wrong assumption for a discrete label. Practically, cross-entropy paired with softmax also avoids the vanishing-gradient problem that MSE paired with a sigmoid or softmax runs into when the model is confidently wrong.</p>"
+"a": "<p>Cross-entropy is the maximum-likelihood loss for a categorical target, so minimizing it maximizes the probability of the correct class. MSE is maximum likelihood under Gaussian noise, the wrong assumption for a discrete label. It also keeps a strong gradient when the model is confidently wrong: at 0.01 on the true class, its gradient on the logit is −0.99, against about −0.02 for squared error through a sigmoid.</p>"
 },
 {
 "id": "01-math-foundations::4",
@@ -54,7 +54,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "intermediate",
 "q": "Explain the bias-variance tradeoff and how regularization affects each term.",
-"a": "<p>Expected test error decomposes into bias squared, variance, and irreducible noise. Bias is systematic error from a model too simple to capture the true pattern — underfitting. Variance is error from a model too sensitive to the specific training sample — overfitting. Regularization — L2 weight decay, dropout, early stopping, simpler architectures — trades a bit of bias for a larger reduction in variance, which is why it helps generalization even though it usually makes training loss slightly worse.</p>"
+"a": "<p>Expected squared test error splits into bias squared, variance and irreducible noise. Bias is systematic error from a model too simple for the pattern (underfitting). Variance is error from a model too sensitive to its training sample (overfitting). Regularization, such as weight decay, dropout, early stopping or a smaller architecture, accepts a little more bias for a larger drop in variance. That's why it usually makes training loss slightly worse and validation loss better.</p>"
 },
 {
 "id": "01-math-foundations::5",
@@ -65,7 +65,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "intermediate",
 "q": "What problem does Adam solve that plain SGD doesn't? What does each of Adam's moving averages track?",
-"a": "<p>Plain SGD applies one global learning rate to every parameter and treats each step independently, which zigzags on badly conditioned loss surfaces and requires careful tuning. Adam tracks two exponential moving averages per parameter: the first moment (<span>$m_t$</span>), a momentum-like average of the gradient itself, and the second moment (<span>$v_t$</span>), an average of the squared gradient. Dividing the first by the square root of the second gives each parameter its own adaptive step size — large steps for parameters with small, consistent gradients, small steps for parameters with large or noisy ones.</p>"
+"a": "<p>Plain SGD uses one global learning rate and treats steps independently, so it zigzags on badly conditioned surfaces and needs careful tuning. Adam keeps two moving averages per parameter: <span>$m_t$</span> of the gradient, like momentum, and <span>$v_t$</span> of the squared gradient. Dividing the first by the square root of the second gives each parameter its own step size, larger for small steady gradients and smaller for large or noisy ones. On the first step every parameter moves by the learning rate, whatever its gradient's size.</p>"
 },
 {
 "id": "01-math-foundations::6",
@@ -76,7 +76,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "intermediate",
 "q": "What's the difference between MLE, MAP, and full Bayesian inference?",
-"a": "<p>MLE maximizes the likelihood <span>$P(D\\mid\\theta)$</span> alone — no prior, equivalent to unregularized loss minimization. MAP maximizes the likelihood times a prior, <span>$P(D\\mid\\theta)P(\\theta)$</span> — L2 regularization is MAP with a Gaussian prior on the weights, L1 is MAP with a Laplace prior. Full Bayesian inference doesn't collapse to a single point estimate at all; it keeps the entire posterior distribution over <span>$\\theta$</span>, so predictions carry calibrated uncertainty, at a much higher computational cost.</p>"
+"a": "<p>MLE maximizes the likelihood <span>$P(D\\mid\\theta)$</span> alone: unregularized loss minimization. MAP maximizes likelihood times prior, <span>$P(D\\mid\\theta)P(\\theta)$</span>; L2 regularization is MAP with a Gaussian prior on the weights, and L1 with a Laplace prior. Full Bayesian inference keeps the whole posterior over <span>$\\theta$</span> instead of one point, so predictions carry uncertainty, at a much higher computing cost.</p>"
 },
 {
 "id": "01-math-foundations::7",
@@ -87,7 +87,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "intermediate",
 "q": "What's the relationship between cross-entropy and KL divergence? Why does minimizing one minimize the other?",
-"a": "<p><span>$D_{KL}(p\\|q) = H(p,q) - H(p)$</span>. <span>$H(p)$</span>, the entropy of the true data distribution, is fixed — it doesn't depend on the model and doesn't change during training. So minimizing cross-entropy <span>$H(p,q)$</span> with respect to the model's parameters and minimizing KL divergence <span>$D_{KL}(p\\|q)$</span> are the same optimization problem; they differ only by a constant offset.</p>"
+"a": "<p><span>$D_{KL}(p\\|q) = H(p,q) - H(p)$</span>. The entropy of the data, <span>$H(p)$</span>, doesn't depend on the model and doesn't change during training. So minimizing <span>$H(p,q)$</span> over the parameters and minimizing <span>$D_{KL}(p\\|q)$</span> are the same problem, differing by a constant. With one-hot labels <span>$H(p) = 0$</span> and they're equal.</p>"
 },
 {
 "id": "01-math-foundations::8",
@@ -98,7 +98,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "deep",
 "q": "Why do saddle points matter more than local minima in high-dimensional non-convex optimization?",
-"a": "<p>At a critical point, the Hessian's eigenvalues determine its type. For a point to be a true local minimum, every single eigenvalue must be positive — curving upward in every one of potentially millions of directions. As dimensionality grows, the odds of that happening by chance shrink fast, while the odds of a mixed-sign Hessian — some directions up, some down, a saddle point — grow. So in high dimensions, saddle points and plateaus around them, not bad local minima, are the more common obstacle, and training slows down while gradients search for a direction that still curves downward rather than because it's trapped in a bad basin.</p>"
+"a": "<p>At a critical point, the Hessian's eigenvalues decide its type. A true local minimum needs every eigenvalue positive, curving up in each of possibly millions of directions. As dimension grows that gets unlikely, and a mixed-sign Hessian, a saddle, becomes the common case. So in high dimensions training mostly slows on saddles and the plateaus around them while it searches for a direction that still curves down. A bad basin is the rarer explanation.</p>"
 },
 {
 "id": "01-math-foundations::9",
@@ -109,7 +109,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "deep",
 "q": "Derive the gradient of softmax plus cross-entropy with respect to the logits, and explain why the result matters.",
-"a": "<p>For a single example, with logits <span>$z$</span>, softmax output <span>$\\hat{y}=\\mathrm{softmax}(z)$</span>, and one-hot target <span>$y$</span>, the loss is <span>$L=-\\sum_i y_i \\log \\hat{y}_i$</span>. Working through the softmax and log derivatives together, the terms telescope and the gradient with respect to the logits collapses to exactly <span>$\\partial L/\\partial z = \\hat{y} - y$</span> — one subtraction. Practically, that means the gradient's magnitude scales directly with how wrong the prediction is, and it never saturates the way a sigmoid-plus-MSE combination does: the model gets a strong, un-shrunk correction signal exactly when it's most wrong, and the gradient naturally shrinks toward zero as the prediction approaches the true label — a clean training signal with no extra tricks required.</p>"
+"a": "<p>With logits <span>$z$</span>, <span>$\\hat{y}=\\mathrm{softmax}(z)$</span>, one-hot target <span>$y$</span> and <span>$L=-\\sum_i y_i \\log \\hat{y}_i$</span>: the softmax Jacobian is <span>$\\partial \\hat y_i/\\partial z_j = \\hat y_i(\\delta_{ij} - \\hat y_j)$</span>. Multiply by <span>$\\partial L/\\partial \\hat y_i = -y_i/\\hat y_i$</span> and sum over <span>$i$</span>. The <span>$\\hat y_i$</span> cancel and, since <span>$\\sum_i y_i = 1$</span>, <span>$\\partial L/\\partial z = \\hat{y} - y$</span>. The gradient is the size of the miss. It doesn't saturate the way squared error on a sigmoid does, so the model gets its strongest correction when it's most wrong.</p>"
 },
 {
 "id": "01-math-foundations::10",
@@ -120,7 +120,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "deep",
 "q": "Your model has 99% accuracy on a fraud dataset but is badly miscalibrated. How would you diagnose and fix that, and why didn't accuracy catch it?",
-"a": "<p>Accuracy only checks whether the argmax prediction is correct — it's blind to how confident the model was, and on a dataset where 99% of examples are the majority class, 99% accuracy can be achieved by ignoring the input entirely. Diagnose calibration directly: bucket predictions by confidence and plot a reliability diagram — predicted confidence versus actual accuracy in each bucket — or compute expected calibration error. A well-calibrated model's points sit on the diagonal; systematic overconfidence bows below it. Fix it with a lightweight, ranking-preserving correction like temperature scaling on a held-out set, or address it earlier with better-calibrated training objectives (label smoothing, focal loss) and evaluation metrics beyond accuracy — precision/recall or PR-AUC on the minority class, since accuracy is close to meaningless on this kind of imbalance to begin with.</p>"
+"a": "<p>Accuracy only checks the top prediction and ignores confidence; when 99% of examples are legitimate, a model can score 99% by ignoring the input. Diagnose calibration with a reliability diagram (confidence against actual accuracy per bucket) or expected calibration error; overconfidence bows below the diagonal. Fix it with temperature scaling on a held-out set, which keeps the ranking, or with label smoothing or focal loss in training. Evaluate with precision, recall or PR-AUC on the minority class, at the production base rate.</p>"
 },
 {
 "id": "01-math-foundations::11",
@@ -131,7 +131,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-math)",
 "level": "deep",
 "q": "What does it mean, information-theoretically, for a learned representation to be \"good\"? Connect this to mutual information.",
-"a": "<p>A representation <span>$Z$</span> derived from input <span>$X$</span> is \"good\" for a task involving target <span>$Y$</span> if it retains high mutual information <span>$I(Z;Y)$</span> — knowing <span>$Z$</span> should meaningfully reduce uncertainty about <span>$Y$</span> — while compressing away information in <span>$X$</span> that's irrelevant to <span>$Y$</span>, since <span>$Z$</span> can never contain more information about <span>$Y$</span> than <span>$X$</span> itself did (the data processing inequality). This is the conceptual backbone of a lot of self-supervised learning: contrastive objectives, masked prediction, and next-token prediction can all be read as different practical ways of maximizing mutual information between a representation and some signal — another view, a masked-out patch, the next token — without ever needing hand-labeled targets.</p>"
+"a": "<p>A representation <span>$Z$</span> of input <span>$X$</span> is good for predicting <span>$Y$</span> if it keeps high mutual information <span>$I(Z;Y)$</span>, so knowing <span>$Z$</span> cuts your uncertainty about <span>$Y$</span>, while discarding what in <span>$X$</span> is irrelevant to <span>$Y$</span>. It can never hold more information about <span>$Y$</span> than <span>$X$</span> did (the data processing inequality). Contrastive objectives, masked prediction and next-token prediction can all be read as ways to raise the mutual information between a representation and some signal (another view, a masked patch, the next token) without hand-labelled targets.</p>"
 },
 {
 "id": "02-classical-ml::0",
@@ -2485,7 +2485,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-practice)",
 "level": "beginner",
 "q": "How do you estimate whether a model fits on a given GPU?",
-"a": "<p>Add three terms. Weights are parameter count times bits per weight divided by eight, using the measured bits per weight rather than the number in the quantization name. KV cache is 2 × layers × KV heads × head dimension × bytes per element, per token, multiplied by your context length and concurrency. Then add several hundred megabytes to about a gigabyte of framework overhead. As a sanity check, Q4_K_M lands near 0.6 to 0.7 GB per billion parameters before cache.</p>"
+"a": "<p>Add three terms. Weights are parameter count times bits per weight divided by eight, using the measured bits per weight, not the number in the quantization name. KV cache is 2 × layers × KV heads × head dimension × bytes per element, per token, multiplied by your context length and concurrency. Then add several hundred megabytes to about a gigabyte of framework overhead. As a sanity check, Q4_K_M lands near 0.6 to 0.7 GB per billion parameters before cache.</p>"
 },
 {
 "id": "30-running-models-locally::1",
@@ -2496,7 +2496,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-practice)",
 "level": "beginner",
 "q": "Why is Q4_K_M not 4 bits per weight?",
-"a": "<p>Because k-quants store a scale and a minimum for each block of weights, and the medium mix deliberately keeps some tensors at higher precision. llama.cpp measures Q4_K_M at 4.8944 bits per weight for Llama 3.1 8B, about 22% above the naive assumption. Budgeting from the filename rather than the measured figure is a common way to discover a model does not fit only after downloading it.</p>"
+"a": "<p>Because k-quants store a scale and a minimum for each block of weights, and the medium mix deliberately keeps some tensors at higher precision. llama.cpp measures Q4_K_M at 4.8944 bits per weight for Llama 3.1 8B, about 22% above the naive assumption. Budget from the filename instead of the measured figure and you'll discover the model doesn't fit only after downloading it.</p>"
 },
 {
 "id": "30-running-models-locally::2",
@@ -2506,8 +2506,8 @@ window.KML_QUESTIONS = [
 "group": "Hands-on",
 "color": "var(--c-practice)",
 "level": "intermediate",
-"q": "Why does the KV cache formula use KV heads rather than attention heads?",
-"a": "<p>Because grouped-query attention shares each key-value head across several query heads, so only the KV heads are actually stored. Llama 3 8B has 32 attention heads but 8 KV heads, which makes its cache four times smaller than the multi-head equivalent: 128 KiB per token instead of 512 KiB. Using attention heads in the formula overestimates cache memory by exactly that ratio, which is enough to reject a configuration that would have worked.</p>"
+"q": "Why does the KV cache formula use KV heads and not attention heads?",
+"a": "<p>Because grouped-query attention shares each key-value head across several query heads, so only the KV heads are actually stored. Llama 3 8B has 32 attention heads but 8 KV heads, so its cache is four times smaller than the multi-head equivalent: 128 KiB per token instead of 512 KiB. Use attention heads in the formula and you overestimate cache memory by exactly that ratio, which is enough to reject a configuration that would've worked.</p>"
 },
 {
 "id": "30-running-models-locally::3",
@@ -2518,7 +2518,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-practice)",
 "level": "intermediate",
 "q": "A model loads fine but runs out of memory after a long conversation. What happened?",
-"a": "<p>The KV cache grew past the remaining headroom. Weights are a fixed cost paid at load, but the cache grows linearly with every token in the context. A model that leaves a gigabyte free after loading will exhaust it once the conversation reaches a length whose cache exceeds that gigabyte. Fixes are to cap context length, use a smaller quantization to free capacity, or quantize the cache itself if the runtime supports it.</p>"
+"a": "<p>Your KV cache grew past the remaining headroom. Weights are a fixed cost paid at load; the cache grows linearly with every token in the context. A model that leaves a gigabyte free after loading will exhaust it once the conversation's cache passes that gigabyte. Fixes: cap context length, drop to a smaller quantization to free capacity, or quantize the cache itself if your runtime supports it.</p>"
 },
 {
 "id": "30-running-models-locally::4",
@@ -2529,7 +2529,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-practice)",
 "level": "intermediate",
 "q": "Why does a smaller quantization generate tokens faster on the same hardware?",
-"a": "<p>Because generation is memory-bandwidth-bound. Producing each token requires reading every weight, so halving the bytes per weight roughly halves the bytes moved per token. llama.cpp's benchmarks show this directly: about 72 tokens/sec at Q4_K_M against 29 at F16 for Llama 3.1 8B. Prompt processing does not follow the same pattern, staying roughly flat across quantizations, because prefill processes many tokens per weight load and is compute-bound instead.</p>"
+"a": "<p>Because generation is memory-bandwidth-bound. Producing each token requires reading every weight, so halving the bytes per weight roughly halves the bytes moved per token. llama.cpp's benchmarks show this directly: about 72 tokens/sec at Q4_K_M against 29 at F16 for Llama 3.1 8B. Prompt processing doesn't follow the same pattern and stays roughly flat across quantizations, because prefill processes many tokens per weight load and is compute-bound instead.</p>"
 },
 {
 "id": "30-running-models-locally::5",
@@ -2540,7 +2540,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-practice)",
 "level": "deep",
 "q": "Your model needs 26 GB and you have a 24 GB card. Walk through the options.",
-"a": "<p>Take the cheapest quality loss first. Drop one quantization step, since Q5_K_M to Q4_K_M is roughly a 14% size reduction and usually closes a 2 GB gap on its own. Next, reduce maximum context length, which shrinks the cache term without touching weights at all, and check whether your runtime can quantize the KV cache to 8-bit. Offloading layers to CPU should be near-last, because every offloaded layer crosses PCIe on every token and typically costs more throughput than a smaller quantization would have. Adding a second GPU works but introduces communication between devices, which is only worth it when quality genuinely cannot be compromised.</p>"
+"a": "<p>Take the cheapest quality loss first. Drop one quantization step, since Q5_K_M to Q4_K_M is roughly a 14% size reduction and usually closes a 2 GB gap on its own. Next, reduce maximum context length, which shrinks the cache term without touching weights at all, and check whether your runtime can quantize the KV cache to 8-bit. Offloading layers to CPU comes near-last, because every offloaded layer crosses PCIe on every token and usually costs more throughput than a smaller quantization would have. A second GPU works, but it adds communication between devices, and that's only worth it when quality genuinely can't be compromised.</p>"
 },
 {
 "id": "30-running-models-locally::6",
@@ -2551,7 +2551,7 @@ window.KML_QUESTIONS = [
 "color": "var(--c-practice)",
 "level": "deep",
 "q": "When is running locally genuinely cheaper than an API?",
-"a": "<p>When utilisation is high and quality requirements are modest. Hardware is a fixed cost that you pay whether or not it is busy, while API pricing is proportional to use, so local wins on sustained high-volume workloads and loses on spiky or low ones. The comparison also has to include engineering time, which is usually the largest hidden cost. The honest framing is that most local deployments are justified by privacy, offline operation, or model access rather than by cost, and treating cost as the primary argument usually means the arithmetic has not been done.</p>"
+"a": "<p>When utilisation is high and quality requirements are modest. Hardware is a fixed cost you pay whether or not it's busy, while API pricing is proportional to use, so local wins on sustained high-volume workloads and loses on spiky or low ones. Include engineering time too, since that's usually the largest hidden cost. Most local deployments are justified by privacy, offline operation or model access, not by cost, and treating cost as the main argument usually means nobody's done the arithmetic.</p>"
 },
 {
 "id": "31-llm-inference-serving::0",
