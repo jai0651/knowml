@@ -1472,7 +1472,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
     "url": "topics/02-classical-ml.html#timeline",
@@ -1722,7 +1722,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
     "url": "topics/03-unsupervised-self-supervised.html#timeline",
@@ -1902,7 +1902,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
     "url": "topics/04-neural-network-fundamentals.html#timeline",
@@ -2022,7 +2022,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#timeline",
@@ -2212,7 +2212,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
     "url": "topics/06-modern-vision-foundation-models.html#timeline",
@@ -2412,7 +2412,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/07-sequence-modeling-pre-transformer.html#timeline",
@@ -2542,7 +2542,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#timeline",
@@ -2652,7 +2652,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/09-nlp-evolution.html#timeline",
@@ -2822,7 +2822,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/10-llm-architecture-training.html#timeline",
@@ -3062,7 +3062,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
     "url": "topics/11-rag-agents-reasoning.html#timeline",
@@ -3322,7 +3322,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
     "url": "topics/12-generative-models.html#timeline",
@@ -3512,7 +3512,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
     "url": "topics/13-speech-audio.html#timeline",
@@ -3692,7 +3692,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
     "url": "topics/14-multimodal-ai.html#timeline",
@@ -3812,7 +3812,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
     "url": "topics/15-reinforcement-learning.html#timeline",
@@ -4522,7 +4522,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
     "url": "topics/20-3d-spatial-autonomous-driving.html#timeline",
@@ -4732,7 +4732,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
     "url": "topics/21-robotics-embodied-ai.html#timeline",
@@ -5072,7 +5072,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
     "url": "topics/23-efficient-ai-systems.html#timeline",
@@ -5272,7 +5272,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
     "url": "topics/24-mlops.html#timeline",
@@ -5372,7 +5372,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
     "url": "topics/25-evaluation-reliability-safety.html#timeline",
@@ -5512,7 +5512,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "26 · 2026 Frontier Map",
     "section": "Systems, Safety & Interview",
     "url": "topics/26-frontier-2026.html#timeline",
@@ -5752,7 +5752,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Timeline",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
     "url": "topics/28-gpu-architecture-cuda-distributed.html#timeline",
