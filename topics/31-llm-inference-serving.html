@@ -305,12 +305,12 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 
   <section id="lifecycle">
     <h2><span class="num">02</span>The request lifecycle, end to end</h2>
-    <p class="lede">Follow one request through a modern server. Every stage below exists because of something in section 01.</p>
+    <p class="lede">Follow one request through a modern server. Each stage below exists because of something in section 01.</p>
 
     <ol>
       <li><strong>Tokenize.</strong> The prompt becomes token IDs. Cheap, but it decides your real input length, which is what you are billed and rate-limited on.</li>
-      <li><strong>Admission.</strong> The scheduler decides whether there is room. Room means KV cache blocks, not just weights, and the cache is usually what runs out first.</li>
-      <li><strong>Prefill.</strong> One forward pass over the whole prompt. Populates the KV cache for every prompt token. Emits token one.</li>
+      <li><strong>Admission.</strong> The scheduler decides whether there is room. Room means KV cache blocks as well as weights, and the cache is usually what runs out first.</li>
+      <li><strong>Prefill.</strong> It runs one forward pass over the whole prompt, populates the KV cache for every prompt token, and emits token one.</li>
       <li><strong>Decode loop.</strong> One forward pass per token. Each pass reads the whole model and appends one entry per layer to the cache.</li>
       <li><strong>Eviction.</strong> The request finishes or is cancelled, and its cache blocks return to the pool for the next request.</li>
     </ol>
@@ -327,10 +327,10 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <p class="lede">Almost every argument about inference is an argument about which of these four you are optimising, and which you are quietly sacrificing.</p>
 
     <ul>
-      <li><em class="term">Time to first token</em> (TTFT). How long the user waits before anything appears. Dominated by prefill, so it grows with prompt length. This is the number that decides whether a chat interface feels alive.</li>
+      <li><em class="term">Time to first token</em> (TTFT). This is how long the user waits before anything appears. Prefill dominates it, so it grows with prompt length, and it decides whether a chat interface feels alive.</li>
       <li><em class="term">Inter-token latency</em> (ITL), also called time per output token. The gap between successive tokens once streaming starts. Dominated by decode, and roughly flat per token. It sets the perceived reading speed.</li>
-      <li><em class="term">Throughput</em>. Total tokens per second across all concurrent requests. This is the number that decides your cost per million tokens.</li>
-      <li><em class="term">Goodput</em>. Throughput counting <em>only</em> the requests that met their latency target. A server can post excellent throughput while failing every user, and goodput is the metric that refuses to hide it.</li>
+      <li><em class="term">Throughput</em>. This is the total tokens per second across all concurrent requests, and it decides your cost per million tokens.</li>
+      <li><em class="term">Goodput</em>. This is throughput counting <em>only</em> the requests that met their latency target. A server can post excellent throughput while failing every user, and goodput exposes that.</li>
     </ul>
 
     <p>The first three are in direct tension. Raising concurrency raises throughput, because decode batches get fuller. It also raises TTFT and ITL, because each request waits behind more work. There is no setting that maximises all of them.</p>
@@ -340,7 +340,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <p>A single tokens-per-second figure is meaningless without saying whether it was measured at batch size 1 or 256. At batch 1 you get the best possible ITL and terrible throughput. At batch 256 you get the reverse. Benchmarks that quote one number have chosen a point on that curve and not told you which.</p>
     </div>
 
-    <p>The practical version: pick a latency budget first, then find the highest throughput that stays inside it. That is what goodput measures, and it is why the DistServe authors built their whole system around optimising it rather than raw throughput.</p>
+    <p>The practical version: pick a latency budget first, then find the highest throughput that stays inside it. Goodput measures exactly this, which is why the DistServe authors built their system around optimising it and not raw throughput.</p>
   </section>
 
   <section id="math">
@@ -361,13 +361,13 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 
     <div class="eq-block"><span>$$\text{intensity} = \frac{2PB}{2P} = B$$</span></div>
 
-    <p class="eq-explain">The model size cancels. Decode's arithmetic intensity is just the batch size.</p>
+    <p class="eq-explain">The model size cancels, and decode's arithmetic intensity equals the batch size.</p>
 
-    <p>That is a startling little result, and it carries the whole section. A 7B model and a 70B model sit at the <em>same</em> point on the roofline during decode. Only concurrency moves you along it.</p>
+    <p>This small result carries the whole section. A 7B model and a 70B model sit at the <em>same</em> point on the roofline during decode. Only concurrency moves you along it.</p>
 
-    <p>A modern datacentre accelerator has a ridge point in the hundreds of FLOPs per byte, so at batch 1 you are running at a small fraction of the hardware's arithmetic capability, and no amount of kernel optimisation changes that. The only way out is more requests in the same pass. Compute your own ridge point with the project on page <a href="./23-efficient-ai-systems.html">23</a> rather than trusting a number from a blog post.</p>
+    <p>A modern datacentre accelerator has a ridge point in the hundreds of FLOPs per byte, so at batch 1 you are running at a small fraction of the hardware's arithmetic capability, and no amount of kernel optimisation changes that. The only way out is more requests in the same pass. Compute your own ridge point with the project on page <a href="./23-efficient-ai-systems.html">23</a> and do not trust a number from a blog post.</p>
 
-    <p>Prefill sits at the opposite end. A prompt of <span>$L$</span> tokens gives intensity of roughly <span>$LB$</span>, and <span>$L$</span> is in the thousands, so prefill is compute-bound almost immediately. This is why one long prompt can occupy the GPU completely.</p>
+    <p>Prefill sits at the opposite end. A prompt of <span>$L$</span> tokens gives intensity of roughly <span>$LB$</span>, and <span>$L$</span> is in the thousands, so prefill is compute-bound almost immediately. So one long prompt can occupy the GPU completely.</p>
   </section>
 
   <section id="scheduler">
@@ -378,15 +378,15 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 
     <p>The obvious way to batch is to collect requests, run them together, and return when all are done. It fails badly here, because generation lengths differ wildly. One request wanting 2,000 tokens holds the whole batch hostage while nine requests that finished at 50 tokens sit idle in it.</p>
 
-    <p><em class="term">Continuous batching</em>, introduced as iteration-level scheduling in the Orca paper, schedules per <em>step</em> rather than per request. After every decode step the scheduler drops finished requests and admits waiting ones. The batch is a revolving door instead of a fixed cohort.</p>
+    <p><em class="term">Continuous batching</em>, introduced as iteration-level scheduling in the Orca paper, schedules per <em>step</em> and not per request. After every decode step the scheduler drops finished requests and admits waiting ones. The batch works like a revolving door and is not a fixed cohort.</p>
 
-    <p>This is the single largest throughput win in modern serving, and it is why a naive <code>model.generate()</code> loop is not a serving system.</p>
+    <p>It is the largest throughput win in modern serving, and it is why a naive <code>model.generate()</code> loop is not a serving system.</p>
 
     <h3>Chunked prefill</h3>
 
     <p>Continuous batching leaves one problem unsolved. Prefill and decode still contend for the same GPU, and prefill is the bigger, greedier job.</p>
 
-    <p>When a request arrives with a 30,000-token prompt, its prefill occupies the device for a long single step. Every request already streaming stalls for that entire duration. Users see their output freeze mid-sentence because somebody else pasted a document. That is <em class="term">head-of-line blocking</em>, and it shows up as an ITL spike that has nothing to do with the affected users' own requests.</p>
+    <p>When a request arrives with a 30,000-token prompt, its prefill occupies the device for a long single step. Every request already streaming stalls for that entire duration. Users see their output freeze mid-sentence because somebody else pasted a document. This is <em class="term">head-of-line blocking</em>, and it shows up as an ITL spike unrelated to the affected users' own requests.</p>
 
     <p><em class="term">Chunked prefill</em>, from the Sarathi-Serve paper, splits a long prefill into fixed-size pieces and interleaves them with ongoing decodes. Each scheduler step carries one chunk of prefill plus all the decodes, so no single step is long enough to starve anyone.</p>
 
@@ -395,7 +395,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <p>Chunking does not make prefill faster. It makes prefill <em>interruptible</em>, trading a little total throughput for a large reduction in worst-case latency. Sarathi-Serve is titled "Taming Throughput-Latency Tradeoff" for exactly this reason: the technique does not remove the tradeoff, it gives you a knob to set it deliberately.</p>
     </div>
 
-    <p>A related idea takes the separation further. <strong>Prefill/decode disaggregation</strong> runs the two phases on different GPUs entirely, so neither can interfere with the other, at the cost of shipping the KV cache between them. DistServe is the reference design, and it optimises goodput rather than throughput.</p>
+    <p>A related idea takes the separation further. <strong>Prefill/decode disaggregation</strong> runs the two phases on different GPUs entirely, so neither can interfere with the other, at the cost of shipping the KV cache between them. DistServe is the reference design, and it optimises goodput and not raw throughput.</p>
   </section>
 
   <section id="caching">
@@ -406,7 +406,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 
     <p><em class="term">Prefix caching</em> keeps those entries and reuses them. A cache hit skips the prefill work for the shared prefix entirely, which cuts TTFT directly and frees compute for everyone else.</p>
 
-    <p>SGLang generalised this as <strong>RadixAttention</strong>, storing cached prefixes in a radix tree so requests share the longest prefix they have in common rather than needing an exact match. It is the main reason SGLang does well on agent and few-shot workloads, where every request in a batch shares a long head and differs only in the tail.</p>
+    <p>SGLang generalised this as <strong>RadixAttention</strong>, storing cached prefixes in a radix tree so requests share the longest prefix they have in common and do not need an exact match. It is the main reason SGLang does well on agent and few-shot workloads, where every request in a batch shares a long head and differs only in the tail.</p>
 
     <p>Two properties are worth remembering, because they explain the API design you see from model providers:</p>
 
@@ -430,10 +430,10 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       </div>
       <p>Serve a small model, drive it with increasing concurrency, and plot <strong>TTFT</strong> and <strong>ITL</strong> against <strong>throughput</strong>. You are not benchmarking the model. You are finding the point where your server stops trading gracefully and starts falling over.</p>
       <ol class="proj-steps">
-        <li>Start a server with a 1B to 8B model. A free Colab T4 is enough; the shape of the curve matters, not the absolute numbers.</li>
+        <li>Start a server with a 1B to 8B model. A free Colab T4 is enough, because the shape of the curve matters more than the absolute numbers.</li>
         <li>Write a load generator that fires <span>$N$</span> concurrent requests with fixed prompt and output lengths, and records per-request TTFT and per-token arrival times. Do not use a benchmarking harness. Recording the timestamps yourself is what makes the metrics stop being abstract.</li>
         <li>Sweep <span>$N$</span> over powers of two, from 1 up to whatever the server accepts. Plot throughput on one axis and TTFT and ITL on the other.</li>
-        <li>Now cause head-of-line blocking. Hold a steady stream of short requests, then inject one request with a very long prompt. Watch the ITL of the <em>short</em> requests while the long prefill runs.</li>
+        <li>Now cause head-of-line blocking by holding a steady stream of short requests and injecting one request with a very long prompt. Watch the ITL of the <em>short</em> requests while the long prefill runs.</li>
         <li>Restart the server with chunked prefill enabled and repeat step 4 unchanged.</li>
       </ol>
       <div class="proj-done"><strong>You'll know it worked when</strong> the sweep produces a hockey stick: throughput climbs while latency barely moves, then bends sharply upward at a concurrency the hardware picked, not you. That knee is your real capacity, and it sits well below the point where the server starts refusing requests.</div>
@@ -443,7 +443,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 
   <section id="engines">
     <h2><span class="num">08</span>The engines, and how to choose</h2>
-    <p class="lede">Four serious options. They are not competing implementations of the same thing; they target different workloads.</p>
+    <p class="lede">There are four serious options, and they target different workloads and do not compete as implementations of the same thing.</p>
 
     <div class="wild-grid">
       <div class="wild-card">
@@ -458,13 +458,13 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       </div>
       <div class="wild-card">
         <div class="wild-head"><strong>llama.cpp</strong></div>
-        <p>C/C++, runs anywhere, including CPU-only machines, Apple silicon and phones. Consumes GGUF. Optimised for one or a few users rather than for a busy batch.</p>
+        <p>It is written in C/C++ and runs anywhere, including CPU-only machines, Apple silicon and phones, and it consumes GGUF. It is optimised for one or a few users and not for a busy batch.</p>
         <p class="reach reach-yes">Reach for it for local, edge and single-user work. Page <a href="./30-running-models-locally.html">30</a> covers this path in full.</p>
         <p class="reach reach-no">Not the tool for a multi-tenant service.</p>
       </div>
       <div class="wild-card">
         <div class="wild-head"><strong>TensorRT-LLM</strong></div>
-        <p>NVIDIA's engine. Compiles the model into a hardware-specific plan ahead of time, which buys performance that runtime-dispatched engines cannot match on the same card. The cost is a build step, tighter version coupling, and less flexibility when you swap models.</p>
+        <p>This is NVIDIA's engine. It compiles the model into a hardware-specific plan ahead of time, which buys performance that runtime-dispatched engines cannot match on the same card. The cost is a build step, tighter version coupling, and less flexibility when you swap models.</p>
         <p class="reach reach-yes">Reach for it when you are locked to NVIDIA hardware, the model is stable, and the last increment of performance is worth real engineering time.</p>
       </div>
     </div>
@@ -477,8 +477,8 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <p class="lede">Failures in serving are rarely a crash. They are a latency number quietly going wrong for reasons that are not in your logs.</p>
 
     <ul>
-      <li><strong>The KV cache runs out before the weights do.</strong> A server that loads fine at startup can refuse requests an hour later, because concurrency times context length exceeded the block pool. Capacity is a function of traffic shape, not just model size.</li>
-      <li><strong>One user's long prompt degrades everyone.</strong> Section 05's head-of-line blocking. It looks like random latency spikes until you correlate against input length.</li>
+      <li><strong>The KV cache runs out before the weights do.</strong> A server that loads fine at startup can refuse requests an hour later, because concurrency times context length exceeded the block pool. Capacity depends on traffic shape as well as model size.</li>
+      <li><strong>One user's long prompt degrades everyone.</strong> This is section 05's head-of-line blocking, and it looks like random latency spikes until you correlate against input length.</li>
       <li><strong>Preemption thrash.</strong> When the cache fills, schedulers evict and later recompute a request's prefill. Under sustained pressure a server can spend a serious fraction of its time redoing work it already did.</li>
       <li><strong>The average hides the failure.</strong> Mean TTFT looks fine while the 99th percentile is many times worse. Serving is a tail-latency discipline; report percentiles or you are not reporting anything.</li>
       <li><strong>Benchmarks measured at the wrong point.</strong> A throughput number from batch 256 tells you nothing about how the product feels, and a latency number from batch 1 tells you nothing about what it costs.</li>
@@ -493,7 +493,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <div class="wild-grid">
       <div class="wild-card">
         <div class="wild-head"><strong>A chat product</strong></div>
-        <p>TTFT is the product. Users forgive slow streaming far more readily than a blank screen. Prefix caching on the system prompt and chunked prefill to protect against long pastes both pay for themselves immediately.</p>
+        <p>TTFT matters most here, since users forgive slow streaming far more readily than a blank screen. Prefix caching on the system prompt and chunked prefill to protect against long pastes both pay for themselves immediately.</p>
       </div>
       <div class="wild-card">
         <div class="wild-head"><strong>A batch pipeline</strong></div>
@@ -501,11 +501,11 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       </div>
       <div class="wild-card">
         <div class="wild-head"><strong>An agent loop</strong></div>
-        <p>Every step replays the accumulated history, so requests share enormous prefixes. This is the workload prefix caching was built for, and the difference between having it and not having it is large.</p>
+        <p>Every step replays the accumulated history, so requests share enormous prefixes. Prefix caching was built for this workload, and the difference between having it and not having it is large.</p>
       </div>
       <div class="wild-card">
         <div class="wild-head"><strong>Code completion in an editor</strong></div>
-        <p>ITL barely matters because completions are short. TTFT matters enormously, because a suggestion that arrives after the developer has typed the next character is worthless. Small models and aggressive caching, not big models served well.</p>
+        <p>ITL barely matters because completions are short, while TTFT matters a great deal, because a suggestion that arrives after the developer has typed the next character is worthless. Use small models with aggressive caching, and skip the big models served well.</p>
       </div>
     </div>
   </section>
