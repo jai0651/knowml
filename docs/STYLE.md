@@ -20,8 +20,9 @@ Measured across the 23 full pages before the editing pass:
 ## The rules
 
 **1. One idea per sentence.** The single biggest problem is a 40-word sentence
-chaining three ideas with em-dashes and semicolons. Break it. Vary the length —
-a four-word sentence after a twenty-word one is what creates rhythm.
+chaining three ideas with em-dashes and semicolons. Break it, but keep the pieces
+connected (see the 2026-09-30 note at the end). Vary the length, and use a short
+sentence only when it carries a real point.
 
 **2. Em-dashes are a last resort.** They are the signature tell. If a clause is
 worth an em-dash, it is usually worth a full stop. Use a colon when introducing,
@@ -105,3 +106,23 @@ banned phrasings (contrast frames, "the result?" questions, fragment triplets, f
 as "actually" and "simply") are listed in `teach-writing`; `tells.py` in that skill checks
 them. Worked reference for the new opening: `topics/08-attention-transformers.html`,
 section `id="intuition"`.
+
+## Update, 2026-09-30: connected prose, no staccato
+
+The first pass over-corrected. Chopping every long sentence into short ones, and turning
+comma chains into lists, produced strings of fragments that read as machine-written. The
+rules now are:
+
+- Write connected paragraphs. A run of three or more short sentences ("X. Y. Z.") should be
+  one sentence with a subject and a verb, or two that follow from each other.
+- Do not open a sentence with a fragment for effect ("Cheap, fast, reproducible.") and do
+  not end a paragraph with a one-line verdict ("That is the whole idea.").
+- Lists are for real enumerations (steps, options, a table's worth of comparison). Do not
+  split an explanation into bullets to make it look structured.
+- Avoid "rather than", "instead of" and "X, not Y" as a rhetorical turn. Keep them where the
+  comparison is the technical content, and say what something is before what it is not.
+- The "target" table above is historical. Do not optimise for words per sentence or list
+  counts.
+
+Reference for the tone: `topics/24-*.html` (full prose pass) and the KnowSys chapters.
+Check a page with `python3 ~/.claude/skills/teach-writing/scripts/tells.py <page>.html`.

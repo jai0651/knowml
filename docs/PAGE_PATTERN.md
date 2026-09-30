@@ -2,8 +2,9 @@
 
 **First load the `teach-writing` skill** (`~/.claude/skills/teach-writing`). It holds the
 rules for every page: ease in then go deep, the sentence rules, the banned phrasing, and
-the evidence rules. This file adds what is specific to this repo. `docs/STYLE.md` still
-governs sentence rhythm; where it says "an editing pass, not a rewrite", read that as
+the evidence rules. This file adds what is specific to this repo. `docs/STYLE.md` governs
+sentence rhythm, and its 2026-09-30 note (connected prose, no staccato runs) overrides
+the older short-sentence and list targets; where it says "an editing pass, not a rewrite", read that as
 "never change a fact, number, equation or link". Reordering sections and adding a first
 experiment are allowed.
 
