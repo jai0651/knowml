@@ -220,22 +220,22 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <p>A forward pass is a long chain of simple, differentiable steps. Multiply by a weight matrix, add a bias, squash through a non-linearity, repeat. Feed in an input and every layer transforms it a little, until you get a prediction.</p>
     <p>Compare that prediction to the true answer and you get one number: the loss. "You were this wrong."</p>
     <p>Computing that number was never the hard part. The hard part is <em class="term">credit assignment</em>. For a weight sitting three layers deep, which direction should it move, and by how much, to make that one number smaller next time?</p>
-    <p>Brute force is hopeless. Nudge one weight, rerun the entire forward pass, see what changed, repeat for every weight. That does not survive contact with a million parameters.</p>
+    <p>Brute force is hopeless: you would nudge one weight, rerun the entire forward pass, see what changed, and repeat for every weight, which does not scale to a million parameters.</p>
 
     <div class="callout callout-teach">
       <span class="callout-label">Why the naive version is exponential and backprop is not</span>
       <p>A forward pass is a <strong>computational graph</strong>: a directed sequence of differentiable operations, each node's output feeding the next node's input.</p>
       <p>The chain rule says the derivative of the loss with respect to any node is the product of local derivatives along the path from that node to the loss.</p>
       <p>Here is the part that matters. Many paths <em>share sub-paths</em>. A weight in layer 1 affects the loss only through everything downstream of it, and that downstream work is identical for every weight in the layer. Compute it once, cache it, reuse it.</p>
-      <p>So one backward traversal gets you <em>every</em> weight's gradient. <strong>That reuse is the whole reason backprop is efficient rather than exponential.</strong></p>
+      <p>So one backward traversal gets you <em>every</em> weight's gradient. <strong>That reuse is the whole reason backprop is efficient and avoids an exponential cost.</strong></p>
     </div>
 
     <p>Concretely, a 2-layer network is <span>$x \to$</span> linear + activation <span>$\to h \to$</span> linear + activation <span>$\to \hat y \to$</span> loss <span>$L$</span>.</p>
     <p>To find <span>$\partial L / \partial W^{[1]}$</span>, the gradient for the <em>first</em> layer's weights, you do not analyze layer 1 in isolation. You take the gradient signal that already arrived at the hidden layer, computed a moment ago while working out layer 2, and multiply by one more local derivative.</p>
-    <p>Gradients flow backward like water through a pipe network, picking up a multiplicative factor at every junction. That is also exactly why they can shrink toward zero or blow up over many junctions. More on that in Tradeoffs.</p>
+    <p>Gradients flow backward like water through a pipe network, picking up a multiplicative factor at every junction. This is also why they can shrink toward zero or blow up over many junctions. More on that in Tradeoffs.</p>
   
 
-    <p>A single neuron can't compute XOR, the function that is 1 only when exactly one input is 1. Two hidden neurons can. The weights below are hand-set to show that it works; training would find something equivalent.</p>
+    <p>A single neuron can't compute XOR, the function that is 1 only when exactly one input is 1, but two hidden neurons can. The weights below are hand-set to show that it works, and training would find something equivalent.</p>
 
     <details class="tryit" open>
       <summary class="tryit-head">
@@ -282,12 +282,12 @@ for x, o in zip(X, out):
     <h2><span class="num">03</span>Architecture: forward pass, then backward pass through the same graph</h2>
     <p>A <strong>multilayer perceptron</strong> (MLP) is nothing more than this pattern, stacked: linear transformation → non-linear activation, repeated.</p>
     <p>The <strong>universal approximation theorem</strong> (Cybenko, 1989; Hornik, 1991) says a single hidden layer, given enough neurons and a non-linear activation, can approximate any continuous function on a compact input domain to arbitrary precision.</p>
-    <p>Be precise about what that does and does not promise. It is an existence proof, not a training recipe. It says nothing about:</p>
+    <p>The theorem is an existence proof and gives no training recipe. It says nothing about:</p>
     <ul>
       <li><strong>How many neurons "enough" is.</strong> It can be exponentially many.</li>
       <li><strong>Whether gradient descent will ever find those weights.</strong></li>
     </ul>
-    <p>In practice depth matters, even though the theorem only requires width. A deep network can represent the same function with far fewer total neurons than a shallow one. Each layer composes on features the previous layer already built (edges → textures → parts → objects) instead of representing the whole function flat in one layer.</p>
+    <p>In practice depth matters, even though the theorem only requires width. A deep network can represent the same function with far fewer total neurons than a shallow one. Each layer composes on features the previous layer already built (edges → textures → parts → objects) where a shallow network would represent the whole function flat in one layer.</p>
 
     <div class="diagram">
       <div class="diagram-title">Forward pass (blue) and backward pass (pink) through the same tiny network
@@ -335,7 +335,7 @@ for x, o in zip(X, out):
     </div>
 
     <p>Real networks almost never stack raw linear+activation layers indefinitely. Past a modest depth, plain stacking becomes very hard to optimize (see Why, next).</p>
-    <p>The fix that made 50-, 100-, even 1000-layer networks trainable is the <strong>residual block</strong>: normalize, transform, and add the result back onto a running <em>residual stream</em> instead of overwriting it. Same idea, same shape, as the residual stream running through every Transformer block (08).</p>
+    <p>The fix that made 50-, 100-, even 1000-layer networks trainable is the <strong>residual block</strong>: normalize, transform, and add the result back onto a running <em>residual stream</em> and does not overwrite it. This is the same residual stream that runs through every Transformer block running through every Transformer block (08).</p>
 
     <div class="diagram">
       <div class="diagram-title">A generic pre-norm residual block — the residual stream flowing bottom to top
@@ -372,13 +372,13 @@ for x, o in zip(X, out):
       <div class="diagram-caption">Each sub-layer reads the current value off the residual stream (dashed line), computes an update, and <em>adds</em> it back rather than replacing it. If the update is close to zero, say a not-yet-useful or poorly initialized transformation early in training, the identity path still carries the input straight through undamaged. That direct additive path works the same way for gradients flowing backward. They do not have to survive being multiplied through every transformation; they can flow along the stream. Same mechanism as the residual stream in a Transformer block (08), because it is the same underlying fix.</div>
     </div>
 
-    <p>Shapes and cost, concretely. A linear layer maps <code>(batch, in_features) → (batch, out_features)</code> via a weight matrix of shape <code>(in_features, out_features)</code> plus a bias. That is <code>in_features × out_features + out_features</code> parameters, full stop, regardless of batch size.</p>
+    <p>Take shapes and cost concretely. A linear layer maps <code>(batch, in_features) → (batch, out_features)</code> via a weight matrix of shape <code>(in_features, out_features)</code> plus a bias. That is <code>in_features × out_features + out_features</code> parameters, regardless of batch size.</p>
     <p>A useful rule of thumb from the scaling-law literature: total training compute is roughly <span>$6 \times N \times D$</span>, where <span>$N$</span> is parameter count and <span>$D$</span> is training tokens seen. It breaks down as:</p>
     <ul>
       <li><strong>Forward pass:</strong> about <span>$2N$</span> FLOPs, one multiply and one add per parameter.</li>
       <li><strong>Backward pass:</strong> roughly twice the forward pass again, since it propagates gradients with respect to both the weights <em>and</em> the activations.</li>
     </ul>
-    <p>Two separate memory costs follow from that. <strong>Parameters</strong> set your floor for weights. <strong>Activations</strong>, which you must keep around for the backward pass, set a second cost that scales with batch size and depth, and it is often the larger of the two. That is precisely why gradient accumulation and activation checkpointing exist (more in section 07 and in 23).</p>
+    <p>Two separate memory costs follow from that. <strong>Parameters</strong> set your floor for weights. <strong>Activations</strong>, which you must keep around for the backward pass, set a second cost that scales with batch size and depth, and it is often the larger of the two. This is why gradient accumulation and activation checkpointing exist (more in section 07 and in 23).</p>
   </section>
 
   <section id="math">
@@ -387,7 +387,7 @@ for x, o in zip(X, out):
     <div class="eq-block">
       <span>$$\begin{aligned}z^{[1]} &= W^{[1]}x + b^{[1]}, \qquad a^{[1]} = f(z^{[1]}) \\ z^{[2]} &= W^{[2]}a^{[1]} + b^{[2]}, \qquad \hat y = g(z^{[2]}) \\ L &= \text{loss}(\hat y, y)\end{aligned}$$</span>
     </div>
-    <p>That's the forward pass. The backward pass computes a gradient <span>$\delta$</span> at each layer's pre-activation, propagates it back through one linear map, and stops:</p>
+    <p>That is the forward pass. The backward pass computes a gradient <span>$\delta$</span> at each layer's pre-activation, propagates it back through one linear map, and stops:</p>
     <div class="eq-block">
       <span>$$\delta^{[2]} = \frac{\partial L}{\partial z^{[2]}} = \frac{\partial L}{\partial \hat y}\odot g'(z^{[2]}), \qquad \frac{\partial L}{\partial W^{[2]}} = \delta^{[2]}\left(a^{[1]}\right)^{\top}, \qquad \frac{\partial L}{\partial b^{[2]}} = \delta^{[2]}$$</span>
     </div>
@@ -396,7 +396,7 @@ for x, o in zip(X, out):
     </div>
     <ul class="eq-explain">
       <li><span class="sym">δ</span> the "error signal" arriving at a layer's pre-activation — everything the loss cares about that flows through this point, collapsed into one vector.</li>
-      <li><span class="sym">f', g'</span> the local derivative of that layer's own activation function, evaluated at the value it output on the forward pass. This is why the forward pass's intermediate values have to be cached — the backward pass needs them.</li>
+      <li><span class="sym">f', g'</span> is the local derivative of that layer's own activation function, evaluated at the value it output on the forward pass. This is why the forward pass's intermediate values have to be cached — the backward pass needs them.</li>
       <li><span class="sym">(W^[2])ᵀδ^[2]</span> how the error signal at layer 2 propagates back through layer 2's weights to become "blame" felt by layer 1's output — this is the literal mechanism of credit assignment.</li>
       <li><span class="sym">δ(a)ᵀ</span> an outer product: every weight <span>$W_{ij}$</span> gets the product of "how wrong was output <span>$i$</span>" and "how active was input <span>$j$</span>" — a weight only gets blamed in proportion to how much it was actually used.</li>
     </ul>
@@ -447,7 +447,7 @@ for x, o in zip(X, out):
     <div class="eq-block">
       <span>$$\begin{aligned}\mu_B &= \frac{1}{m}\sum_{i=1}^{m} x_i, \qquad \sigma_B^2 = \frac{1}{m}\sum_{i=1}^{m}(x_i-\mu_B)^2 \\[4pt] \hat x_i &= \frac{x_i - \mu_B}{\sqrt{\sigma_B^2+\epsilon}}, \qquad y_i = \gamma\hat x_i + \beta\end{aligned}$$</span>
     </div>
-    <p><strong>LayerNorm</strong> uses the identical formula. The difference is what <span>$\mu$</span> and <span>$\sigma^2$</span> range over: each example's own features, never touching the batch dimension at all. <strong>RMSNorm</strong> goes one step further and drops mean-centering entirely, normalizing only by root-mean-square magnitude:</p>
+    <p><strong>LayerNorm</strong> uses the same formula, but <span>$\mu$</span> and <span>$\sigma^2$</span> range over each example's own features and never touch the batch dimension. <strong>RMSNorm</strong> goes one step further and drops mean-centering entirely, normalizing only by root-mean-square magnitude:</p>
     <div class="eq-block">
       <span>$$\text{RMS}(x) = \sqrt{\frac{1}{d}\sum_{j=1}^{d}x_j^2 + \epsilon}, \qquad y = \gamma \odot \frac{x}{\text{RMS}(x)}$$</span>
     </div>
@@ -458,17 +458,17 @@ for x, o in zip(X, out):
     <h2><span class="num">05</span>Why these specific choices</h2>
     <p><strong>Why ReLU beat sigmoid/tanh.</strong> Sigmoid and tanh squash their input into a bounded range. For large positive or negative inputs the function is nearly flat, so its derivative is close to zero.</p>
     <p>Chain a dozen of those together. The gradient reaching early layers is a product of a dozen near-zero numbers. It vanishes, and early layers stop learning almost entirely.</p>
-    <p>ReLU, <span>$f(z)=\max(0,z)$</span>, has a derivative of exactly 1 for any positive input. No saturation, no shrinkage. Gradients pass straight through unchanged wherever the unit is active. That is the whole reason it unlocked meaningfully deeper networks.</p>
-    <p>It is not free. For negative inputs ReLU's derivative is exactly 0, so a unit that ends up permanently negative on every training example receives no gradient and <strong>dies</strong>. Two patches keep ReLU's advantage while fixing that:</p>
+    <p>ReLU, <span>$f(z)=\max(0,z)$</span>, has a derivative of exactly 1 for any positive input, so it does not saturate or shrink gradients, and they pass through unchanged wherever the unit is active. This is why it unlocked deeper networks.</p>
+    <p>It has a cost: for negative inputs ReLU's derivative is exactly 0, so a unit that ends up permanently negative on every training example receives no gradient and <strong>dies</strong>. Two patches keep ReLU's advantage while fixing that:</p>
     <ul>
       <li><strong>LeakyReLU.</strong> A small non-zero slope for negative inputs.</li>
       <li><strong>GELU / SiLU.</strong> Smooth, with non-zero gradient almost everywhere.</li>
     </ul>
-    <p><strong>Why GELU/SiLU in modern transformers instead of plain ReLU.</strong> GELU is <span>$x\cdot\Phi(x)$</span> and SiLU (Swish) is <span>$x\cdot\sigma(x)$</span>. Both multiply the input by a smooth gate: close to 0 for very negative inputs, close to 1 for very positive ones.</p>
-    <p>Unlike ReLU, the transition is smooth, and the function dips slightly negative just below zero rather than clamping hard at exactly zero. That smoothness gives better-behaved gradients at the scale transformers are trained at, and empirically these activations outperform ReLU in that regime. Hence BERT, GPT-family models, and most modern transformer feed-forward blocks default to GELU or a gated SiLU variant (SwiGLU).</p>
-    <p><strong>Why residual connections instead of just building a deeper plain network.</strong> He et al. (2015) showed something that looks paradoxical. A plain 56-layer network had <em>higher training error</em> than an 18-layer one. Not worse test error from overfitting. Worse error on the data it was trained on.</p>
-    <p>A deeper plain network is strictly more expressive, since it could always reproduce the shallow one by setting extra layers to the identity. So this is an optimization failure, not a capacity failure. Plain SGD struggles to find that identity mapping across many stacked non-linear layers.</p>
-    <p>A residual block computes <span>$f(x)+x$</span> instead of <span>$f(x)$</span>. The identity mapping becomes the default whenever <span>$f$</span> contributes little. The network does not have to learn identity; it starts there and only learns a useful deviation from it. That, not "more layers," is what unlocked networks past ~20 layers.</p>
+    <p><strong>Why GELU/SiLU in modern transformers.</strong> GELU is <span>$x\cdot\Phi(x)$</span> and SiLU (Swish) is <span>$x\cdot\sigma(x)$</span>. Both multiply the input by a smooth gate: close to 0 for very negative inputs, close to 1 for very positive ones.</p>
+    <p>Unlike ReLU, the transition is smooth, and the function dips slightly negative just below zero and does not clamp hard at zero. That smoothness gives better-behaved gradients at the scale transformers are trained at, and empirically these activations outperform ReLU in that regime. Hence BERT, GPT-family models, and most modern transformer feed-forward blocks default to GELU or a gated SiLU variant (SwiGLU).</p>
+    <p><strong>Why residual connections and not just a deeper plain network.</strong> He et al. (2015) showed something that looks paradoxical: a plain 56-layer network had <em>higher training error</em> than an 18-layer one. That is worse error on the data it was trained on, and overfitting does not explain it.</p>
+    <p>A deeper plain network is strictly more expressive, since it could always reproduce the shallow one by setting extra layers to the identity. So this is an optimization failure and not a capacity failure: plain SGD struggles to find that identity mapping across many stacked non-linear layers.</p>
+    <p>A residual block computes <span>$f(x)+x$</span> in place of <span>$f(x)$</span>, so the identity mapping becomes the default whenever <span>$f$</span> contributes little. The network starts at identity and only learns a useful deviation from it. This is what unlocked networks past ~20 layers.</p>
   </section>
 
   <section id="tradeoffs">
@@ -488,9 +488,9 @@ for x, o in zip(X, out):
     <div class="callout callout-teach">
       <span class="callout-label">The trap-question answer, in one sentence</span>
       <p>BatchNorm's statistics are computed <em>across examples in the batch</em>. So the normalization applied to one example depends on which other examples happen to be sitting beside it.</p>
-      <p>That is fine for image classifiers, where batch size is typically large and fixed. It breaks badly for sequence models, for three reasons:</p>
+      <p>This is fine for image classifiers, where batch size is typically large and fixed. It breaks badly for sequence models, for three reasons:</p>
       <ul>
-        <li>Batch size varies.</li>
+        <li>Batch size varies between steps.</li>
         <li>Sequences are padded to different lengths.</li>
         <li>Critically, autoregressive generation happens one token at a time, with an effective batch dimension that does not resemble training at all.</li>
       </ul>
@@ -499,9 +499,9 @@ for x, o in zip(X, out):
 
     <h3>Failure modes that show up</h3>
     <ul>
-      <li><strong>Dead ReLUs.</strong> A unit whose pre-activation is negative for every input in the training set receives zero gradient forever. A large learning-rate spike or an unlucky initialization can push a unit there, and it never recovers. Symptom: a growing fraction of activations reading exactly zero. Fixes: lower learning rate, He initialization, LeakyReLU/GELU/SiLU instead of plain ReLU.</li>
+      <li><strong>Dead ReLUs.</strong> A unit whose pre-activation is negative for every input in the training set receives zero gradient forever. A large learning-rate spike or an unlucky initialization can push a unit there, and it never recovers. Symptom: a growing fraction of activations reading exactly zero. Fixes: lower learning rate, He initialization, LeakyReLU/GELU/SiLU in place of plain ReLU.</li>
       <li><strong>Vanishing / exploding gradients in RNNs.</strong> An RNN reuses the same weight matrix at every timestep, so the gradient flowing back through <span>$T$</span> timesteps is roughly that matrix raised to the <span>$T$</span>-th power. Dominant eigenvalue below 1 and the gradient shrinks toward zero over long sequences. Above 1 and it grows exponentially, which can produce a NaN loss within a few hundred steps.</li>
-      <li><strong>Gradient clipping</strong> exists specifically for the exploding side. Cap the global gradient norm at a threshold before the optimizer step. That caps update magnitude without changing its direction. Cheap, standard (Pascanu et al., 2013), and still routinely used when training any recurrent or otherwise deep, unstable model.</li>
+      <li><strong>Gradient clipping</strong> handles the exploding side. It caps the global gradient norm at a threshold before the optimizer step, which limits update magnitude without changing its direction. It is cheap, standard (Pascanu et al., 2013), and still routinely used when training any recurrent or otherwise deep, unstable model.</li>
       <li><strong>Exploding logits.</strong> Unnormalized final-layer logits that grow very large before the softmax push cross-entropy toward numerical overflow, and make the loss landscape near that point extremely sharp. Handled in practice with the log-sum-exp trick, and in some modern LLMs with an explicit logit soft-cap.</li>
     </ul>
 
@@ -509,32 +509,32 @@ for x, o in zip(X, out):
       <span class="callout-label">Common misconception</span>
       <p>"A deeper network takes proportionally longer to train per step because backprop has more layers to work through."</p>
       <p>The backward pass costs roughly a fixed multiple of the forward pass, about 2×, regardless of how that compute is distributed across layers. Depth alone does not change that ratio.</p>
-      <p>What depth <em>does</em> cost is memory. Every layer's activations from the forward pass have to be kept around until the backward pass needs them. So memory, not per-step compute overhead, is usually the first thing that breaks as you add layers. That is exactly why activation checkpointing and gradient accumulation exist.</p>
+      <p>Depth costs memory. Every layer's activations from the forward pass have to be kept around until the backward pass needs them. So memory is usually the first thing that breaks as you add layers, before per-step compute overhead. This is why activation checkpointing and gradient accumulation exist.</p>
     </div>
 
     <div class="callout callout-status">
       <span class="callout-label">2026 status</span>
       <p>RMSNorm paired with a SwiGLU-style gated feed-forward block has become the default recipe across most frontier open-weight LLM families (LLaMA, Mistral, Qwen, and others). It has largely displaced the original 2017 Transformer's LayerNorm + ReLU/GELU feed-forward design.</p>
-      <p>The training algorithm underneath all of it is still exactly the backprop described on this page, largely unchanged since 1986. The architecture keeps evolving. The gradient computation does not.</p>
+      <p>The training algorithm underneath all of it is still exactly the backprop described on this page, largely unchanged since 1986, while the architecture keeps evolving.</p>
     </div>
 
     <h3>Regularization: dropout, early stopping, weight decay</h3>
 
-    <p>Normalization stabilises optimisation. <em class="term">Regularization</em> does something different: it deliberately makes training harder so the network cannot memorise its way to a low loss. Page <a href="./01-math-foundations.html">01</a> frames the tradeoff; here is what the three most common levers do to the network.</p>
+    <p>Normalization stabilises optimisation, while <em class="term">Regularization</em> deliberately makes training harder so the network cannot memorise its way to a low loss. Page <a href="./01-math-foundations.html">01</a> frames the tradeoff; here is what the three most common levers do to the network.</p>
 
     <ul>
       <li><strong>Dropout.</strong> During training, zero out each unit independently with probability <span>$p$</span>, then rescale the survivors by <span>$1/(1-p)$</span> so the expected activation is unchanged. At evaluation time nothing is dropped. The effect is that no unit can rely on any particular other unit being present, which stops <em>co-adaptation</em>, where a group of units only works as a committee and none is individually meaningful.</li>
       <li><strong>Early stopping.</strong> Track validation loss every epoch, keep the weights from the best one, and stop once it has not improved for a set number of epochs. It costs nothing and it is the only technique here that needs no hyperparameter tuning beyond the patience value.</li>
-      <li><strong>Weight decay.</strong> Add a penalty proportional to the squared magnitude of the weights, which pulls them toward zero unless the data pushes back. This is <span>$L_2$</span> regularization, and in a Bayesian reading it is a Gaussian prior centred on zero.</li>
+      <li><strong>Weight decay.</strong> It adds a penalty proportional to the squared magnitude of the weights, which pulls them toward zero unless the data pushes back. This is <span>$L_2$</span> regularization, and in a Bayesian reading it is a Gaussian prior centred on zero.</li>
     </ul>
 
     <div class="callout callout-teach">
       <div class="callout-label">The detail that trips people up</div>
       <p>Dropout and BatchNorm interact badly, and it is a common interview follow-up. Dropout changes the variance of activations between training and evaluation, while BatchNorm's running statistics were estimated under training-time dropout. The two disagree at inference.</p>
-    <p>This is one reason modern transformer blocks use LayerNorm or RMSNorm with little or no dropout in the residual stream, and it is why <code>model.eval()</code> matters: it switches <em>both</em> layers into inference behaviour, and forgetting it is a classic source of results that are quietly wrong rather than obviously broken.</p>
+    <p>This is one reason modern transformer blocks use LayerNorm or RMSNorm with little or no dropout in the residual stream, and it is why <code>model.eval()</code> matters: it switches <em>both</em> layers into inference behaviour, and forgetting it is a classic source of results that are quietly wrong.</p>
     </div>
 
-    <p>A practical ordering. Reach for early stopping always, since it is free. Add weight decay next, because it is one number and it usually helps. Add dropout when the model still overfits after both, and expect to need less of it than older tutorials suggest: large models trained on large corpora are often regularised adequately by the data itself.</p>
+    <p>A practical ordering is to always use early stopping, since it is free, then add weight decay, because it is one number and it usually helps, and then add dropout when the model still overfits after both, and expect to need less of it than older tutorials suggest: large models trained on large corpora are often regularised adequately by the data itself.</p>
   </section>
 
   <section id="build">
@@ -547,14 +547,14 @@ for x, o in zip(X, out):
         <span class="proj-title">Stall a 40-layer MLP, then fix it with one addition</span>
         <span class="proj-meta">~4 hours · NumPy</span>
       </div>
-      <p>Fit a smooth one-dimensional curve with a plain MLP, then keep making it deeper until it stops learning. Everything is hand-written from the four backprop equations in section 04, with <strong>no autograd</strong>. That is the point: you want to watch the gradient shrink on its way back, and then change that by hand.</p>
+      <p>Fit a smooth one-dimensional curve with a plain MLP, then keep making it deeper until it stops learning. Everything is hand-written from the four backprop equations in section 04, with <strong>no autograd</strong>. The aim is to watch the gradient shrink on its way back, and then change that by hand.</p>
       <ol class="proj-steps">
         <li>Data: a few hundred points from a smooth curve with a couple of bends. One input, one output, no noise needed.</li>
         <li>Write forward and backward in NumPy from the section 04 equations. A <span>$\delta$</span> at each pre-activation, an outer product for each weight gradient. Depth and width are arguments. Use tanh, and check the gradients once against finite differences before trusting anything.</li>
-        <li>Train at depth 4. Then train at depth 40, same width, same learning rate, same number of steps. Plot both training-loss curves on one axis, plus each network's fitted curve over the target. If depth 40 still trains, keep adding layers until it stops. Where that happens is yours to find.</li>
+        <li>Train at depth 4, then at depth 40 with the same width, same learning rate, same number of steps. Plot both training-loss curves on one axis, plus each network's fitted curve over the target. If depth 40 still trains, keep adding layers until it stops. Where that happens is yours to find.</li>
         <li>Print the gradient norm for every layer of the deep net, output back to input, at the first step and again later in training.</li>
-        <li>Add the <strong>residual</strong>: each block computes <code>x + f(x)</code> instead of <code>f(x)</code>. In the backward pass that is one extra term, the incoming gradient passed straight through. Add hand-written RMSNorm from section 04 ahead of each block. Retrain at the same depth.</li>
-        <li>Now ablate. Remove the residual and keep the norm, then keep the residual and remove the norm. Same depth, same seed, same steps, three curves on one plot.</li>
+        <li>Add the <strong>residual</strong>: each block computes <code>x + f(x)</code> in place of <code>f(x)</code>. In the backward pass that is one extra term, the incoming gradient passed straight through. Add hand-written RMSNorm from section 04 ahead of each block. Retrain at the same depth.</li>
+        <li>Now ablate: remove the residual and keep the norm, then keep the residual and remove the norm, with the same depth, seed and steps, and plot all three curves together.</li>
       </ol>
       <div class="proj-done"><strong>You'll know it worked when</strong> the deep plain net's <em>training</em> loss curve sits above the shallow one's. Its fitted curve stays close to flat while the shallow net traces the target. Nothing was overfitted and no capacity was missing: the deep net contains the shallow one as a special case (section 05). Step 4 shows the mechanism, with the per-layer gradient norms shrinking as they travel back toward the input. Add the residual and that decay flattens out.</div>
       <div class="proj-stretch"><strong>What the ablation teaches.</strong> Depth was never the problem on its own. Section 05 has the framing worth keeping. A residual block starts from the identity and only learns a deviation from it. The network is never asked to discover the identity across forty stacked non-linearities. The norm and the residual do different jobs. Running each one alone, at a depth where plain stacking fails, is the cheapest way to feel that difference. Whichever turns out to be load-bearing for you, step 4's gradient-norm printout says why.</div>
@@ -565,7 +565,7 @@ for x, o in zip(X, out):
     <p>Three levers, each attacking a different part of that:</p>
     <ul>
       <li><strong>Mixed precision.</strong> Store most of the forward and backward computation in FP16 or BF16. Half the memory, and much higher throughput on GPU tensor cores. Keep a master copy of the weights in FP32 so small updates are not lost to rounding, and add <strong>loss scaling</strong> to stop small gradients underflowing to zero. Loss scaling matters more for FP16's narrow exponent range than for BF16's.</li>
-      <li><strong>Gradient accumulation.</strong> This handles the batch-size side. If the batch you want does not fit, run several smaller micro-batches forward and backward, sum their gradients, and take one optimizer step after enough have accumulated. Mathematically close to training at the larger batch size, paid for with extra passes rather than extra memory.</li>
+      <li><strong>Gradient accumulation.</strong> This handles the batch-size side. If the batch you want does not fit, run several smaller micro-batches forward and backward, sum their gradients, and take one optimizer step after enough have accumulated. Mathematically close to training at the larger batch size, paid for with extra passes and not extra memory.</li>
       <li><strong>Gradient clipping.</strong> Keeps the mixed-precision, accumulated updates numerically stable.</li>
     </ul>
     <p>Together those are the standard recipe that lets a handful of memory-constrained GPUs train a model that would otherwise need far more hardware. The rest of the toolbox (sharding, offloading, activation checkpointing) gets a full treatment in 23.</p>
