@@ -202,7 +202,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <span class="th-pill">Assumes: calibration basics (01), RAG/agent loop (11) — 11 already covers RAG-specific evaluation and prompt-injection in the agent context</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#timeline"><span class="tn">01</span>Where this sits in the timeline</a></li><li><a href="#intuition"><span class="tn">02</span>The intuition, before any math</a></li><li><a href="#landscape"><span class="tn">03</span>The landscape: five questions, five toolkits</a></li><li><a href="#math"><span class="tn">04</span>The math that's actually load-bearing here</a></li><li><a href="#why"><span class="tn">05</span>Why this design, not the obvious alternative</a></li><li><a href="#failure-modes"><span class="tn">06</span>Complexity, failure modes, and what actually breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li><li><a href="#techmap-embed"><span class="tn">·</span>Other techniques for this problem</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Where this sits in the timeline</a></li><li><a href="#landscape"><span class="tn">03</span>The landscape: five questions, five toolkits</a></li><li><a href="#math"><span class="tn">04</span>The math that's load-bearing here</a></li><li><a href="#why"><span class="tn">05</span>Why this design</a></li><li><a href="#failure-modes"><span class="tn">06</span>Complexity, failure modes, and what breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li><li><a href="#techmap-embed"><span class="tn">·</span>Other techniques for this problem</a></li></ol></nav>
   </div>
 
   <section id="tldr">
@@ -213,8 +213,54 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
+  <section id="intuition">
+    <h2><span class="num">01</span>Intuition</h2>
+    <p class="lede">You cannot fully test a system against failure modes you haven't imagined yet. Every technique on this page is a different strategy for imagining more of them, faster than an attacker or an unlucky user does.</p>
+    <p>Here is the uncomfortable core fact. A model's test-set performance tells you how it behaves on inputs statistically similar to that test set. It tells you nothing directly about three other kinds of input:</p>
+
+    <ul>
+      <li><strong>Subtly different.</strong> Distribution shift, where the input population has drifted.</li>
+      <li><strong>Deliberately adversarial.</strong> Someone crafting an input specifically to break it.</li>
+      <li><strong>Rare.</strong> Cases too infrequent to show up in a few thousand held-out examples.</li>
+    </ul>
+
+    <p>The test set is a sample of "questions like these." The whole point of evaluation as a discipline is that "questions like these" is never the full space of questions a deployed system receives.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">What every technique here is doing</span>
+      <p>Read as a list, these eighteen concepts look unrelated. They are not. Each one is a different strategy for the same job: finding failure modes before a user or an attacker does.</p>
+      <ul>
+        <li><strong>Robustness testing and adversarial examples</strong> search near the edge of what the model handles well.</li>
+        <li><strong>Red-teaming</strong> searches for what a malicious user would craft.</li>
+        <li><strong>Calibration</strong> asks the model to know when it is in unfamiliar territory, even when it can't always get the answer right.</li>
+        <li><strong>Interpretability</strong> asks what the model computes internally, so you are not relying purely on input-output behavior to guess at untriggered failures.</li>
+      </ul>
+      <p>None of them prove the system is safe. They give you a wider net for finding the ways it isn't, before those ways find your users.</p>
+    </div>
+  
+
+    <p>Accuracy can look excellent for a model that does nothing useful. Suppose 1 case in 100 is the one you care about, and the model always answers no.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Score a model that never finds the rare case</span>
+      </summary>
+<pre><code>import numpy as np
+
+y = np.array([0] * 990 + [1] * 10)       # 1% of cases are the rare one
+pred = np.zeros_like(y)                  # a &quot;model&quot; that always says 0
+
+acc = (pred == y).mean()
+recall = (pred[y == 1] == 1).mean()
+print(f&quot;accuracy: {acc:.1%}&quot;)
+print(f&quot;recall on the rare class: {recall:.1%}&quot;)</code></pre>
+      <div class="tryit-out"><strong>The model scores <code>99.0%</code> accuracy and finds none of the rare cases: <code>0.0%</code> recall.</strong> Ninety-nine percent of its answers are right only because 99% of the cases are negative. On imbalanced problems, a metric that counts the rare class, such as recall, is the one to watch.</div>
+    </details>
+  </section>
+
   <section id="timeline">
-    <h2><span class="num">01</span>Where this sits in the timeline</h2>
+    <h2><span class="num">02</span>Where this sits in the timeline</h2>
     <p>Evaluation used to be the easy part. It stopped being easy exactly when models stopped producing a single verifiable number as their output.</p>
     <div class="bia">
       <div class="bia-box">
@@ -236,32 +282,6 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
-  <section id="intuition">
-    <h2><span class="num">02</span>The intuition, before any math</h2>
-    <p class="lede">You cannot fully test a system against failure modes you haven't imagined yet. Every technique on this page is a different strategy for imagining more of them, faster than an attacker or an unlucky user does.</p>
-    <p>Here is the uncomfortable core fact. A model's test-set performance tells you how it behaves on inputs statistically similar to that test set. It tells you nothing directly about three other kinds of input:</p>
-
-    <ul>
-      <li><strong>Subtly different.</strong> Distribution shift, where the input population has drifted.</li>
-      <li><strong>Deliberately adversarial.</strong> Someone crafting an input specifically to break it.</li>
-      <li><strong>Simply rare.</strong> Cases too infrequent to show up in a few thousand held-out examples.</li>
-    </ul>
-
-    <p>The test set is a sample of "questions like these." The whole point of evaluation as a discipline is that "questions like these" is never the full space of questions a deployed system receives.</p>
-
-    <div class="callout callout-teach">
-      <span class="callout-label">What every technique here is really doing</span>
-      <p>Read as a list, these eighteen concepts look unrelated. They are not. Each one is a different strategy for the same job: finding failure modes before a user or an attacker does.</p>
-      <ul>
-        <li><strong>Robustness testing and adversarial examples</strong> search near the edge of what the model handles well.</li>
-        <li><strong>Red-teaming</strong> searches for what a malicious user would craft.</li>
-        <li><strong>Calibration</strong> asks the model to know when it is in unfamiliar territory, even when it can't always get the answer right.</li>
-        <li><strong>Interpretability</strong> asks what the model computes internally, so you are not relying purely on input-output behavior to guess at untriggered failures.</li>
-      </ul>
-      <p>None of them prove the system is safe. They give you a wider net for finding the ways it isn't, before those ways find your users.</p>
-    </div>
-  </section>
-
   <section id="landscape">
     <h2><span class="num">03</span>The landscape: five questions, five toolkits</h2>
     <p>Eighteen distinct concepts sounds unmanageable until you notice they cluster into five different questions being asked about a model. Keep the grouping, not the list, in your head.</p>
@@ -276,7 +296,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </ul>
     <p><strong>Calibration and uncertainty.</strong> A model is calibrated if its stated confidence matches its actual accuracy. When it says "80% confident" across many predictions, it should be right about 80% of the time. Modern neural networks are frequently overconfident by default.</p>
     <p>Temperature scaling (dividing logits by a learned scalar before softmax) is the standard practical fix, covered in depth on <a href="./01-math-foundations.html">01</a>. What's specific to this page: calibration is itself an evaluation target you measure, not just a training-time fix. The Expected Calibration Error metric below is how.</p>
-    <p><strong>LLM-as-judge.</strong> Use a strong LLM to score or compare another model's open-ended output against a rubric. Exact-match scoring doesn't work for free-form text, and human evaluation doesn't scale to continuous, high-volume testing. It works well enough to be genuinely useful. It also has three specific, well-documented failure modes:</p>
+    <p><strong>LLM-as-judge.</strong> Use a strong LLM to score or compare another model's open-ended output against a rubric. Exact-match scoring doesn't work for free-form text, and human evaluation doesn't scale to continuous, high-volume testing. It works well enough to be useful. It also has three specific, well-documented failure modes:</p>
     <ul>
       <li><strong>Position bias.</strong> Favoring whichever answer appears first or second in a pairwise comparison, regardless of quality.</li>
       <li><strong>Verbosity bias.</strong> Rewarding longer answers independent of correctness.</li>
@@ -292,7 +312,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <p><strong>Adversarial examples.</strong> Small, often imperceptible, deliberately crafted perturbations that flip a model's prediction. The classic case is an image, altered by an amount invisible to a human, that a classifier suddenly misclassifies with high confidence. For LLMs the analogous attack is an adversarial suffix or crafted phrasing engineered to manipulate output. What separates these from ordinary distribution shift is <em>intent</em>: someone specifically searched for the input that breaks you.</p>
     <p><strong>OOD detection.</strong> Recognizing when an input is unlike anything the model was trained on, so the system can abstain, flag for human review, or express low confidence rather than confidently emitting a wrong answer. This is the practical, deployable complement to calibration. Calibration asks the model to know its confidence is low. OOD detection asks the system to catch the case entirely, ideally before the model even has to guess.</p>
     <p><strong>Fairness and subgroup evaluation.</strong> An aggregate accuracy number can look fine while hiding a large performance gap for a specific subgroup. Computing metrics sliced by group (by demographic, by region, by device type) is the only way to catch that a "97% accurate" model is failing 40% of the time for one slice of users.</p>
-    <p>A genuinely hard result worth knowing. Several intuitive fairness definitions can be mathematically incompatible with each other except in special cases:</p>
+    <p>A hard result. Several intuitive fairness definitions can be mathematically incompatible with each other except in special cases:</p>
     <ul>
       <li>Equal false-positive rates across groups</li>
       <li>Equal calibration across groups</li>
@@ -303,7 +323,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <h3>3. Can you trust what it says?</h3>
     <p><strong>Hallucination and factuality.</strong> LLMs are trained to produce fluent, plausible continuations, not to fact-check themselves. Fluency and truth are correlated in training data but they are not the same objective.</p>
     <p>That gap is exactly why a model can generate a confident, well-formatted, entirely fabricated citation. Hallucination isn't a bug that a bigger model necessarily removes. It is a direct consequence of the training objective, which is why mitigation leans on retrieval grounding and verification rather than scale alone.</p>
-    <p><strong>Groundedness and citation correctness.</strong> Specific to retrieval-augmented systems (<a href="./11-rag-agents-reasoning.html">11</a>). Check that a claim in the generated answer is genuinely supported by the source it is attributed to, not just plausible-sounding text near a citation marker.</p>
+    <p><strong>Groundedness and citation correctness.</strong> Specific to retrieval-augmented systems (<a href="./11-rag-agents-reasoning.html">11</a>). Check that a claim in the generated answer is supported by the source it is attributed to, not just plausible-sounding text near a citation marker.</p>
     <p>A groundedness checker (often another LLM call, or a dedicated smaller classifier) compares each claim against the retrieved passages it is supposed to rest on. This catches the common RAG failure where retrieval succeeded but generation still drifted away from what was retrieved.</p>
 
     <h3>4. Can someone break it on purpose?</h3>
@@ -313,7 +333,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <p><strong>Data poisoning and model extraction.</strong> Poisoning is an attacker manipulating training data, inserting examples designed to implant a backdoor (a hidden trigger causing specific misbehavior) or bias the model in a chosen direction. Extraction runs the other way. An attacker repeatedly queries a deployed model to reconstruct a functional copy, or to recover memorized training data, without ever accessing the weights.</p>
     <p><strong>Privacy leakage.</strong> Models can memorize specific training examples and later regurgitate them, verbatim or near-verbatim, when queried in particular ways. That is a genuine risk when training data includes personal or sensitive information. The model didn't "learn a pattern" from that example so much as store it outright.</p>
 
-    <h3>5. What is it actually computing, and can you steer it?</h3>
+    <h3>5. What is it computing, and can you steer it?</h3>
     <p><strong>Saliency, probing, activation analysis.</strong> Saliency methods attribute an output back to input features, usually via gradients or perturbation: which pixels, which tokens most influenced this specific prediction. Probing trains a small auxiliary classifier on internal activations to test whether specific information (part of speech, sentiment, a fact) is linearly recoverable from a layer. That tells you what is represented, even when you don't know how it is used.</p>
     <p>Both are useful. Both share a limitation worth stating plainly: a saliency map can look plausible while not reflecting the computation that caused the output. It is a correlational tool, not a proof of causation.</p>
     <p><strong>Mechanistic interpretability.</strong> A more ambitious research program. Reverse-engineer the algorithm a network has learned internally, the way you would reverse-engineer a compiled program back into readable source. That means finding specific <strong>circuits</strong>, subsets of attention heads and neurons across layers responsible for a particular capability, rather than only correlating activations with outputs.</p>
@@ -336,13 +356,13 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <div class="callout callout-teach">
       <div class="callout-label">Why they survive anyway</div>
       <p>They are cheap, deterministic and reproducible, which model-graded evaluation is not. An LLM judge captures meaning far better but costs money per call, drifts when the judge model is updated, and carries its own biases, including a documented preference for longer answers.</p>
-    <p>The practical answer is rarely one or the other: use n-gram metrics as a fast regression check that catches gross breakage, and reserve judged or human evaluation for the decisions that actually matter.</p>
+    <p>The practical answer is rarely one or the other: use n-gram metrics as a fast regression check that catches gross breakage, and reserve judged or human evaluation for the decisions that matter.</p>
     </div>
   </section>
 
   <section id="loop">
     <div class="diagram">
-      <div class="diagram-title">The evaluation loop — why it never actually stops
+      <div class="diagram-title">The evaluation loop — why it never stops
         <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
       </div>
       <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
@@ -385,37 +405,37 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The math that's actually load-bearing here</h2>
+    <h2><span class="num">04</span>The math that's load-bearing here</h2>
     <div class="eq-block">
       <span>$$\text{ECE} = \sum_{b=1}^{B} \frac{|S_b|}{n} \left| \text{acc}(S_b) - \text{conf}(S_b) \right|$$</span>
     </div>
     <ul class="eq-explain">
       <li><span class="sym">Expected Calibration Error</span> bucket predictions into <span>$B$</span> bins by their predicted confidence (e.g. 0–10%, 10–20%, …), then for each bin <span>$S_b$</span> compare the bin's actual accuracy against its average stated confidence, weighted by how many predictions fall in that bin.</li>
-      <li><span class="sym">acc(S_b)</span> the fraction of predictions in that confidence bin that were actually correct.</li>
+      <li><span class="sym">acc(S_b)</span> the fraction of predictions in that confidence bin that were correct.</li>
       <li><span class="sym">conf(S_b)</span> the average predicted confidence of predictions in that bin.</li>
-      <li><span class="sym">Reading it</span> ECE near zero means confidence tracks reality. The model's "80% sure" predictions really are right about 80% of the time. A large ECE means the model is systematically over- or under-confident, and temperature scaling (01) is the standard fix once you've measured it.</li>
+      <li><span class="sym">Reading it</span> ECE near zero means confidence tracks reality. The model's "80% sure" predictions are right about 80% of the time. A large ECE means the model is systematically over- or under-confident, and temperature scaling (01) is the standard fix once you've measured it.</li>
     </ul>
     <p>Now consider agreement between two raters: two human annotators, or a human checked against an LLM judge. Plain percent agreement overstates reliability, because two raters agree by pure chance some of the time. More often still if one label is common. Cohen's kappa corrects for that:</p>
     <div class="eq-block"><span>$$\kappa = \frac{p_o - p_e}{1 - p_e}$$</span></div>
     <p>Here <span>$p_o$</span> is observed agreement and <span>$p_e$</span> is the agreement expected purely by chance, given each rater's label distribution. A kappa near 0 means the raters are barely beating chance. Near 1 means they agree almost perfectly beyond what chance alone would produce.</p>
-    <p>This is the right tool for a specific question: does my LLM judge genuinely agree with my human evaluators, or does it just look that way because it always picks the more common label?</p>
+    <p>This is the right tool for a specific question: does my LLM judge agree with my human evaluators, or does it just look that way because it always picks the more common label?</p>
     <p>Finally, any binary safety classifier (a jailbreak detector, a content filter, a red-team success/fail label) inherits the precision/recall tradeoff from <a href="./01-math-foundations.html">01</a> directly:</p>
     <ul>
       <li><strong>Tuned for recall.</strong> Catches nearly everything unsafe (high recall), and flags legitimate content as unsafe more often (lower precision).</li>
-      <li><strong>Tuned for precision.</strong> Rarely bothers legitimate users (high precision), and lets more genuinely unsafe content through (lower recall).</li>
+      <li><strong>Tuned for precision.</strong> Rarely bothers legitimate users (high precision), and lets more unsafe content through (lower recall).</li>
     </ul>
     <p>No threshold maximizes both simultaneously. Deciding which error is more expensive for your system is a product decision, not a modeling one.</p>
   </section>
 
   <section id="why">
-    <h2><span class="num">05</span>Why this design, not the obvious alternative</h2>
+    <h2><span class="num">05</span>Why this design</h2>
     <p><strong>Why trust an LLM to judge another LLM, given the known biases?</strong> Because the alternative doesn't scale. Exhaustive human evaluation of every model change, at the rate modern systems iterate, is not available. And the biases are mitigable rather than fatal:</p>
     <ul>
       <li><strong>Position bias</strong> cancels out if you randomize order and average.</li>
       <li><strong>Self-enhancement bias</strong> shrinks when the judge comes from a different model family than the one under test.</li>
       <li><strong>Verbosity bias</strong> is caught by naming it explicitly as a rubric criterion, rather than leaving "quality" undefined.</li>
     </ul>
-    <p>Used carefully, with those mitigations applied and human spot-checks retained rather than replaced, LLM-as-judge is a genuinely useful scalable proxy. Not a perfect one. A useful one, which is a different and more honest claim.</p>
+    <p>Used carefully, with those mitigations applied and human spot-checks retained rather than replaced, LLM-as-judge is a useful scalable proxy. Not a perfect one. A useful one, which is a different and more honest claim.</p>
     <p><strong>Why pairwise comparison instead of absolute scoring?</strong> "Is A better than B" is a much easier and more consistent judgment than "rate this response 7 out of 10," for humans and LLM judges alike.</p>
     <p>An absolute scale has no fixed anchor, and different raters silently use different internal scales for what a "7" means. Relative comparisons sidestep that. You don't need to agree on what a 7 means, only on which of two concrete things is better.</p>
     <p><strong>Why red-team continuously instead of once before launch?</strong> Because the set of known attacks is not fixed. A model considered safe against every jailbreak technique known in January can be broken by one discovered in June. The attack surface evolves after deployment, the same way a security system's threat model doesn't freeze the day it ships.</p>
@@ -423,7 +443,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="failure-modes">
-    <h2><span class="num">06</span>Complexity, failure modes, and what actually breaks</h2>
+    <h2><span class="num">06</span>Complexity, failure modes, and what breaks</h2>
     <div class="callout callout-warn">
       <span class="callout-label">Silent contamination</span>
       <p>A benchmark that has leaked into training data doesn't fail loudly. It produces an inflated, meaningless score that looks like genuine progress. The only way to catch it is actively checking for overlap between training data and benchmark content, or holding back a fresh, never-published variant to compare against; a suspiciously high score alone is not proof, but it's a reason to check.</p>
@@ -466,7 +486,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
         <li>Now break it. Refit <span>$T$</span> on the <em>training</em> split instead of the held-out one, and replot.</li>
       </ol>
       <div class="proj-done"><strong>You'll know it worked when</strong> the before-plot sits below the diagonal, with bin accuracy trailing stated confidence and the mass piled into the top confidence bin. After scaling, the points settle onto the diagonal. Check test accuracy before and after: it is unchanged, to the digit. Dividing every logit by the same positive scalar cannot reorder them, so <strong>temperature scaling changes only how sure the model claims to be</strong>, never which class it picks.</div>
-      <div class="proj-stretch"><strong>What the breakage teaches.</strong> On data it has memorised, the model's confidence looks entirely justified, because it really does get those examples right. So the fit finds almost nothing to correct and lands close to no correction at all. The test diagram stays bent. Calibration is a statement about data the model has not seen, which means the corrector has to be fitted on data the model has not seen. That is the same held-out logic as every other evaluation on this page. It is also why calibration belongs here as a thing you <em>measure</em>, not only a thing you fix at training time.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> On data it has memorised, the model's confidence looks entirely justified, because it does get those examples right. So the fit finds almost nothing to correct and lands close to no correction at all. The test diagram stays bent. Calibration is a statement about data the model has not seen, which means the corrector has to be fitted on data the model has not seen. That is the same held-out logic as every other evaluation on this page. It is also why calibration belongs here as a thing you <em>measure</em>, not only a thing you fix at training time.</div>
     </div>
 
     <h3>Where this runs in production</h3>
@@ -478,7 +498,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <li><strong>Canary.</strong> If the new prompt wins clearly and the humans agree with the judge, roll out to a small percentage of real traffic. Watch engagement, escalation rate to a human agent, and explicit user feedback before widening.</li>
     </ol>
     <div class="callout callout-teach">
-      <span class="callout-label">What each half of that pipeline actually buys you</span>
+      <span class="callout-label">What each half of that pipeline buys you</span>
       <p>The judge comparison tells you the new prompt is probably better <em>in the way you tested</em>.</p>
       <p>The canary tells you it is better <em>in the way that matters</em>, on traffic you did not construct. Neither one substitutes for the other, which is why the pipeline has both.</p>
     </div>
@@ -638,7 +658,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=8a7b7a3b"></script>
+<script defer src="../assets/js/search-data.js?v=1c94190d"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>
@@ -647,7 +667,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 <script defer src="../assets/js/find-in-page.js?v=f0e43675"></script>
 <script defer src="../assets/js/kml-modal.js?v=6a0f6bea"></script>
 <script defer src="../assets/js/review.js?v=11ed4252"></script>
-<script defer src="../assets/js/question-index.js?v=321c545a"></script>
+<script defer src="../assets/js/question-index.js?v=4f49e5cd"></script>
 <script defer src="../assets/js/review-widget.js?v=577f11ae"></script>
 <script defer src="../assets/js/anchor.js?v=257d98c1"></script>
 <script defer src="../assets/js/notes.js?v=e8ec89d2"></script>

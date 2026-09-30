@@ -196,13 +196,13 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   <div class="topic-header">
     <div class="th-top"><span class="th-chip" style="--c:var(--c-multimodal)">Generative &amp; Multimodal</span><span class="th-num">Chapter 14</span></div>
     <h1>Multimodal <span class="th-grad">AI</span></h1>
-    <p class="dek">The synthesis page. How vision, language, audio, and video models actually get wired into one system that perceives, reasons, and generates across modalities, instead of staying siloed.</p>
+    <p class="dek">The synthesis page. How vision, language, audio, and video models get wired into one system that perceives, reasons, and generates across modalities, instead of staying siloed.</p>
     <div class="meta-row">
       <span class="th-pill"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>24 min read</span>
       <span class="th-pill">Assumes: CLIP &amp; vision foundation models (06), attention (08), generative models (12), speech &amp; audio (13)</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#timeline"><span class="tn">01</span>Where this sits in the timeline</a></li><li><a href="#intuition"><span class="tn">02</span>The intuition, before any math</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: where modalities actually meet</a></li><li><a href="#math"><span class="tn">04</span>The equations, term by term</a></li><li><a href="#why"><span class="tn">05</span>Why this architecture, not the obvious alternatives</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Tradeoffs, and what actually breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Where this sits in the timeline</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: where modalities meet</a></li><li><a href="#math"><span class="tn">04</span>The equations</a></li><li><a href="#why"><span class="tn">05</span>Why this architecture</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Tradeoffs, and what breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
   </div>
 
   <section id="tldr">
@@ -214,32 +214,8 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
-  <section id="timeline">
-    <h2><span class="num">01</span>Where this sits in the timeline</h2>
-    <p>Combining modalities is an old goal. What changed is how cheaply and how well you can do it. That is a story about two specific ideas landing a couple of years apart.</p>
-    <div class="bia">
-      <div class="bia-box">
-        <div class="bia-label">Before</div>
-        <p>Vision, language, and audio research were separate fields with separate architectures and separate training pipelines well into the 2010s. A system that needed more than one modality, say an image captioning pipeline or a video search engine, was usually built by training independent unimodal models and gluing their outputs together after the fact.</p>
-    <p>That is a late-fusion pipeline held together by hand-written rules for combining scores. Brittle, hard to improve end-to-end, and blind to any interaction between modalities that happened below the level of the final prediction.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box innovation">
-        <div class="bia-label">Innovation</div>
-        <p>CLIP-style contrastive alignment (2021) showed that training an image encoder and a text encoder together produces a genuinely shared space. The loss just pulls matching image-caption pairs together in embedding space and pushes every mismatched pair apart. No hand-written glue code needed, just a dot product.</p>
-    <p>Then the encoder + projector + LLM recipe (2022–2023) showed you didn't need to train a vision-language model from scratch at all. Bolt a pretrained vision encoder onto a pretrained LLM through a small trainable projector, and you get real visual reasoning for a tiny fraction of the cost of training either piece from zero.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box">
-        <div class="bia-label">After</div>
-        <p>The frontier now runs on two parallel lanes. Adapter-based VLMs keep inheriting improvements from better unimodal encoders and better LLMs independently. Natively multimodal models are trained jointly across modalities from the start, betting that architectural unification buys better cross-modal reasoning at a much higher training cost.</p>
-    <p>On top of both, cross-modal generation (text-to-video, speech-to-speech) and multimodal agents that look at a screen and act push the frontier toward systems that perceive, reason, and act in one continuous loop.</p>
-      </div>
-    </div>
-  </section>
-
   <section id="intuition">
-    <h2><span class="num">02</span>The intuition, before any math</h2>
+    <h2><span class="num">01</span>Intuition</h2>
     <p class="lede">Every modality speaks a different native language — so the first problem multimodal AI solves is translation, not fusion.</p>
     <p>An image, as data, is a grid of pixel intensities. A sentence is a sequence of discrete token ids. There is no shared coordinate system connecting them. You can't take a dot product between a pixel grid and a token sequence and expect it to mean anything.</p>
 
@@ -259,10 +235,56 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <p>Once that shared space exists, it becomes the common language every downstream multimodal system relies on. <strong>Retrieval</strong> becomes a nearest-neighbor search across modalities: find the image whose embedding is closest to this text query. <strong>Zero-shot classification</strong> becomes comparing an image embedding against a handful of candidate label embeddings and picking the closest one.</p>
 
     <p>And critically, it becomes the raw material that fusion operates on. That is the subject of the next section. You can't usefully combine two modalities' representations until you have first made those representations comparable.</p>
+  
+
+    <p>Multimodal models put images and text into the same vector space, so that a matching pair lands close together. Here the vectors are hand-picked, two numbers each, to show the matching step.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Match images to captions with cosine similarity</span>
+      </summary>
+<pre><code>import numpy as np
+
+# Hand-picked [furry, wheels] embeddings: three images, three captions
+images = np.array([[0.9, 0.1], [0.1, 0.9], [0.5, 0.5]])
+texts = np.array([[1.0, 0.0], [0.0, 1.0], [0.6, 0.4]])
+names = [&quot;a photo of a dog&quot;, &quot;a photo of a car&quot;, &quot;a photo of a robot dog&quot;]
+
+def norm(a): return a / np.linalg.norm(a, axis=1, keepdims=True)
+sim = norm(images) @ norm(texts).T          # cosine similarity
+print(np.round(sim, 2))
+print(&quot;best caption per image:&quot;, [names[i] for i in sim.argmax(axis=1)])</code></pre>
+      <div class="tryit-out"><strong>Each image's highest score is against its own caption.</strong> The diagonal of the printed matrix is <code>0.99</code>, <code>0.99</code> and <code>0.98</code>, and the off-diagonal entries are lower, such as <code>0.11</code> for the dog against the car. The third image, half furry and half wheeled, picks &quot;robot dog&quot; at <code>0.98</code>, ahead of &quot;dog&quot; and &quot;car&quot; at <code>0.71</code> each. Real models learn these vectors from data instead of having them hand-picked.</div>
+    </details>
+  </section>
+
+  <section id="timeline">
+    <h2><span class="num">02</span>Where this sits in the timeline</h2>
+    <p>Combining modalities is an old goal. What changed is how cheaply and how well you can do it. That is a story about two specific ideas landing a couple of years apart.</p>
+    <div class="bia">
+      <div class="bia-box">
+        <div class="bia-label">Before</div>
+        <p>Vision, language, and audio research were separate fields with separate architectures and separate training pipelines well into the 2010s. A system that needed more than one modality, say an image captioning pipeline or a video search engine, was usually built by training independent unimodal models and gluing their outputs together after the fact.</p>
+    <p>That is a late-fusion pipeline held together by hand-written rules for combining scores. Brittle, hard to improve end-to-end, and blind to any interaction between modalities that happened below the level of the final prediction.</p>
+      </div>
+      <div class="bia-arrow">→</div>
+      <div class="bia-box innovation">
+        <div class="bia-label">Innovation</div>
+        <p>CLIP-style contrastive alignment (2021) showed that training an image encoder and a text encoder together produces a shared space. The loss just pulls matching image-caption pairs together in embedding space and pushes every mismatched pair apart. No hand-written glue code needed, just a dot product.</p>
+    <p>Then the encoder + projector + LLM recipe (2022–2023) showed you didn't need to train a vision-language model from scratch at all. Bolt a pretrained vision encoder onto a pretrained LLM through a small trainable projector, and you get real visual reasoning for a tiny fraction of the cost of training either piece from zero.</p>
+      </div>
+      <div class="bia-arrow">→</div>
+      <div class="bia-box">
+        <div class="bia-label">After</div>
+        <p>The frontier now runs on two parallel lanes. Adapter-based VLMs keep inheriting improvements from better unimodal encoders and better LLMs independently. Natively multimodal models are trained jointly across modalities from the start, betting that architectural unification buys better cross-modal reasoning at a much higher training cost.</p>
+    <p>On top of both, cross-modal generation (text-to-video, speech-to-speech) and multimodal agents that look at a screen and act push the frontier toward systems that perceive, reason, and act in one continuous loop.</p>
+      </div>
+    </div>
   </section>
 
   <section id="architecture">
-    <h2><span class="num">03</span>Architecture: where modalities actually meet</h2>
+    <h2><span class="num">03</span>Architecture: where modalities meet</h2>
     <p>Once you have per-modality representations, you have to decide where in the network they meet. This is the <em class="term">fusion</em> taxonomy, and it is the single most consequential architectural decision in a multimodal system. It trades off how much cross-modal interaction the model can learn against how expensive and inflexible the resulting system becomes.</p>
 
     <div class="tbl-wrap">
@@ -367,7 +389,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The equations, term by term</h2>
+    <h2><span class="num">04</span>The equations</h2>
     <p>Cross-attention is not a new mechanism. It is the identical formula from 08, with one detail changed: where each matrix comes from.</p>
     <div class="eq-block">
       <span>$$\text{CrossAttention}(Q_{\text{text}}, K_{\text{image}}, V_{\text{image}}) = \text{softmax}\!\left(\frac{Q_{\text{text}} K_{\text{image}}^{\top}}{\sqrt{d_k}}\right)V_{\text{image}}$$</span>
@@ -386,19 +408,19 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="why">
-    <h2><span class="num">05</span>Why this architecture, not the obvious alternatives</h2>
+    <h2><span class="num">05</span>Why this architecture</h2>
     <p>Why did intermediate fusion, specifically cross-attention, become the default over pure early or pure late fusion for most systems? <strong>Cost and reuse.</strong></p>
 
     <p>Cross-attention fusion lets you start from two or more already-excellent pretrained unimodal models: a vision encoder trained on huge amounts of image data, an LLM trained on huge amounts of text. Then you add a comparatively small number of new parameters, the cross-attention layers or the projector, to connect them.</p>
 
-    <p>You get most of the benefit of early fusion's fine-grained interaction, since a text token really can attend directly to a specific image patch mid-network, before any prediction is made. And you pay closer to late fusion's training cost, since you are mostly fine-tuning a small bridge rather than training two giant encoders jointly from scratch.</p>
+    <p>You get most of the benefit of early fusion's fine-grained interaction, since a text token can attend directly to a specific image patch mid-network, before any prediction is made. And you pay closer to late fusion's training cost, since you are mostly fine-tuning a small bridge rather than training two giant encoders jointly from scratch.</p>
     <p>That is the accuracy-versus-cost sweet spot. Early fusion's ceiling is higher in principle, but almost nobody can afford to pay for it from scratch for every new modality combination. Late fusion is cheap but structurally incapable of fine-grained cross-modal reasoning. Cross-attention fusion is the point on that curve where most production systems land.</p>
 
     <p>Native multimodal tokenization is the closest thing to deliberately paying for early fusion's ceiling. Which is exactly why it is rarer, and mostly pursued by teams with the budget to train large joint models from scratch rather than adapt existing ones.</p>
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">06</span>Tradeoffs, and what actually breaks</h2>
+    <h2><span class="num">06</span>Tradeoffs, and what breaks</h2>
     <div class="tbl-wrap">
       <table class="cmp">
         <thead><tr><th></th><th>Early fusion</th><th>Late fusion</th><th>Intermediate / cross-attention fusion</th></tr></thead>
@@ -412,9 +434,9 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 
     <h3>Failure modes</h3>
     <ul>
-      <li><strong>Grounding failures.</strong> A model describes something plausible-sounding but not actually present in the input. Language priors learned from huge amounts of text pretraining are strong, and a fluent, wrong description often reads just as convincingly as a correct one. This is the single most common real complaint about VLMs in production.</li>
+      <li><strong>Grounding failures.</strong> A model describes something plausible-sounding but not present in the input. Language priors learned from huge amounts of text pretraining are strong, and a fluent, wrong description often reads just as convincingly as a correct one. This is the single most common real complaint about VLMs in production.</li>
       <li><strong>Temporal inconsistency.</strong> Video generation and video understanding both have to maintain consistency across time that image models never had to deal with. An object's identity, appearance, and position have to stay coherent across dozens or hundreds of frames. Both generative and discriminative video-language models still struggle with this over long clips.</li>
-      <li><strong>Evaluation is genuinely hard.</strong> Unlike a text benchmark where you can check an answer string, checking a multimodal answer means checking several harder-to-automate things at once: perception (did it correctly perceive what's in the input), grounding (does a specific claim actually correspond to a specific part of the image or video, not just sound plausible), reasoning (given correct perception, is the inference valid), generation quality (for cross-modal generation tasks), and temporal/spatial consistency (for video specifically). A single benchmark number rarely captures all five, which is why real multimodal evaluation usually needs several benchmarks plus a human or rubric-based check for grounding specifically.</li>
+      <li><strong>Evaluation is hard.</strong> Unlike a text benchmark where you can check an answer string, checking a multimodal answer means checking several harder-to-automate things at once: perception (did it correctly perceive what's in the input), grounding (does a specific claim correspond to a specific part of the image or video, not just sound plausible), reasoning (given correct perception, is the inference valid), generation quality (for cross-modal generation tasks), and temporal/spatial consistency (for video specifically). A single benchmark number rarely captures all five, which is why real multimodal evaluation usually needs several benchmarks plus a human or rubric-based check for grounding specifically.</li>
     </ul>
 
     <div class="callout callout-warn">
@@ -593,7 +615,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=8a7b7a3b"></script>
+<script defer src="../assets/js/search-data.js?v=1c94190d"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>
@@ -602,7 +624,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 <script defer src="../assets/js/find-in-page.js?v=f0e43675"></script>
 <script defer src="../assets/js/kml-modal.js?v=6a0f6bea"></script>
 <script defer src="../assets/js/review.js?v=11ed4252"></script>
-<script defer src="../assets/js/question-index.js?v=321c545a"></script>
+<script defer src="../assets/js/question-index.js?v=4f49e5cd"></script>
 <script defer src="../assets/js/review-widget.js?v=577f11ae"></script>
 <script defer src="../assets/js/anchor.js?v=257d98c1"></script>
 <script defer src="../assets/js/notes.js?v=e8ec89d2"></script>

@@ -202,7 +202,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <span class="th-pill">Assumes: backprop &amp; gradients (04)</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#timeline"><span class="tn">01</span>Where this sits in the timeline</a></li><li><a href="#intuition"><span class="tn">02</span>The intuition, before any math</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: how the data actually flows</a></li><li><a href="#math"><span class="tn">04</span>The equations, term by term</a></li><li><a href="#why"><span class="tn">05</span>Why gating actually fixes vanishing gradients</a></li><li><a href="#tradeoffs"><span class="tn">06</span>RNN vs. LSTM vs. GRU vs. Transformer</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Where this sits in the timeline</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: how the data flows</a></li><li><a href="#math"><span class="tn">04</span>The equations</a></li><li><a href="#why"><span class="tn">05</span>Why gating fixes vanishing gradients</a></li><li><a href="#tradeoffs"><span class="tn">06</span>RNN vs. LSTM vs. GRU vs. Transformer</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
   </div>
 
   <section id="tldr">
@@ -214,8 +214,47 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
+  <section id="intuition">
+    <h2><span class="num">01</span>Intuition</h2>
+    <p class="lede">A recurrent network reads like you do when you can't flip back a page.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The index card that never gets bigger</span>
+      <p>Imagine reading a novel one word at a time. After every word you must compress everything you have read so far onto a single index card. A fixed number of slots, no matter how long the book gets.</p>
+      <p>You read the next word, glance at the card, update it, and throw away the exact wording of everything before it. By page 300 that card still has the same number of slots it had on page 1.</p>
+      <p>Early details survive only if they got re-written onto the card at every single page. Anything that stopped being relevant for a few dozen pages gets overwritten, and is effectively gone.</p>
+    </div>
+
+    <p>That index card is the RNN's <em class="term">hidden state</em>. It's a fixed-size vector, and it's the network's only channel for carrying information from the past into the present.</p>
+
+    <p>Before RNNs, <strong>Markov chains</strong> and <strong>HMMs</strong> did not even pretend to keep a full running card. They explicitly assumed the next state depends only on the last one or two, and modeled language as a table of next-word probabilities conditioned on a short fixed window.</p>
+
+    <p>RNNs were the first attempt to make that window "as long as it needs to be." The summary became a learned, continuously-updated vector instead of a hard-coded lookup.</p>
+
+    <p>Here's the catch, and it's the single fact that explains everything else on this page. <em>Writing</em> to that card at every step is also how the network learns, via backpropagation. The further back an important word was, the more times its influence has to survive being multiplied through the update rule to reach the present. <strong>That repeated multiplication is where the whole story of LSTMs, GRUs, and eventually attention begins.</strong></p>
+  
+
+    <p>A recurrent network passes information through the same weight at every step, so a gradient sent back through many steps is multiplied by that weight many times.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Multiply a gradient by the same weight twenty times</span>
+      </summary>
+<pre><code>w = 0.5                        # a recurrent weight below 1
+grad = 1.0
+for t in range(1, 21):
+    grad *= w                  # each step back multiplies the gradient
+    if t in (1, 5, 10, 20):
+        print(f&quot;{t:&gt;2} steps back: gradient x {grad:.7f}&quot;)
+
+print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></pre>
+      <div class="tryit-out"><strong>With a weight of <code>0.5</code>, the gradient is <code>0.5</code> after one step and about a millionth after twenty.</strong> Early inputs then have almost no influence on learning. With a weight of <code>1.5</code>, the same twenty steps multiply it by <code>3,325</code> instead. Both directions break training, and that is the problem the rest of this page is about.</div>
+    </details>
+  </section>
+
   <section id="timeline">
-    <h2><span class="num">01</span>Where this sits in the timeline</h2>
+    <h2><span class="num">02</span>Where this sits in the timeline</h2>
     <p>Every idea on this page is a reaction to the same constraint: sequences vary in length, but for decades the tools available for handling them didn't have real long-range memory. Each fix bought a bit more memory at the cost of a bit more machinery, until the machinery itself became the bottleneck attention removed.</p>
     <div class="bia">
       <div class="bia-box">
@@ -236,28 +275,8 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
-  <section id="intuition">
-    <h2><span class="num">02</span>The intuition, before any math</h2>
-    <p class="lede">A recurrent network reads like you do when you can't flip back a page.</p>
-
-    <div class="callout callout-teach">
-      <span class="callout-label">The index card that never gets bigger</span>
-      <p>Imagine reading a novel one word at a time. After every word you must compress everything you have read so far onto a single index card. A fixed number of slots, no matter how long the book gets.</p>
-      <p>You read the next word, glance at the card, update it, and throw away the exact wording of everything before it. By page 300 that card still has the same number of slots it had on page 1.</p>
-      <p>Early details survive only if they got re-written onto the card at every single page. Anything that stopped being relevant for a few dozen pages gets overwritten, and is effectively gone.</p>
-    </div>
-
-    <p>That index card is the RNN's <em class="term">hidden state</em>. It's a fixed-size vector, and it's the network's only channel for carrying information from the past into the present.</p>
-
-    <p>Before RNNs, <strong>Markov chains</strong> and <strong>HMMs</strong> did not even pretend to keep a full running card. They explicitly assumed the next state depends only on the last one or two, and modeled language as a table of next-word probabilities conditioned on a short fixed window.</p>
-
-    <p>RNNs were the first attempt to make that window "as long as it needs to be." The summary became a learned, continuously-updated vector instead of a hard-coded lookup.</p>
-
-    <p>Here's the catch, and it's the single fact that explains everything else on this page. <em>Writing</em> to that card at every step is also how the network learns, via backpropagation. The further back an important word was, the more times its influence has to survive being multiplied through the update rule to reach the present. <strong>That repeated multiplication is where the whole story of LSTMs, GRUs, and eventually attention begins.</strong></p>
-  </section>
-
   <section id="architecture">
-    <h2><span class="num">03</span>Architecture: how the data actually flows</h2>
+    <h2><span class="num">03</span>Architecture: how the data flows</h2>
     <p>An RNN applies the <em>same</em> set of weights at every timestep. At step <span>$t$</span> it takes two things: the current input <span>$x_t$</span> and the previous hidden state <span>$h_{t-1}$</span>. Out comes a new hidden state <span>$h_t$</span>. <strong>Unrolling</strong> the network across a sequence means drawing that one cell repeated once per timestep, with the hidden state threaded through as the connecting wire.</p>
 
     <div class="diagram">
@@ -336,7 +355,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The equations, term by term</h2>
+    <h2><span class="num">04</span>The equations</h2>
     <p>The vanilla RNN update, at every timestep:</p>
     <div class="eq-block">
       <span>$$h_t = \tanh(W_h h_{t-1} + W_x x_t + b)$$</span>
@@ -387,7 +406,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
 
     <h3>GRU: the simpler cousin</h3>
-    <p>The <strong>Gated Recurrent Unit</strong> (Cho et al., 2014) asks whether you really need three separate gates and two separate states. It merges the cell state and hidden state into one. Forget and input collapse into a single update gate <span>$z_t$</span>, joined by a reset gate <span>$r_t$</span> controlling how much past state is used when computing the candidate:</p>
+    <p>The <strong>Gated Recurrent Unit</strong> (Cho et al., 2014) asks whether you need three separate gates and two separate states. It merges the cell state and hidden state into one. Forget and input collapse into a single update gate <span>$z_t$</span>, joined by a reset gate <span>$r_t$</span> controlling how much past state is used when computing the candidate:</p>
     <div class="eq-block">
       <span>$$\begin{aligned}
       z_t &= \sigma(W_z [h_{t-1}, x_t]) \\
@@ -402,7 +421,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="why">
-    <h2><span class="num">05</span>Why gating actually fixes vanishing gradients</h2>
+    <h2><span class="num">05</span>Why gating fixes vanishing gradients</h2>
     <p>Go back to the cell state update: <span>$C_t = f_t \odot C_{t-1} + i_t \odot \tilde{C}_t$</span>. Differentiate <span>$C_t$</span> with respect to <span>$C_{t-1}$</span>, ignoring the comparatively minor dependence of the gates themselves on <span>$C_{t-1}$</span>, and you get <span>$\partial C_t / \partial C_{t-1} \approx f_t$</span>.</p>
 
     <p>Just the forget gate, elementwise. Not a repeated multiplication by a fixed weight matrix <span>$W_h$</span> squashed through tanh every single step.</p>
@@ -416,7 +435,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <p>LSTM's cell state is a <strong>gradient highway through time</strong>, in exactly the sense a residual stream is a gradient highway through depth. Same failure mode: repeated lossy transformations. Same fix: an additive path that bypasses them.</p>
     </div>
 
-    <p>Gating doesn't make the vanishing gradient problem disappear entirely. With poor initialization, or extremely long sequences of thousands of steps, LSTMs still degrade. But it pushes the effective range of dependencies the network can actually learn from roughly 10-20 steps to several hundred. That was enough to make RNNs genuinely useful for translation, speech, and language modeling for most of the 2010s.</p>
+    <p>Gating doesn't make the vanishing gradient problem disappear entirely. With poor initialization, or extremely long sequences of thousands of steps, LSTMs still degrade. But it pushes the effective range of dependencies the network can learn from roughly 10-20 steps to several hundred. That was enough to make RNNs useful for translation, speech, and language modeling for most of the 2010s.</p>
   </section>
 
   <section id="tradeoffs">
@@ -487,7 +506,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 
     <p>Training sums the probability over every alignment that collapses to the correct label, using dynamic programming. Per-frame labels are never required.</p>
 
-    <p>The key structural difference from seq2seq is alignment. CTC assumes <strong>monotonic</strong> alignment, where frame order matches output order and is never reordered, and produces one output per input frame that then gets collapsed. Seq2seq's encoder-decoder has no such constraint. It can freely reorder or vary output length relative to input length, which is necessary for translation where word order genuinely differs between languages, but more than speech recognition needs.</p>
+    <p>The key structural difference from seq2seq is alignment. CTC assumes <strong>monotonic</strong> alignment, where frame order matches output order and is never reordered, and produces one output per input frame that then gets collapsed. Seq2seq's encoder-decoder has no such constraint. It can freely reorder or vary output length relative to input length, which is necessary for translation where word order differs between languages, but more than speech recognition needs.</p>
 
     <p>CTC-based and CTC-hybrid systems are still in production in real-time speech recognition today. The monotonic assumption holds there, and the lower latency of a single forward pass matters, with no separate decoder generating token by token.</p>
   </section>
@@ -622,7 +641,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=8a7b7a3b"></script>
+<script defer src="../assets/js/search-data.js?v=1c94190d"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>
@@ -631,7 +650,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 <script defer src="../assets/js/find-in-page.js?v=f0e43675"></script>
 <script defer src="../assets/js/kml-modal.js?v=6a0f6bea"></script>
 <script defer src="../assets/js/review.js?v=11ed4252"></script>
-<script defer src="../assets/js/question-index.js?v=321c545a"></script>
+<script defer src="../assets/js/question-index.js?v=4f49e5cd"></script>
 <script defer src="../assets/js/review-widget.js?v=577f11ae"></script>
 <script defer src="../assets/js/anchor.js?v=257d98c1"></script>
 <script defer src="../assets/js/notes.js?v=e8ec89d2"></script>

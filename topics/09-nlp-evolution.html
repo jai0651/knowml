@@ -196,13 +196,13 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   <div class="topic-header">
     <div class="th-top"><span class="th-chip" style="--c:var(--c-nlp)">Sequence, Attention &amp; LLMs</span><span class="th-num">Chapter 09</span></div>
     <h1>NLP <span class="th-grad">Evolution</span></h1>
-    <p class="dek">Bag-of-words to TF-IDF to Word2Vec to ELMo to BERT — the same question asked four times, with a slightly better answer each time: how do you turn a word into a number that actually means something?</p>
+    <p class="dek">Bag-of-words to TF-IDF to Word2Vec to ELMo to BERT — the same question asked four times, with a slightly better answer each time: how do you turn a word into a number that means something?</p>
     <div class="meta-row">
       <span class="th-pill"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>18 min read</span>
       <span class="th-pill">Assumes: none, but pairs with sequence modeling (07) and attention (08)</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#timeline"><span class="tn">01</span>Where this sits in the timeline</a></li><li><a href="#intuition"><span class="tn">02</span>The intuition, before any math</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: how each generation actually works</a></li><li><a href="#math"><span class="tn">04</span>The equations, term by term</a></li><li><a href="#why"><span class="tn">05</span>Why this design, not the obvious alternative</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Complexity, failure modes, and what actually breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Where this sits in the timeline</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: how each generation works</a></li><li><a href="#math"><span class="tn">04</span>The equations</a></li><li><a href="#why"><span class="tn">05</span>Why this design</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Complexity, failure modes, and what breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
   </div>
 
   <section id="tldr">
@@ -215,8 +215,55 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
+  <section id="intuition">
+    <h2><span class="num">01</span>Intuition</h2>
+    <p class="lede">"You shall know a word by the company it keeps." — J. R. Firth, 1957</p>
+    <p>That one sentence, written decades before any of these models existed, is the idea behind every technique on this page.</p>
+
+    <p>The disagreement between generations was never about <em>whether</em> a word's meaning comes from its context. Everyone from TF-IDF to GPT agrees on that. The disagreement was about two narrower questions: how much of that context to use, and how to turn "context" into a number.</p>
+
+    <p>Bag-of-words and TF-IDF use almost none of it. They look at which words co-occur in a whole <em>document</em>, and even then only as raw or re-weighted counts. "Context" here means little more than "which bucket did this word fall into." There's no sense in which the vector for "good" sits close to the vector for "great," because there are no vectors at all. Only counts.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">Why the byproduct is the thing you keep</span>
+      <p>Word2Vec's insight was to turn "predict the neighbors of a word" into a training objective.</p>
+      <p>Train a shallow network to predict the words that tend to surround "good." Separately, train it to predict the words that surround "great." Those two prediction tasks end up wanting very similar internal representations, <em>because the two words do appear in similar contexts</em>.</p>
+      <p>Nobody wants the prediction. The vector that falls out of solving the prediction task is what everyone is after.</p>
+    </div>
+
+    <p>GloVe reaches a similar place by a different road. Instead of predicting anything, it directly factorizes the global count matrix of how often every word co-occurs with every other word.</p>
+
+    <p>Both of those still hand you one fixed vector per word, decided once at training time and frozen forever after.</p>
+
+    <p>That's the crack ELMo exploits. "Bank" the riverbank and "bank" the financial institution are spelled identically but mean nothing alike. A single <em class="term">static vector</em> has to awkwardly average both senses together.</p>
+
+    <p>ELMo's fix is to change the question. Stop asking "what's the vector for this word?" Start asking "what's the vector for this word <em>in this sentence</em>?" Run the whole sentence through a language model, then read the word's representation off the model's internal hidden state at that position.</p>
+
+    <p>BERT and GPT push that same idea to its natural conclusion. If the representation should depend on the whole sentence, don't bother with a separate embedding-lookup stage at all. Pretrain one big network, end to end, and let every layer contribute to what "bank" means <em>right here</em>.</p>
+  
+
+    <p>An early way to turn text into numbers was to count the words. Try it on two sentences that mean opposite things.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Count words in two sentences that mean different things</span>
+      </summary>
+<pre><code>from collections import Counter
+
+a = &quot;dog bites man&quot;.split()
+b = &quot;man bites dog&quot;.split()
+
+print(&quot;bag of words a:&quot;, dict(Counter(a)))
+print(&quot;bag of words b:&quot;, dict(Counter(b)))
+print(&quot;same counts:&quot;, Counter(a) == Counter(b))
+print(&quot;same sentence:&quot;, a == b)</code></pre>
+      <div class="tryit-out"><strong>The two sentences produce identical counts.</strong> <code>dog bites man</code> and <code>man bites dog</code> each contain one <code>dog</code>, one <code>bites</code> and one <code>man</code>, so a bag of words can't tell them apart. Most of what came next in NLP is a way to keep word order and meaning.</div>
+    </details>
+  </section>
+
   <section id="timeline">
-    <h2><span class="num">01</span>Where this sits in the timeline</h2>
+    <h2><span class="num">02</span>Where this sits in the timeline</h2>
     <p>This page is the connective tissue between "words are symbols" and "words are vectors a transformer reads." It's less one architecture than four generations of the same idea, each removing exactly one assumption the last generation still made.</p>
     <div class="bia">
       <div class="bia-box">
@@ -239,35 +286,8 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
-  <section id="intuition">
-    <h2><span class="num">02</span>The intuition, before any math</h2>
-    <p class="lede">"You shall know a word by the company it keeps." — J. R. Firth, 1957</p>
-    <p>That one sentence, written decades before any of these models existed, is the idea behind every technique on this page.</p>
-
-    <p>The disagreement between generations was never about <em>whether</em> a word's meaning comes from its context. Everyone from TF-IDF to GPT agrees on that. The disagreement was about two narrower questions: how much of that context to use, and how to turn "context" into a number.</p>
-
-    <p>Bag-of-words and TF-IDF use almost none of it. They look at which words co-occur in a whole <em>document</em>, and even then only as raw or re-weighted counts. "Context" here means little more than "which bucket did this word fall into." There's no sense in which the vector for "good" sits close to the vector for "great," because there are no vectors at all. Only counts.</p>
-
-    <div class="callout callout-teach">
-      <span class="callout-label">Why the byproduct is the thing you keep</span>
-      <p>Word2Vec's insight was to turn "predict the neighbors of a word" into a training objective.</p>
-      <p>Train a shallow network to predict the words that tend to surround "good." Separately, train it to predict the words that surround "great." Those two prediction tasks end up wanting very similar internal representations, <em>because the two words genuinely do appear in similar contexts</em>.</p>
-      <p>Nobody wants the prediction. The vector that falls out of solving the prediction task is what everyone is after.</p>
-    </div>
-
-    <p>GloVe reaches a similar place by a different road. Instead of predicting anything, it directly factorizes the global count matrix of how often every word co-occurs with every other word.</p>
-
-    <p>Both of those still hand you one fixed vector per word, decided once at training time and frozen forever after.</p>
-
-    <p>That's the crack ELMo exploits. "Bank" the riverbank and "bank" the financial institution are spelled identically but mean nothing alike. A single <em class="term">static vector</em> has to awkwardly average both senses together.</p>
-
-    <p>ELMo's fix is to change the question. Stop asking "what's the vector for this word?" Start asking "what's the vector for this word <em>in this sentence</em>?" Run the whole sentence through a language model, then read the word's representation off the model's internal hidden state at that position.</p>
-
-    <p>BERT and GPT push that same idea to its natural conclusion. If the representation should depend on the whole sentence, don't bother with a separate embedding-lookup stage at all. Pretrain one big network, end to end, and let every layer contribute to what "bank" means <em>right here</em>.</p>
-  </section>
-
   <section id="architecture">
-    <h2><span class="num">03</span>Architecture: how each generation actually works</h2>
+    <h2><span class="num">03</span>Architecture: how each generation works</h2>
 
     <h3>Bag-of-words and TF-IDF: counting, dressed up</h3>
     <p><strong>Bag-of-words</strong> builds a vocabulary of every distinct word across a corpus. Each document then becomes a vector of length <code>|vocabulary|</code>, where each entry is how many times that word appears in the document.</p>
@@ -365,7 +385,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The equations, term by term</h2>
+    <h2><span class="num">04</span>The equations</h2>
 
     <h3>TF-IDF</h3>
     <div class="eq-block">
@@ -398,7 +418,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="why">
-    <h2><span class="num">05</span>Why this design, not the obvious alternative</h2>
+    <h2><span class="num">05</span>Why this design</h2>
     <p>The obvious alternative at every step was <em>"just use a bigger lookup table."</em> It fails twice over. A bigger table of hand-built synonym rules doesn't scale past a few thousand words and can't be learned from data. A bigger one-hot vocabulary still gives you zero notion of similarity between "good" and "great," no matter how large you make it.</p>
     <p>The real axis of progress across this whole page is a single question: <strong>how much does the representation have to be told, versus how much can it learn on its own from raw co-occurrence?</strong></p>
     <div class="tbl-wrap">
@@ -408,7 +428,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
           <tr><td>Captures semantic similarity</td><td>No</td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
           <tr><td>Vector depends on context</td><td>No</td><td>No — one per word type</td><td>Yes</td><td>Yes</td></tr>
           <tr><td>Handles unseen words</td><td>No</td><td>No (fixed vocabulary)</td><td>Partially (char-CNN input)</td><td>Yes (subword tokenization)</td></tr>
-          <tr><td>What's actually pretrained</td><td>Nothing</td><td>An embedding table only</td><td>A 2-layer biLSTM</td><td>The entire network, dozens of layers</td></tr>
+          <tr><td>What's pretrained</td><td>Nothing</td><td>An embedding table only</td><td>A 2-layer biLSTM</td><td>The entire network, dozens of layers</td></tr>
         </tbody>
       </table>
     </div>
@@ -421,7 +441,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">06</span>Complexity, failure modes, and what actually breaks</h2>
+    <h2><span class="num">06</span>Complexity, failure modes, and what breaks</h2>
     <ul>
       <li><strong>Polysemy is the fundamental limit of static embeddings.</strong> Word2Vec and GloVe are mathematically incapable of giving "bank" two different vectors. The training objective produces exactly one vector per word type, so it ends up as an uneasy average over every sense the word is ever used in. This isn't a bug that more training data fixes. It's a structural property of "one vector per word."</li>
       <li><strong>Sparse count vectors don't compose.</strong> A TF-IDF vector for a document about "cars" and one about "automobiles" can score as nearly unrelated by cosine similarity, purely because the exact words don't overlap. There's no mechanism for "car" and "automobile" to be recognized as related at all, unlike in a learned embedding space.</li>
@@ -437,7 +457,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <div class="callout callout-status">
       <span class="callout-label">2026 status</span>
       <p>Bag-of-words, TF-IDF, Word2Vec, GloVe, and ELMo are all functionally retired as the primary text representation in new systems. Nobody is training a fresh Word2Vec model to power a 2026 product.</p>
-      <p>But two pieces of this lineage never left. TF-IDF/BM25-style sparse retrieval is still one half of essentially every production hybrid search system (see 11). And subword tokenization (BPE/WordPiece/SentencePiece, or close variants) is still the very first thing that happens to your prompt before it reaches any modern LLM.</p>
+      <p>But two pieces of this lineage never left. TF-IDF/BM25-style sparse retrieval is still one half of almost every production hybrid search system (see 11). And subword tokenization (BPE/WordPiece/SentencePiece, or close variants) is still the very first thing that happens to your prompt before it reaches any modern LLM.</p>
       <p>The representations died; two of the mechanisms that produced them didn't.</p>
     </div>
   </section>
@@ -612,7 +632,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=8a7b7a3b"></script>
+<script defer src="../assets/js/search-data.js?v=1c94190d"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>
@@ -621,7 +641,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 <script defer src="../assets/js/find-in-page.js?v=f0e43675"></script>
 <script defer src="../assets/js/kml-modal.js?v=6a0f6bea"></script>
 <script defer src="../assets/js/review.js?v=11ed4252"></script>
-<script defer src="../assets/js/question-index.js?v=321c545a"></script>
+<script defer src="../assets/js/question-index.js?v=4f49e5cd"></script>
 <script defer src="../assets/js/review-widget.js?v=577f11ae"></script>
 <script defer src="../assets/js/anchor.js?v=257d98c1"></script>
 <script defer src="../assets/js/notes.js?v=e8ec89d2"></script>

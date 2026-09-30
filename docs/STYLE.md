@@ -93,3 +93,15 @@ See `topics/08-attention-transformers.html`, section `id="intuition"`. Same
 facts, same length (248 → 264 words), 24.8 → 10.2 words per sentence, 7 → 0
 em-dashes, 0 → 7 bold terms, 0 → 3 list items, and the central example moved
 into a teach callout.
+
+## Update, 2026-09-30: easing readers in
+
+The rules above fix how sentences read. They did not fix where a page starts. Pages open
+with a timeline, and the plain-language intuition comes second. Read `docs/PAGE_PATTERN.md` before editing a page, and the `teach-writing` skill if you have it.
+In short: the intuition section goes first, it gets a small runnable example with numbers
+the reader can check, and the "editing pass, not a rewrite" constraint above means "never
+change a fact, number, equation or link", not "never reorder or add a section". The
+banned phrasings (contrast frames, "the result?" questions, fragment triplets, filler such
+as "actually" and "simply") are listed in `teach-writing`; `tells.py` in that skill checks
+them. Worked reference for the new opening: `topics/08-attention-transformers.html`,
+section `id="intuition"`.

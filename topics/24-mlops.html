@@ -202,7 +202,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <span class="th-pill">Assumes: none specific, but training-loop basics (04) help</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#timeline"><span class="tn">01</span>Where this sits in the timeline</a></li><li><a href="#intuition"><span class="tn">02</span>The intuition, before any math</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: the production ML lifecycle as a loop</a></li><li><a href="#deployment"><span class="tn">04</span>Rolling out a new model without betting the business on it</a></li><li><a href="#monitoring"><span class="tn">05</span>Monitoring: telling drift apart from noise</a></li><li><a href="#evaluation"><span class="tn">06</span>Evaluation: golden sets, and offline vs online metrics</a></li><li><a href="#why"><span class="tn">07</span>Why this design, not the obvious alternative</a></li><li><a href="#failure-modes"><span class="tn">08</span>Complexity, failure modes, and what actually breaks</a></li><li><a href="#build"><span class="tn">09</span>Build this</a></li><li><a href="#interview"><span class="tn">10</span>Interview questions</a></li><li><a href="#resources"><span class="tn">11</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">12</span>Related pages</a></li><li><a href="#techmap-embed"><span class="tn">·</span>Other techniques for this problem</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Where this sits in the timeline</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: the production ML lifecycle as a loop</a></li><li><a href="#deployment"><span class="tn">04</span>Rolling out a new model without betting the business on it</a></li><li><a href="#monitoring"><span class="tn">05</span>Monitoring: telling drift apart from noise</a></li><li><a href="#evaluation"><span class="tn">06</span>Evaluation: golden sets, and offline vs online metrics</a></li><li><a href="#why"><span class="tn">07</span>Why this design</a></li><li><a href="#failure-modes"><span class="tn">08</span>Complexity, failure modes, and what breaks</a></li><li><a href="#build"><span class="tn">09</span>Build this</a></li><li><a href="#interview"><span class="tn">10</span>Interview questions</a></li><li><a href="#resources"><span class="tn">11</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">12</span>Related pages</a></li><li><a href="#techmap-embed"><span class="tn">·</span>Other techniques for this problem</a></li></ol></nav>
   </div>
 
   <section id="tldr">
@@ -214,8 +214,57 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
+  <section id="intuition">
+    <h2><span class="num">01</span>Intuition</h2>
+    <p class="lede">A model is not a fact about the world that you compute once and keep. It's a bet about a pattern that was true in your training window. Every day that passes, the bet gets a little more stale.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">Why ML failures are worse than ordinary bugs</span>
+      <p>Ordinary software fails loudly. A null pointer throws. A 500 shows up in your logs. Someone gets paged.</p>
+      <p>A machine learning system's <strong>most dangerous failure mode is the opposite</strong>. It keeps returning confident, well-formed, plausible-looking predictions while being quietly, progressively wrong. Nothing in a standard error log will ever tell you.</p>
+      <p>There is no exception to catch. That is the whole problem.</p>
+    </div>
+
+    <p>Two things can slip out from under a working model:</p>
+    <ul>
+      <li><strong>The inputs move.</strong> The distribution the model sees in production drifts away from what it trained on. Users change, a competitor launches a promotion, a pandemic changes shopping behavior overnight.</li>
+      <li><strong>The answer moves.</strong> The relationship between inputs and the right answer changes. What counted as fraud last year doesn't cover this year's new pattern.</li>
+    </ul>
+
+    <p>The model has no idea either happened. It keeps applying last year's pattern with complete confidence.</p>
+
+    <p>This is why MLOps is a distinct discipline rather than just "software engineering, but for ML". You need infrastructure whose entire job is to notice decay that produces no exceptions and no crashes. Only a slow decline in a business metric, which, if you're not watching for it specifically, looks like nothing at all until it's a serious, expensive problem.</p>
+  
+
+    <p>A model in production sees data that slowly stops resembling its training data. One simple way to notice is to compare the two distributions bin by bin.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Detect drift in a feature with the population stability index</span>
+      </summary>
+<pre><code>import numpy as np
+
+rng = np.random.default_rng(0)
+train = rng.normal(50, 10, 10_000)         # values at training time
+live_same = rng.normal(50, 10, 10_000)     # live, same distribution
+live_drift = rng.normal(58, 10, 10_000)    # live, the mean shifted
+
+def psi(a, b, bins=10):
+    edges = np.quantile(a, np.linspace(0, 1, bins + 1))
+    edges[0], edges[-1] = -np.inf, np.inf
+    pa = np.histogram(a, edges)[0] / len(a) + 1e-6
+    pb = np.histogram(b, edges)[0] / len(b) + 1e-6
+    return ((pb - pa) * np.log(pb / pa)).sum()
+
+print(f&quot;no drift: PSI = {psi(train, live_same):.3f}&quot;)
+print(f&quot;drifted:  PSI = {psi(train, live_drift):.3f}&quot;)</code></pre>
+      <div class="tryit-out"><strong>Live data from the same distribution scores a PSI of <code>0.001</code>. Live data whose mean has shifted from 50 to 58 scores <code>0.595</code>.</strong> A shift of less than one standard deviation in a single feature moves the score by orders of magnitude. The number itself matters less than having one to alert on.</div>
+    </details>
+  </section>
+
   <section id="timeline">
-    <h2><span class="num">01</span>Where this sits in the timeline</h2>
+    <h2><span class="num">02</span>Where this sits in the timeline</h2>
     <p>MLOps has no founding paper the way attention or backpropagation does. It congealed out of painful experience. Companies ran enough models in production, for long enough, to watch them fail the same handful of ways over and over, across completely different teams and problems.</p>
     <div class="bia">
       <div class="bia-box">
@@ -236,28 +285,6 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <p>The discipline scaled further with LLMs. Prompts and retrieval pipelines now get versioned and evaluated the same way model weights always were, and "LLM-as-judge" evaluation (see <a href="./25-evaluation-reliability-safety.html">25</a>) has become its own monitoring layer on top of everything below.</p>
       </div>
     </div>
-  </section>
-
-  <section id="intuition">
-    <h2><span class="num">02</span>The intuition, before any math</h2>
-    <p class="lede">A model is not a fact about the world that you compute once and keep. It's a bet about a pattern that was true in your training window. Every day that passes, the bet gets a little more stale.</p>
-
-    <div class="callout callout-teach">
-      <span class="callout-label">Why ML failures are worse than ordinary bugs</span>
-      <p>Ordinary software fails loudly. A null pointer throws. A 500 shows up in your logs. Someone gets paged.</p>
-      <p>A machine learning system's <strong>most dangerous failure mode is the opposite</strong>. It keeps returning confident, well-formed, plausible-looking predictions while being quietly, progressively wrong. Nothing in a standard error log will ever tell you.</p>
-      <p>There is no exception to catch. That is the whole problem.</p>
-    </div>
-
-    <p>Two things can slip out from under a working model:</p>
-    <ul>
-      <li><strong>The inputs move.</strong> The distribution the model sees in production drifts away from what it trained on. Users change, a competitor launches a promotion, a pandemic changes shopping behavior overnight.</li>
-      <li><strong>The answer moves.</strong> The relationship between inputs and the right answer changes. What counted as fraud last year doesn't cover this year's new pattern.</li>
-    </ul>
-
-    <p>The model has no idea either happened. It keeps applying last year's pattern with complete confidence.</p>
-
-    <p>This is why MLOps is a distinct discipline rather than just "software engineering, but for ML". You need infrastructure whose entire job is to notice decay that produces no exceptions and no crashes. Only a slow decline in a business metric, which, if you're not watching for it specifically, looks like nothing at all until it's a serious, expensive problem.</p>
   </section>
 
   <section id="architecture">
@@ -346,7 +373,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <li><strong>Canary deployment</strong> is the next step up. The new model serves a small, real slice of traffic (often 1&ndash;5%) end to end, with its impact on real business metrics measured directly, before that slice is gradually increased.</li>
     </ul>
 
-    <p>The difference matters. Shadow tells you the new model's predictions <em>look</em> reasonable. Only canary tells you whether users actually respond to them the way you hoped.</p>
+    <p>The difference matters. Shadow tells you the new model's predictions <em>look</em> reasonable. Only canary tells you whether users respond to them the way you hoped.</p>
 
     <p><strong>Rollback strategy</strong> is the part teams most often forget to design in advance. Reverting a model version is easy if it's just a registry pointer. But if the new version also required a new feature or a new database schema, then "roll back the model" and "roll back everything the model depended on" are not the same operation. An actual incident is the wrong time to learn that.</p>
 
@@ -357,11 +384,11 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 
   <section id="monitoring">
     <h2><span class="num">05</span>Monitoring: telling drift apart from noise</h2>
-    <p>"Something changed" isn't actionable on its own. The fix for a shifted input distribution is completely different from the fix for a genuinely changed relationship between inputs and outcomes. So the first job of monitoring is telling apart three things that all just look like "the numbers moved."</p>
+    <p>"Something changed" isn't actionable on its own. The fix for a shifted input distribution is completely different from the fix for a changed relationship between inputs and outcomes. So the first job of monitoring is telling apart three things that all just look like "the numbers moved."</p>
 
     <ul>
       <li><strong>Data drift</strong> is a change in the distribution of the model's input features. Your fraud model was trained when average transaction size was $40, and it's now $65, even though "what counts as fraud" hasn't changed at all.</li>
-      <li><strong>Concept drift</strong> is a change in the actual relationship between inputs and the correct output. The fraud patterns themselves evolved, so the same transaction profile that used to be safe now genuinely often isn't.</li>
+      <li><strong>Concept drift</strong> is a change in the actual relationship between inputs and the correct output. The fraud patterns themselves evolved, so the same transaction profile that used to be safe now often isn't.</li>
       <li><strong>Performance drift</strong> is the downstream symptom: accuracy, precision, or whatever business metric you care about visibly degrading. Data or concept drift eventually cause it. You can only measure it directly once you have ground-truth labels, which for many production systems arrive late or never at scale.</li>
     </ul>
     <div class="eq-block">
@@ -398,12 +425,12 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="why">
-    <h2><span class="num">07</span>Why this design, not the obvious alternative</h2>
+    <h2><span class="num">07</span>Why this design</h2>
     <p><strong>Why not just retrain on a fixed schedule (say, every Monday) instead of building drift detection?</strong></p>
 
     <p>A fixed schedule is either wasteful or too slow, and usually both at different times. Retraining weekly when nothing has changed burns compute and engineering time for zero benefit. Meanwhile a sudden, sharp shift, like a fraud ring changing tactics overnight, can do real damage for days before the next scheduled retrain even happens.</p>
 
-    <p>Drift-triggered retraining spends the budget where and when it's needed. The cost is needing real monitoring infrastructure to know when that is. A fixed schedule is simpler to build and is a completely reasonable choice when drift is genuinely slow and predictable, which is itself something you should verify rather than assume.</p>
+    <p>Drift-triggered retraining spends the budget where and when it's needed. The cost is needing real monitoring infrastructure to know when that is. A fixed schedule is simpler to build and is a completely reasonable choice when drift is slow and predictable, which is itself something you should verify rather than assume.</p>
 
     <p><strong>Why not skip staging and go straight from "passed offline eval" to full production traffic?</strong></p>
 
@@ -411,18 +438,18 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="failure-modes">
-    <h2><span class="num">08</span>Complexity, failure modes, and what actually breaks</h2>
+    <h2><span class="num">08</span>Complexity, failure modes, and what breaks</h2>
     <p><strong>Train-serving skew</strong> is the recurring villain of this entire page. Any place where feature computation at training time differs even slightly from serving time produces a model that looks great offline and is silently miscalibrated the moment it sees production traffic.</p>
 
     <p>The culprit is usually small: a different library version, a subtly different time-window definition, a null-handling difference. A feature store's whole reason for existing is making this structurally hard to do by accident.</p>
 
-    <p><strong>Hidden feedback loops</strong> happen when a model's own predictions influence the data it's later trained on. A recommender that under-shows a certain category generates less engagement data for that category. To the next training run, that looks like genuinely low demand, reinforcing the original bias with no external cause required at all.</p>
+    <p><strong>Hidden feedback loops</strong> happen when a model's own predictions influence the data it's later trained on. A recommender that under-shows a certain category generates less engagement data for that category. To the next training run, that looks like low demand, reinforcing the original bias with no external cause required at all.</p>
 
-    <p>This is one of the specific risk factors named in the "Hidden Technical Debt" paper. It's genuinely hard to detect from inside the system, since every signal you'd use to check is itself produced by the loop.</p>
+    <p>This is one of the specific risk factors named in the "Hidden Technical Debt" paper. It's hard to detect from inside the system, since every signal you'd use to check is itself produced by the loop.</p>
 
     <p><strong>Data leakage</strong> is information about the label leaking into the features, usually through a feature that's only available after the outcome is already known. Using "did the customer cancel this month" to help predict "will the customer cancel this month," for example.</p>
 
-    <p>It inflates offline metrics dramatically, then evaporates entirely in production, since the leaked signal simply isn't available at real prediction time. It's one of the most common reasons a model that looked excellent in evaluation performs close to random once deployed.</p>
+    <p>It inflates offline metrics dramatically, then evaporates entirely in production, since the leaked signal isn't available at real prediction time. It's one of the most common reasons a model that looked excellent in evaluation performs close to random once deployed.</p>
 
     <p><strong>Alert fatigue and threshold tuning</strong> are a genuine, ongoing operational cost, not a one-time setup step. A threshold that's too sensitive trains engineers to ignore the monitor. One that's too loose lets real regressions through silently.</p>
 
@@ -531,7 +558,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <div class="related-grid">
       <a class="related-card" href="./23-efficient-ai-systems.html"><div class="rc-sec" style="color:var(--c-efficient)">23 · What came before</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Getting a model to run fast and cheap — this page is about running it correctly, forever.</div></a>
       <a class="related-card" href="./25-evaluation-reliability-safety.html"><div class="rc-sec" style="color:var(--c-eval)">25 · The other half</div><div class="rc-title">Evaluation, Reliability &amp; Safety</div><div class="rc-hook">Golden sets and offline/online metrics, gone deep — plus LLM-as-judge and red teaming.</div></a>
-      <a class="related-card" href="./04-neural-network-fundamentals.html"><div class="rc-sec" style="color:var(--c-nn)">04 · Prerequisite</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">What experiment tracking is actually tracking — the training loop itself.</div></a>
+      <a class="related-card" href="./04-neural-network-fundamentals.html"><div class="rc-sec" style="color:var(--c-nn)">04 · Prerequisite</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">What experiment tracking is tracking — the training loop itself.</div></a>
       <a class="related-card" href="./27-interview-mastery.html"><div class="rc-sec" style="color:var(--c-interview)">27 · Interview framing</div><div class="rc-title">Interview Mastery</div><div class="rc-hook">How to structure a system-design answer that includes a production/monitoring story.</div></a>
     </div>
   </section>
@@ -601,7 +628,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=8a7b7a3b"></script>
+<script defer src="../assets/js/search-data.js?v=1c94190d"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>
@@ -610,7 +637,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 <script defer src="../assets/js/find-in-page.js?v=f0e43675"></script>
 <script defer src="../assets/js/kml-modal.js?v=6a0f6bea"></script>
 <script defer src="../assets/js/review.js?v=11ed4252"></script>
-<script defer src="../assets/js/question-index.js?v=321c545a"></script>
+<script defer src="../assets/js/question-index.js?v=4f49e5cd"></script>
 <script defer src="../assets/js/review-widget.js?v=577f11ae"></script>
 <script defer src="../assets/js/anchor.js?v=257d98c1"></script>
 <script defer src="../assets/js/notes.js?v=e8ec89d2"></script>

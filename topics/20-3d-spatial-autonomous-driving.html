@@ -202,7 +202,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <span class="th-pill">Assumes: CNNs &amp; detection basics (05), attention &amp; transformers (08)</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#timeline"><span class="tn">01</span>Where this sits in the timeline</a></li><li><a href="#intuition"><span class="tn">02</span>The intuition, before any equation</a></li><li><a href="#architecture"><span class="tn">03</span>The stack, piece by piece</a></li><li><a href="#math"><span class="tn">04</span>The math, term by term</a></li><li><a href="#why"><span class="tn">05</span>Why BEV/occupancy, and why modular over end-to-end</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Complexity, failure modes, and what actually breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Where this sits in the timeline</a></li><li><a href="#architecture"><span class="tn">03</span>The stack, piece by piece</a></li><li><a href="#math"><span class="tn">04</span>The math</a></li><li><a href="#why"><span class="tn">05</span>Why BEV/occupancy, and why modular over end-to-end</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Complexity, failure modes, and what breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
   </div>
 
   <section id="tldr">
@@ -216,8 +216,48 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
+  <section id="intuition">
+    <h2><span class="num">01</span>Intuition</h2>
+    <p class="lede">No single sensor tells you what's out there. The whole field exists because you have to combine several incomplete answers into one you can trust.</p>
+    <p>A camera image is a 2D projection of the world. By the time light hits the sensor, depth is already gone. Two objects at wildly different distances can land on the exact same pixel if one sits behind the other, and a monocular camera alone cannot tell you which is which. It needs additional assumptions, or a second view to triangulate against.</p>
+
+    <p>The other two sensors each fix part of that, and break somewhere else:</p>
+
+    <ul>
+      <li><strong>LiDAR</strong> fires laser pulses and times their return, giving precise, direct 3D range measurements. But a rotating unit only samples a sparse, uneven point cloud: dense up close, sparse at range, and silent about color or fine texture. It is also the most expensive sensor in the stack.</li>
+      <li><strong>Radar</strong> measures velocity directly and instantly via Doppler shift, which neither cameras nor LiDAR do without inferring it across multiple frames. Its spatial resolution is coarse enough that it often cannot tell you an object's exact shape, or sometimes whether two nearby objects are one object or two.</li>
+    </ul>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The two questions everything here answers</span>
+      <p><strong>First: how do you turn what one sensor sees into a 3D fact about the world?</strong> That is camera geometry, stereo depth, and LiDAR point-cloud processing.</p>
+      <p><strong>Second: how do you combine facts from sensors that disagree?</strong> They measure different things and update at different rates. Reconciling them is sensor fusion, BEV representations, and occupancy networks.</p>
+      <p>Get the first right and you have accurate individual readings that still don't agree with each other. Get the second right and that disagreement flips from a source of confusion into a source of <em>robustness</em>, because each sensor covers the others' blind spots.</p>
+    </div>
+  
+
+    <p>A camera turns a point in 3D into a pixel by dividing by its distance. That one division is why far things look small and why a single camera can't tell you how far away something is.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Project a 3D point onto a camera image</span>
+      </summary>
+<pre><code>f = 800.0                                    # focal length in pixels
+cx, cy = 320.0, 240.0                        # image center
+
+def project(X, Y, Z):
+    return f * X / Z + cx, f * Y / Z + cy    # x = f X / Z
+
+for Z in (5, 10, 20):
+    u, v = project(1.0, 0.5, Z)
+    print(f&quot;{Z:&gt;2} m away -&gt; pixel ({u:.0f}, {v:.0f})&quot;)</code></pre>
+      <div class="tryit-out"><strong>The same point, 1 m right and 0.5 m down, lands at pixel <code>(480, 320)</code> at 5 m, <code>(400, 280)</code> at 10 m and <code>(360, 260)</code> at 20 m.</strong> Moving it further away pulls it toward the image center at <code>(320, 240)</code>. Going the other way, from a pixel back to a 3D position, needs the distance, and one image doesn't contain it.</div>
+    </details>
+  </section>
+
   <section id="timeline">
-    <h2><span class="num">01</span>Where this sits in the timeline</h2>
+    <h2><span class="num">02</span>Where this sits in the timeline</h2>
     <p>Self-driving research predates deep learning by decades. The geometric core of this page, how a camera's pixels relate to real-world 3D points, is unchanged 19th-century projective geometry. Deep learning did not invent it. What changed, in three overlapping waves, was how much of the pipeline <em>above</em> that geometry got replaced by learned components.</p>
     <div class="bia">
       <div class="bia-box">
@@ -236,26 +276,6 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
         <p><strong>Occupancy networks</strong> (TPVFormer and successors) generalize past bounding boxes entirely. They predict free space and semantics per voxel, so an oddly-shaped obstacle a detector was never trained to name still shows up as "occupied." NeRF and Gaussian splatting (06) get reused to reconstruct real driving logs photorealistically for closed-loop simulation.</p>
         <p>The frontier argument is modular-but-learned versus end-to-end: whether perception, prediction and planning stay separate, independently-verifiable learned stages, or collapse into one jointly-trained network. Section 05 covers why that isn't settled yet.</p>
       </div>
-    </div>
-  </section>
-
-  <section id="intuition">
-    <h2><span class="num">02</span>The intuition, before any equation</h2>
-    <p class="lede">No single sensor tells you what's actually out there. The whole field exists because you have to combine several incomplete answers into one you can trust.</p>
-    <p>A camera image is a 2D projection of the world. By the time light hits the sensor, depth is already gone. Two objects at wildly different distances can land on the exact same pixel if one sits behind the other, and a monocular camera alone genuinely cannot tell you which is which. It needs additional assumptions, or a second view to triangulate against.</p>
-
-    <p>The other two sensors each fix part of that, and break somewhere else:</p>
-
-    <ul>
-      <li><strong>LiDAR</strong> fires laser pulses and times their return, giving precise, direct 3D range measurements. But a rotating unit only samples a sparse, uneven point cloud: dense up close, sparse at range, and silent about color or fine texture. It is also the most expensive sensor in the stack.</li>
-      <li><strong>Radar</strong> measures velocity directly and instantly via Doppler shift, which neither cameras nor LiDAR do without inferring it across multiple frames. Its spatial resolution is coarse enough that it often cannot tell you an object's exact shape, or sometimes whether two nearby objects are one object or two.</li>
-    </ul>
-
-    <div class="callout callout-teach">
-      <span class="callout-label">The two questions everything here answers</span>
-      <p><strong>First: how do you turn what one sensor sees into a 3D fact about the world?</strong> That is camera geometry, stereo depth, and LiDAR point-cloud processing.</p>
-      <p><strong>Second: how do you combine facts from sensors that disagree?</strong> They measure different things and update at different rates. Reconciling them is sensor fusion, BEV representations, and occupancy networks.</p>
-      <p>Get the first right and you have accurate individual readings that still don't agree with each other. Get the second right and that disagreement flips from a source of confusion into a source of <em>robustness</em>, because each sensor covers the others' blind spots.</p>
     </div>
   </section>
 
@@ -353,7 +373,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <p><strong>BEVFormer</strong> builds this grid directly with attention. A fixed grid of learned BEV queries, one per top-down cell, uses two attention mechanisms:</p>
 
     <ul>
-      <li><strong>Spatial cross-attention</strong> pulls in the relevant image features from whichever camera views actually see that patch of ground.</li>
+      <li><strong>Spatial cross-attention</strong> pulls in the relevant image features from whichever camera views see that patch of ground.</li>
       <li><strong>Temporal self-attention</strong> fuses the current BEV grid with the previous timestep's grid.</li>
     </ul>
 
@@ -423,7 +443,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The math, term by term</h2>
+    <h2><span class="num">04</span>The math</h2>
     <p>Two equations carry almost all of the geometry on this page: the camera projection equation, and the epipolar constraint.</p>
     <div class="eq-block">
       <span>$$\lambda \begin{bmatrix}u\\v\\1\end{bmatrix} = K \big[R \mid t\big] \begin{bmatrix}X\\Y\\Z\\1\end{bmatrix}$$</span>
@@ -467,7 +487,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">06</span>Complexity, failure modes, and what actually breaks</h2>
+    <h2><span class="num">06</span>Complexity, failure modes, and what breaks</h2>
     <div class="tbl-wrap">
       <table class="cmp">
         <thead><tr><th></th><th>Camera</th><th>LiDAR</th><th>Radar</th></tr></thead>
@@ -480,7 +500,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       </table>
     </div>
 
-    <h3>What actually shows up in production</h3>
+    <h3>What shows up in production</h3>
     <ul>
       <li><strong>Sensor miscalibration.</strong> Extrinsics drift out of alignment over time, from a bump, a temperature change, a minor collision. Every downstream fusion step then silently trusts a wrong camera-to-vehicle transform, producing subtly wrong 3D positions that look entirely plausible.</li>
       <li><strong>Long-tail object shapes</strong> that a bounding-box detector's training categories never covered. Exactly what occupancy networks exist to catch, and exactly where pure bounding-box pipelines fail quietly instead of loudly.</li>
@@ -519,7 +539,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
         <li>Now break the calibration. Change the baseline by a few percent and rerun everything, with the images untouched.</li>
         <li>Restore the baseline. Instead rotate the assumed camera extrinsic by a fraction of a degree, rerun, and look at the BEV again.</li>
       </ol>
-      <div class="proj-done"><strong>You'll know it worked when</strong> the disparity map is bright on near surfaces and dark on far ones, with edges where object edges actually are. The BEV grid should put a blob near the bottom for the car ahead, and a band at the far edge for the buildings. Nothing you wrote knows what a car is. That layout came out of geometry.</div>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the disparity map is bright on near surfaces and dark on far ones, with edges where object edges are. The BEV grid should put a blob near the bottom for the car ahead, and a band at the far edge for the buildings. Nothing you wrote knows what a car is. That layout came out of geometry.</div>
       <div class="proj-stretch"><strong>What the two breakages teach.</strong> A wrong baseline scales every depth by a constant, so the disparity map looks exactly as convincing as before and the BEV is uniformly wrong. Nothing in either picture flags it. A small extrinsic rotation is nastier. It tilts the whole point cloud, so the ground plane slopes and far points slide sideways much further than near ones. That is the miscalibration failure mode from section 06, reproduced in a few lines. Calibration errors do not look like errors. They look like confident, plausible, wrong geometry, which is why a real stack spends so much effort on staying calibrated.</div>
     </div>
 
@@ -669,7 +689,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=8a7b7a3b"></script>
+<script defer src="../assets/js/search-data.js?v=1c94190d"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>
@@ -678,7 +698,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 <script defer src="../assets/js/find-in-page.js?v=f0e43675"></script>
 <script defer src="../assets/js/kml-modal.js?v=6a0f6bea"></script>
 <script defer src="../assets/js/review.js?v=11ed4252"></script>
-<script defer src="../assets/js/question-index.js?v=321c545a"></script>
+<script defer src="../assets/js/question-index.js?v=4f49e5cd"></script>
 <script defer src="../assets/js/review-widget.js?v=577f11ae"></script>
 <script defer src="../assets/js/anchor.js?v=257d98c1"></script>
 <script defer src="../assets/js/notes.js?v=e8ec89d2"></script>

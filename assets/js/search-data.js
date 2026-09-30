@@ -292,7 +292,7 @@ window.SEARCH_INDEX = [
       "graph transformer",
       "full"
     ],
-    "summary": "Message passing is the whole field: gather, aggregate, update. GCN, GraphSAGE and GAT as variations on the middle step, plus over-smoothing, neighbour sampling and why splitting a graph is subtle.",
+    "summary": "Message passing: gather, aggregate, update. GCN, GraphSAGE and GAT as variations on the middle step, plus over-smoothing, neighbour sampling and why splitting a graph is subtle.",
     "color": "var(--c-graph)"
   },
   {
@@ -762,7 +762,7 @@ window.SEARCH_INDEX = [
     "color": "var(--c-challenge)"
   },
   {
-    "title": "37 · AI in Industry: What It Is Actually Solving",
+    "title": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html",
     "tags": [
@@ -1462,6 +1462,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Intuition",
+    "parentTitle": "02 · Classical Supervised ML",
+    "section": "Foundations",
+    "url": "topics/02-classical-ml.html#intuition",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-classical)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
@@ -1472,17 +1482,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
-    "parentTitle": "02 · Classical Supervised ML",
-    "section": "Foundations",
-    "url": "topics/02-classical-ml.html#intuition",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-classical)"
-  },
-  {
-    "kind": "section",
-    "title": "The model zoo: how each one actually decides",
+    "title": "The model zoo: how each one decides",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
     "url": "topics/02-classical-ml.html#architecture",
@@ -1492,10 +1492,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Regularization, geometrically — before you even meet a tree",
+    "title": "Regularization, geometrically",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#regularization-geometrically-before-you-even-meet-a-tree",
+    "url": "topics/02-classical-ml.html#regularization-geometrically",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
@@ -1592,7 +1592,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
     "url": "topics/02-classical-ml.html#math",
@@ -1632,7 +1632,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this shape, not the obvious alternative",
+    "title": "Why this shape",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
     "url": "topics/02-classical-ml.html#why",
@@ -1672,10 +1672,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Failure modes worth knowing cold",
+    "title": "Failure modes",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#failure-modes-worth-knowing-cold",
+    "url": "topics/02-classical-ml.html#failure-modes",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
@@ -1712,6 +1712,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Intuition",
+    "parentTitle": "03 · Unsupervised & Self-Supervised",
+    "section": "Foundations",
+    "url": "topics/03-unsupervised-self-supervised.html#intuition",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-unsup)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
@@ -1722,17 +1732,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
-    "parentTitle": "03 · Unsupervised & Self-Supervised",
-    "section": "Foundations",
-    "url": "topics/03-unsupervised-self-supervised.html#intuition",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-unsup)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how the data actually flows",
+    "title": "Architecture: how the data flows",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
     "url": "topics/03-unsupervised-self-supervised.html#architecture",
@@ -1792,7 +1792,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
     "url": "topics/03-unsupervised-self-supervised.html#math",
@@ -1802,10 +1802,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "InfoNCE, term by term",
+    "title": "InfoNCE",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
-    "url": "topics/03-unsupervised-self-supervised.html#infonce-term-by-term",
+    "url": "topics/03-unsupervised-self-supervised.html#infonce",
     "tags": [],
     "summary": "",
     "color": "var(--c-unsup)"
@@ -1822,7 +1822,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why self-supervised pretraining won, not just \"get more labels\"",
+    "title": "Why self-supervised pretraining won",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
     "url": "topics/03-unsupervised-self-supervised.html#why",
@@ -1832,7 +1832,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Failure modes, evaluation, and what actually breaks",
+    "title": "Failure modes, evaluation, and what breaks",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
     "url": "topics/03-unsupervised-self-supervised.html#tradeoffs",
@@ -1892,20 +1892,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Intuition",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
-    "url": "topics/04-neural-network-fundamentals.html#timeline",
+    "url": "topics/04-neural-network-fundamentals.html#intuition",
     "tags": [],
     "summary": "",
     "color": "var(--c-nn)"
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
+    "title": "Where this sits in the timeline",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
-    "url": "topics/04-neural-network-fundamentals.html#intuition",
+    "url": "topics/04-neural-network-fundamentals.html#timeline",
     "tags": [],
     "summary": "",
     "color": "var(--c-nn)"
@@ -1922,7 +1922,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
     "url": "topics/04-neural-network-fundamentals.html#math",
@@ -1952,7 +1952,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why these specific choices, not the obvious alternatives",
+    "title": "Why these specific choices",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
     "url": "topics/04-neural-network-fundamentals.html#why",
@@ -1962,7 +1962,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Normalization and regularization: what actually breaks",
+    "title": "Normalization and regularization: what breaks",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
     "url": "topics/04-neural-network-fundamentals.html#tradeoffs",
@@ -1972,10 +1972,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Failure modes that actually show up",
+    "title": "Failure modes that show up",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
-    "url": "topics/04-neural-network-fundamentals.html#failure-modes-that-actually-show-up",
+    "url": "topics/04-neural-network-fundamentals.html#failure-modes-that-show-up",
     "tags": [],
     "summary": "",
     "color": "var(--c-nn)"
@@ -2012,6 +2012,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Intuition",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#intuition",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
@@ -2022,17 +2032,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
-    "parentTitle": "05 · CNNs & Vision Foundations",
-    "section": "Neural Nets & Vision",
-    "url": "topics/05-cnn-vision-foundations.html#intuition",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-vision)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how the data actually flows",
+    "title": "Architecture: how the data flows",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#architecture",
@@ -2092,7 +2092,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#math",
@@ -2102,17 +2102,17 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why parameter count is the whole story",
+    "title": "Parameter count",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
-    "url": "topics/05-cnn-vision-foundations.html#why-parameter-count-is-the-whole-story",
+    "url": "topics/05-cnn-vision-foundations.html#parameter-count",
     "tags": [],
     "summary": "",
     "color": "var(--c-vision)"
   },
   {
     "kind": "section",
-    "title": "Why this architecture, not the obvious alternative",
+    "title": "Why this architecture",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#why",
@@ -2122,7 +2122,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs and what actually breaks",
+    "title": "Tradeoffs and what breaks",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#tradeoffs",
@@ -2132,10 +2132,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Failure modes worth knowing cold",
+    "title": "Failure modes",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
-    "url": "topics/05-cnn-vision-foundations.html#failure-modes-worth-knowing-cold",
+    "url": "topics/05-cnn-vision-foundations.html#failure-modes",
     "tags": [],
     "summary": "",
     "color": "var(--c-vision)"
@@ -2202,6 +2202,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Intuition",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#intuition",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
@@ -2212,17 +2222,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
-    "parentTitle": "06 · Modern Vision Foundation Models",
-    "section": "Neural Nets & Vision",
-    "url": "topics/06-modern-vision-foundation-models.html#intuition",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-visionfm)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how the data actually flows",
+    "title": "Architecture: how the data flows",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
     "url": "topics/06-modern-vision-foundation-models.html#architecture",
@@ -2232,7 +2232,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
     "url": "topics/06-modern-vision-foundation-models.html#math",
@@ -2262,7 +2262,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this architecture, not the obvious alternatives",
+    "title": "Why this architecture",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
     "url": "topics/06-modern-vision-foundation-models.html#why",
@@ -2272,7 +2272,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs and what actually breaks",
+    "title": "Tradeoffs and what breaks",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
     "url": "topics/06-modern-vision-foundation-models.html#tradeoffs",
@@ -2282,10 +2282,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Failure modes worth knowing by name",
+    "title": "Failure modes",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
-    "url": "topics/06-modern-vision-foundation-models.html#failure-modes-worth-knowing-by-name",
+    "url": "topics/06-modern-vision-foundation-models.html#failure-modes",
     "tags": [],
     "summary": "",
     "color": "var(--c-visionfm)"
@@ -2332,20 +2332,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What patchification actually throws away",
+    "title": "What patchification throws away",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
-    "url": "topics/06-modern-vision-foundation-models.html#what-patchification-actually-throws-away",
+    "url": "topics/06-modern-vision-foundation-models.html#what-patchification-throws-away",
     "tags": [],
     "summary": "",
     "color": "var(--c-visionfm)"
   },
   {
     "kind": "section",
-    "title": "How a VLM is actually wired",
+    "title": "How a VLM is wired",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
-    "url": "topics/06-modern-vision-foundation-models.html#how-a-vlm-is-actually-wired",
+    "url": "topics/06-modern-vision-foundation-models.html#how-a-vlm-is-wired",
     "tags": [],
     "summary": "",
     "color": "var(--c-visionfm)"
@@ -2362,10 +2362,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The other backbone worth knowing: supervision-free features",
+    "title": "The other backbone: supervision-free features",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
-    "url": "topics/06-modern-vision-foundation-models.html#the-other-backbone-worth-knowing-supervision-free-features",
+    "url": "topics/06-modern-vision-foundation-models.html#the-other-backbone-supervision-free-features",
     "tags": [],
     "summary": "",
     "color": "var(--c-visionfm)"
@@ -2402,6 +2402,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Intuition",
+    "parentTitle": "07 · Sequence Modeling Pre-Transformer",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/07-sequence-modeling-pre-transformer.html#intuition",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sequence)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
@@ -2412,17 +2422,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
-    "parentTitle": "07 · Sequence Modeling Pre-Transformer",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/07-sequence-modeling-pre-transformer.html#intuition",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-sequence)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how the data actually flows",
+    "title": "Architecture: how the data flows",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/07-sequence-modeling-pre-transformer.html#architecture",
@@ -2432,7 +2432,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/07-sequence-modeling-pre-transformer.html#math",
@@ -2472,7 +2472,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why gating actually fixes vanishing gradients",
+    "title": "Why gating fixes vanishing gradients",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/07-sequence-modeling-pre-transformer.html#why",
@@ -2532,6 +2532,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Intuition",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#intuition",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
@@ -2542,17 +2552,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
-    "parentTitle": "08 · Attention & Transformers",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/08-attention-transformers.html#intuition",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-attention)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how the data actually flows",
+    "title": "Architecture: how the data flows",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#architecture",
@@ -2562,7 +2562,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#math",
@@ -2592,7 +2592,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this architecture, not the obvious alternatives",
+    "title": "Why this architecture",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#why",
@@ -2602,10 +2602,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what actually breaks",
+    "title": "Complexity, failure modes, and what breaks",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "What shows up in production",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#what-shows-up-in-production",
     "tags": [],
     "summary": "",
     "color": "var(--c-attention)"
@@ -2632,6 +2642,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Intuition",
+    "parentTitle": "09 · NLP Evolution",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/09-nlp-evolution.html#intuition",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-nlp)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
@@ -2642,17 +2662,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
-    "parentTitle": "09 · NLP Evolution",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#intuition",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-nlp)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how each generation actually works",
+    "title": "Architecture: how each generation works",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/09-nlp-evolution.html#architecture",
@@ -2722,7 +2732,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/09-nlp-evolution.html#math",
@@ -2762,7 +2772,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this design, not the obvious alternative",
+    "title": "Why this design",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/09-nlp-evolution.html#why",
@@ -2772,7 +2782,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what actually breaks",
+    "title": "Complexity, failure modes, and what breaks",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/09-nlp-evolution.html#tradeoffs",
@@ -2802,20 +2812,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Intuition",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#timeline",
+    "url": "topics/10-llm-architecture-training.html#intuition",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
+    "title": "Where this sits in the timeline",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#intuition",
+    "url": "topics/10-llm-architecture-training.html#timeline",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"
@@ -2922,10 +2932,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Serving basics, briefly — the rest lives in 23",
+    "title": "Serving basics",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#serving-basics-briefly-the-rest-lives-in-23",
+    "url": "topics/10-llm-architecture-training.html#serving-basics",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"
@@ -2942,7 +2952,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/10-llm-architecture-training.html#math",
@@ -2972,7 +2982,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why these choices, not the obvious alternatives",
+    "title": "Why these choices",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/10-llm-architecture-training.html#why",
@@ -3002,10 +3012,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what actually breaks",
+    "title": "Complexity, failure modes, and what breaks",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/10-llm-architecture-training.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-llm)"
+  },
+  {
+    "kind": "section",
+    "title": "What shows up in production",
+    "parentTitle": "10 · LLM Architecture & Training",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/10-llm-architecture-training.html#what-shows-up-in-production",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"
@@ -3032,6 +3052,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Intuition",
+    "parentTitle": "11 · RAG, Agents & Reasoning",
+    "section": "Generative & Multimodal",
+    "url": "topics/11-rag-agents-reasoning.html#intuition",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rag)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
@@ -3042,17 +3072,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
-    "parentTitle": "11 · RAG, Agents & Reasoning",
-    "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#intuition",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-rag)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how the data actually flows",
+    "title": "Architecture: how the data flows",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
     "url": "topics/11-rag-agents-reasoning.html#architecture",
@@ -3152,10 +3172,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where the vectors actually live",
+    "title": "Where the vectors live",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#where-the-vectors-actually-live",
+    "url": "topics/11-rag-agents-reasoning.html#where-the-vectors-live",
     "tags": [],
     "summary": "",
     "color": "var(--c-rag)"
@@ -3172,7 +3192,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The one equation worth knowing here",
+    "title": "The one equation",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
     "url": "topics/11-rag-agents-reasoning.html#math",
@@ -3182,7 +3202,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this approach, not the obvious alternatives",
+    "title": "Why this approach",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
     "url": "topics/11-rag-agents-reasoning.html#why",
@@ -3192,7 +3212,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs, evaluation, and what actually breaks",
+    "title": "Tradeoffs, evaluation, and what breaks",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
     "url": "topics/11-rag-agents-reasoning.html#tradeoffs",
@@ -3242,17 +3262,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
-    "parentTitle": "12 · Generative Models",
-    "section": "Generative & Multimodal",
-    "url": "topics/12-generative-models.html#timeline",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-genai)"
-  },
-  {
-    "kind": "section",
-    "title": "The intuition, before any math",
+    "title": "Intuition",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
     "url": "topics/12-generative-models.html#intuition",
@@ -3312,7 +3322,17 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Architecture: how the data actually flows",
+    "title": "Where this sits in the timeline",
+    "parentTitle": "12 · Generative Models",
+    "section": "Generative & Multimodal",
+    "url": "topics/12-generative-models.html#timeline",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Architecture: how the data flows",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
     "url": "topics/12-generative-models.html#architecture",
@@ -3322,7 +3342,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
     "url": "topics/12-generative-models.html#math",
@@ -3332,7 +3352,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this architecture, not the obvious alternatives",
+    "title": "Why this architecture",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
     "url": "topics/12-generative-models.html#why",
@@ -3342,7 +3362,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what actually breaks",
+    "title": "Complexity, failure modes, and what breaks",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
     "url": "topics/12-generative-models.html#tradeoffs",
@@ -3352,10 +3372,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
-    "url": "topics/12-generative-models.html#what-actually-breaks",
+    "url": "topics/12-generative-models.html#what-breaks",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
@@ -3442,10 +3462,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where GANs still genuinely win",
+    "title": "Where GANs still win",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
-    "url": "topics/12-generative-models.html#where-gans-still-genuinely-win",
+    "url": "topics/12-generative-models.html#where-gans-still-win",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
@@ -3462,10 +3482,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Evaluation is the real bottleneck",
+    "title": "Evaluation is the bottleneck",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
-    "url": "topics/12-generative-models.html#evaluation-is-the-real-bottleneck",
+    "url": "topics/12-generative-models.html#evaluation-is-the-bottleneck",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
@@ -3482,6 +3502,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Intuition",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#intuition",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
@@ -3492,17 +3522,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
-    "parentTitle": "13 · Speech & Audio",
-    "section": "Generative & Multimodal",
-    "url": "topics/13-speech-audio.html#intuition",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-speech)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how the pipeline actually evolved",
+    "title": "Architecture: how the pipeline evolved",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
     "url": "topics/13-speech-audio.html#architecture",
@@ -3582,7 +3602,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs and what actually breaks",
+    "title": "Tradeoffs and what breaks",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
     "url": "topics/13-speech-audio.html#tradeoffs",
@@ -3662,6 +3682,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Intuition",
+    "parentTitle": "14 · Multimodal AI",
+    "section": "Generative & Multimodal",
+    "url": "topics/14-multimodal-ai.html#intuition",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-multimodal)"
+  },
+  {
+    "kind": "section",
     "title": "Where this sits in the timeline",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
@@ -3672,17 +3702,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
-    "parentTitle": "14 · Multimodal AI",
-    "section": "Generative & Multimodal",
-    "url": "topics/14-multimodal-ai.html#intuition",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-multimodal)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: where modalities actually meet",
+    "title": "Architecture: where modalities meet",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
     "url": "topics/14-multimodal-ai.html#architecture",
@@ -3722,7 +3742,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations, term by term",
+    "title": "The equations",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
     "url": "topics/14-multimodal-ai.html#math",
@@ -3732,7 +3752,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this architecture, not the obvious alternatives",
+    "title": "Why this architecture",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
     "url": "topics/14-multimodal-ai.html#why",
@@ -3742,7 +3762,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs, and what actually breaks",
+    "title": "Tradeoffs, and what breaks",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
     "url": "topics/14-multimodal-ai.html#tradeoffs",
@@ -3782,20 +3802,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Intuition",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
-    "url": "topics/15-reinforcement-learning.html#timeline",
+    "url": "topics/15-reinforcement-learning.html#intuition",
     "tags": [],
     "summary": "",
     "color": "var(--c-rl)"
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
+    "title": "Where this sits in the timeline",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
-    "url": "topics/15-reinforcement-learning.html#intuition",
+    "url": "topics/15-reinforcement-learning.html#timeline",
     "tags": [],
     "summary": "",
     "color": "var(--c-rl)"
@@ -3872,10 +3892,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where training actually breaks",
+    "title": "Where training breaks",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
-    "url": "topics/15-reinforcement-learning.html#where-training-actually-breaks",
+    "url": "topics/15-reinforcement-learning.html#where-training-breaks",
     "tags": [],
     "summary": "",
     "color": "var(--c-rl)"
@@ -3912,7 +3932,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The funnel, before anything else",
+    "title": "The funnel",
     "parentTitle": "16 · Recommenders, Ranking & Search",
     "section": "Decision & Retrieval Systems",
     "url": "topics/16-recommenders-ranking-search.html#funnel",
@@ -4002,7 +4022,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Making retrieval actually fast: ANN indexes",
+    "title": "Making retrieval fast: ANN indexes",
     "parentTitle": "16 · Recommenders, Ranking & Search",
     "section": "Decision & Retrieval Systems",
     "url": "topics/16-recommenders-ranking-search.html#ann",
@@ -4022,7 +4042,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "16 · Recommenders, Ranking & Search",
     "section": "Decision & Retrieval Systems",
     "url": "topics/16-recommenders-ranking-search.html#tradeoffs",
@@ -4112,7 +4132,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Deep forecasting: four architectures worth knowing",
+    "title": "Deep forecasting: four architectures",
     "parentTitle": "17 · Time Series & Forecasting",
     "section": "Decision & Retrieval Systems",
     "url": "topics/17-time-series-forecasting.html#deep",
@@ -4172,7 +4192,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "17 · Time Series & Forecasting",
     "section": "Decision & Retrieval Systems",
     "url": "topics/17-time-series-forecasting.html#tradeoffs",
@@ -4202,7 +4222,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Message passing is the whole field",
+    "title": "Message passing",
     "parentTitle": "18 · Graph ML",
     "section": "Decision & Retrieval Systems",
     "url": "topics/18-graph-ml.html#message-passing",
@@ -4322,7 +4342,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "18 · Graph ML",
     "section": "Decision & Retrieval Systems",
     "url": "topics/18-graph-ml.html#tradeoffs",
@@ -4472,7 +4492,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "19 · Scientific & Structured AI",
     "section": "Embodied & Frontier",
     "url": "topics/19-scientific-structured-ai.html#tradeoffs",
@@ -4492,20 +4512,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Intuition",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#timeline",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#intuition",
     "tags": [],
     "summary": "",
     "color": "var(--c-3d)"
   },
   {
     "kind": "section",
-    "title": "The intuition, before any equation",
+    "title": "Where this sits in the timeline",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#intuition",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#timeline",
     "tags": [],
     "summary": "",
     "color": "var(--c-3d)"
@@ -4642,7 +4662,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The math, term by term",
+    "title": "The math",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
     "url": "topics/20-3d-spatial-autonomous-driving.html#math",
@@ -4662,10 +4682,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what actually breaks",
+    "title": "Complexity, failure modes, and what breaks",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
     "url": "topics/20-3d-spatial-autonomous-driving.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-3d)"
+  },
+  {
+    "kind": "section",
+    "title": "What shows up in production",
+    "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
+    "section": "Embodied & Frontier",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#what-shows-up-in-production",
     "tags": [],
     "summary": "",
     "color": "var(--c-3d)"
@@ -4692,20 +4722,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Intuition",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#timeline",
+    "url": "topics/21-robotics-embodied-ai.html#intuition",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "The intuition, before any acronym",
+    "title": "Where this sits in the timeline",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#intuition",
+    "url": "topics/21-robotics-embodied-ai.html#timeline",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
@@ -4842,7 +4872,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The core objective — light, and mostly a cross-reference to 12",
+    "title": "The core objective",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
     "url": "topics/21-robotics-embodied-ai.html#math",
@@ -4862,10 +4892,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what actually breaks",
+    "title": "Complexity, failure modes, and what breaks",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
     "url": "topics/21-robotics-embodied-ai.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "What shows up in production",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#what-shows-up-in-production",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
@@ -4902,7 +4942,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What a world model actually is",
+    "title": "What a world model is",
     "parentTitle": "22 · World Models",
     "section": "Embodied & Frontier",
     "url": "topics/22-world-models.html#what",
@@ -4992,7 +5032,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "22 · World Models",
     "section": "Embodied & Frontier",
     "url": "topics/22-world-models.html#tradeoffs",
@@ -5022,20 +5062,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Intuition",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#timeline",
+    "url": "topics/23-efficient-ai-systems.html#intuition",
     "tags": [],
     "summary": "",
     "color": "var(--c-efficient)"
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
+    "title": "Where this sits in the timeline",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#intuition",
+    "url": "topics/23-efficient-ai-systems.html#timeline",
     "tags": [],
     "summary": "",
     "color": "var(--c-efficient)"
@@ -5082,7 +5122,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Inference-time efficiency: where most interview questions actually land",
+    "title": "Inference-time efficiency: where most interview questions land",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
     "url": "topics/23-efficient-ai-systems.html#inference-stack",
@@ -5162,7 +5202,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs, and what actually breaks",
+    "title": "Tradeoffs, and what breaks",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
     "url": "topics/23-efficient-ai-systems.html#tradeoffs",
@@ -5222,20 +5262,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Intuition",
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
-    "url": "topics/24-mlops.html#timeline",
+    "url": "topics/24-mlops.html#intuition",
     "tags": [],
     "summary": "",
     "color": "var(--c-mlops)"
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
+    "title": "Where this sits in the timeline",
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
-    "url": "topics/24-mlops.html#intuition",
+    "url": "topics/24-mlops.html#timeline",
     "tags": [],
     "summary": "",
     "color": "var(--c-mlops)"
@@ -5282,7 +5322,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this design, not the obvious alternative",
+    "title": "Why this design",
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
     "url": "topics/24-mlops.html#why",
@@ -5292,7 +5332,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what actually breaks",
+    "title": "Complexity, failure modes, and what breaks",
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
     "url": "topics/24-mlops.html#failure-modes",
@@ -5322,20 +5362,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Intuition",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
-    "url": "topics/25-evaluation-reliability-safety.html#timeline",
+    "url": "topics/25-evaluation-reliability-safety.html#intuition",
     "tags": [],
     "summary": "",
     "color": "var(--c-eval)"
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
+    "title": "Where this sits in the timeline",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
-    "url": "topics/25-evaluation-reliability-safety.html#intuition",
+    "url": "topics/25-evaluation-reliability-safety.html#timeline",
     "tags": [],
     "summary": "",
     "color": "var(--c-eval)"
@@ -5392,10 +5432,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "5. What is it actually computing, and can you steer it?",
+    "title": "5. What is it computing, and can you steer it?",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
-    "url": "topics/25-evaluation-reliability-safety.html#5-what-is-it-actually-computing-and-can-you-steer-it",
+    "url": "topics/25-evaluation-reliability-safety.html#5-what-is-it-computing-and-can-you-steer-it",
     "tags": [],
     "summary": "",
     "color": "var(--c-eval)"
@@ -5412,7 +5452,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The math that's actually load-bearing here",
+    "title": "The math that's load-bearing here",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
     "url": "topics/25-evaluation-reliability-safety.html#math",
@@ -5422,7 +5462,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this design, not the obvious alternative",
+    "title": "Why this design",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
     "url": "topics/25-evaluation-reliability-safety.html#why",
@@ -5432,7 +5472,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what actually breaks",
+    "title": "Complexity, failure modes, and what breaks",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
     "url": "topics/25-evaluation-reliability-safety.html#failure-modes",
@@ -5462,20 +5502,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Intuition",
     "parentTitle": "26 · 2026 Frontier Map",
     "section": "Systems, Safety & Interview",
-    "url": "topics/26-frontier-2026.html#timeline",
+    "url": "topics/26-frontier-2026.html#intuition",
     "tags": [],
     "summary": "",
     "color": "var(--c-frontier)"
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
+    "title": "Where this sits in the timeline",
     "parentTitle": "26 · 2026 Frontier Map",
     "section": "Systems, Safety & Interview",
-    "url": "topics/26-frontier-2026.html#intuition",
+    "url": "topics/26-frontier-2026.html#timeline",
     "tags": [],
     "summary": "",
     "color": "var(--c-frontier)"
@@ -5552,7 +5592,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this direction, not the obvious alternative",
+    "title": "Why this direction",
     "parentTitle": "26 · 2026 Frontier Map",
     "section": "Systems, Safety & Interview",
     "url": "topics/26-frontier-2026.html#why-this",
@@ -5702,20 +5742,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where this sits in the timeline",
+    "title": "Intuition",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
-    "url": "topics/28-gpu-architecture-cuda-distributed.html#timeline",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#intuition",
     "tags": [],
     "summary": "",
     "color": "var(--c-gpu)"
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
+    "title": "Where this sits in the timeline",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
-    "url": "topics/28-gpu-architecture-cuda-distributed.html#intuition",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#timeline",
     "tags": [],
     "summary": "",
     "color": "var(--c-gpu)"
@@ -5852,10 +5892,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "FSDP versus DeepSpeed ZeRO: what is actually different",
+    "title": "FSDP versus DeepSpeed ZeRO: what is different",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
-    "url": "topics/28-gpu-architecture-cuda-distributed.html#fsdp-versus-deepspeed-zero-what-is-actually-different",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#fsdp-versus-deepspeed-zero-what-is-different",
     "tags": [],
     "summary": "",
     "color": "var(--c-gpu)"
@@ -5912,7 +5952,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs, and what actually breaks",
+    "title": "Tradeoffs, and what breaks",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
     "url": "topics/28-gpu-architecture-cuda-distributed.html#tradeoffs",
@@ -6002,17 +6042,17 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Does it actually fit in 24 GB?",
+    "title": "Does it fit in 24 GB?",
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
-    "url": "topics/29-finetuning-llms.html#does-it-actually-fit-in-24-gb",
+    "url": "topics/29-finetuning-llms.html#does-it-fit-in-24-gb",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
   },
   {
     "kind": "section",
-    "title": "What LoRA is actually doing",
+    "title": "What LoRA is doing",
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
     "url": "topics/29-finetuning-llms.html#lora-math",
@@ -6052,7 +6092,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Data is the whole game",
+    "title": "Data",
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
     "url": "topics/29-finetuning-llms.html#data",
@@ -6132,7 +6172,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Catastrophic forgetting, and what actually helps",
+    "title": "Catastrophic forgetting, and what helps",
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
     "url": "topics/29-finetuning-llms.html#forgetting",
@@ -6182,7 +6222,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Formats you'll actually meet",
+    "title": "Formats you'll meet",
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
     "url": "topics/30-running-models-locally.html#formats",
@@ -6202,7 +6242,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Hardware tiers, honestly",
+    "title": "Hardware tiers",
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
     "url": "topics/30-running-models-locally.html#hardware",
@@ -6212,7 +6252,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually makes it slow",
+    "title": "What makes it slow",
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
     "url": "topics/30-running-models-locally.html#speed",
@@ -6342,7 +6382,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "31 · LLM Inference & Serving",
     "section": "Hands-on",
     "url": "topics/31-llm-inference-serving.html#tradeoffs",
@@ -6382,7 +6422,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The intuition, before any math",
+    "title": "Intuition",
     "parentTitle": "32 · Preference Optimization: RLHF, DPO & GRPO",
     "section": "Hands-on",
     "url": "topics/32-preference-optimization.html#intuition",
@@ -6462,7 +6502,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The variants, honestly",
+    "title": "The variants",
     "parentTitle": "32 · Preference Optimization: RLHF, DPO & GRPO",
     "section": "Hands-on",
     "url": "topics/32-preference-optimization.html#variants",
@@ -6472,7 +6512,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "32 · Preference Optimization: RLHF, DPO & GRPO",
     "section": "Hands-on",
     "url": "topics/32-preference-optimization.html#tradeoffs",
@@ -6522,10 +6562,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What each one actually tests",
+    "title": "What each one tests",
     "parentTitle": "33 · Model Atlas: Language Models",
     "section": "Model Atlas",
-    "url": "topics/33-model-atlas-language.html#what-each-one-actually-tests",
+    "url": "topics/33-model-atlas-language.html#what-each-one-tests",
     "tags": [],
     "summary": "",
     "color": "var(--c-atlas)"
@@ -6612,7 +6652,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "33 · Model Atlas: Language Models",
     "section": "Model Atlas",
     "url": "topics/33-model-atlas-language.html#tradeoffs",
@@ -6662,7 +6702,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Reading word error rate honestly",
+    "title": "Reading word error rate",
     "parentTitle": "34 · Model Atlas: Speech & Audio",
     "section": "Model Atlas",
     "url": "topics/34-model-atlas-speech-audio.html#reading-wer",
@@ -6742,7 +6782,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "34 · Model Atlas: Speech & Audio",
     "section": "Model Atlas",
     "url": "topics/34-model-atlas-speech-audio.html#tradeoffs",
@@ -6862,7 +6902,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "35 · Model Atlas: Vision & Generative Media",
     "section": "Model Atlas",
     "url": "topics/35-model-atlas-vision-generative.html#tradeoffs",
@@ -6942,10 +6982,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What the prize actually asks for",
+    "title": "What the prize asks for",
     "parentTitle": "36 · The Millennium Prize Problems",
     "section": "Grand Challenges",
-    "url": "topics/36-millennium-prize-problems.html#what-the-prize-actually-asks-for",
+    "url": "topics/36-millennium-prize-problems.html#what-the-prize-asks-for",
     "tags": [],
     "summary": "",
     "color": "var(--c-challenge)"
@@ -6982,7 +7022,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where AI actually touches this",
+    "title": "Where AI touches this",
     "parentTitle": "36 · The Millennium Prize Problems",
     "section": "Grand Challenges",
     "url": "topics/36-millennium-prize-problems.html#ai-and-math",
@@ -6992,7 +7032,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "36 · The Millennium Prize Problems",
     "section": "Grand Challenges",
     "url": "topics/36-millennium-prize-problems.html#tradeoffs",
@@ -7003,7 +7043,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "How to read a claim",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#filter",
     "tags": [],
@@ -7013,7 +7053,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "Structural biology: the strongest case there is",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#proteins",
     "tags": [],
@@ -7023,7 +7063,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "Weather: the strongest case for deployment",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#weather",
     "tags": [],
@@ -7033,7 +7073,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "Materials: where the headline outran the result",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#materials",
     "tags": [],
@@ -7043,7 +7083,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "Chip design: real deployment, contested benchmark",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#chips",
     "tags": [],
@@ -7053,7 +7093,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "Physical control: fusion plasma",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#control",
     "tags": [],
@@ -7063,7 +7103,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "Medicine: the one that reached patients properly",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#medicine",
     "tags": [],
@@ -7073,7 +7113,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "Algorithms: AI improving the tools it runs on",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#algorithms",
     "tags": [],
@@ -7083,7 +7123,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "The pattern worth taking away",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#pattern",
     "tags": [],
@@ -7092,8 +7132,8 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "title": "What breaks",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#tradeoffs",
     "tags": [],
@@ -7103,7 +7143,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "If one of these is what you want to work on",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#pick",
     "tags": [],
@@ -7113,7 +7153,7 @@ window.SEARCH_INDEX = [
   {
     "kind": "section",
     "title": "Now write it yourself",
-    "parentTitle": "37 · AI in Industry: What It Is Actually Solving",
+    "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#practice-problems",
     "tags": [],
@@ -7202,10 +7242,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually gets quantized",
+    "title": "What gets quantized",
     "parentTitle": "LLM Inference at Scale",
     "section": "Site",
-    "url": "topics/38-llm-inference-at-scale.html#what-actually-gets-quantized",
+    "url": "topics/38-llm-inference-at-scale.html#what-gets-quantized",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
@@ -7252,10 +7292,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Imbalance is the real cost",
+    "title": "Imbalance is the cost",
     "parentTitle": "LLM Inference at Scale",
     "section": "Site",
-    "url": "topics/38-llm-inference-at-scale.html#imbalance-is-the-real-cost",
+    "url": "topics/38-llm-inference-at-scale.html#imbalance-is-the-cost",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
@@ -7282,7 +7322,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "LLM Inference at Scale",
     "section": "Site",
     "url": "topics/38-llm-inference-at-scale.html#tradeoffs",
@@ -7502,10 +7542,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The jitter buffer is a latency knob, not a detail",
+    "title": "The jitter buffer is a latency knob",
     "parentTitle": "Real-Time Voice AI",
     "section": "Site",
-    "url": "topics/39-realtime-voice-ai.html#the-jitter-buffer-is-a-latency-knob-not-a-detail",
+    "url": "topics/39-realtime-voice-ai.html#the-jitter-buffer-is-a-latency-knob",
     "tags": [],
     "summary": "",
     "color": "var(--c-speech)"
@@ -7532,7 +7572,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "Real-Time Voice AI",
     "section": "Site",
     "url": "topics/39-realtime-voice-ai.html#breaks",
@@ -7572,7 +7612,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What one step actually buys",
+    "title": "What one step buys",
     "parentTitle": "Diffusion & Video Inference",
     "section": "Site",
     "url": "topics/40-diffusion-video-inference.html#steps",
@@ -7592,10 +7632,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Where quality actually falls off",
+    "title": "Where quality falls off",
     "parentTitle": "Diffusion & Video Inference",
     "section": "Site",
-    "url": "topics/40-diffusion-video-inference.html#where-quality-actually-falls-off",
+    "url": "topics/40-diffusion-video-inference.html#where-quality-falls-off",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
@@ -7742,7 +7782,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What actually breaks",
+    "title": "What breaks",
     "parentTitle": "Diffusion & Video Inference",
     "section": "Site",
     "url": "topics/40-diffusion-video-inference.html#tradeoffs",

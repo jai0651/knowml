@@ -202,7 +202,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <span class="th-pill">Assumes: dot products &amp; softmax (01), RNN/seq2seq bottleneck (07)</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#timeline"><span class="tn">01</span>Where this sits in the timeline</a></li><li><a href="#intuition"><span class="tn">02</span>The intuition, before any math</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: how the data actually flows</a></li><li><a href="#math"><span class="tn">04</span>The equations, term by term</a></li><li><a href="#why"><span class="tn">05</span>Why this architecture, not the obvious alternatives</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Complexity, failure modes, and what actually breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li><li><a href="#techmap-embed"><span class="tn">·</span>Other techniques for this problem</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Where this sits in the timeline</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: how the data flows</a></li><li><a href="#math"><span class="tn">04</span>The equations</a></li><li><a href="#why"><span class="tn">05</span>Why this architecture</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Complexity, failure modes, and what breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li><li><a href="#techmap-embed"><span class="tn">·</span>Other techniques for this problem</a></li></ol></nav>
   </div>
 
   <section id="tldr">
@@ -213,30 +213,8 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
-  <section id="timeline">
-    <h2><span class="num">01</span>Where this sits in the timeline</h2>
-    <p>Attention didn't appear out of nowhere in 2017. It was already patched onto RNNs three years earlier, to fix a specific and well-understood failure. The 2017 contribution was deleting the RNN and keeping only the patch.</p>
-    <div class="bia">
-      <div class="bia-box">
-        <div class="bia-label">Before</div>
-        <p>Seq2seq (2014) compressed an entire input sentence into one fixed-size vector: the encoder's last hidden state. A 50-word sentence and a 5-word sentence both had to fit through the same bottleneck. Long sequences degraded badly; the decoder was working from a blurry summary.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box innovation">
-        <div class="bia-label">Innovation</div>
-        <p>Bahdanau attention (2015) let the decoder look back at every encoder hidden state at each output step, weighted by relevance. It removed the bottleneck but was still bolted onto a sequential RNN.</p>
-    <p>Vaswani et al., <em>"Attention Is All You Need"</em> (2017), asked a sharper question. What if attention is not a patch, but the whole computation? Delete the recurrence, keep only attention + position information, and process the entire sequence in parallel.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box">
-        <div class="bia-label">After</div>
-        <p>BERT (2018) and GPT (2018) built on the encoder and decoder stacks respectively. By 2020, ViT proved the same block works on image patches. By 2023, the Transformer was the default computation graph for text, vision, audio, and increasingly robotics. One architecture, many modalities.</p>
-      </div>
-    </div>
-  </section>
-
   <section id="intuition">
-    <h2><span class="num">02</span>The intuition, before any math</h2>
+    <h2><span class="num">01</span>Intuition</h2>
     <p class="lede">Attention is a soft dictionary lookup.</p>
 
     <p>A Python dictionary matches one key exactly. <code>d["cat"]</code> hands back a single value and ignores everything else it holds.</p>
@@ -259,13 +237,61 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <p>The ambiguity is resolved <strong>inside the representation itself</strong>, before any downstream layer ever sees it.</p>
     </div>
 
+    <p>Here is the same idea in numbers. Three words each carry a two-number key that says how animal-like or object-like the word is. The word <strong>it</strong> sends out a query asking for something animal-like. The vectors are hand-picked to make the point; a trained model learns them.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Attention on three words, with numbers you can check by hand</span>
+      </summary>
+<pre><code>import numpy as np
+
+words = [&quot;cat&quot;, &quot;mat&quot;, &quot;it&quot;]
+K = np.array([[1.0, 0.0],        # &quot;cat&quot;: an animal
+              [0.0, 1.0],        # &quot;mat&quot;: an object
+              [0.5, 0.5]])       # &quot;it&quot;: not sure yet
+V = K.copy()                     # here each value is just its key
+q = np.array([2.0, 0.5])         # what &quot;it&quot; is looking for: animal-like
+
+scores = K @ q / np.sqrt(2)      # how well each word matches the query
+w = np.exp(scores) / np.exp(scores).sum()   # softmax: weights sum to 1
+out = w @ V                      # a weighted average of the values
+
+for word, s, weight in zip(words, scores, w):
+    print(f&quot;{word:&gt;4}: score {s:5.2f}  weight {weight:5.2f}&quot;)
+print(&quot;new vector for &#x27;it&#x27;:&quot;, np.round(out, 2))</code></pre>
+      <div class="tryit-out"><strong>The query for <code>it</code> scores <code>1.41</code> against <code>cat</code>, <code>0.35</code> against <code>mat</code> and <code>0.88</code> against itself.</strong> The softmax turns those into weights of <code>0.52</code>, <code>0.18</code> and <code>0.30</code>, which sum to <code>1</code>. The new vector for <code>it</code> is <code>[0.67 0.33]</code>: a weighted average of the three values, tilted toward the animal direction because <code>cat</code> got the biggest weight. Every word contributed, just by different amounts.</div>
+    </details>
+
     <p>That example is Jay Alammar's, from <a href="https://jalammar.github.io/illustrated-transformer/">The Illustrated Transformer</a>. Worth twenty minutes if diagrams land faster for you than equations.</p>
 
     <p>Every self-attention layer does this for every token against every other token, all at once. <strong>That is the whole idea.</strong> Queries, keys, values, multiple heads, the <span>$\sqrt{d_k}$</span> scaling: all of it is machinery to make that one idea learnable and numerically well-behaved.</p>
   </section>
 
+  <section id="timeline">
+    <h2><span class="num">02</span>Where this sits in the timeline</h2>
+    <p>Attention didn't appear out of nowhere in 2017. It was already patched onto RNNs three years earlier, to fix a specific and well-understood failure. The 2017 contribution was deleting the RNN and keeping only the patch.</p>
+    <div class="bia">
+      <div class="bia-box">
+        <div class="bia-label">Before</div>
+        <p>Seq2seq (2014) compressed an entire input sentence into one fixed-size vector: the encoder's last hidden state. A 50-word sentence and a 5-word sentence both had to fit through the same bottleneck. Long sequences degraded badly; the decoder was working from a blurry summary.</p>
+      </div>
+      <div class="bia-arrow">→</div>
+      <div class="bia-box innovation">
+        <div class="bia-label">Innovation</div>
+        <p>Bahdanau attention (2015) let the decoder look back at every encoder hidden state at each output step, weighted by relevance. It removed the bottleneck but was still bolted onto a sequential RNN.</p>
+    <p>Vaswani et al., <em>"Attention Is All You Need"</em> (2017), asked a sharper question. What if attention is not a patch, but the whole computation? Delete the recurrence, keep only attention + position information, and process the entire sequence in parallel.</p>
+      </div>
+      <div class="bia-arrow">→</div>
+      <div class="bia-box">
+        <div class="bia-label">After</div>
+        <p>BERT (2018) and GPT (2018) built on the encoder and decoder stacks respectively. By 2020, ViT proved the same block works on image patches. By 2023, the Transformer was the default computation graph for text, vision, audio, and increasingly robotics. One architecture, many modalities.</p>
+      </div>
+    </div>
+  </section>
+
   <section id="architecture">
-    <h2><span class="num">03</span>Architecture: how the data actually flows</h2>
+    <h2><span class="num">03</span>Architecture: how the data flows</h2>
     <p>Every token's embedding is linearly projected three different ways: into a Query, a Key, and a Value vector. Three learned lenses on the same token.</p>
 
     <ul>
@@ -426,7 +452,7 @@ print(&quot;Z[0] is exactly V[0]:&quot;, np.allclose(Z[0], V[0]))</code></pre>
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The equations, term by term</h2>
+    <h2><span class="num">04</span>The equations</h2>
     <div class="eq-block">
       <span>$$\text{Attention}(Q,K,V) = \text{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right)V$$</span>
     </div>
@@ -501,7 +527,7 @@ print(&quot;unscaled softmax:&quot;, np.round(p_raw, 4))
 print(&quot;scaled softmax:  &quot;, np.round(p_sc, 4))
 print(f&quot;smallest weight: {p_raw.min():.1e} unscaled,&quot;
       f&quot; {p_sc.min():.1e} scaled&quot;)</code></pre>
-      <div class="tryit-out"><strong><code>var(q.k)</code> comes out <code>8.0</code>, <code>63.8</code>, <code>510.9</code> — it simply <em>is</em> <span>$d_k$</span>.</strong> Dividing by <span>$\sqrt{d_k}$</span> pins it at <code>1.00</code> in all three cases, which is the derivation above in one line of output. The second half shows why anyone should care. At <span>$d_k=512$</span> the raw scores span <code>-70.6</code> to <code>25.6</code>, and softmax turns that into a weight of <code>1.6e-42</code> on the weakest key. The gradient flowing back through that entry is not small, it is gone. Scaled, the same six scores give <code>0.0056</code> through <code>0.3959</code>: still a clear preference, still differentiable everywhere.</div>
+      <div class="tryit-out"><strong><code>var(q.k)</code> comes out <code>8.0</code>, <code>63.8</code>, <code>510.9</code> — it <em>is</em> <span>$d_k$</span>.</strong> Dividing by <span>$\sqrt{d_k}$</span> pins it at <code>1.00</code> in all three cases, which is the derivation above in one line of output. The second half shows why anyone should care. At <span>$d_k=512$</span> the raw scores span <code>-70.6</code> to <code>25.6</code>, and softmax turns that into a weight of <code>1.6e-42</code> on the weakest key. The gradient flowing back through that entry is not small, it is gone. Scaled, the same six scores give <code>0.0056</code> through <code>0.3959</code>: still a clear preference, still differentiable everywhere.</div>
     </details>
 
     <h3>Multi-head attention</h3>
@@ -558,7 +584,7 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
   </section>
 
   <section id="why">
-    <h2><span class="num">05</span>Why this architecture, not the obvious alternatives</h2>
+    <h2><span class="num">05</span>Why this architecture</h2>
     <p>The obvious alternatives were "keep the RNN" and "use a CNN." Attention wins on the two axes that matter most for training at scale:</p>
 
     <ul>
@@ -579,17 +605,17 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
     <p>The <span>$O(1)$</span> path length is the real prize. In an RNN, information from token 1 has to survive <span>$n{-}1$</span> sequential updates before it can influence token <span>$n$</span>. That is exactly where vanishing gradients bite (see 07). In self-attention, token 1 and token <span>$n$</span> are one dot product apart. Always, regardless of distance.</p>
 
     <div class="callout callout-teach">
-      <span class="callout-label">The trade the Transformer actually makes</span>
+      <span class="callout-label">The trade the Transformer makes</span>
       <p>Per-layer compute goes from linear in sequence length to <strong>quadratic</strong>. On its face, that is a step backwards.</p>
       <p>But look at what is being swapped. You take on an <em>engineering problem</em> (quadratic cost) in order to eliminate a <em>hard optimization problem</em> (long-range gradients). Engineering problems are usually easier to throw hardware at. That is why the trade was worth making.</p>
     </div>
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">06</span>Complexity, failure modes, and what actually breaks</h2>
+    <h2><span class="num">06</span>Complexity, failure modes, and what breaks</h2>
     <p>Self-attention costs <span>$O(n^2 \cdot d)$</span> time and, naively, <span>$O(n^2)$</span> memory to materialize the full attention matrix, where <span>$n$</span> is sequence length. <strong>Double the context window and compute roughly quadruples.</strong> That single fact drives a huge amount of LLM systems engineering. It is why 23 (Efficient AI &amp; Systems) exists as its own section.</p>
 
-    <h3>What actually shows up in production</h3>
+    <h3>What shows up in production</h3>
 
     <div class="diagram">
       <div class="diagram-title">KV cache growth — linear in tokens, and that is quite bad enough
@@ -636,7 +662,7 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
     <ul>
       <li><strong>KV cache growth.</strong> During autoregressive generation you don't recompute attention from scratch each step. You cache every past token's K and V vectors. Cache size grows linearly with tokens generated × layers × heads × head_dim. For long conversations this becomes the dominant memory cost on the serving GPU, often larger than the model weights themselves.</li>
       <li><strong>FlashAttention</strong> doesn't reduce the <span>$O(n^2)$</span> FLOPs. It restructures the computation to avoid ever writing the full <span>$n \times n$</span> attention matrix to slow GPU memory, computing softmax in fused tiles instead. Same math, dramatically less memory traffic. Memory traffic is usually the real bottleneck on modern GPUs.</li>
-      <li><strong>Grouped-query / multi-query attention</strong> shrinks the KV cache by having multiple query heads share one set of K/V heads. A deliberate quality-for-memory tradeoff, used in essentially every modern serving-optimized LLM.</li>
+      <li><strong>Grouped-query / multi-query attention</strong> shrinks the KV cache by having multiple query heads share one set of K/V heads. A deliberate quality-for-memory tradeoff, used in almost every modern serving-optimized LLM.</li>
       <li><strong>Attention sinks and long-context dilution.</strong> Models reliably show a strong bias toward attending heavily to the first few tokens, regardless of relevance. Needle-in-a-haystack evaluations show retrieval accuracy dropping for facts placed in the middle of very long contexts. A model that technically <em>can</em> attend anywhere does not mean it attends <em>usefully</em> everywhere.</li>
     </ul>
 
@@ -823,7 +849,7 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=8a7b7a3b"></script>
+<script defer src="../assets/js/search-data.js?v=1c94190d"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>
@@ -832,7 +858,7 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
 <script defer src="../assets/js/find-in-page.js?v=f0e43675"></script>
 <script defer src="../assets/js/kml-modal.js?v=6a0f6bea"></script>
 <script defer src="../assets/js/review.js?v=11ed4252"></script>
-<script defer src="../assets/js/question-index.js?v=321c545a"></script>
+<script defer src="../assets/js/question-index.js?v=4f49e5cd"></script>
 <script defer src="../assets/js/review-widget.js?v=577f11ae"></script>
 <script defer src="../assets/js/anchor.js?v=257d98c1"></script>
 <script defer src="../assets/js/notes.js?v=e8ec89d2"></script>

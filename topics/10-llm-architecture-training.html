@@ -202,7 +202,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <span class="th-pill">Assumes: attention &amp; transformer blocks (08), NLP pretraining history (09)</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#timeline"><span class="tn">01</span>Where this sits in the timeline</a></li><li><a href="#intuition"><span class="tn">02</span>The intuition, before any math</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: from decoder-only block to training pipeline</a></li><li><a href="#math"><span class="tn">04</span>The equations, term by term</a></li><li><a href="#why"><span class="tn">05</span>Why these choices, not the obvious alternatives</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Complexity, failure modes, and what actually breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Where this sits in the timeline</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: from decoder-only block to training pipeline</a></li><li><a href="#math"><span class="tn">04</span>The equations</a></li><li><a href="#why"><span class="tn">05</span>Why these choices</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Complexity, failure modes, and what breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
   </div>
 
   <section id="tldr">
@@ -213,30 +213,8 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
   </section>
 
-  <section id="timeline">
-    <h2><span class="num">01</span>Where this sits in the timeline</h2>
-    <p>Page 09 covers the slow build-up: word embeddings, ELMo, BERT. Through all of it, NLP still meant picking or designing an architecture per task. This page is about the moment that stopped being necessary.</p>
-    <div class="bia">
-      <div class="bia-box">
-        <div class="bia-label">Before</div>
-        <p>Task-specific models. Translation had its own seq2seq-plus-attention architecture. Sentiment analysis had its own classifier. Named-entity recognition had its own tagger. Even after pretrained embeddings and BERT-style fine-tuning existed, you were still building a separate architecture per task, or at least a separate model copy with its own head.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box innovation">
-        <div class="bia-label">Innovation</div>
-        <p>GPT (2018) showed a single decoder-only transformer could beat task-specific architectures across the board. Pretrain with next-token prediction over huge unlabeled text, then fine-tune lightly. <strong>One architecture, one objective, many tasks.</strong> GPT-3 (2020), 175B parameters, went further: at sufficient scale the model didn't need fine-tuning at all for many tasks. A handful of examples placed directly in the prompt (in-context, "few-shot" learning) was enough.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box">
-        <div class="bia-label">After</div>
-        <p>Two 2022 papers reset how the field builds and trains these models. <strong>InstructGPT</strong> showed that SFT followed by RLHF turns a raw pretrained completer into a model that follows instructions. That was the recipe behind the first wave of usable chat assistants.</p>
-    <p><strong>Chinchilla</strong> showed that most large models were trained wrong in a specific, measurable way: undertrained relative to their size. It corrected how labs allocate a fixed compute budget between model size and data.</p>
-      </div>
-    </div>
-  </section>
-
   <section id="intuition">
-    <h2><span class="num">02</span>The intuition, before any math</h2>
+    <h2><span class="num">01</span>Intuition</h2>
     <p class="lede">An LLM is not a new architecture. It's the decoder half of the transformer you already know, with nothing else attached.</p>
     <p>In 08 you met two flavors of transformer block:</p>
 
@@ -271,6 +249,50 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <p>What next-token prediction alone does <em>not</em> give you is a model that behaves like an assistant. Left alone, a pretrained model just continues text plausibly. Asked a question, it might answer. It might restate the question. It might trail off into a list of similar questions. All of those follow a question somewhere on the internet.</p>
 
     <p>Getting from "plausible continuation of internet text" to "helpful, on-format answer that stops in the right place" is the job of everything after pretraining: SFT, then RLHF or DPO. That is most of the rest of this page.</p>
+  
+
+    <p>A language model predicts the next word. The simplest possible one just counts what followed each word in its training text.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Learn which word follows which from ten words of text</span>
+      </summary>
+<pre><code>from collections import Counter, defaultdict
+
+text = &quot;the cat sat on the mat and the cat ran&quot;.split()
+nxt = defaultdict(Counter)
+for a, b in zip(text, text[1:]):
+    nxt[a][b] += 1                      # count what follows each word
+
+for word in (&quot;the&quot;, &quot;cat&quot;):
+    total = sum(nxt[word].values())
+    probs = {w: round(c / total, 2) for w, c in nxt[word].items()}
+    print(f&quot;after &#x27;{word}&#x27;:&quot;, probs)</code></pre>
+      <div class="tryit-out"><strong>After <code>the</code>, this model gives <code>cat</code> two chances in three and <code>mat</code> one in three.</strong> In the text, <code>the</code> was followed by <code>cat</code> twice and <code>mat</code> once. After <code>cat</code> it splits evenly between <code>sat</code> and <code>ran</code>. A large language model does the same job, giving a probability to every possible next token, with far more context and a learned function in place of a lookup table.</div>
+    </details>
+  </section>
+
+  <section id="timeline">
+    <h2><span class="num">02</span>Where this sits in the timeline</h2>
+    <p>Page 09 covers the slow build-up: word embeddings, ELMo, BERT. Through all of it, NLP still meant picking or designing an architecture per task. This page is about the moment that stopped being necessary.</p>
+    <div class="bia">
+      <div class="bia-box">
+        <div class="bia-label">Before</div>
+        <p>Task-specific models. Translation had its own seq2seq-plus-attention architecture. Sentiment analysis had its own classifier. Named-entity recognition had its own tagger. Even after pretrained embeddings and BERT-style fine-tuning existed, you were still building a separate architecture per task, or at least a separate model copy with its own head.</p>
+      </div>
+      <div class="bia-arrow">→</div>
+      <div class="bia-box innovation">
+        <div class="bia-label">Innovation</div>
+        <p>GPT (2018) showed a single decoder-only transformer could beat task-specific architectures across the board. Pretrain with next-token prediction over huge unlabeled text, then fine-tune lightly. <strong>One architecture, one objective, many tasks.</strong> GPT-3 (2020), 175B parameters, went further: at sufficient scale the model didn't need fine-tuning at all for many tasks. A handful of examples placed directly in the prompt (in-context, "few-shot" learning) was enough.</p>
+      </div>
+      <div class="bia-arrow">→</div>
+      <div class="bia-box">
+        <div class="bia-label">After</div>
+        <p>Two 2022 papers reset how the field builds and trains these models. <strong>InstructGPT</strong> showed that SFT followed by RLHF turns a raw pretrained completer into a model that follows instructions. That was the recipe behind the first wave of usable chat assistants.</p>
+    <p><strong>Chinchilla</strong> showed that most large models were trained wrong in a specific, measurable way: undertrained relative to their size. It corrected how labs allocate a fixed compute budget between model size and data.</p>
+      </div>
+    </div>
   </section>
 
   <section id="architecture">
@@ -477,9 +499,9 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     </div>
     <p>Here <span>$g_i(x)$</span> is the router's weight for expert <span>$i$</span> on input <span>$x$</span>. Only the selected experts do any compute; the rest cost nothing for that token. The result: a model can have an enormous total parameter count spread across all its experts, while compute per forward pass reflects only the handful activated. More total capacity, without paying its full compute cost on every token.</p>
 
-    <p>The real cost shows up in training. Without an auxiliary load-balancing loss encouraging the router to spread tokens evenly, it collapses onto a favorite few experts, and you lose the benefit you paid to build.</p>
+    <p>The cost shows up in training. Without an auxiliary load-balancing loss encouraging the router to spread tokens evenly, it collapses onto a favorite few experts, and you lose the benefit you paid to build.</p>
 
-    <h3>Serving basics, briefly — the rest lives in 23</h3>
+    <h3>Serving basics</h3>
     <p>Two things matter at a conceptual level, because they shape how you reason about training and architecture choices:</p>
 
     <ul>
@@ -492,7 +514,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <h3>The long tail, briefly</h3>
     <ul>
       <li>Data quality, dedup, and mixture design. A pretraining corpus isn't just "all the text you can find." Near-duplicate documents inflate a dataset without adding signal and push the model toward memorizing repeated substrings — deduplication is a standard pipeline step because it measurably improves quality per token spent. Mixture design — what fraction of tokens come from web text vs. books vs. code vs. curated sources — meaningfully shapes what the model is good at; a heavier code mixture improves structured reasoning, not by accident but because code text rewards tracking state precisely.</li>
-      <li>Long-context training. A model pretrained mostly on short documents doesn't automatically use a 128k-token window well just because attention can mathematically handle it (see 08 on attention sinks and mid-context dilution) — labs run dedicated long-context stages, often extending position embeddings and training on genuinely long documents, specifically to make the model exploit long context rather than merely tolerate it.</li>
+      <li>Long-context training. A model pretrained mostly on short documents doesn't automatically use a 128k-token window well just because attention can mathematically handle it (see 08 on attention sinks and mid-context dilution) — labs run dedicated long-context stages, often extending position embeddings and training on long documents, specifically to make the model exploit long context rather than merely tolerate it.</li>
       <li>Function/tool calling. A trained (or prompted) behavior where the model emits a structured request — "call this API with these arguments" — instead of answering purely from its own weights, then consumes the tool's result before producing a final answer. This is what turns a text predictor into something that can look things up, run code, or take actions, and it's the entire foundation of 11 (RAG &amp; agents).</li>
       <li>Structured/constrained decoding. An inference-time technique, not a training change: instead of hoping free-form output happens to be valid JSON, constrain token-by-token sampling itself so only tokens consistent with a target grammar are ever eligible — a decoding-time guarantee that output can't be unparseable, no retraining required.</li>
       <li>Code, multilingual, and domain models. Code models are typically the same decoder-only architecture, pretrained or fine-tuned with a much heavier proportion of source code, often trained to fill in the middle of a file rather than only continue it left-to-right. Multilingual and domain models face the tokenization tradeoff most acutely — a tokenizer trained mostly on English badly over-fragments other languages or specialized vocabularies (legal text, chemistry), quietly costing context budget and quality unless the tokenizer and pretraining mixture are built for that domain from the start.</li>
@@ -501,7 +523,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The equations, term by term</h2>
+    <h2><span class="num">04</span>The equations</h2>
     <h3>Next-token prediction loss</h3>
     <div class="eq-block">
       <span>$$\mathcal{L}_{\text{LM}}(\theta) = -\sum_{t=1}^{T} \log P_\theta(x_t \mid x_1, \dots, x_{t-1})$$</span>
@@ -528,7 +550,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="why">
-    <h2><span class="num">05</span>Why these choices, not the obvious alternatives</h2>
+    <h2><span class="num">05</span>Why these choices</h2>
     <h3>Why decoder-only won over encoder-decoder for general-purpose LLMs</h3>
     <p>Encoder-decoder makes sense when input and output are structurally different sequences with a clean split: a source sentence and a target sentence in translation, a document and its summary.</p>
 
@@ -550,7 +572,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">06</span>Complexity, failure modes, and what actually breaks</h2>
+    <h2><span class="num">06</span>Complexity, failure modes, and what breaks</h2>
     <div class="tbl-wrap">
       <table class="cmp">
         <thead><tr><th></th><th>RLHF (PPO)</th><th>DPO</th></tr></thead>
@@ -563,9 +585,9 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       </table>
     </div>
 
-    <h3>What actually shows up in production</h3>
+    <h3>What shows up in production</h3>
     <ul>
-      <li>Reward hacking. The policy finds outputs that score well on an imperfect reward model or preference signal without actually being better — longer answers, hedging language, sycophantic agreement — because those correlate with human preference ratings, not because they're more correct.</li>
+      <li>Reward hacking. The policy finds outputs that score well on an imperfect reward model or preference signal without being better — longer answers, hedging language, sycophantic agreement — because those correlate with human preference ratings, not because they're more correct.</li>
       <li>Overfitting to a narrow preference-annotator population. Preference data reflects the taste, culture, and instructions given to whichever annotator pool labeled it. The aligned model inherits those biases as if they were universal — "helpfulness" quietly comes to mean "what this specific annotator pool liked."</li>
       <li>Quantization accuracy loss. Lower precision trades a usually small, but non-uniform, amount of task accuracy for large memory and compute savings — arithmetic and low-frequency facts tend to degrade before fluent generation does.</li>
       <li>MoE load-balancing issues. An unregularized router collapses onto a favorite handful of experts, wasting the extra capacity and effectively shrinking the model back toward its active-parameter count — the reason MoE training adds an auxiliary load-balancing loss term.</li>
@@ -574,7 +596,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
     <div class="callout callout-status">
       <span class="callout-label">2026 status</span>
       <p>Reasoning-focused post-training is an active, fast-moving research area: extra RL or search-based training aimed specifically at multi-step problem solving, layered on top of the SFT/RLHF/DPO recipe described here. So are preference-optimization variants that go beyond vanilla DPO.</p>
-      <p>Treat the exact recipe used by any specific current model as a moving target. The underlying building blocks (pretraining, SFT, preference optimization, quantized deployment) are stable enough to be worth knowing cold, whichever variant is fashionable this quarter.</p>
+      <p>Treat the exact recipe used by any specific current model as a moving target. The underlying building blocks (pretraining, SFT, preference optimization, quantized deployment) are stable enough to learn thoroughly, whichever variant is fashionable this quarter.</p>
     </div>
   </section>
 
@@ -697,7 +719,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
       <a class="related-card" href="./08-attention-transformers.html"><div class="rc-sec" style="color:var(--c-attention)">08 · Prerequisite</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">The block anatomy this page assumes — causal masking is the only change.</div></a>
       <a class="related-card" href="./11-rag-agents-reasoning.html"><div class="rc-sec" style="color:var(--c-rag)">11 · What changed next</div><div class="rc-title">RAG, Agents &amp; Reasoning</div><div class="rc-hook">Tool calling, retrieval, and multi-step reasoning sit on top of this stack.</div></a>
       <a class="related-card" href="./23-efficient-ai-systems.html"><div class="rc-sec" style="color:var(--c-efficient)">23 · Serving depth</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">KV cache, paged attention, and parallelism get their full systems treatment here.</div></a>
-      <a class="related-card" href="./25-evaluation-reliability-safety.html"><div class="rc-sec" style="color:var(--c-eval)">25 · Evaluating this</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">How you actually measure whether alignment and scale delivered anything.</div></a>
+      <a class="related-card" href="./25-evaluation-reliability-safety.html"><div class="rc-sec" style="color:var(--c-eval)">25 · Evaluating this</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">How you measure whether alignment and scale delivered anything.</div></a>
     </div>
   </section>
 
@@ -760,7 +782,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=8a7b7a3b"></script>
+<script defer src="../assets/js/search-data.js?v=1c94190d"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>
@@ -769,7 +791,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
 <script defer src="../assets/js/find-in-page.js?v=f0e43675"></script>
 <script defer src="../assets/js/kml-modal.js?v=6a0f6bea"></script>
 <script defer src="../assets/js/review.js?v=11ed4252"></script>
-<script defer src="../assets/js/question-index.js?v=321c545a"></script>
+<script defer src="../assets/js/question-index.js?v=4f49e5cd"></script>
 <script defer src="../assets/js/review-widget.js?v=577f11ae"></script>
 <script defer src="../assets/js/anchor.js?v=257d98c1"></script>
 <script defer src="../assets/js/notes.js?v=e8ec89d2"></script>
