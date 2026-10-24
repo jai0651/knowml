@@ -62,7 +62,7 @@
     renderDimKey();
     renderDots();
     renderStep();
-    if (!opts.skipHistory) history.replaceState(null, '', '#' + TABS[i].id);
+    if (!opts.skipHistory) history.replaceState(history.state, '', '#' + TABS[i].id);
     if (!opts.skipScroll) {
       window.scrollTo({ top: els.shell.getBoundingClientRect().top + window.scrollY - 96, behavior: opts.instant ? 'auto' : 'smooth' });
     }
@@ -140,11 +140,15 @@
 
     els.prev.addEventListener('click', prev);
     els.next.addEventListener('click', next);
-    document.addEventListener('keydown', function (e) {
+    /* The app shell can mount this script more than once (client-side navigation),
+       so document/window listeners are removed by the previous run's teardown. */
+    if (window.__kmlLabTeardown) window.__kmlLabTeardown();
+    function onKey(e) {
       if (e.target && /input|textarea/i.test(e.target.tagName)) return;
       if (e.key === 'ArrowRight') next();
       if (e.key === 'ArrowLeft') prev();
-    });
+    }
+    document.addEventListener('keydown', onKey);
 
     var startIndex = tabIndexFromHash();
     state.tabIndex = startIndex;
@@ -153,17 +157,23 @@
     renderDimKey();
     renderDots();
     renderStep();
-    history.replaceState(null, '', '#' + TABS[startIndex].id);
+    history.replaceState(history.state, '', '#' + TABS[startIndex].id);
     if (startIndex !== 0) {
       requestAnimationFrame(function () {
         window.scrollTo({ top: els.shell.getBoundingClientRect().top + window.scrollY - 96, behavior: 'auto' });
       });
     }
 
-    window.addEventListener('popstate', function () {
+    function onPop() {
       var i = tabIndexFromHash();
       if (i !== state.tabIndex) switchTab(i, { skipHistory: true, instant: true });
-    });
+    }
+    window.addEventListener('popstate', onPop);
+    window.__kmlLabTeardown = function () {
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('popstate', onPop);
+      window.__kmlLabTeardown = null;
+    };
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

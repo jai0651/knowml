@@ -37,7 +37,7 @@
     }
     var leaf = document.createElement(node.page ? 'a' : 'div');
     leaf.className = 'tt-leaf';
-    if (node.page) leaf.href = topicsBase + node.page + '.html';
+    if (node.page) leaf.href = topicsBase + node.page;
     var descHtml = node.desc
       ? '<span class="tt-leaf-desc">' + escapeHtml(node.desc) + '</span>'
       : '<span class="tt-leaf-desc tt-leaf-desc-stub">Full write-up coming next.</span>';

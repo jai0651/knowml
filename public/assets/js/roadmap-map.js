@@ -29,6 +29,9 @@
     var tracks = document.querySelectorAll('.rm-track');
     if (!tracks.length) return;
 
+    /* Idempotent: a second run (dev double-mount) must not stack a second map. */
+    Array.prototype.forEach.call(document.querySelectorAll('.rm-map'), function (m) { m.remove(); });
+
     doc.classList.add('js-roadmap');
 
     Array.prototype.forEach.call(tracks, function (track) {
@@ -145,6 +148,10 @@
     /* A deep link to a stage should open it rather than scroll to a collapsed
        shell. Same for the browser's own find-on-page landing inside one. */
     if (location.hash) openFromHash();
+    /* Under client-side navigation this file runs once per visit and the
+       window outlives the page, so drop the previous visit's listener. */
+    if (window.__rmHash) window.removeEventListener('hashchange', window.__rmHash);
+    window.__rmHash = openFromHash;
     window.addEventListener('hashchange', openFromHash);
 
     function openFromHash() {

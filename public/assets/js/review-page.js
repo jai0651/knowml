@@ -143,7 +143,7 @@
 
     $('drillChip').textContent = card.pageTitle;
     $('drillChip').style.setProperty('--dc', card.color);
-    $('drillChip').href = 'topics/' + card.page + '.html';
+    $('drillChip').href = '/topics/' + card.page;
     $('drillLevel').textContent = card.level;
     $('drillLevel').className = 'qa-level ' + card.level;
     $('drillCount').textContent = (pos + 1) + ' / ' + queue.length;
@@ -157,7 +157,7 @@
     $('drillA').hidden = true;
     $('drillReveal').hidden = false;
     $('drillRate').hidden = true;
-    $('drillSource').href = 'topics/' + card.page + '.html';
+    $('drillSource').href = '/topics/' + card.page;
 
     renderMath($('drillQ'));
     renderMath($('drillA'));
@@ -213,7 +213,7 @@
   }
 
   /* ---------- init ---------- */
-  document.addEventListener('DOMContentLoaded', function () {
+  function init() {
     R = window.KMLReview;
     CARDS = window.KML_QUESTIONS || [];
     if (!R || !CARDS.length) return;
@@ -267,15 +267,18 @@
     });
 
     /* keyboard: space/enter reveals, 1-3 rate — drilling should not need a mouse */
-    document.addEventListener('keydown', function (e) {
-      if ($('drill').hidden) return;
+    /* this script re-runs on every client-side visit; drop the previous visit's listener */
+    if (window.__kmlReviewKey) document.removeEventListener('keydown', window.__kmlReviewKey);
+    window.__kmlReviewKey = function (e) {
+      if (!$('drill') || $('drill').hidden) return;
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); revealed ? answer('good') : reveal(); }
       else if (e.key === '1') { e.preventDefault(); answer('again'); }
       else if (e.key === '2') { e.preventDefault(); answer('hard'); }
       else if (e.key === '3') { e.preventDefault(); answer('good'); }
       else if (e.key === 'Escape') { e.preventDefault(); exitSession(); }
-    });
+    };
+    document.addEventListener('keydown', window.__kmlReviewKey);
 
     $('resetBtn').addEventListener('click', function () {
       window.KMLModal.confirm('Reset all review progress? Your highlights and notes are not affected.', {
@@ -286,5 +289,8 @@
         paintStats(); paintMastery();
       });
     });
-  });
+  }
+
+  if (document.readyState !== 'loading') init();
+  else document.addEventListener('DOMContentLoaded', init);
 })();

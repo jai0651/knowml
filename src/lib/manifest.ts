@@ -60,10 +60,8 @@ const GROUP_COLOUR: Record<string, string> = {
   "grand-challenges": "machine",
 };
 
-/** Labs are standalone pages served as they were; chapters are routes. */
 function hrefOf(p: RawPage): string {
-  if (p.kind === "lab") return "/" + p.href.replace(/^\.?\//, "");
-  return `/topics/${p.id}`;
+  return p.kind === "lab" ? `/labs/${p.id}` : `/topics/${p.id}`;
 }
 
 export const groups: Group[] = (manifest.groups as { name: string; pages: RawPage[] }[]).map((g) => {

@@ -187,15 +187,18 @@
     var out = [];
     for (var i = 0; i < localStorage.length; i++) {
       var key = localStorage.key(i);
-      if (key.indexOf('np-notes::') !== 0) continue;
+      /* np-notes:: is the old static site's store, ks-notes:: the Next.js engine's */
+      var legacy = key.indexOf('np-notes::') === 0;
+      if (!legacy && key.indexOf('ks-notes::') !== 0) continue;
       var path = key.slice('np-notes::'.length);
       var data;
       try { data = JSON.parse(localStorage.getItem(key)); } catch (e) { continue; }
       if (!data || !data.highlights) continue;
       data.highlights.forEach(function (h) {
         out.push({
-          id: h.id, text: h.text, note: h.note || '', color: h.color,
-          createdAt: h.createdAt || 0, path: path,
+          id: h.id, text: h.text, note: h.note || '', color: h.colour || h.color,
+          createdAt: h.created || h.createdAt || 0,
+          path: path.replace(/\.html$/, '').replace(/^(?:\.\/)?(?=topics\/)/, '/'),
           page: (path.split('/').pop() || '').replace('.html', ''),
         });
       });

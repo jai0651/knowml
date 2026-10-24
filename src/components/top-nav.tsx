@@ -10,8 +10,8 @@ import { groups, livePages } from "@/lib/manifest";
 const LINKS = [
   { href: "/sections", label: "Chapters" },
   { href: "/labs", label: "Labs" },
-  { href: "/roadmaps.html", label: "Roadmaps" },
-  { href: "/review.html", label: "Review" },
+  { href: "/roadmaps", label: "Roadmaps" },
+  { href: "/review", label: "Review" },
 ];
 
 export function TopNav() {

@@ -20,6 +20,12 @@
   var host = document.getElementById('map');
   if (!DATA || !host || typeof cytoscape === 'undefined') return;
 
+  /* The manifest still stores legacy hrefs (topics/NN.html); the Next routes
+     are /topics/<id>, /labs/<id> and /<id>. */
+  function route(p) {
+    return p.kind === 'lab' ? '/labs/' + p.id : p.kind === 'tool' ? '/' + p.id : '/topics/' + p.id;
+  }
+
   var css = getComputedStyle(document.documentElement);
   function tok(name, fallback) {
     var v = css.getPropertyValue(name).trim();
@@ -35,7 +41,7 @@
 
      Positions are computed, not simulated. A force layout rearranges itself on
      every visit, and a map you cannot build a memory of is not much of a map. */
-  var COL = 268, ROW = 74, GAP_Y = 150, PER_ROW = 6;
+  var COL = 268, ROW = 74, GAP_Y = 150, PER_ROW = 7;
   var nodes = [], edges = [], rowTop = 0, rowMax = 0;
 
   DATA.groups.forEach(function (g, gi) {
@@ -51,7 +57,7 @@
     g.pages.forEach(function (p, pi) {
       nodes.push({
         data: {
-          id: p.id, label: p.title, kind: p.kind, href: p.href,
+          id: p.id, label: p.title, kind: p.kind, href: route(p),
           hook: p.hook, num: p.num || '', colour: tok(p.colour)
         },
         position: { x: col * COL, y: rowTop + 92 + pi * ROW }
@@ -66,17 +72,17 @@
     container: host,
     elements: { nodes: nodes, edges: edges },
     layout: { name: 'preset', fit: true, padding: 60 },
-    minZoom: 0.25,
+    minZoom: 0.12,
     maxZoom: 2.2,
     wheelSensitivity: 0.2,
     style: [
       { selector: 'node', style: {
           'label': 'data(label)', 'font-family': 'Inter, system-ui, sans-serif',
-          'font-size': 11, 'font-weight': 600, 'color': tok('--text'),
+          'font-size': 11, 'font-weight': 600, 'color': tok('--ink'),
           'text-valign': 'center', 'text-halign': 'center', 'text-wrap': 'wrap',
           'text-max-width': 176, 'width': 204, 'height': 48, 'shape': 'round-rectangle',
-          'background-color': tok('--bg-card'), 'border-width': 1.5,
-          'border-color': tok('--border-hover'), 'transition-property': 'border-color background-color',
+          'background-color': tok('--surface'), 'border-width': 1.5,
+          'border-color': tok('--line-2'), 'transition-property': 'border-color background-color',
           'transition-duration': 140
       }},
       { selector: 'node[kind = "group"]', style: {
@@ -91,7 +97,7 @@
       { selector: 'node[kind = "topic"]', style: { 'border-left-color': 'data(colour)' } },
       { selector: 'node:selected', style: {
           'border-color': 'data(colour)', 'border-width': 3,
-          'background-color': tok('--bg-2')
+          'background-color': tok('--surface-2')
       }},
       { selector: 'edge', style: {
           'width': 1.4, 'line-color': 'data(colour)', 'opacity': 0.35,
@@ -99,10 +105,10 @@
           'target-arrow-shape': 'none'
       }},
       { selector: 'edge[kind = "spine"]', style: {
-          'width': 1.8, 'line-color': tok('--border-hover'), 'opacity': 0.5,
+          'width': 1.8, 'line-color': tok('--line-2'), 'opacity': 0.5,
           'curve-style': 'unbundled-bezier', 'control-point-distances': [-26],
           'control-point-weights': [0.5], 'target-arrow-shape': 'triangle',
-          'target-arrow-color': tok('--border-hover'), 'arrow-scale': 0.9
+          'target-arrow-color': tok('--line-2'), 'arrow-scale': 0.9
       }},
       { selector: '.faded', style: { 'opacity': 0.12 } },
       { selector: '.lit', style: { 'opacity': 1 } }
@@ -145,7 +151,7 @@
   });
   cy.on('tap', 'node', function (e) {
     var href = e.target.data('href');
-    if (href) location.href = href;
+    if (href) { if (window.KML_MAP_NAV) window.KML_MAP_NAV(href); else location.href = href; }
   });
 
   /* ---------- controls ---------- */
@@ -171,12 +177,15 @@
 
   /* Theme can change under us; re-read the tokens rather than keeping the
      colours we sampled at construction time. */
-  new MutationObserver(function () {
+  window.KML_MAP_CY = cy;
+  var themeObs = new MutationObserver(function () {
+    if (cy.destroyed()) { themeObs.disconnect(); return; }
     css = getComputedStyle(document.documentElement);
     cy.style().update();
     cy.nodes().forEach(function (n) {
       var g = DATA.groups.find(function (gr) { return gr.name === n.data('label'); });
       if (g) n.data('colour', tok(g.colour));
     });
-  }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  });
+  themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 })();

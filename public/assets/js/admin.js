@@ -143,13 +143,15 @@
   }
 
   function pageHref(pageId) {
-    // Page ids mirror the filenames: numbered ones live under topics/, the rest
-    // at the root. Anything that does not resolve just opens a 404, which is a
-    // smaller cost than not linking at all.
-    if (/^\d{2}-/.test(pageId)) return './topics/' + pageId + '.html';
-    if (pageId === '00-map-timeline') return './index.html';
-    if (pageId === '00-sections') return './sections.html';
-    return './' + pageId + '.html';
+    // Numbered ids are chapters under /topics/; the rest are top-level routes.
+    // Anything that does not resolve just opens a 404, which is a smaller cost
+    // than not linking at all.
+    if (/^\d{2}-/.test(pageId)) return '/topics/' + pageId;
+    if (pageId === '00-map-timeline') return '/';
+    if (pageId === '00-sections') return '/sections';
+    if (/-lab$/.test(pageId)) return '/labs/' + pageId;
+    if (pageId === 'site-map') return '/map';
+    return '/' + pageId;
   }
 
   function renderDash(d) {
