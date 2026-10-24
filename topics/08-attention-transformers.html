@@ -196,48 +196,44 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   <div class="topic-header">
     <div class="th-top"><span class="th-chip" style="--c:var(--c-attention)">Sequence, Attention &amp; LLMs</span><span class="th-num">Chapter 08</span></div>
     <h1>Attention &amp; <span class="th-grad">Transformers</span></h1>
-    <p class="dek">The mechanism that let every token look directly at every other token, no matter how far apart. The single most interview-relevant idea in modern AI.</p>
+    <p class="dek">Follow one sentence through a Transformer: how the word "it" finds the word it refers to, how that search becomes a single matrix equation, and why doing it for every word at once gets expensive as the text gets longer.</p>
     <div class="meta-row">
-      <span class="th-pill"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>22 min read</span>
+      <span class="th-pill"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>36 min read</span>
       <span class="th-pill">Assumes: dot products &amp; softmax (01), RNN/seq2seq bottleneck (07)</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Timeline</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: how the data flows</a></li><li><a href="#math"><span class="tn">04</span>The equations</a></li><li><a href="#why"><span class="tn">05</span>Why this architecture</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Complexity, failure modes, and what breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li><li><a href="#techmap-embed"><span class="tn">·</span>Other techniques for this problem</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>How one word looks at the others</a></li><li><a href="#architecture"><span class="tn">02</span>Every word at once</a></li><li><a href="#math"><span class="tn">03</span>Making it work at real sizes</a></li><li><a href="#block"><span class="tn">04</span>From a layer to a Transformer</a></li><li><a href="#why"><span class="tn">05</span>Why it replaced recurrent networks</a></li><li><a href="#tradeoffs"><span class="tn">06</span>What it costs</a></li><li><a href="#summary"><span class="tn">07</span>Summary</a></li><li><a href="#build"><span class="tn">08</span>Build this</a></li><li><a href="#interview"><span class="tn">09</span>Interview questions</a></li><li><a href="#resources"><span class="tn">10</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">11</span>Related pages</a></li><li><a href="#techmap-embed"><span class="tn">·</span>Other techniques for this problem</a></li></ol></nav>
   </div>
 
   <section id="tldr">
-    <div class="tldr">
-      <div class="tldr-label">TL;DR</div>
-      <p>Attention computes, for every token, a weighted average of every other token's representation. The weights come from how relevant those tokens are to each other, and <strong>"relevant" is learned and is not hand-coded</strong>, which means recurrence can be dropped entirely.</p>
-    <p>Stack blocks of attention + a feed-forward layer with residual connections and normalization, and you get the Transformer: the architecture behind BERT, GPT, ViT, Whisper, and almost everything trained since 2018. One sentence for an interview: attention is a <strong>soft, differentiable, content-based lookup</strong>.</p>
-    </div>
+    <p>Here's a sentence: "The animal didn't cross the street because it was too tired." When you read it, you know without thinking that "it" means the animal and not the street, because a street can't be tired. Ask a language model what was tired and it'll give the same answer, so somewhere inside it, the model has connected "it" to "animal", a word several positions earlier.</p>
+
+    <p>That's a bit harder than it sounds, because a model doesn't see words. It sees a list of vectors, one for each <strong>token</strong> (a word or a piece of a word), and each layer of the model updates every vector in the list. For the model to know what "it" refers to, the vector at the position of "it" has to pick up some information from the vector at the position of "animal". So the question is how information gets from one position in the list to another.</p>
+
+    <p>Before 2017, the usual answer was a recurrent network (chapter 07). It reads the words one at a time and carries a single memory vector along, updating it at every word, so whatever "animal" contributes has to survive every update between it and "it". And the further apart two words are, the more of that tends to get lost on the way. This chapter is about the idea that replaced it, <strong>attention</strong>, which lets each position look directly at every other position and decide how much to take from each one. We'll follow our sentence through it with one question in mind: how does "it" decide where to look? It turns out to be a weighted average, and most of the chapter is about making that average learnable, and then about what it costs when every word does it at once.</p>
   </section>
 
   <section id="intuition">
-    <h2><span class="num">01</span>Intuition</h2>
-    <p class="lede">Attention is a soft dictionary lookup.</p>
+    <h2><span class="num">01</span>How one word looks at the others</h2>
 
-    <p>A Python dictionary matches one key exactly. <code>d["cat"]</code> hands back a single value and ignores everything else it holds.</p>
+    <h3>A lookup that doesn't need an exact match</h3>
+    <p>Start with a kind of lookup you already use. A Python dictionary stores pairs of keys and values, and <code>d["cat"]</code> finds the key that matches "cat" exactly and hands back its value. Every other entry is ignored, and if no key matches, you get an error.</p>
 
-    <p>Attention asks a fuzzier question. Not <em>"which key matches?"</em> but <em>"how similar is my query to every key?"</em> It then returns a blend of all the values, weighted by that similarity. Three steps:</p>
+    <p>Our word "it" needs something looser. It isn't looking for one exact word. It's looking for whichever word is most likely to be the thing it refers to, and it might well do better taking a little from several words. So imagine a different kind of lookup. You give it a description of what you're looking for, it compares that description with every key and gives each one a score for how well it matches, and it hands back a mix of all the values, in which the better-matching values make up a bigger share.</p>
 
-    <ul>
-      <li><strong>Score.</strong> Compare the query against every key. One similarity number per key.</li>
-      <li><strong>Normalize.</strong> Push those scores through a softmax so they sum to one.</li>
-      <li><strong>Blend.</strong> Take the weighted average of every value, using those weights.</li>
-    </ul>
+    <p>That's attention, and each piece of it has a name. What "it" sends out, the description, is called its <strong>query</strong>. Every word offers a <strong>key</strong>, the thing the query gets compared against, and a <strong>value</strong>, which is what it hands over if it's chosen. All three are vectors. To compare a query with a key, attention uses the dot product from chapter 01: multiply the two vectors number by number and add up the results. Two vectors that point in a similar direction give a large dot product, and two that point in unrelated directions give one near zero.</p>
 
-    <p>Nothing is discarded, and every token contributes by a different amount.</p>
+    <h3>Turning scores into weights</h3>
+    <p>The dot products give one score per word, but a list of scores isn't yet a recipe for mixing. Scores can be negative, and they don't add up to anything in particular. We want weights that are all positive and add up to one, so the result is a proper average.</p>
 
-    <div class="callout callout-teach">
-      <span class="callout-label">The sentence that makes it click</span>
-      <p><em>"The animal didn't cross the street because it was too tired."</em></p>
-      <p>What does <strong>it</strong> refer to? On its own, the word is ambiguous. The animal, or the street.</p>
-      <p>Self-attention lets the representation of <strong>it</strong> act as a query and compare itself against every other word in the sentence. <em>Animal</em> scores far higher than <em>street</em>, because tiredness is a property of animals. So the output vector for "it" becomes mostly "it", blended heavily with "animal".</p>
-      <p>The ambiguity is resolved <strong>inside the representation itself</strong>, before any downstream layer ever sees it.</p>
-    </div>
+    <p>That's the job of the <strong>softmax</strong> function. It raises <em>e</em> to the power of each score, which makes every number positive and widens the gap between big and small scores, and then it divides each result by their total so that they add up to one. A score that's clearly higher than the others ends up with most of the weight, but no word ends up with exactly zero.</p>
 
-    <p>Here is the same idea in numbers. Three words each carry a two-number key that says how animal-like or object-like the word is. The word <strong>it</strong> sends out a query asking for something animal-like. The vectors are hand-picked to make the point; a trained model learns them.</p>
+    <p>So attention, for one word, takes three steps. It scores the query against every key with a dot product, turns the scores into weights with a softmax, and adds up the values, each multiplied by its weight. What comes out is a new vector for "it" that blends every word's value, tilted toward the words that matched best.</p>
+
+    <h3>Trying it on three words</h3>
+    <p>Let's do this with numbers small enough to check by hand. Take three words, "cat", "mat" and "it", and give each one a key with only two numbers in it. The first number says how animal-like the word is and the second says how object-like it is, so "cat" gets <code>[1, 0]</code>, "mat" gets <code>[0, 1]</code>, and "it", which could be either, gets <code>[0.5, 0.5]</code>. To keep things simple, each word's value is the same as its key. For the query of "it" we'll use <code>[2, 0.5]</code>, which mostly asks for something animal-like. These numbers are picked by hand to make the point. In a real model they're learned, as we'll see in section 2.</p>
+
+    <p>Below, the code runs the three steps. <code>K @ q</code> takes the dot product of the query with every key at once, the line after it is the softmax, and <code>w @ V</code> is the weighted sum of the values. It also divides the scores by <code>np.sqrt(2)</code>. Ignore that for now, because section 3 is about exactly why it's there.</p>
 
     <details class="tryit" open>
       <summary class="tryit-head">
@@ -260,43 +256,29 @@ out = w @ V                      # a weighted average of the values
 for word, s, weight in zip(words, scores, w):
     print(f&quot;{word:&gt;4}: score {s:5.2f}  weight {weight:5.2f}&quot;)
 print(&quot;new vector for &#x27;it&#x27;:&quot;, np.round(out, 2))</code></pre>
-      <div class="tryit-out"><strong>The query for <code>it</code> scores <code>1.41</code> against <code>cat</code>, <code>0.35</code> against <code>mat</code> and <code>0.88</code> against itself.</strong> The softmax turns those into weights of <code>0.52</code>, <code>0.18</code> and <code>0.30</code>, which sum to <code>1</code>. The new vector for <code>it</code> is <code>[0.67 0.33]</code>: a weighted average of the three values, tilted toward the animal direction because <code>cat</code> got the biggest weight. Every word contributed, just by different amounts.</div>
+      <div class="tryit-out">It prints a score of <code>1.41</code> for <code>cat</code>, <code>0.35</code> for <code>mat</code> and <code>0.88</code> for <code>it</code> itself. The softmax turns those into weights of <code>0.52</code>, <code>0.18</code> and <code>0.30</code>, which add up to <code>1</code>, and the new vector for <code>it</code> comes out as <code>[0.67 0.33]</code>.</div>
     </details>
 
-    <p>That example is Jay Alammar's, from <a href="https://jalammar.github.io/illustrated-transformer/">The Illustrated Transformer</a>. Worth twenty minutes if diagrams land faster for you than equations.</p>
+    <p>Read the output one line at a time. "cat" scores highest, so it gets just over half the weight. "mat" gets the least. And "it" scored itself too and kept 0.30 of the weight, because a word is always one of the words it can look at. Its vector started out as <code>[0.5, 0.5]</code> and has moved to <code>[0.67, 0.33]</code>, toward the animal direction. Nothing in the code says that "it" means "cat". Our query and keys made "cat" the best match, and the average did the rest. (Jay Alammar's <a href="https://jalammar.github.io/illustrated-transformer/">The Illustrated Transformer</a> walks through the same idea with pictures, and it's probably the best next read if pictures help you more than equations.)</p>
 
-    <p>Every self-attention layer does this for every token against every other token, all at once. Queries, keys, values, multiple heads and the <span>$\sqrt{d_k}$</span> scaling are machinery that makes this one idea learnable and numerically well-behaved.</p>
-  </section>
+    <h4 class="why">Why mix all the values instead of taking the best one?</h4>
+    <p>Taking only the best-matching word would be a yes-or-no decision, and a model can't learn well through one. Training works by nudging the model's numbers a little and checking whether the output gets a little better (that's what the gradient from chapter 01 measures). If the lookup picks a single winner, a small nudge to the scores usually changes nothing at all, and once in a while it makes the answer jump to a different word, so there's no smooth signal to follow. A weighted average changes smoothly when the scores change, so every nudge has a small effect the model can learn from. That's why attention is often described as a soft, differentiable lookup.</p>
 
-  <section id="timeline">
-    <h2><span class="num">02</span>Timeline</h2>
-    <div class="bia">
-      <div class="bia-box">
-        <div class="bia-label">Before</div>
-        <p>Seq2seq (2014) squeezed an entire input sentence into one fixed-size vector, so long sequences degraded badly.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box innovation">
-        <div class="bia-label">Innovation</div>
-        <p>Bahdanau attention (2015) let the decoder look back at every encoder state, and Vaswani et al., "Attention Is All You Need" (2017), dropped the recurrence and kept only attention plus position information.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box">
-        <div class="bia-label">After</div>
-        <p>BERT and GPT (2018) built on the encoder and decoder stacks, ViT (2020) showed the same block works on image patches, and by 2023 the Transformer was the default for text, vision, audio and increasingly robotics.</p>
-      </div>
-    </div>
+    <p>In the example we wrote the query and the keys ourselves. A real model has to produce them from the words, and it has to do so for every word in the sentence, not only for "it".</p>
   </section>
 
   <section id="architecture">
-    <h2><span class="num">03</span>Architecture: how the data flows</h2>
-    <p>Every token's embedding is linearly projected three different ways: into a Query, a Key, and a Value vector. Three learned lenses on the same token.</p>
+    <h2><span class="num">02</span>Every word at once</h2>
 
-    <ul>
-      <li><strong>Query.</strong> "What am I looking for?"</li>
-      <li><strong>Key.</strong> "Here's what I contain."</li>
-      <li><strong>Value.</strong> "Here's what I'll give you if you attend to me."</li>
-    </ul>
+    <h3>Where queries, keys and values come from</h3>
+    <p>When a sentence enters a model, each token is replaced by its <strong>embedding</strong>, a vector of a few hundred or a few thousand numbers that the model learned during training. In the original Transformer each embedding has 512 numbers, and that width is called <span>$d_{model}$</span>. The embedding for "it" is a single vector, but attention needs three things from it: a query, a key and a value.</p>
+
+    <p>It makes them by multiplying the embedding by three different weight matrices, which are learned along with everything else in the model. Multiplying a vector by a matrix gives a new vector, a reshaped view of the original, so a word's query, key and value are three different views of the same embedding.</p>
+
+    <h4 class="why">Why does a word need three different vectors?</h4>
+    <p>Because the three jobs ask different things of it. When "it" goes looking, it's looking for an animal, but "it" isn't an animal itself, so the vector it searches with (its query) shouldn't be the same as the vector that other words find it by (its key). And what a word is matched on doesn't have to be what it passes on once it's matched, so the value gets its own matrix as well. With three matrices, training can shape each view separately. In section 1 we skipped this and set each value equal to its key, which is fine for a toy but leaves a real model less to work with.</p>
+
+    <p>Here's one query going through the three steps against four words. Watch how four scores become four weights that add up to one, and how those weights decide how much of each value ends up in the output.</p>
 
     <div class="diagram">
       <div class="diagram-title">Scaled dot-product attention — one query attending over four keys/values
@@ -351,71 +333,32 @@ print(&quot;new vector for &#x27;it&#x27;:&quot;, np.round(out, 2))</code></pre>
         <text x="620" y="165" text-anchor="middle" font-size="11" font-weight="700" fill="#4f8cff">Z</text>
         <text x="620" y="196" text-anchor="middle" font-size="10" class="dim">output</text>
       </svg>
-      <div class="diagram-caption">Q·K similarity → softmax turns 4 raw scores into weights that sum to 1 (here 0.09 / 0.62 / 0.21 / 0.08) → those same weights blend V1..V4 into the output Z. Notice K2/V2 dominates — that token is "the answer" this query cared about most. Every token in the sequence runs this simultaneously, as its own query.</div>
+      <div class="diagram-caption">The query is compared with four keys, and the softmax turns the four scores into weights that add up to 1 (here 0.09, 0.62, 0.21 and 0.08). The same weights then mix the values V1 to V4 into the output Z. The second word gets most of the weight, so its value makes up most of the output. In a real layer every word does this at the same time, each with its own query.</div>
     </div>
 
-    <p>Now wrap that in a block: a residual connection, a normalization layer, and a position-wise feed-forward network. Repeat that 12–96+ times and you have a Transformer stack:</p>
-
-    <div class="diagram">
-      <div class="diagram-title">One pre-norm transformer block — residual stream flowing bottom to top
-        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
-      </div>
-      <svg viewBox="0 0 320 340" style="max-width:440px;display:block;margin:0 auto" xmlns="http://www.w3.org/2000/svg">
-        <path id="resid" d="M160,326 L160,14" stroke="#24242f" stroke-width="3" fill="none"/>
-        <path d="M160,326 L160,14" stroke="#7c6cf6" stroke-width="2" fill="none" stroke-dasharray="6 8" class="flow-line"/>
-        <circle r="4" fill="#7c6cf6" class="roll" style="offset-path: path('M160,326 L160,14')"></circle>
-
-        <rect x="60" y="290" width="200" height="34" rx="7" fill="#14141d" stroke="#24242f"/>
-        <text x="160" y="311" text-anchor="middle" font-size="12" fill="#e9e9ef">Input embedding + position</text>
-
-        <rect x="60" y="240" width="200" height="30" rx="7" fill="#14141d" stroke="#24242f"/>
-        <text x="160" y="259" text-anchor="middle" font-size="11.5" fill="#a3a3b2">LayerNorm</text>
-
-        <rect x="40" y="190" width="240" height="34" rx="7" fill="#14141d" stroke="#f472b6"/>
-        <text x="160" y="211" text-anchor="middle" font-size="12" fill="#f472b6">Multi-Head Self-Attention</text>
-
-        <rect x="60" y="160" width="200" height="20" rx="6" fill="#14141d" stroke="#24242f"/>
-        <text x="160" y="174" text-anchor="middle" font-size="10.5" fill="#a3a3b2">+ residual add</text>
-
-        <rect x="60" y="118" width="200" height="30" rx="7" fill="#14141d" stroke="#24242f"/>
-        <text x="160" y="137" text-anchor="middle" font-size="11.5" fill="#a3a3b2">LayerNorm</text>
-
-        <rect x="40" y="68" width="240" height="34" rx="7" fill="#14141d" stroke="#818cf8"/>
-        <text x="160" y="89" text-anchor="middle" font-size="12" fill="#818cf8">Feed-Forward (2 linear + GELU)</text>
-
-        <rect x="60" y="38" width="200" height="20" rx="6" fill="#14141d" stroke="#24242f"/>
-        <text x="160" y="52" text-anchor="middle" font-size="10.5" fill="#a3a3b2">+ residual add</text>
-
-        <text x="160" y="15" text-anchor="middle" font-size="11" fill="#4f8cff">↑ to next block / output head</text>
-      </svg>
-      <div class="diagram-caption">The residual stream (dashed vertical line) is the through-line: attention and the feed-forward layer each <em>read</em> from it, compute something, and <em>add back into it</em> — they never overwrite it. This is why 96-layer transformers train at all; gradients have a direct highway back to the input, same reason ResNet works (see 04).</div>
+    <h3>Writing it as matrices</h3>
+    <p>Every word in the sentence goes through the same steps, and the work for one word doesn't depend on the result for any other, so all of it can happen at the same time. Stack the queries of all the words into a matrix <span>$Q$</span>, one row per word, and do the same with the keys to get <span>$K$</span> and with the values to get <span>$V$</span>. Then a single matrix multiplication, <span>$QK^{\top}$</span>, computes every word's score against every other word, and the whole of attention fits on one line. This is the equation from the 2017 paper "Attention Is All You Need":</p>
+    <div class="eq-block">
+      <span>$$\text{Attention}(Q,K,V) = \text{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right)V$$</span>
     </div>
-
-    <p>That block, stacked, is the whole architecture. Here is how the original paper drew the full encoder-decoder picture: an encoder stack on the left, feeding a decoder stack on the right through cross-attention.</p>
-
-    <div class="ref-figure">
-      <div class="rf-img-wrap"><img src="https://jalammar.github.io/images/t/The_transformer_encoder_decoder_stack.png" alt="The Transformer encoder-decoder stack — N encoder blocks feeding N decoder blocks" loading="lazy"></div>
-      <div class="rf-caption"><span class="rf-label">Reference figure</span>The full encoder-decoder Transformer stack. Source: Jay Alammar, <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener">The Illustrated Transformer</a>.</div>
-    </div>
-
-    <p>Shapes, concretely:</p>
-
-    <ul>
-      <li>Input token ids: <code>(batch, seq_len)</code></li>
-      <li>After the embedding table: <code>(batch, seq_len, d_model)</code></li>
-      <li>After a decoder-only LM head: <code>(batch, seq_len, vocab_size)</code> logits, one distribution per position predicting the next token</li>
+    <p>Each part of it is a step you've already seen:</p>
+    <ul class="eq-explain">
+      <li><span class="sym">Q, K, V</span> matrices with one row per token. Row <em>i</em> holds token <em>i</em>'s query, key or value, made by multiplying its embedding by the matching weight matrix. Their width is <span>$d_k$</span>.</li>
+      <li><span class="sym">QKᵀ</span> a square grid of scores, with one row and one column per token. The number in row <em>i</em>, column <em>j</em> is the dot product of token <em>i</em>'s query with token <em>j</em>'s key.</li>
+      <li><span class="sym">√d_k</span> a scaling factor, the square root of the query and key width. Section 3 explains why it's needed.</li>
+      <li><span class="sym">softmax</span> applied to each row separately, so that each token's scores become weights adding up to 1.</li>
+      <li><span class="sym">· V</span> multiplies the weights by the values, which gives each token a weighted average of every token's value.</li>
     </ul>
+    <p>Notice what happens to the shape. A sentence of <em>n</em> tokens goes in as <em>n</em> vectors and comes out as <em>n</em> vectors. Attention changes what's inside each vector by mixing in information from other positions, but it never changes how many vectors there are.</p>
 
-    <p>Every attention and feed-forward layer preserves that middle shape. Attention <em>mixes information across the seq_len axis</em> but never changes it. Only the final LM head projects <code>d_model → vocab_size</code>.</p>
+    <h3>Not looking ahead</h3>
+    <p>There's one complication. A model like GPT is trained to predict the next word: given "The animal didn't cross the", it should guess "street". If the position of "the" could attend to the word after it, it would see the answer. So when attention is used to predict the next token, each position is only allowed to look at itself and the positions before it. This is called <strong>causal</strong> attention.</p>
 
-    <p>Encoder and decoder stacks differ in exactly one line.</p>
+    <p>Doing it takes one small change. Before the softmax, every score where a token would be looking at a later token is replaced with <span>$-\infty$</span>. Since the softmax raises <em>e</em> to the power of each score, and <em>e</em> to the power of minus infinity is zero, those positions get a weight of exactly zero and contribute nothing. If you drew the grid, the blanked-out scores would form a triangle in the top-right corner of the grid, above the diagonal.</p>
 
-    <ul>
-      <li><strong>Encoder</strong> (used in BERT). It is bidirectional, so every position sees the whole input at once.</li>
-      <li><strong>Decoder</strong> (used in GPT). It is causal, so each position sees only itself and earlier positions.</li>
-    </ul>
+    <p>Models like BERT, which read a whole sentence at once to understand it and don't predict the next word, leave the mask off, so every position sees every other one. That's the main difference between the two halves of the original Transformer: the <strong>encoder</strong> has no mask and the <strong>decoder</strong> has one. BERT is built from encoder blocks and GPT from decoder blocks.</p>
 
-    <p>The decoder gets there by masking out future positions before the softmax, setting their scores to <span>$-\infty$</span>. Same mechanism, one masking triangle.</p>
+    <p>Next, we'll run the full equation on four tokens with random queries, keys and values, with the mask applied. <code>np.triu(..., k=1)</code> marks the triangle of positions above the diagonal, and the line after it sets those scores to <code>-inf</code>. Subtracting each row's largest score before taking the exponent doesn't change what the softmax returns; it only stops large scores from overflowing. Before you run it, think about the first row. Token 0 isn't allowed to look at anything after itself, so what's left for it to attend to?</p>
 
     <details class="tryit" open>
       <summary class="tryit-head">
@@ -445,22 +388,23 @@ print(np.round(scores, 2), &quot;\n&quot;)
 print(np.round(W, 3))
 print(&quot;row sums:&quot;, W.sum(axis=1))
 print(&quot;Z[0] is exactly V[0]:&quot;, np.allclose(Z[0], V[0]))</code></pre>
-      <div class="tryit-out"><strong>Every row of <code>W</code> sums to exactly <code>1.</code>, including the first one.</strong> The mask sets the strict upper triangle to <code>-inf</code>, and <code>exp(-inf)</code> is <code>0</code>, so row 0 has nowhere to look but itself — its weight is forced to <code>1.000</code> and the output <code>Z[0]</code> comes back as literally <code>V[0]</code>. The first token of a causal model gets no context at all, in every layer, forever. Row 3 is the only unconstrained one: <code>0.102 / 0.031 / 0.684 / 0.183</code>, dominated by token 2 because <code>1.4</code> was its largest score. Notice too that <code>scores</code> is <code>(4, 4)</code> while <code>V</code> is <code>(4, 3)</code> — the attention matrix is square in sequence length and knows nothing about how wide the values are.</div>
+      <div class="tryit-out">Every row of <code>W</code> adds up to <code>1</code>. The first row has a weight of <code>1.000</code> on token 0 and zero everywhere else, so <code>Z[0]</code> is exactly <code>V[0]</code>. The last row is the only one that sees all four tokens, with weights <code>0.102</code>, <code>0.031</code>, <code>0.684</code> and <code>0.183</code>. <code>scores</code> has shape <code>(4, 4)</code> while <code>V</code> has shape <code>(4, 3)</code>.</div>
     </details>
+
+    <p>Token 0 can only attend to itself. Its row of weights is <code>1.000</code> followed by zeros, so its output is its own value, unchanged, and in a causal model that's true in every layer: the first token never gets any context from the rest of the text. Only the last row can see all four tokens, and most of its weight, 0.684, goes to token 2, because that's where its largest score, 1.4, is. Look at the shapes as well. The grid of scores is 4 by 4, one row and one column per token, while the values are 4 by 3. Its size depends only on how many tokens there are, and that will matter a lot in section 6.</p>
+
+    <p>If you ran this same code at the sizes a real model uses, it would stop learning. Section 3 is about why, and about two other things the plain equation can't do.</p>
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The equations</h2>
-    <div class="eq-block">
-      <span>$$\text{Attention}(Q,K,V) = \text{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right)V$$</span>
-    </div>
-    <ul class="eq-explain">
-      <li><span class="sym">Q, K, V</span> matrices of shape <code>(seq_len, d_k)</code> — every row is one token's query/key/value vector, produced by three separate learned linear layers on the input embeddings.</li>
-      <li><span class="sym">QKᵀ</span> a <code>(seq_len, seq_len)</code> matrix of raw similarity scores — every token compared against every other token via dot product.</li>
-      <li><span class="sym">√d_k</span> scaling factor: without it, dot products of high-dimensional vectors grow large in magnitude, which pushes softmax into a region with near-zero gradients almost everywhere except one spike. Dividing by <span>$\sqrt{d_k}$</span> keeps the variance of the scores roughly constant regardless of dimension, so training stays stable.</li>
-      <li><span class="sym">softmax</span> applied row-wise, turning each token's raw scores into a probability distribution over all tokens (including itself) that sums to 1.</li>
-      <li><span class="sym">· V</span> the weighted sum — multiplying those probabilities back into the value vectors gives, for each token, a blend of everyone else's information, proportioned by relevance.</li>
-    </ul>
+    <h2><span class="num">03</span>Making it work at real sizes</h2>
+
+    <h3>Scores that grow with the width</h3>
+    <p>In our toy example the queries and keys had two numbers each. In a real model they usually have 64 or 128. A dot product adds up one product for each number, so a wider vector means more terms added together, and the total tends to land further from zero. When the scores spread out like that, the softmax gives nearly all of the weight to the largest score and almost none to the others.</p>
+
+    <p>That might seem harmless, since the output is still a weighted average, but it breaks training. When one weight is close to 1 and the rest are close to 0, small changes to the scores hardly change the weights at all, so the gradient that's meant to tell the model how to adjust its queries and keys is close to zero. In practice, the model stops learning where to look.</p>
+
+    <p>Dividing the scores fixes it: divide them by <span>$\sqrt{d_k}$</span>, the square root of the query and key width, before the softmax. But why the square root, and not <span>$d_k$</span> itself or some other number? It comes out of a short calculation about how spread out the dot product of two random vectors is:</p>
 
     <details class="derivation">
       <summary>
@@ -495,6 +439,8 @@ print(&quot;Z[0] is exactly V[0]:&quot;, np.allclose(Z[0], V[0]))</code></pre>
       </div>
     </details>
 
+    <p>Let's check both halves of that argument in code. Its first part takes 200,000 dot products of random vectors at three widths and prints how spread out they are (their variance), before and after dividing by <span>$\sqrt{d_k}$</span>. Its second part takes one query and six keys of width 512 and runs the softmax on the raw scores and on the scaled ones.</p>
+
     <details class="tryit" open>
       <summary class="tryit-head">
         <span class="tryit-label">Try it</span>
@@ -525,15 +471,22 @@ print(&quot;unscaled softmax:&quot;, np.round(p_raw, 4))
 print(&quot;scaled softmax:  &quot;, np.round(p_sc, 4))
 print(f&quot;smallest weight: {p_raw.min():.1e} unscaled,&quot;
       f&quot; {p_sc.min():.1e} scaled&quot;)</code></pre>
-      <div class="tryit-out"><strong><code>var(q.k)</code> comes out <code>8.0</code>, <code>63.8</code>, <code>510.9</code> — it <em>is</em> <span>$d_k$</span>.</strong> Dividing by <span>$\sqrt{d_k}$</span> pins it at <code>1.00</code> in all three cases, which is the derivation above in one line of output. The second half shows why anyone should care. At <span>$d_k=512$</span> the raw scores span <code>-70.6</code> to <code>25.6</code>, and softmax turns that into a weight of <code>1.6e-42</code> on the weakest key. The gradient flowing back through that entry is not small, it is gone. Scaled, the same six scores give <code>0.0056</code> through <code>0.3959</code>: still a clear preference, still differentiable everywhere.</div>
+      <div class="tryit-out">The variance of the raw dot products comes out at <code>8.0</code>, <code>63.8</code> and <code>510.9</code> for widths 8, 64 and 512, and after dividing by <span>$\sqrt{d_k}$</span> it is <code>1.00</code> each time. At width 512 the raw scores run from <code>-70.6</code> to <code>25.6</code>, and the unscaled softmax gives the weakest key a weight of <code>1.6e-42</code>. The scaled softmax gives weights from <code>0.0056</code> to <code>0.3959</code>.</div>
     </details>
 
+    <p>In the first part the variance grows with the width and comes out almost exactly equal to it, and dividing by <span>$\sqrt{d_k}$</span> brings it back to 1 every time, as the derivation said it would. And the second part shows why that matters. Without scaling, the weakest key gets a weight of about 10<sup>-42</sup>, which is zero for any practical purpose, and no gradient will get through it. With scaling, the same six keys get weights between about 0.006 and 0.4, so there's still a clear favourite, but every key keeps some weight and can still be learned.</p>
+
     <h3>Multi-head attention</h3>
-    <p>Running one attention function gives the model exactly one notion of "relevance." In practice you want several. One head might learn to track subject-verb agreement, another coreference, another local syntax. Multi-head attention runs <span>$h$</span> independent, smaller attention operations in parallel and concatenates the results:</p>
+    <p>A single attention layer gives each word one set of weights, so it can only express one idea of which words are relevant. Our sentence has several things going on at once, though. "it" needs to find "animal", the verb "was" goes with its subject, and some words mostly care about their immediate neighbours. With one set of weights, all of that has to be averaged together.</p>
+
+    <p><strong>Multi-head attention</strong> runs several smaller attention operations side by side, each with its own query, key and value matrices, and each one is called a <strong>head</strong>. Each head can learn its own idea of relevance. One head might learn to track subject-verb agreement, another which noun a pronoun refers to, and another the local word order.</p>
+
+    <p>Adding heads doesn't make the model any bigger. With <span>$d_{model} = 512$</span> and 8 heads, each head works with vectors of width <span>$d_k = 64$</span>, so the eight heads together do about the same amount of work as one head of width 512. At the end, their outputs are joined back into one vector of width 512 and multiplied by one more weight matrix, <span>$W^{O}$</span>:</p>
     <div class="eq-block">
       <span>$$\begin{aligned}\text{MultiHead}(Q,K,V) &= \text{Concat}(\text{head}_1, \dots, \text{head}_h)\,W^{O} \\[4pt] \text{head}_i &= \text{Attention}(QW_i^{Q}, KW_i^{K}, VW_i^{V})\end{aligned}$$</span>
     </div>
-    <p>If <span>$d_{model}=512$</span> and <span>$h=8$</span>, each head works in <span>$d_k = 64$</span> dimensions. The total compute is the same as one 512-dim head, and it buys <strong>8 independent subspaces</strong> to specialize in, where a single head has to average everything together.</p>
+
+    <p>Splitting a vector into heads doesn't take any computation at all, and that's easy to check. Below, we make a matrix for five tokens of width 12, splits it into three heads of width 4, and checks whether the split copied anything. <code>view</code> reads the same memory with a different shape, and <code>transpose</code> swaps two dimensions so that the heads come first.</p>
 
     <details class="tryit" open>
       <summary class="tryit-head">
@@ -562,8 +515,10 @@ print(&quot;attention maps:&quot;, tuple(A.shape))
 back = heads.transpose(0, 1).reshape(T, d_model)   # the Concat step
 assert torch.equal(back, x)
 print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></pre>
-      <div class="tryit-out"><strong><code>same storage: True</code> is the key line.</strong> Splitting <code>(5, 12)</code> into three heads of width 4 is a <code>view</code> and a <code>transpose</code> — the split itself runs no arithmetic at all, and <code>heads[1, 0]</code> prints <code>0.849, 0.692, -0.316, -2.115</code> because those are the very same bytes as <code>x[0, 4:8]</code>. What the reshape buys is <code>(3, 5, 5)</code>: three independent attention maps where one head would have given you one. The <span>$\text{Concat}$</span> in the equation above is that reshape run backwards, and <code>torch.equal(back, x)</code> is <code>True</code> — bit-for-bit, not approximately. Multi-head costs no more, because it spends the same <span>$d_{model}$</span> on more opinions.</div>
+      <div class="tryit-out"><code>same storage</code> prints <code>True</code>, so the three heads share memory with <code>x</code>. Head 1's vector for token 0 is <code>0.849, 0.692, -0.316, -2.115</code>, the same four numbers as <code>x[0, 4:8]</code>. The attention weights have shape <code>(3, 5, 5)</code>, one 5 by 5 grid per head, and joining the heads back together gives exactly <code>x</code>.</div>
     </details>
+
+    <p>So the heads are another way of reading the same numbers: head 1's part of token 0 is numbers 4 to 7 of token 0's row. What the split buys is the shape of the attention weights, three separate 5-by-5 grids, one for each head, where a single head would have produced one. Joining the heads back together, the Concat in the equation, is the same reshape run backwards.</p>
 
     <div class="ref-figure">
       <div class="rf-img-wrap"><img src="https://jalammar.github.io/images/t/transformer_attention_heads_qkv.png" alt="Multiple attention heads each producing their own Q, K, V projections" loading="lazy"></div>
@@ -571,49 +526,116 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
     </div>
 
     <h3>Positional information</h3>
-    <p>Attention itself is <em class="term">permutation-invariant</em>. Shuffle the input tokens and you get the same set of outputs, shuffled the same way, so the layer has no sense of order. Order has to be injected, and there are two standard ways to do it:</p>
+    <p>There's a problem we haven't mentioned yet. Look back at the attention equation and ask what it knows about word order. Scores come from dot products between queries and keys, and nothing in a dot product depends on where a word sits in the sentence. Without a causal mask, if you shuffled the words of our sentence and fed them in, every word would get the same output vector as before, only in the shuffled order. To attention on its own, "the dog bit the man" and "the man bit the dog" contain the same information. This property is called being <em class="term">permutation-invariant</em>.</p>
 
+    <p>So position has to be added in some other way. There are two common approaches:</p>
     <ul>
-      <li><strong>Sinusoidal (original paper).</strong> Fixed position vectors added to the input embeddings, one frequency per dimension.</li>
-      <li><strong>RoPE, Rotary Position Embedding (modern default).</strong> Rotate each query/key vector by an angle proportional to its position.</li>
+      <li><strong>Sinusoidal position encodings</strong>, used in the original paper, add a fixed vector to each token's embedding. That vector is built from sine and cosine waves of different frequencies, one frequency per dimension, so every position gets its own pattern.</li>
+      <li><strong>Rotary position embedding (RoPE)</strong>, the usual choice in recent models, rotates each query and key vector by an angle that depends on its position.</li>
     </ul>
 
-    <p>RoPE's payoff is subtle but large. The dot product between a query at position <span>$m$</span> and a key at position <span>$n$</span> ends up depending on the <em>relative</em> distance <span>$m-n$</span> and not on the absolute positions. This relative-distance property makes RoPE extrapolate more gracefully to longer sequences than fixed sinusoidal or learned absolute embeddings.</p>
+    <p>RoPE has a useful side effect. Once the query at position <span>$m$</span> and the key at position <span>$n$</span> have both been rotated, their dot product depends on the distance between them, <span>$m-n$</span>, and not on where each one sits. A model using RoPE learns about relative distances ("three words back") instead of absolute positions ("position 41"), and that helps it cope with texts longer than the ones it was trained on, better than sinusoidal or learned absolute positions do.</p>
+
+    <p>We now have a working attention layer. A model is made of many of them stacked on top of each other, and stacking needs a little more structure around each one.</p>
+  </section>
+
+  <section id="block">
+    <h2><span class="num">04</span>From a layer to a Transformer</h2>
+    <p>Attention moves information between positions, but on its own it can only combine what's already there, because its output is a weighted average of value vectors. So each attention layer is followed by a small <strong>feed-forward network</strong>: two weight matrices with a nonlinearity between them, applied to each position's vector separately. Attention moves information between words, and the feed-forward network works on what each word now holds.</p>
+
+    <p>Two more pieces make deep stacks trainable. A <strong>residual connection</strong> adds a layer's output to its input, so the layer computes a change to the vector and doesn't replace it. A <strong>normalisation layer</strong> rescales each vector before it goes into attention or the feed-forward network, which keeps the numbers in a steady range as they pass through many layers. Attention, a feed-forward network, two residual connections and two normalisations make up one <strong>Transformer block</strong>, and a model is that block repeated, anywhere from 12 times in a small model to 96 or more in a large one.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">One pre-norm transformer block — residual stream flowing bottom to top
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 320 340" style="max-width:440px;display:block;margin:0 auto" xmlns="http://www.w3.org/2000/svg">
+        <path id="resid" d="M160,326 L160,14" stroke="#24242f" stroke-width="3" fill="none"/>
+        <path d="M160,326 L160,14" stroke="#7c6cf6" stroke-width="2" fill="none" stroke-dasharray="6 8" class="flow-line"/>
+        <circle r="4" fill="#7c6cf6" class="roll" style="offset-path: path('M160,326 L160,14')"></circle>
+
+        <rect x="60" y="290" width="200" height="34" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="160" y="311" text-anchor="middle" font-size="12" fill="#e9e9ef">Input embedding + position</text>
+
+        <rect x="60" y="240" width="200" height="30" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="160" y="259" text-anchor="middle" font-size="11.5" fill="#a3a3b2">LayerNorm</text>
+
+        <rect x="40" y="190" width="240" height="34" rx="7" fill="#14141d" stroke="#f472b6"/>
+        <text x="160" y="211" text-anchor="middle" font-size="12" fill="#f472b6">Multi-Head Self-Attention</text>
+
+        <rect x="60" y="160" width="200" height="20" rx="6" fill="#14141d" stroke="#24242f"/>
+        <text x="160" y="174" text-anchor="middle" font-size="10.5" fill="#a3a3b2">+ residual add</text>
+
+        <rect x="60" y="118" width="200" height="30" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="160" y="137" text-anchor="middle" font-size="11.5" fill="#a3a3b2">LayerNorm</text>
+
+        <rect x="40" y="68" width="240" height="34" rx="7" fill="#14141d" stroke="#818cf8"/>
+        <text x="160" y="89" text-anchor="middle" font-size="12" fill="#818cf8">Feed-Forward (2 linear + GELU)</text>
+
+        <rect x="60" y="38" width="200" height="20" rx="6" fill="#14141d" stroke="#24242f"/>
+        <text x="160" y="52" text-anchor="middle" font-size="10.5" fill="#a3a3b2">+ residual add</text>
+
+        <text x="160" y="15" text-anchor="middle" font-size="11" fill="#4f8cff">↑ to next block / output head</text>
+      </svg>
+      <div class="diagram-caption">Follow the dashed line up the middle. It carries each token's vector from the bottom of the block to the top. Attention and the feed-forward network each read from it, compute something, and add their result back onto it without ever replacing it. That's what lets a stack of 96 blocks train at all: the gradient can flow straight down the line to the earliest layers, for the same reason it does in a ResNet (chapter 04).</div>
+    </div>
+
+    <p>Through all of these blocks, one shape stays the same. If you follow a batch of text through a GPT-style model:</p>
+    <ul>
+      <li>it goes in as token ids, with shape <code>(batch, seq_len)</code>;</li>
+      <li>after the embedding table it's <code>(batch, seq_len, d_model)</code>, one vector per token;</li>
+      <li>every block takes in and puts out that same <code>(batch, seq_len, d_model)</code>;</li>
+      <li>at the end, the <strong>LM head</strong> (language-model head), one last matrix, turns each vector into <code>vocab_size</code> scores, one for every token in the vocabulary, which gives a prediction for the next token at every position.</li>
+    </ul>
+
+    <p>The original paper drew two stacks of blocks side by side, an encoder that reads the input sentence and a decoder that writes the output, which suited the translation task it was built for. Each decoder block has one extra attention layer, called <em class="term">cross-attention</em>, where the queries come from the decoder and the keys and values come from the encoder's output. That's how each word being written can look back at the sentence being translated, a bit like a translator glancing back at the original.</p>
+
+    <div class="ref-figure">
+      <div class="rf-img-wrap"><img src="https://jalammar.github.io/images/t/The_transformer_encoder_decoder_stack.png" alt="The Transformer encoder-decoder stack — N encoder blocks feeding N decoder blocks" loading="lazy"></div>
+      <div class="rf-caption"><span class="rf-label">Reference figure</span>The full encoder-decoder Transformer stack. Source: Jay Alammar, <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener">The Illustrated Transformer</a>.</div>
+    </div>
+
+    <p>Most models since have kept only one of the two stacks: BERT the encoder, and GPT and most chat models the decoder. Which brings us to why this design replaced recurrent networks so quickly.</p>
   </section>
 
   <section id="why">
-    <h2><span class="num">05</span>Why this architecture</h2>
-    <p>The obvious alternatives were "keep the RNN" and "use a CNN." Attention wins on the two axes that matter most for training at scale:</p>
+    <h2><span class="num">05</span>Why it replaced recurrent networks</h2>
+    <p>Before attention there were two common ways to read a sequence. A recurrent network (an RNN or LSTM) reads one token at a time and carries a memory vector forward. A convolutional network (a CNN) looks at a small window of neighbouring tokens in each layer, and stacks layers to see further. Think about our sentence: how many steps does information need to get from "animal" to "it" in each design? In a recurrent network it's one step for every word in between. In a convolutional network it's however many layers it takes for the windows to reach. In attention it's one step, whatever the distance, because every position looks at every other one directly.</p>
 
-    <ul>
-      <li><strong>Parallelism.</strong> How much of the computation can run at the same time.</li>
-      <li><strong>Path length.</strong> How many steps separate any two related tokens.</li>
-    </ul>
+    <p>That number of steps, the path length, is one of two things that decide how well a design trains at scale. The other is how much of the work can run at the same time. Here's how the three designs compare:</p>
     <div class="tbl-wrap">
       <table class="cmp">
         <thead><tr><th></th><th>RNN / LSTM</th><th>CNN (dilated)</th><th>Self-Attention</th></tr></thead>
         <tbody>
-          <tr><td>Parallelizable across sequence</td><td>No — step <span>$t$</span> needs step <span>$t{-}1$</span></td><td>Yes, within a layer</td><td>Yes, fully</td></tr>
+          <tr><td>Parallelizable across sequence</td><td>No, step <span>$t$</span> needs step <span>$t{-}1$</span></td><td>Yes, within a layer</td><td>Yes, fully</td></tr>
           <tr><td>Max path length, token <span>$i$</span> → <span>$j$</span></td><td><span>$O(n)$</span></td><td><span>$O(\log n)$</span></td><td><span>$O(1)$</span></td></tr>
           <tr><td>Compute per layer</td><td><span>$O(n \cdot d^2)$</span></td><td><span>$O(k \cdot n \cdot d^2)$</span></td><td><span>$O(n^2 \cdot d)$</span></td></tr>
-          <tr><td>Handles long-range dependency</td><td>Degrades — vanishing gradient over distance</td><td>Better, needs deep stacks or large dilation</td><td>Direct — one hop, always</td></tr>
+          <tr><td>Handles long-range dependency</td><td>Degrades, gradients vanish over distance</td><td>Better, needs deep stacks or large dilation</td><td>Directly, in one step</td></tr>
         </tbody>
       </table>
     </div>
-    <p>The <span>$O(1)$</span> path length is the main prize. In an RNN, information from token 1 has to survive <span>$n{-}1$</span> sequential updates before it can influence token <span>$n$</span>. This is where vanishing gradients bite (see 07). In self-attention, token 1 and token <span>$n$</span> are always one dot product apart, regardless of distance.</p>
 
-    <div class="callout callout-teach">
-      <span class="callout-label">The trade the Transformer makes</span>
-      <p>Per-layer compute goes from linear in sequence length to <strong>quadratic</strong>. On its face, that is a step backwards.</p>
-      <p>The trade swaps one problem for another: you take on an <em>engineering problem</em> (quadratic cost) to eliminate a <em>hard optimization problem</em> (long-range gradients). Engineering problems are usually easier to throw hardware at, so the trade paid off.</p>
-    </div>
+    <p>The path length is the main win. In a recurrent network, information from token 1 has to survive <span>$n-1$</span> updates to reach token <span>$n$</span>, and during training the gradient has to travel back through all of them, shrinking as it goes. That's the vanishing gradient problem from chapter 07, and it's why recurrent networks struggle to connect words that are far apart. In attention, any two tokens are one dot product apart. Attention also wins on parallelism: a recurrent network can't start on token <span>$t$</span> until it has finished token <span>$t-1$</span>, but attention works on every position at once, which suits a GPU well.</p>
+
+    <p>Now look at the third row of the table, because that's the price. Every token is scored against every other token, so the work in each layer grows with the square of the sequence length, where a recurrent network's grows in proportion to the length. In effect the Transformer swaps a hard training problem, getting gradients across long distances, for an engineering problem, doing a lot of arithmetic. Engineering problems are easier to solve with more hardware, and so far the trade has paid off.</p>
+
+    <p>Historically it happened in two steps. In 2014, sequence-to-sequence models for translation squeezed the whole input sentence into one fixed-size vector, and long sentences came out badly. In 2015, Bahdanau and colleagues added attention to a recurrent translation model, so the decoder could look back at every word of the input. In 2017, Vaswani and colleagues, in "Attention Is All You Need", removed the recurrence entirely and kept only attention plus position information. BERT and GPT followed in 2018, ViT showed in 2020 that the same block works on patches of an image, and by 2023 the Transformer was the default design for text, vision and audio, and increasingly for robotics.</p>
+
+    <p>That quadratic cost didn't go away, though. It's where most of the engineering around Transformers goes, and it's the subject of the last section.</p>
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">06</span>Complexity, failure modes, and what breaks</h2>
-    <p>Self-attention costs <span>$O(n^2 \cdot d)$</span> time and, naively, <span>$O(n^2)$</span> memory to materialize the full attention matrix, where <span>$n$</span> is sequence length. <strong>Double the context window and compute roughly quadruples.</strong> That single fact drives a huge amount of LLM systems engineering. It is why 23 (Efficient AI &amp; Systems) exists as its own section.</p>
+    <h2><span class="num">06</span>What it costs</h2>
 
-    <h3>What shows up in production</h3>
+    <h3>The grid grows with the square of the length</h3>
+    <p>For a sequence of <span>$n$</span> tokens, attention builds the <span>$n \times n$</span> grid of scores we saw in section 2, in every head of every layer. Computing it takes time proportional to <span>$n^2 \cdot d$</span>, and storing it the straightforward way takes memory proportional to <span>$n^2$</span>. Double the length of the text and that work roughly quadruples. A great deal of the engineering in large language models comes back to this one fact, enough that chapter 23 (Efficient AI &amp; Systems) is about it.</p>
+
+    <p>Probably the best-known fix, <strong>FlashAttention</strong>, doesn't reduce the arithmetic at all, since the same <span>$n^2$</span> scores still get computed. What it avoids is writing the full grid out to the GPU's main memory. It works through the grid in small tiles that fit in the GPU's fast on-chip memory and computes the softmax tile by tile. On modern GPUs, moving data to and from main memory is usually slower than the arithmetic, so the same maths finishes much sooner.</p>
+
+    <h3>The KV cache</h3>
+    <p>Generating text adds a second cost. A model writes its reply one token at a time, and every new token has to attend to every token before it, so it needs their keys and values. Recomputing all of them for every new token would probably mean redoing nearly the same work again and again, so instead they're computed once and kept. This store is called the <strong>KV cache</strong>, and it grows with every token in the conversation.</p>
+
+    <p>For a model with 8 billion parameters, the cache takes about 128 KB per token, and at long context lengths that adds up to more memory than the model's weights:</p>
 
     <div class="diagram">
       <div class="diagram-title">KV cache growth — linear in tokens, and that is quite bad enough
@@ -654,31 +676,37 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
         <text x="24" y="268" font-size="9.5" class="dim">8B model,</text>
         <text x="24" y="280" font-size="9.5" class="dim">GQA, FP16</text>
       </svg>
-      <div class="diagram-caption">Worked for an 8B model with grouped-query attention: 32 layers × 8 KV heads × 128 head-dim × 2 (for K and V) × 2 bytes comes to <strong>128 KB per token</strong>. Multiply by context length and the last row is 16 GB — more than three times the 4.9 GB the quantised weights occupy. Note what this diagram is <em>not</em> showing: attention compute is quadratic in sequence length, but the cache is strictly linear. Linear was already sufficient to make context length, not model size, the thing that decides whether a long conversation survives.</div>
+      <div class="diagram-caption">For an 8B model using grouped-query attention, each token needs 32 layers × 8 key-value heads × 128 numbers per head × 2 (one for K, one for V) × 2 bytes, which comes to <strong>128 KB</strong>. At 128k tokens that's 16 GB, more than three times the 4.9 GB that the model's quantised weights take up. The cache grows in proportion to the number of tokens, not with its square, and that alone is enough to make the length of the conversation, more than the size of the model, decide what fits on the GPU.</div>
     </div>
 
-    <ul>
-      <li><strong>KV cache growth.</strong> During autoregressive generation you don't recompute attention from scratch each step. You cache every past token's K and V vectors. Cache size grows linearly with tokens generated × layers × heads × head_dim. For long conversations this becomes the dominant memory cost on the serving GPU, often larger than the model weights themselves.</li>
-      <li><strong>FlashAttention</strong> doesn't reduce the <span>$O(n^2)$</span> FLOPs. It restructures the computation to avoid ever writing the full <span>$n \times n$</span> attention matrix to slow GPU memory, computing softmax in fused tiles instead. Same math, dramatically less memory traffic. Memory traffic is usually the real bottleneck on modern GPUs.</li>
-      <li><strong>Grouped-query / multi-query attention</strong> shrinks the KV cache by having multiple query heads share one set of K/V heads. A deliberate quality-for-memory tradeoff, used in almost every modern serving-optimized LLM.</li>
-      <li><strong>Attention sinks and long-context dilution.</strong> Models reliably show a strong bias toward attending heavily to the first few tokens, regardless of relevance. Needle-in-a-haystack evaluations show retrieval accuracy dropping for facts placed in the middle of very long contexts. A model that technically <em>can</em> attend anywhere does not mean it attends <em>usefully</em> everywhere.</li>
-    </ul>
+    <p>That example already includes one way of shrinking the cache. In <strong>grouped-query attention</strong> (GQA), several query heads share one set of key and value heads, so there are fewer keys and values to store; the model above keeps 8 key-value heads per layer. <strong>Multi-query attention</strong> takes the same idea to the limit with a single shared key-value head. Both give up a little quality to save a lot of memory, and almost every model built for serving makes that trade.</p>
 
-    <div class="callout callout-warn">
-      <span class="callout-label">Common misconception</span>
-      <p>"High attention weight on token X means the model is using X to make its decision, so attention weights explain the model's reasoning." This is contested and often false. Attention weights show where information is <em>gathered from</em> and say little about how it is <em>used</em> downstream by the feed-forward layers and later blocks.</p>
-    <p>Treat attention maps as a debugging hint and do not present them as a certified explanation. If asked about interpretability in an interview, this distinction is the answer they're checking for.</p>
-    </div>
+    <h3>Where attention doesn't do what you'd expect</h3>
+    <p>Being able to attend anywhere doesn't mean a model attends usefully everywhere. Trained models reliably put a lot of weight on the first few tokens of the text, whether or not they're relevant, and these tokens are called <strong>attention sinks</strong>. In needle-in-a-haystack tests, where one fact is hidden somewhere in a very long text and the model is asked about it, accuracy drops for facts placed in the middle of the context.</p>
 
-    <div class="callout callout-status">
-      <span class="callout-label">2026 status</span>
-      <p>Quadratic full attention is still the standard for the vast majority of production LLMs. It was made tractable through engineering (FlashAttention-class kernels, paged/GQA KV caches, sliding-window + occasional global-attention hybrids) and has not been replaced outright.</p>
-    <p>Linear-attention and state-space alternatives (Mamba-style) remain an active, promising research direction for very long context, but they have not displaced attention as the default at frontier scale. Treat "attention is dead, SSMs won" as an overclaim if you see it stated flatly.</p>
-    </div>
+    <p>It's also tempting to read attention weights as an explanation. If "it" puts most of its weight on "animal", surely that's why the model decided "it" means the animal? That claim is contested, and it's often wrong. Weights show where information was gathered from, but not how the feed-forward networks and later blocks used it afterwards. An attention map is a useful hint when you're debugging, not proof of how the model reasoned, and if interpretability comes up in an interview, this distinction is usually what the question is checking.</p>
+
+    <p>As of 2026, full quadratic attention is still the standard in the great majority of production language models. Engineering has made it affordable, through FlashAttention-style kernels, paged and grouped-query KV caches, and hybrids that mix sliding-window attention with occasional full attention, and nothing has replaced it outright. Linear-attention and state-space models (Mamba and its relatives) are a promising research direction for very long texts, but they haven't displaced attention in the largest models, so a flat claim that attention is finished is likely an overstatement.</p>
   </section>
 
+  <section id="summary">
+    <h2><span class="num">07</span>Summary</h2>
+    <ol>
+      <li><strong>Attention is a lookup that blends.</strong> A query is scored against every key with a dot product, a softmax turns the scores into weights, and the output is the weighted average of the values.</li>
+      <li><strong>The blend is what makes it learnable.</strong> A weighted average changes smoothly as the scores change, so training can adjust where a word looks. Picking a single winner wouldn't give it a gradient to follow.</li>
+      <li><strong>Each token gets a query, a key and a value</strong>, made by three learned matrices, because searching, being found and passing information on are different jobs.</li>
+      <li><strong>For a whole sentence it's one equation,</strong> <span>$\text{softmax}(QK^{\top}/\sqrt{d_k})V$</span>, and it gives back one vector per token, the same number that went in.</li>
+      <li><strong>A causal mask stops tokens from looking ahead</strong> by setting future scores to minus infinity. Decoders like GPT use it, and encoders like BERT don't.</li>
+      <li><strong>Dividing by √d_k keeps the softmax trainable.</strong> Without it, scores spread out as the vectors get wider and the softmax puts all its weight on one key.</li>
+      <li><strong>Multiple heads give several kinds of relevance</strong> for the same cost, by splitting each vector into narrower pieces.</li>
+      <li><strong>Attention doesn't know word order</strong> until positions are added. RoPE adds them so that scores depend on the distance between tokens.</li>
+      <li><strong>A Transformer is a stack of blocks,</strong> each with attention, a feed-forward network, residual connections and normalisation.</li>
+      <li><strong>Any two tokens are one step apart.</strong> That's why attention replaced recurrent networks, and the price is work that grows with the square of the length.</li>
+      <li><strong>When generating, the KV cache is the main memory cost,</strong> and at long context lengths it can be larger than the model's weights.</li>
+    </ol>
+  </section>
   <section id="build">
-    <h2><span class="num">07</span>Build this</h2>
+    <h2><span class="num">08</span>Build this</h2>
     <p class="lede">You can read the attention equation twenty times and still not believe it works. Building the smallest thing that uses it fixes that in an afternoon.</p>
 
     <div class="project">
@@ -696,7 +724,7 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
         <li>Now break it deliberately by removing the position embeddings and retraining, then restoring them and removing the <span>$\sqrt{d_k}$</span> scaling, using a large <span>$d_k$</span> like 256.</li>
       </ol>
       <div class="proj-done"><strong>You'll know it worked when</strong> the heatmap shows a clean bright diagonal: position <span>$i$</span> attending almost entirely to position <span>$i$</span>. That diagonal is the model discovering the copy rule on its own. Nobody coded it.</div>
-      <div class="proj-stretch"><strong>What the two breakages teach.</strong> Without positions, the diagonal never forms: attention is permutation-invariant, so the model literally cannot tell position 3 from position 7. Without the <span>$\sqrt{d_k}$</span> scaling at large <span>$d_k$</span>, the heatmap goes hard one-hot early and training stalls, which is the vanishing-gradient argument from section 04 showing up as a picture instead of an equation.</div>
+      <div class="proj-stretch"><strong>What the two breakages teach.</strong> Without positions, the diagonal never forms: attention is permutation-invariant, so the model literally cannot tell position 3 from position 7. Without the <span>$\sqrt{d_k}$</span> scaling at large <span>$d_k$</span>, the heatmap goes hard one-hot early and training stalls, which is the vanishing-gradient argument from section 3 showing up as a picture instead of an equation.</div>
     </div>
 
     <h3>Where this runs in production</h3>
@@ -706,7 +734,7 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
   </section>
 
   <section id="interview">
-    <h2><span class="num">08</span>Interview questions</h2>
+    <h2><span class="num">09</span>Interview questions</h2>
 
     <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Walk me through scaled dot-product attention, step by step.</summary>
       <div class="qa-body"><p>Project the input into Q, K, V via three learned linear layers. Compute <span>$QK^\top$</span> to get raw similarity scores between every pair of tokens. Divide by <span>$\sqrt{d_k}$</span> to keep the variance stable. Apply softmax row-wise so each token's scores become a probability distribution. Multiply that distribution by V to get a weighted blend of every token's value — that blend is the output for this token.</p></div>
@@ -732,7 +760,7 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
   </section>
 
   <section id="resources">
-    <h2><span class="num">09</span>Go deeper</h2>
+    <h2><span class="num">10</span>Go deeper</h2>
     <div class="resource-grid">
       <a class="resource-card" href="https://arxiv.org/abs/1706.03762" target="_blank" rel="noopener">
         <div class="r-icon">📄</div>
@@ -772,7 +800,7 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
   </section>
 
   <section id="related">
-    <h2><span class="num">10</span>Related pages</h2>
+    <h2><span class="num">11</span>Related pages</h2>
     <div class="related-grid">
       <a class="related-card" href="./07-sequence-modeling-pre-transformer.html"><div class="rc-sec" style="color:var(--c-sequence)">07 · Prerequisite</div><div class="rc-title">Sequence Modeling Pre-Transformer</div><div class="rc-hook">The bottleneck attention was built to remove.</div></a>
       <a class="related-card" href="./10-llm-architecture-training.html"><div class="rc-sec" style="color:var(--c-llm)">10 · What changed next</div><div class="rc-title">LLM Architecture &amp; Training</div><div class="rc-hook">Stack decoder blocks, scale up, train on next-token prediction.</div></a>
@@ -847,7 +875,7 @@ print(&quot;concat recovers x bit-for-bit:&quot;, torch.equal(back, x))</code></
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=199a2f78"></script>
+<script defer src="../assets/js/search-data.js?v=c663b9b2"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>

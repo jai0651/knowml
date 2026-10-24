@@ -1042,7 +1042,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "One loop, five toolkits",
+    "title": "The loop on three orders",
     "parentTitle": "01 · Math & Stats Foundations",
     "section": "Foundations",
     "url": "topics/01-math-foundations.html#loop",
@@ -1052,27 +1052,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "1.1 One training step",
-    "parentTitle": "01 · Math & Stats Foundations",
-    "section": "Foundations",
-    "url": "topics/01-math-foundations.html#1-1-one-training-step",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-math)"
-  },
-  {
-    "kind": "section",
-    "title": "1.2 Where these ideas came from",
-    "parentTitle": "01 · Math & Stats Foundations",
-    "section": "Foundations",
-    "url": "topics/01-math-foundations.html#1-2-where-these-ideas-came-from",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-math)"
-  },
-  {
-    "kind": "section",
-    "title": "Linear algebra: holding the data and the model",
+    "title": "Linear algebra: all the predictions at once",
     "parentTitle": "01 · Math & Stats Foundations",
     "section": "Foundations",
     "url": "topics/01-math-foundations.html#linear-algebra",
@@ -1112,7 +1092,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Calculus: which way is downhill",
+    "title": "Calculus: which way to move",
     "parentTitle": "01 · Math & Stats Foundations",
     "section": "Foundations",
     "url": "topics/01-math-foundations.html#calculus",
@@ -1252,7 +1232,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Information theory: pricing surprise",
+    "title": "Information theory: entropy, cross-entropy and KL",
     "parentTitle": "01 · Math & Stats Foundations",
     "section": "Foundations",
     "url": "topics/01-math-foundations.html#information",
@@ -1312,7 +1292,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Optimization: taking good steps",
+    "title": "Optimization: how far to move",
     "parentTitle": "01 · Math & Stats Foundations",
     "section": "Foundations",
     "url": "topics/01-math-foundations.html#optimization",
@@ -1366,6 +1346,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "01 · Math & Stats Foundations",
     "section": "Foundations",
     "url": "topics/01-math-foundations.html#6-5-local-minima-and-saddle-points",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-math)"
+  },
+  {
+    "kind": "section",
+    "title": "6.6 The whole loop, named",
+    "parentTitle": "01 · Math & Stats Foundations",
+    "section": "Foundations",
+    "url": "topics/01-math-foundations.html#6-6-the-whole-loop-named",
     "tags": [],
     "summary": "",
     "color": "var(--c-math)"
@@ -1462,7 +1452,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Fitting a line to five students",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
     "url": "topics/02-classical-ml.html#intuition",
@@ -1472,80 +1462,110 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "From a number to a class",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#timeline",
+    "url": "topics/02-classical-ml.html#classification",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
   },
   {
     "kind": "section",
-    "title": "The model zoo: how each one decides",
+    "title": "A hard-threshold cousin: the perceptron",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#architecture",
+    "url": "topics/02-classical-ml.html#a-hard-threshold-cousin-the-perceptron",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
   },
   {
     "kind": "section",
-    "title": "Regularization, geometrically",
+    "title": "Polynomial features and regularization",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#regularization-geometrically",
+    "url": "topics/02-classical-ml.html#regularization",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
   },
   {
     "kind": "section",
-    "title": "Polynomial regression and feature engineering",
+    "title": "Giving the line curves",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#polynomial-regression-and-feature-engineering",
+    "url": "topics/02-classical-ml.html#giving-the-line-curves",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
   },
   {
     "kind": "section",
-    "title": "Decision trees: splitting criteria and pruning",
+    "title": "Penalizing large coefficients",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#decision-trees-splitting-criteria-and-pruning",
+    "url": "topics/02-classical-ml.html#penalizing-large-coefficients",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
   },
   {
     "kind": "section",
-    "title": "Bagging and random forests",
+    "title": "Decision trees",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#bagging-and-random-forests",
+    "url": "topics/02-classical-ml.html#trees",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
   },
   {
     "kind": "section",
-    "title": "Boosting: sequential error correction",
+    "title": "Averaging many trees: bagging and random forests",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#boosting-sequential-error-correction",
+    "url": "topics/02-classical-ml.html#bagging",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
   },
   {
     "kind": "section",
-    "title": "XGBoost, LightGBM, CatBoost — and why gradient-boosted trees still win on tabular data",
+    "title": "Boosting: fixing what's left over",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#xgboost-lightgbm-catboost-and-why-gradient-boosted-trees-still-win-on-tabular-data",
+    "url": "topics/02-classical-ml.html#boosting",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-classical)"
+  },
+  {
+    "kind": "section",
+    "title": "Why the two are different moves",
+    "parentTitle": "02 · Classical Supervised ML",
+    "section": "Foundations",
+    "url": "topics/02-classical-ml.html#why-the-two-are-different-moves",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-classical)"
+  },
+  {
+    "kind": "section",
+    "title": "XGBoost, LightGBM and CatBoost",
+    "parentTitle": "02 · Classical Supervised ML",
+    "section": "Foundations",
+    "url": "topics/02-classical-ml.html#xgboost",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-classical)"
+  },
+  {
+    "kind": "section",
+    "title": "Margins, neighbours and probabilities",
+    "parentTitle": "02 · Classical Supervised ML",
+    "section": "Foundations",
+    "url": "topics/02-classical-ml.html#other",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
@@ -1562,10 +1582,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "k-NN and the curse of dimensionality",
+    "title": "k-nearest neighbors and the curse of dimensionality",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#k-nn-and-the-curse-of-dimensionality",
+    "url": "topics/02-classical-ml.html#k-nearest-neighbors-and-the-curse-of-dimensionality",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
@@ -1582,87 +1602,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The perceptron — the bridge to everything in 04",
-    "parentTitle": "02 · Classical Supervised ML",
-    "section": "Foundations",
-    "url": "topics/02-classical-ml.html#the-perceptron-the-bridge-to-everything-in-04",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-classical)"
-  },
-  {
-    "kind": "section",
-    "title": "The equations",
-    "parentTitle": "02 · Classical Supervised ML",
-    "section": "Foundations",
-    "url": "topics/02-classical-ml.html#math",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-classical)"
-  },
-  {
-    "kind": "section",
-    "title": "Least squares: the closed-form solution",
-    "parentTitle": "02 · Classical Supervised ML",
-    "section": "Foundations",
-    "url": "topics/02-classical-ml.html#least-squares-the-closed-form-solution",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-classical)"
-  },
-  {
-    "kind": "section",
-    "title": "Logistic regression: the sigmoid link",
-    "parentTitle": "02 · Classical Supervised ML",
-    "section": "Foundations",
-    "url": "topics/02-classical-ml.html#logistic-regression-the-sigmoid-link",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-classical)"
-  },
-  {
-    "kind": "section",
-    "title": "L1 vs. L2 regularization",
-    "parentTitle": "02 · Classical Supervised ML",
-    "section": "Foundations",
-    "url": "topics/02-classical-ml.html#l1-vs-l2-regularization",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-classical)"
-  },
-  {
-    "kind": "section",
-    "title": "Why this shape",
-    "parentTitle": "02 · Classical Supervised ML",
-    "section": "Foundations",
-    "url": "topics/02-classical-ml.html#why",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-classical)"
-  },
-  {
-    "kind": "section",
-    "title": "Why lasso gives you sparsity and ridge doesn't",
-    "parentTitle": "02 · Classical Supervised ML",
-    "section": "Foundations",
-    "url": "topics/02-classical-ml.html#why-lasso-gives-you-sparsity-and-ridge-doesn-t",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-classical)"
-  },
-  {
-    "kind": "section",
-    "title": "Why boosting and bagging are fundamentally different moves",
-    "parentTitle": "02 · Classical Supervised ML",
-    "section": "Foundations",
-    "url": "topics/02-classical-ml.html#why-boosting-and-bagging-are-fundamentally-different-moves",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-classical)"
-  },
-  {
-    "kind": "section",
-    "title": "Tradeoffs, failure modes, and choosing a metric",
+    "title": "Leakage, metrics and choosing a model",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
     "url": "topics/02-classical-ml.html#tradeoffs",
@@ -1672,10 +1612,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Failure modes",
+    "title": "Data leakage",
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
-    "url": "topics/02-classical-ml.html#failure-modes",
+    "url": "topics/02-classical-ml.html#data-leakage",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
@@ -1686,6 +1626,26 @@ window.SEARCH_INDEX = [
     "parentTitle": "02 · Classical Supervised ML",
     "section": "Foundations",
     "url": "topics/02-classical-ml.html#choosing-a-metric",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-classical)"
+  },
+  {
+    "kind": "section",
+    "title": "Matching the model to the data",
+    "parentTitle": "02 · Classical Supervised ML",
+    "section": "Foundations",
+    "url": "topics/02-classical-ml.html#matching-the-model-to-the-data",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-classical)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "02 · Classical Supervised ML",
+    "section": "Foundations",
+    "url": "topics/02-classical-ml.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-classical)"
@@ -1892,7 +1852,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "A tiny network that computes XOR",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
     "url": "topics/04-neural-network-fundamentals.html#intuition",
@@ -1902,17 +1862,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
-    "parentTitle": "04 · Neural Network Fundamentals",
-    "section": "Neural Nets & Vision",
-    "url": "topics/04-neural-network-fundamentals.html#timeline",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-nn)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: forward pass, then backward pass through the same graph",
+    "title": "Blame: how the loss reaches every weight",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
     "url": "topics/04-neural-network-fundamentals.html#architecture",
@@ -1922,7 +1872,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations",
+    "title": "Backpropagation in equations",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
     "url": "topics/04-neural-network-fundamentals.html#math",
@@ -1932,10 +1882,30 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Backprop through a 2-layer MLP",
+    "title": "How deep to go, and what it costs",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
-    "url": "topics/04-neural-network-fundamentals.html#backprop-through-a-2-layer-mlp",
+    "url": "topics/04-neural-network-fundamentals.html#scale",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-nn)"
+  },
+  {
+    "kind": "section",
+    "title": "Activations: keeping the gradient alive",
+    "parentTitle": "04 · Neural Network Fundamentals",
+    "section": "Neural Nets & Vision",
+    "url": "topics/04-neural-network-fundamentals.html#why",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-nn)"
+  },
+  {
+    "kind": "section",
+    "title": "Residual connections",
+    "parentTitle": "04 · Neural Network Fundamentals",
+    "section": "Neural Nets & Vision",
+    "url": "topics/04-neural-network-fundamentals.html#residual",
     "tags": [],
     "summary": "",
     "color": "var(--c-nn)"
@@ -1952,17 +1922,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why these specific choices",
-    "parentTitle": "04 · Neural Network Fundamentals",
-    "section": "Neural Nets & Vision",
-    "url": "topics/04-neural-network-fundamentals.html#why",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-nn)"
-  },
-  {
-    "kind": "section",
-    "title": "Normalization and regularization: what breaks",
+    "title": "When training goes wrong",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
     "url": "topics/04-neural-network-fundamentals.html#tradeoffs",
@@ -1972,20 +1932,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Failure modes that show up",
+    "title": "Regularization: dropout, early stopping, weight decay",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
-    "url": "topics/04-neural-network-fundamentals.html#failure-modes-that-show-up",
+    "url": "topics/04-neural-network-fundamentals.html#regularization",
     "tags": [],
     "summary": "",
     "color": "var(--c-nn)"
   },
   {
     "kind": "section",
-    "title": "Regularization: dropout, early stopping, weight decay",
+    "title": "Summary",
     "parentTitle": "04 · Neural Network Fundamentals",
     "section": "Neural Nets & Vision",
-    "url": "topics/04-neural-network-fundamentals.html#regularization-dropout-early-stopping-weight-decay",
+    "url": "topics/04-neural-network-fundamentals.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-nn)"
@@ -2402,7 +2362,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Reading with a memory of fixed size",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/07-sequence-modeling-pre-transformer.html#intuition",
@@ -2412,17 +2372,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
-    "parentTitle": "07 · Sequence Modeling Pre-Transformer",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/07-sequence-modeling-pre-transformer.html#timeline",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-sequence)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how the data flows",
+    "title": "The same cell at every step",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/07-sequence-modeling-pre-transformer.html#architecture",
@@ -2432,7 +2382,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations",
+    "title": "Why the learning signal fades",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/07-sequence-modeling-pre-transformer.html#math",
@@ -2442,20 +2392,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why gradients vanish: the chain rule over time",
+    "title": "Gates: memory that isn't rewritten at every step",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/07-sequence-modeling-pre-transformer.html#why-gradients-vanish-the-chain-rule-over-time",
+    "url": "topics/07-sequence-modeling-pre-transformer.html#gates",
     "tags": [],
     "summary": "",
     "color": "var(--c-sequence)"
   },
   {
     "kind": "section",
-    "title": "LSTM: gates and the cell state",
+    "title": "LSTM: the cell state and three gates",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/07-sequence-modeling-pre-transformer.html#lstm-gates-and-the-cell-state",
+    "url": "topics/07-sequence-modeling-pre-transformer.html#lstm-the-cell-state-and-three-gates",
     "tags": [],
     "summary": "",
     "color": "var(--c-sequence)"
@@ -2482,10 +2432,60 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "RNN vs. LSTM vs. GRU vs. Transformer",
+    "title": "Encoders, decoders and one vector",
+    "parentTitle": "07 · Sequence Modeling Pre-Transformer",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/07-sequence-modeling-pre-transformer.html#bottleneck",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sequence)"
+  },
+  {
+    "kind": "section",
+    "title": "Translating with two networks",
+    "parentTitle": "07 · Sequence Modeling Pre-Transformer",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/07-sequence-modeling-pre-transformer.html#translating-with-two-networks",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sequence)"
+  },
+  {
+    "kind": "section",
+    "title": "Reading in both directions",
+    "parentTitle": "07 · Sequence Modeling Pre-Transformer",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/07-sequence-modeling-pre-transformer.html#reading-in-both-directions",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sequence)"
+  },
+  {
+    "kind": "section",
+    "title": "The second bottleneck",
+    "parentTitle": "07 · Sequence Modeling Pre-Transformer",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/07-sequence-modeling-pre-transformer.html#the-second-bottleneck",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sequence)"
+  },
+  {
+    "kind": "section",
+    "title": "RNN, LSTM, GRU and Transformer side by side",
     "parentTitle": "07 · Sequence Modeling Pre-Transformer",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/07-sequence-modeling-pre-transformer.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sequence)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "07 · Sequence Modeling Pre-Transformer",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/07-sequence-modeling-pre-transformer.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-sequence)"
@@ -2532,7 +2532,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "How one word looks at the others",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#intuition",
@@ -2542,17 +2542,37 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "A lookup that doesn't need an exact match",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/08-attention-transformers.html#timeline",
+    "url": "topics/08-attention-transformers.html#a-lookup-that-doesn-t-need-an-exact-match",
     "tags": [],
     "summary": "",
     "color": "var(--c-attention)"
   },
   {
     "kind": "section",
-    "title": "Architecture: how the data flows",
+    "title": "Turning scores into weights",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#turning-scores-into-weights",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "Trying it on three words",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#trying-it-on-three-words",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "Every word at once",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#architecture",
@@ -2562,10 +2582,50 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The equations",
+    "title": "Where queries, keys and values come from",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#where-queries-keys-and-values-come-from",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "Writing it as matrices",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#writing-it-as-matrices",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "Not looking ahead",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#not-looking-ahead",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "Making it work at real sizes",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#math",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "Scores that grow with the width",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#scores-that-grow-with-the-width",
     "tags": [],
     "summary": "",
     "color": "var(--c-attention)"
@@ -2592,7 +2652,17 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this architecture",
+    "title": "From a layer to a Transformer",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#block",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "Why it replaced recurrent networks",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#why",
@@ -2602,7 +2672,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what breaks",
+    "title": "What it costs",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/08-attention-transformers.html#tradeoffs",
@@ -2612,10 +2682,40 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What shows up in production",
+    "title": "The grid grows with the square of the length",
     "parentTitle": "08 · Attention & Transformers",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/08-attention-transformers.html#what-shows-up-in-production",
+    "url": "topics/08-attention-transformers.html#the-grid-grows-with-the-square-of-the-length",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "The KV cache",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#the-kv-cache",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "Where attention doesn't do what you'd expect",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#where-attention-doesn-t-do-what-you-d-expect",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-attention)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "08 · Attention & Transformers",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/08-attention-transformers.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-attention)"
@@ -2642,7 +2742,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Counting words",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/09-nlp-evolution.html#intuition",
@@ -2652,17 +2752,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
-    "parentTitle": "09 · NLP Evolution",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#timeline",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-nlp)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how each generation works",
+    "title": "Learning a vector for each word",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/09-nlp-evolution.html#architecture",
@@ -2672,107 +2762,57 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Bag-of-words and TF-IDF: counting, dressed up",
+    "title": "Word2Vec: predicting your way to a vector",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#bag-of-words-and-tf-idf-counting-dressed-up",
+    "url": "topics/09-nlp-evolution.html#word2vec-predicting-your-way-to-a-vector",
     "tags": [],
     "summary": "",
     "color": "var(--c-nlp)"
   },
   {
     "kind": "section",
-    "title": "Word2Vec: predicting your way to meaning",
+    "title": "GloVe: factorize the counts directly",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#word2vec-predicting-your-way-to-meaning",
+    "url": "topics/09-nlp-evolution.html#glove-factorize-the-counts-directly",
     "tags": [],
     "summary": "",
     "color": "var(--c-nlp)"
   },
   {
     "kind": "section",
-    "title": "GloVe: skip the prediction, factorize the counts directly",
+    "title": "Words the model has never seen",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#glove-skip-the-prediction-factorize-the-counts-directly",
+    "url": "topics/09-nlp-evolution.html#tokenization",
     "tags": [],
     "summary": "",
     "color": "var(--c-nlp)"
   },
   {
     "kind": "section",
-    "title": "Subword tokenization: the fix for words you've never seen",
+    "title": "One word, a different vector in each sentence",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#subword-tokenization-the-fix-for-words-you-ve-never-seen",
+    "url": "topics/09-nlp-evolution.html#contextual",
     "tags": [],
     "summary": "",
     "color": "var(--c-nlp)"
   },
   {
     "kind": "section",
-    "title": "ELMo: the same word, a different vector every time",
+    "title": "Pretraining the whole network",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#elmo-the-same-word-a-different-vector-every-time",
+    "url": "topics/09-nlp-evolution.html#pretraining",
     "tags": [],
     "summary": "",
     "color": "var(--c-nlp)"
   },
   {
     "kind": "section",
-    "title": "BERT, GPT, and T5: pretrain the whole network, then reuse it",
-    "parentTitle": "09 · NLP Evolution",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#bert-gpt-and-t5-pretrain-the-whole-network-then-reuse-it",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-nlp)"
-  },
-  {
-    "kind": "section",
-    "title": "The equations",
-    "parentTitle": "09 · NLP Evolution",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#math",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-nlp)"
-  },
-  {
-    "kind": "section",
-    "title": "TF-IDF",
-    "parentTitle": "09 · NLP Evolution",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#tf-idf",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-nlp)"
-  },
-  {
-    "kind": "section",
-    "title": "Skip-gram objective",
-    "parentTitle": "09 · NLP Evolution",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#skip-gram-objective",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-nlp)"
-  },
-  {
-    "kind": "section",
-    "title": "The BPE merge rule",
-    "parentTitle": "09 · NLP Evolution",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/09-nlp-evolution.html#the-bpe-merge-rule",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-nlp)"
-  },
-  {
-    "kind": "section",
-    "title": "Why this design",
+    "title": "What changed at each step",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/09-nlp-evolution.html#why",
@@ -2782,10 +2822,50 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what breaks",
+    "title": "What still goes wrong",
     "parentTitle": "09 · NLP Evolution",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/09-nlp-evolution.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-nlp)"
+  },
+  {
+    "kind": "section",
+    "title": "Vectors inherit the biases of their corpus",
+    "parentTitle": "09 · NLP Evolution",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/09-nlp-evolution.html#vectors-inherit-the-biases-of-their-corpus",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-nlp)"
+  },
+  {
+    "kind": "section",
+    "title": "Subword tokenization has sharp edges",
+    "parentTitle": "09 · NLP Evolution",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/09-nlp-evolution.html#subword-tokenization-has-sharp-edges",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-nlp)"
+  },
+  {
+    "kind": "section",
+    "title": "Where things stand in 2026",
+    "parentTitle": "09 · NLP Evolution",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/09-nlp-evolution.html#where-things-stand-in-2026",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-nlp)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "09 · NLP Evolution",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/09-nlp-evolution.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-nlp)"
@@ -2812,7 +2892,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Predicting the next token",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/10-llm-architecture-training.html#intuition",
@@ -2822,17 +2902,17 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "What the model reads",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#timeline",
+    "url": "topics/10-llm-architecture-training.html#tokens",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"
   },
   {
     "kind": "section",
-    "title": "Architecture: from decoder-only block to training pipeline",
+    "title": "The decoder-only stack",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/10-llm-architecture-training.html#architecture",
@@ -2842,117 +2922,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The one structural change from 08: causal masking",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#the-one-structural-change-from-08-causal-masking",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "Tokenization: why vocabulary size is a real design tradeoff",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#tokenization-why-vocabulary-size-is-a-real-design-tradeoff",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "Embedding table, output projection, and weight tying",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#embedding-table-output-projection-and-weight-tying",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "The training pipeline, end to end",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#the-training-pipeline-end-to-end",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "Scaling laws: Chinchilla and the size/data tradeoff",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#scaling-laws-chinchilla-and-the-size-data-tradeoff",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "Supervised fine-tuning (SFT)",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#supervised-fine-tuning-sft",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "Preference optimization: RLHF vs DPO",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#preference-optimization-rlhf-vs-dpo",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "Quantization and LoRA/QLoRA: the two big levers for cheap adaptation and deployment",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#quantization-and-lora-qlora-the-two-big-levers-for-cheap-adaptation-and-deployment",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "Mixture-of-experts: decoupling parameter count from compute-per-token",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#mixture-of-experts-decoupling-parameter-count-from-compute-per-token",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "Serving basics",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#serving-basics",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "The long tail, briefly",
-    "parentTitle": "10 · LLM Architecture & Training",
-    "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#the-long-tail-briefly",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-llm)"
-  },
-  {
-    "kind": "section",
-    "title": "The equations",
+    "title": "The training objective",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/10-llm-architecture-training.html#math",
@@ -2962,57 +2932,97 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Next-token prediction loss",
+    "title": "How much model, how much data",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#next-token-prediction-loss",
+    "url": "topics/10-llm-architecture-training.html#scaling",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"
   },
   {
     "kind": "section",
-    "title": "DPO loss",
+    "title": "From completer to assistant: SFT",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#dpo-loss",
+    "url": "topics/10-llm-architecture-training.html#sft",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"
   },
   {
     "kind": "section",
-    "title": "Why these choices",
+    "title": "Learning what people prefer: RLHF and DPO",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#why",
+    "url": "topics/10-llm-architecture-training.html#preference",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"
   },
   {
     "kind": "section",
-    "title": "Why decoder-only won over encoder-decoder for general-purpose LLMs",
+    "title": "Making it cheaper to adapt and run",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#why-decoder-only-won-over-encoder-decoder-for-general-purpose-llms",
+    "url": "topics/10-llm-architecture-training.html#efficiency",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"
   },
   {
     "kind": "section",
-    "title": "Why DPO gained adoption alongside — and often instead of — full RLHF",
+    "title": "Quantization",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#why-dpo-gained-adoption-alongside-and-often-instead-of-full-rlhf",
+    "url": "topics/10-llm-architecture-training.html#quantization",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what breaks",
+    "title": "LoRA and QLoRA",
+    "parentTitle": "10 · LLM Architecture & Training",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/10-llm-architecture-training.html#lora-and-qlora",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-llm)"
+  },
+  {
+    "kind": "section",
+    "title": "Mixture-of-experts",
+    "parentTitle": "10 · LLM Architecture & Training",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/10-llm-architecture-training.html#mixture-of-experts",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-llm)"
+  },
+  {
+    "kind": "section",
+    "title": "Serving",
+    "parentTitle": "10 · LLM Architecture & Training",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/10-llm-architecture-training.html#serving",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-llm)"
+  },
+  {
+    "kind": "section",
+    "title": "Other pieces around the pipeline",
+    "parentTitle": "10 · LLM Architecture & Training",
+    "section": "Sequence, Attention & LLMs",
+    "url": "topics/10-llm-architecture-training.html#tail",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-llm)"
+  },
+  {
+    "kind": "section",
+    "title": "What goes wrong",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
     "url": "topics/10-llm-architecture-training.html#tradeoffs",
@@ -3022,10 +3032,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What shows up in production",
+    "title": "Summary",
     "parentTitle": "10 · LLM Architecture & Training",
     "section": "Sequence, Attention & LLMs",
-    "url": "topics/10-llm-architecture-training.html#what-shows-up-in-production",
+    "url": "topics/10-llm-architecture-training.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-llm)"

@@ -196,86 +196,57 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   <div class="topic-header">
     <div class="th-top"><span class="th-chip" style="--c:var(--c-sequence)">Sequence, Attention &amp; LLMs</span><span class="th-num">Chapter 07</span></div>
     <h1>Sequence Modeling <span class="th-grad">Pre-Transformer</span></h1>
-    <p class="dek">Before any token could look directly at any other token, a whole generation of architectures squeezed the whole sequence through one running summary. The way that summary broke, mechanically, is the reason attention exists.</p>
+    <p class="dek">Follow one sentence, "The keys that I left on the table yesterday were gone," as a recurrent network tries to carry the word <em>keys</em> forward to the verb eight words later. You'll see how its running memory works, why the learning signal fades over many steps, how LSTM and GRU gates keep it alive, and which limit was left for attention to remove.</p>
     <div class="meta-row">
-      <span class="th-pill"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>20 min read</span>
+      <span class="th-pill"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>33 min read</span>
       <span class="th-pill">Assumes: backprop &amp; gradients (04)</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Timeline</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: how the data flows</a></li><li><a href="#math"><span class="tn">04</span>The equations</a></li><li><a href="#why"><span class="tn">05</span>Why gating fixes vanishing gradients</a></li><li><a href="#tradeoffs"><span class="tn">06</span>RNN vs. LSTM vs. GRU vs. Transformer</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Reading with a memory of fixed size</a></li><li><a href="#architecture"><span class="tn">02</span>The same cell at every step</a></li><li><a href="#math"><span class="tn">03</span>Why the learning signal fades</a></li><li><a href="#gates"><span class="tn">04</span>Gates: memory that isn't rewritten at every step</a></li><li><a href="#why"><span class="tn">05</span>Why gating fixes vanishing gradients</a></li><li><a href="#bottleneck"><span class="tn">06</span>Encoders, decoders and one vector</a></li><li><a href="#tradeoffs"><span class="tn">07</span>RNN, LSTM, GRU and Transformer side by side</a></li><li><a href="#summary"><span class="tn">08</span>Summary</a></li><li><a href="#build"><span class="tn">09</span>Build this</a></li><li><a href="#interview"><span class="tn">10</span>Interview questions</a></li><li><a href="#resources"><span class="tn">11</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">12</span>Related pages</a></li></ol></nav>
   </div>
 
   <section id="tldr">
-    <div class="tldr">
-      <div class="tldr-label">TL;DR</div>
-      <p>A recurrent network reads a sequence one element at a time. It keeps a single hidden-state vector as its "memory," updated at every step by the same shared weights. That reuse is exactly what kills it.</p>
-    <p>Backpropagating an error signal <span>$t$</span> steps back multiplies it by the same Jacobian <span>$t$</span> times, so the signal either vanishes toward zero or explodes. In practice it vanishes almost always, and long-range dependencies get forgotten.</p>
-    <p><strong>LSTMs</strong> and <strong>GRUs</strong> patch this with gates that give the gradient a near-linear, additive path through time. <strong>Seq2seq</strong> chains two RNNs together for translation, but forces the entire input through one fixed-size vector: a second bottleneck. One sentence for an interview: RNNs forget because gradients decay multiplicatively over time, and the fixes either build a straighter path for the gradient (LSTM/GRU) or remove the sequential bottleneck entirely (attention).</p>
-    </div>
+    <p>Take the sentence "The keys that I left on the table yesterday were gone." You know without thinking that the verb is <em>were</em> and not <em>was</em>, because the subject is <em>keys</em>, and keys is plural. Now look at what a program has to work with. It reads one word at a time, the word just before the verb is <em>yesterday</em>, and the nearest noun is <em>table</em>, which is singular. Eight words back sits the one that decides the verb, so the program has to carry something about <em>keys</em> forward through everything in between. A <strong>sequence</strong> is any ordered list like this one (words, characters, audio samples, prices over time), and this chapter is about models that read sequences and have to remember.</p>
+
+    <p>Early statistical language models looked only at the last word or two when guessing what came next. Recurrent neural networks, developed in the 1980s and 90s and revived in the 2010s, carry a running summary instead, and the LSTM (Hochreiter &amp; Schmidhuber, 1997) and the GRU (Cho et al., 2014) added gates so that the summary could last longer. Seq2seq (Sutskever et al., 2014) chained two of these networks together to translate, although it squeezed the whole input into one vector. Bahdanau attention (2015) let the decoder look back at every encoder state, and in 2017 Vaswani et al. asked what happens if you delete the recurrence and keep only the attention. Chapter 08 tells that story. We'll define each of these names when we get to it.</p>
+
+    <p>You'll need backpropagation and gradients from chapter 04. A gradient, briefly, is the signal that tells each number in a network which way to change so that its error gets smaller, and a good part of this chapter is about what happens to that signal on a long sequence. We start with the simplest memory that could carry <em>keys</em> to <em>were</em>, a summary that gets updated at every word. Then we'll see exactly how it breaks, which turns out to be arithmetic you can run yourself, and how gates repair it. After that we'll meet the next limit, the one attention was built to remove.</p>
   </section>
 
   <section id="intuition">
-    <h2><span class="num">01</span>Intuition</h2>
-    <p class="lede">A recurrent network reads like you do when you can't flip back a page.</p>
+    <h2><span class="num">01</span>Reading with a memory of fixed size</h2>
 
-    <div class="callout callout-teach">
-      <span class="callout-label">The index card that never gets bigger</span>
-      <p>Imagine reading a novel one word at a time. After every word you must compress everything you have read so far onto a single index card. A fixed number of slots, no matter how long the book gets.</p>
-      <p>You read the next word, glance at the card, update it, and throw away the exact wording of everything before it. By page 300 that card still has the same number of slots it had on page 1.</p>
-      <p>Early details survive only if they got re-written onto the card at every single page. Anything that stopped being relevant for a few dozen pages gets overwritten, and is effectively gone.</p>
-    </div>
+    <p>Let's begin with the most direct approach to our sentence. When you need to predict the next word, look at the last couple of words and ask what usually follows them. Count, over a huge pile of text, which words came after "table yesterday", and keep the counts as a table of next-word probabilities. That's what <strong>Markov chains</strong> and hidden Markov models (<strong>HMMs</strong>) did. They assumed that what comes next depends only on the last one or two words, so language became a table of probabilities conditioned on a short, fixed window.</p>
 
-    <p>That index card is the RNN's <em class="term">hidden state</em>. It's a fixed-size vector, and it's the network's only channel for carrying information from the past into the present.</p>
+    <p>Watch it fail on our sentence. When we need the verb, the window holds "table yesterday", and nothing in it says the subject was plural. A bigger window would help here, but the window size is fixed in advance, so the next sentence will put its clue one word farther back than we allowed for. A model like that can't use context from ten words back, let alone a hundred. What we want is a window that's as long as it needs to be.</p>
 
-    <p>Before RNNs, <strong>Markov chains</strong> and <strong>HMMs</strong> did not even pretend to keep a full running card. They explicitly assumed the next state depends only on the last one or two, and modeled language as a table of next-word probabilities conditioned on a short fixed window.</p>
+    <p>Recurrent networks get there by changing what gets remembered. Picture reading our sentence with a single index card and no way to flip back. After every word you update the card so that it summarises everything you've read so far, and you throw away the exact wording. It has a fixed number of slots, so after a whole novel it has no more room than it had on page 1. When you read <em>keys</em> you write "plural subject" on the card. Every word after that forces another rewrite, and your note survives only if you copy it across the rewrite each time. Anything that looks irrelevant for a few words gets overwritten, and it's gone. By the time you reach <em>were</em>, the note has been through seven rewrites, one for each word from <em>that</em> to <em>yesterday</em>.</p>
 
-    <p>RNNs were the first attempt to make that window "as long as it needs to be." The summary became a learned, continuously-updated vector where a hard-coded lookup used to be.</p>
+    <p>Our card has a name. It's a <strong>vector</strong>, a fixed-length list of numbers, and the network calls it its <strong>hidden state</strong>. It's "hidden" because it's neither the input nor the answer, just the network's own notes. Only through the hidden state can the network carry anything from the past into the present. Where the window models used a lookup table, a recurrent network uses this learned vector that changes with every word, and that's how its memory can reach back as far as it needs to.</p>
 
-    <p>Here is the catch, which explains the rest of this page. <em>Writing</em> to that card at every step is also how the network learns, via backpropagation. The further back an important word was, the more times its influence has to survive being multiplied through the update rule to reach the present. <strong>That repeated multiplication is where the story of LSTMs, GRUs, and eventually attention begins.</strong></p>
-  
-
-    <p>A recurrent network passes information through the same weight at every step, so a gradient sent back through many steps is multiplied by that weight many times.</p>
-
-    <details class="tryit" open>
-      <summary class="tryit-head">
-        <span class="tryit-label">Try it</span>
-        <span class="tryit-what">Multiply a gradient by the same weight twenty times</span>
-      </summary>
-<pre><code>w = 0.5                        # a recurrent weight below 1
-grad = 1.0
-for t in range(1, 21):
-    grad *= w                  # each step back multiplies the gradient
-    if t in (1, 5, 10, 20):
-        print(f&quot;{t:&gt;2} steps back: gradient x {grad:.7f}&quot;)
-
-print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></pre>
-      <div class="tryit-out"><strong>With a weight of <code>0.5</code>, the gradient is <code>0.5</code> after one step and about a millionth after twenty.</strong> Early inputs then have almost no influence on learning. With a weight of <code>1.5</code>, the same twenty steps multiply it by <code>3,325</code> instead. Both directions break training, and that is the problem the rest of this page is about.</div>
-    </details>
-  </section>
-
-  <section id="timeline">
-    <h2><span class="num">02</span>Timeline</h2>
-    <div class="bia">
-      <div class="bia-box">
-        <div class="bia-label">Before</div>
-        <p>Fixed-window n-gram models and Hidden Markov Models assumed the near future depends only on a small window of the recent past, so they could not use context from ten words back, let alone a hundred.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box innovation">
-        <div class="bia-label">Innovation</div>
-        <p>RNNs (1980s–90s, revived in the 2010s) carry a hidden state across timesteps, and LSTM (Hochreiter & Schmidhuber, 1997) and GRU add gates so that long-range memory works in practice.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box">
-        <div class="bia-label">After</div>
-        <p>Seq2seq (Sutskever et al., 2014) still squeezed the input into one vector, Bahdanau attention (2015) let the decoder look back at every encoder state, and in 2017 Vaswani et al. asked what happens if you delete the RNN and keep only the attention (page 08).</p>
-      </div>
-    </div>
+    <p>There's a catch, and it explains most of the rest of the chapter. The rewriting that carries information forward is also the route an error signal has to take backward when the network learns. An important word that sits further back has more rewrites to survive before it reaches the present, and each rewrite is a multiplication. Before we can see what that does, we need to write the rewrite down precisely.</p>
   </section>
 
   <section id="architecture">
-    <h2><span class="num">03</span>Architecture: how the data flows</h2>
-    <p>An RNN applies the <em>same</em> set of weights at every timestep. At step <span>$t$</span> it takes two things: the current input <span>$x_t$</span> and the previous hidden state <span>$h_{t-1}$</span>. Out comes a new hidden state <span>$h_t$</span>. <strong>Unrolling</strong> the network across a sequence means drawing that one cell repeated once per timestep, with the hidden state threaded through as the connecting wire.</p>
+    <h2><span class="num">02</span>The same cell at every step</h2>
+
+    <p>A recurrent network applies the same set of weights, the grids of numbers it learns, at every <strong>timestep</strong>, where a timestep is one position in the sequence. At step <span>$t$</span> it takes two inputs. One is the current word, <span>$x_t$</span>, which arrives as an <strong>embedding</strong>, the list of numbers the network has learned for that word. The other is the hidden state it had after the previous step, <span>$h_{t-1}$</span>. Out comes a new hidden state, <span>$h_t$</span>. In the plain version, called a vanilla RNN, the update looks like this:</p>
+
+    <div class="eq-block">
+      <span>$$h_t = \tanh(W_h h_{t-1} + W_x x_t + b)$$</span>
+    </div>
+
+    <p>Here is what each piece does.</p>
+
+    <ul class="eq-explain">
+      <li><span class="sym">h_t</span> the hidden state after processing <span>$t$</span> elements. A fixed-size vector, and the network's entire memory of everything it has seen so far.</li>
+      <li><span class="sym">W_h, W_x</span> weight matrices shared across <em>every</em> timestep. The same <span>$W_h$</span> multiplies the hidden state whether it's step 2 or step 200.</li>
+      <li><span class="sym">x_t</span> is the input at this timestep, for example a word embedding.</li>
+      <li><span class="sym">b</span> is a bias, a vector of numbers added in before the squashing step.</li>
+      <li><span class="sym">tanh</span> squashes the result into the range <span>$(-1, 1)$</span>, which keeps the state bounded. Its derivative is at most 1, and it's typically much less than 1 almost everywhere except near 0. We'll need that fact in a moment.</li>
+    </ul>
+
+    <p>Because the weights are reused, the network has the same number of parameters for a sentence of ten words or ten thousand. Drawing the cell once per timestep, with the hidden state as the wire joining one copy to the next, is called <strong>unrolling</strong> the network. The diagram below unrolls five steps. Its five orange boxes are one cell used five times, the amber lines carry the hidden state, and <span>$h_0$</span> on the far left is the starting state. Follow the path from <span>$x_1$</span>: to affect the final state <span>$h_5$</span>, the pulsing circle on the right that the diagram labels a "fixed-size context vector" because it holds the summary of everything read, it has to pass through the cell four more times.</p>
 
     <div class="diagram">
       <div class="diagram-title">A vanilla RNN unrolled across 5 timesteps — hidden state flowing left to right
@@ -334,52 +305,65 @@ print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></p
         <text x="660" y="190" text-anchor="middle" font-size="10" class="dim">fixed-size</text>
         <text x="660" y="202" text-anchor="middle" font-size="10" class="dim">context vector</text>
       </svg>
-      <div class="diagram-caption">Same weights, five times. Every hidden state h<sub>t</sub> is a function of x<sub>t</sub> and h<sub>t-1</sub> only, so information from x₁ can reach h₅ only by surviving four sequential updates. In seq2seq, that final h₅ (pulsing) is the <em>entire</em> summary the decoder gets of the whole input, regardless of whether the sequence was 5 tokens or 500.</div>
+      <div class="diagram-caption">Same weights, five times. Every hidden state h<sub>t</sub> is a function of x<sub>t</sub> and h<sub>t-1</sub> only, so information from x₁ can reach h₅ only by surviving four sequential updates. When we get to seq2seq translation in section 06, that final h₅ (pulsing) becomes the <em>entire</em> summary the decoder gets of the whole input, whether the sequence was 5 words or 500.</div>
     </div>
 
-    <p>Because <span>$h_t$</span> strictly depends on <span>$h_{t-1}$</span>, you cannot compute step 500 before step 499 finishes. The recurrence is inherently sequential. That's the direct cause of the "RNNs can't parallelize across the sequence dimension" fact that shows up constantly in interviews. There's no way to compute all timesteps at once the way a Transformer's attention layer can, because each step's input literally depends on the previous step's output.</p>
+    <h4 class="why">Why can't the steps run at the same time?</h4>
 
-    <p><strong>Bidirectional RNNs</strong> are a cheap, effective fix for one specific limitation. A plain left-to-right RNN's hidden state at position <span>$t$</span> knows only about words <em>before</em> <span>$t$</span>, never after.</p>
+    <p>Because <span>$h_t$</span> depends on <span>$h_{t-1}$</span>. Step 500 can't start until step 499 has finished, since each step's input is the previous step's output. That's the direct cause of a fact you'll probably hear often, that RNNs can't be <strong>parallelized</strong> across the sequence, meaning their steps can't be spread over many processors working simultaneously. A GPU, the chip most networks train on, is fast precisely because it does a great many computations at once, and a recurrent network gives it little to do at once along the sequence. A Transformer's attention layer (chapter 08) has no such dependency and can compute every position together.</p>
 
-    <p>Where the whole sequence is available upfront, you can run a second RNN right-to-left over the same input and concatenate the two hidden states at each position. Now every position has context from both directions. That applies to tasks like:</p>
-
-    <ul>
-      <li><strong>Tagging.</strong> Part-of-speech or named-entity labels, where the word after often disambiguates the word before.</li>
-      <li><strong>Classification.</strong> The whole sentence is in hand before you need a verdict.</li>
-      <li><strong>Encoding for translation.</strong> The source sentence is fully known; only the target is generated left to right.</li>
-    </ul>
-
-    <p>This doesn't fix vanishing gradients. It fixes a blind spot. That's why encoders in seq2seq systems were very often bidirectional, while decoders never were. A decoder generates left to right and can't peek at words it hasn't produced yet.</p>
+    <p>So the memory exists, in the sense that information can in principle ride the hidden state from <em>keys</em> to <em>were</em>. Whether the network can learn to use it is a separate matter. It depends on whether the training signal can find its way back along the same eight steps, and that's where plain RNNs ran into trouble.</p>
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The equations</h2>
-    <p>The vanilla RNN update, at every timestep:</p>
-    <div class="eq-block">
-      <span>$$h_t = \tanh(W_h h_{t-1} + W_x x_t + b)$$</span>
-    </div>
-    <ul class="eq-explain">
-      <li><span class="sym">h_t</span> the hidden state after processing <span>$t$</span> elements. A fixed-size vector, and the network's entire memory of everything it has seen so far.</li>
-      <li><span class="sym">W_h, W_x</span> weight matrices shared across <em>every</em> timestep. The same <span>$W_h$</span> multiplies the hidden state whether it's step 2 or step 200.</li>
-      <li><span class="sym">x_t</span> is the input at this timestep (e.g. a word embedding).</li>
-      <li><span class="sym">tanh</span> squashes the result to <span>$(-1, 1)$</span>, keeping the state bounded. Critically, its derivative is at most 1, and typically much less than 1 almost everywhere except near 0.</li>
-    </ul>
+    <h2><span class="num">03</span>Why the learning signal fades</h2>
 
-    <h3>Why gradients vanish: the chain rule over time</h3>
-    <p>To train the network, you need <span>$\partial h_t / \partial h_0$</span> — how much the initial hidden state (and therefore anything that fed into it many steps ago) affects the state <span>$t$</span> steps later. By the chain rule, this is a product of every intermediate Jacobian:</p>
+    <p>Suppose the network reaches <em>were</em>, predicts "was", and gets marked wrong. Training has to push that error back into the weights, and for that it has to work out how much the hidden state after <em>keys</em> contributed to the mistake. Put another way, it needs to know how much a small nudge to an early hidden state would change a later one. That's a derivative, and backpropagation, which you met in chapter 04, gets it for a long chain with the chain rule: multiply together the derivative of every step in the chain. Each step's derivative is itself a grid of numbers called a <strong>Jacobian</strong>, which records how much every entry of <span>$h_k$</span> moves when you nudge each entry of <span>$h_{k-1}$</span>. For <span>$t$</span> steps between the first hidden state and the last, the product is:</p>
+
     <div class="eq-block">
       <span>$$\frac{\partial h_t}{\partial h_0} = \prod_{k=1}^{t} \frac{\partial h_k}{\partial h_{k-1}} = \prod_{k=1}^{t} \text{diag}(\tanh'(\cdot))\, W_h$$</span>
     </div>
-    <p>Each factor in that product involves the <em>same</em> matrix <span>$W_h$</span>, multiplied by a derivative of tanh bounded by 1. Multiply <span>$t$</span> numbers that are each consistently a bit less than 1 and the product shrinks toward zero exponentially fast in <span>$t$</span>, which gives <strong>vanishing gradients</strong>.</p>
 
-    <p>The opposite can happen too. If the dominant eigenvalue of <span>$W_h$</span> is greater than 1, the product grows exponentially instead. Those are <strong>exploding gradients</strong>, and they show up as loss suddenly spiking to NaN during training.</p>
+    <p>Between <em>keys</em> and <em>were</em> there are eight such factors. Look at what each one contains. Every factor has the <em>same</em> matrix <span>$W_h$</span>, multiplied by a derivative of tanh that's bounded by 1. Multiply <span>$t$</span> numbers that are each consistently a bit less than 1 and the product shrinks toward zero exponentially fast as <span>$t$</span> grows. This is the problem of <strong>vanishing gradients</strong>. The error signal from <em>were</em> reaches <em>keys</em> too weak to teach the network anything.</p>
 
-    <p>In practice vanishing is the far more common and more damaging failure. It doesn't crash training and silently leaves the model unable to learn dependencies more than roughly 10–20 steps apart.</p>
+    <p>To see how fast that happens, we can replace the whole matrix with a single number <span>$w$</span> and multiply a gradient by it once per step back. Starting the gradient at 1, the code below multiplies by <code>w = 0.5</code> in a loop, and prints it after 1, 5, 10 and 20 steps. Its last line shows what a weight of 1.5 would do over the same twenty steps.</p>
 
-    <p>This repeated-matrix-multiplication mechanism also appeared in 04 when initializing deep feedforward nets badly. An RNN unrolled over <span>$t$</span> timesteps <em>is</em>, mathematically, a <span>$t$</span>-layer-deep network with tied weights at every layer.</p>
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Multiply a gradient by the same weight twenty times</span>
+      </summary>
+<pre><code>w = 0.5                        # a recurrent weight below 1
+grad = 1.0
+for t in range(1, 21):
+    grad *= w                  # each step back multiplies the gradient
+    if t in (1, 5, 10, 20):
+        print(f&quot;{t:&gt;2} steps back: gradient x {grad:.7f}&quot;)
 
-    <h3>LSTM: gates and the cell state</h3>
-    <p>Hochreiter &amp; Schmidhuber's 1997 fix keeps a second, separate piece of state: the <em class="term">cell state</em> <span>$C_t$</span>. It is updated almost additively and is not repeatedly matrix-multiplied and squashed. Three gates control what happens to it, each a sigmoid-activated learned vector between 0 and 1:</p>
+print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></pre>
+      <div class="tryit-out">With a weight of <code>0.5</code>, the gradient is <code>0.5</code> after one step, <code>0.03125</code> after five and about a millionth (<code>0.0000010</code>) after twenty. With a weight of <code>1.5</code>, the same twenty steps multiply it by <code>3,325</code> instead.</div>
+    </details>
+
+    <p>With a weight of 0.5 the gradient is already a thirty-second of its size after five steps, and after twenty it's about a millionth. Our eight steps from <em>keys</em> to <em>were</em> would leave about 0.004 of the signal, and a longer sentence would leave next to nothing. Now for the opposite failure. A weight of 1.5 turns a gradient of 1 into 3,325, and a real network has many numbers in play, so that kind of growth makes the weights jump wildly. Both directions break training.</p>
+
+    <p>Growth has a name too. If the dominant eigenvalue of <span>$W_h$</span> is greater than 1, meaning the largest factor by which the matrix stretches a vector along the direction it stretches most, the product grows exponentially instead of shrinking. These are <strong>exploding gradients</strong>, and they show up as the loss suddenly spiking to NaN, the "not a number" value you get when arithmetic overflows.</p>
+
+    <h4 class="why">Which failure is worse, vanishing or exploding?</h4>
+
+    <p>In practice vanishing is the far more common one and the more damaging one. Exploding is loud, because training visibly crashes and you go looking for the cause. Vanishing doesn't crash anything. Loss keeps going down while the model is quietly unable to learn dependencies more than roughly 10 to 20 steps apart. Our sentence is eight steps wide, so it's inside that range, but add a few more clauses between <em>keys</em> and the verb and it isn't.</p>
+
+    <p>You've seen this mechanism before. Chapter 04 met the same repeated matrix multiplication when a deep feedforward network is initialised badly. An RNN unrolled over <span>$t$</span> timesteps <em>is</em>, mathematically, a <span>$t$</span>-layer-deep network whose layers all share the same weights, so a long sequence is a very deep network. What we want is a path for the gradient where no single step shrinks it much, and that's what gates provide.</p>
+  </section>
+
+  <section id="gates">
+    <h2><span class="num">04</span>Gates: memory that isn't rewritten at every step</h2>
+
+    <h3>LSTM: the cell state and three gates</h3>
+
+    <p>Think about where the damage comes from. At every step the hidden state is rebuilt from scratch: it's multiplied by <span>$W_h$</span>, combined with the new word, and squashed by tanh. Anything we want to keep has to survive that rebuild, and so does its gradient on the way back. Hochreiter &amp; Schmidhuber's 1997 fix is to stop rebuilding part of the memory. They gave the network a second, separate piece of state, the <strong>cell state</strong> <span>$C_t$</span>, and update it almost additively: take the old cell state, keep some of it, and add something new. Adding involves no repeated matrix multiplication and no squashing.</p>
+
+    <p>If the cell state only ever grew, though, it would fill up with old notes and never forget anything. So the network needs to control how much to keep, how much to write, and how much to show. Each of those is a <strong>gate</strong>, a vector of numbers between 0 and 1 that multiplies another vector entry by entry. Near 1 an entry passes through, and near 0 it's blocked. A gate gets its values from a <strong>sigmoid</strong>, written <span>$\sigma$</span>, which squashes any number into the range 0 to 1, and the gates are computed from the previous hidden state and the current input joined end to end, written <span>$[h_{t-1}, x_t]$</span>. In the equations, <span>$\odot$</span> means multiplying two vectors entry by entry. Three gates plus the cell state make up the <strong>LSTM</strong> (long short-term memory):</p>
+
     <div class="eq-block">
       <span>$$\begin{aligned}
       f_t &= \sigma(W_f [h_{t-1}, x_t] + b_f) \\
@@ -390,6 +374,7 @@ print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></p
       h_t &= o_t \odot \tanh(C_t)
       \end{aligned}$$</span>
     </div>
+
     <ul class="eq-explain">
       <li><span class="sym">f_t</span> <strong>forget gate.</strong> Decides what fraction of the old cell state to keep, per dimension. Near 1 means "remember this," near 0 means "erase this."</li>
       <li><span class="sym">i_t</span> <strong>input gate.</strong> Decides how much of the new candidate information <span>$\tilde{C}_t$</span> to write into the cell state.</li>
@@ -398,13 +383,21 @@ print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></p
       <li><span class="sym">o_t</span> <strong>output gate.</strong> Decides how much of the squashed cell state gets exposed as the hidden state feeding the next layer and the next timestep.</li>
     </ul>
 
+    <p>Run our sentence through it. At <em>keys</em>, the input gate can learn to open on a dimension that stands for "plural subject" and write that into the cell state. Across the seven words that follow, the forget gate on that dimension can stay near 1, so the note rides along untouched. At <em>were</em>, the output gate lets it influence the hidden state that predicts the verb. Nobody programs this. The weights behind the gates are learned like all the others, and training finds whatever keeps the cell state useful. In Chris Olah's diagram below, the top horizontal line is the cell state, and the three <span>$\sigma$</span> boxes under it are the forget, input and output gates.</p>
+
     <div class="ref-figure">
       <div class="rf-img-wrap"><img src="https://colah.github.io/posts/2015-08-Understanding-LSTMs/img/LSTM3-chain.png" alt="LSTM cell internals showing the forget gate, input gate, candidate values, and output gate" loading="lazy"></div>
       <div class="rf-caption"><span class="rf-label">Reference figure</span>One LSTM cell, unrolled — the top horizontal line is the cell state's additive highway; the three sigmoid gates (σ) below it are the forget/input/output gates. Source: Christopher Olah, <a href="https://colah.github.io/posts/2015-08-Understanding-LSTMs/" target="_blank" rel="noopener">Understanding LSTM Networks</a>.</div>
     </div>
 
+    <h4 class="why">Why keep a separate cell state at all?</h4>
+
+    <p>Because the hidden state <span>$h_t$</span> has a different job. It's what the rest of the network sees at every step, so it passes through the output gate and a tanh each time. Cell state is the protected side channel. It changes only through a forget-gated copy of itself plus a gated addition, which is what lets a note survive many steps.</p>
+
     <h3>GRU: the simpler cousin</h3>
-    <p>The <strong>Gated Recurrent Unit</strong> (Cho et al., 2014) asks whether you need three separate gates and two separate states. It merges the cell state and hidden state into one. Forget and input collapse into a single update gate <span>$z_t$</span>, joined by a reset gate <span>$r_t$</span> controlling how much past state is used when computing the candidate:</p>
+
+    <p>The <strong>Gated Recurrent Unit</strong> (Cho et al., 2014) asks whether you need three separate gates and two separate states. It merges the cell state and hidden state into one. Forget and input collapse into a single update gate <span>$z_t$</span>, joined by a reset gate <span>$r_t$</span> that controls how much past state is used when computing the candidate:</p>
+
     <div class="eq-block">
       <span>$$\begin{aligned}
       z_t &= \sigma(W_z [h_{t-1}, x_t]) \\
@@ -413,31 +406,51 @@ print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></p
       h_t &= (1 - z_t) \odot h_{t-1} + z_t \odot \tilde{h}_t
       \end{aligned}$$</span>
     </div>
-    <p>Fewer parameters, fewer matrix multiplies per step, and in practice roughly comparable performance to LSTM on most tasks. That's why GRUs became the default "I need an RNN and I want it cheaper" choice in the years between LSTM's dominance and attention's takeover.</p>
 
-    <p>The core idea is the same as LSTM's: <span>$h_t$</span> is a convex combination of the old state and a new candidate, an additive blend with no repeated matrix multiplication.</p>
+    <p>Look at the last line. The new state is a <strong>convex combination</strong> of the old state and a new candidate, a weighted average whose two weights, <span>$1-z_t$</span> and <span>$z_t$</span>, add up to 1. It's the same additive blend as the LSTM's, with no repeated matrix multiplication. A GRU has fewer parameters and fewer matrix multiplies per step, and in practice it performs roughly comparably to an LSTM on most tasks. That's why GRUs became the default choice when you needed an RNN and wanted it cheaper, in the years between LSTM's dominance and attention's takeover. Both designs rest on one claim about gradients, and it's time to check it.</p>
   </section>
 
   <section id="why">
     <h2><span class="num">05</span>Why gating fixes vanishing gradients</h2>
-    <p>Go back to the cell state update: <span>$C_t = f_t \odot C_{t-1} + i_t \odot \tilde{C}_t$</span>. Differentiate <span>$C_t$</span> with respect to <span>$C_{t-1}$</span>, ignoring the comparatively minor dependence of the gates themselves on <span>$C_{t-1}$</span>, and you get <span>$\partial C_t / \partial C_{t-1} \approx f_t$</span>.</p>
 
-    <p>Just the forget gate, elementwise. Not a repeated multiplication by a fixed weight matrix <span>$W_h$</span> squashed through tanh every single step.</p>
+    <p>Go back to the cell state update, <span>$C_t = f_t \odot C_{t-1} + i_t \odot \tilde{C}_t$</span>, and ask the question from section 03: how much does a change in <span>$C_{t-1}$</span> change <span>$C_t$</span>? Differentiate <span>$C_t$</span> with respect to <span>$C_{t-1}$</span>, ignoring the comparatively minor dependence of the gates themselves on <span>$C_{t-1}$</span>, and you get <span>$\partial C_t / \partial C_{t-1} \approx f_t$</span>. That's just the forget gate, elementwise. There's no repeated multiplication by a fixed weight matrix <span>$W_h$</span> squashed through tanh at every step.</p>
 
-    <p>So if the network learns to set <span>$f_t \approx 1$</span> for a dimension carrying an important long-range signal, the gradient passes through <em>that step</em> almost unchanged. Chain that across many steps.</p>
-    <p>The path is still <span>$t$</span> steps long, but each step is now close to an identity multiplication, where before it was lossy. The network <em>can</em> learn to keep the highway open, and a vanilla RNN has no mechanism to stop it closing.</p>
+    <p>So if the network learns to set <span>$f_t \approx 1$</span> for a dimension carrying an important long-range signal, such as "plural subject" in our sentence, the gradient passes through that step almost unchanged. Chain that across many steps. The path is still as long as before, but each step is now close to an identity multiplication, where before it was lossy. The network <em>can</em> learn to keep this highway open, and a vanilla RNN has no mechanism for keeping it open at all.</p>
 
-    <div class="callout callout-teach">
-      <span class="callout-label">It is a residual connection, turned sideways</span>
-      <p>This is the trick behind the residual connection in a ResNet or a Transformer block (see 04 and 08): give information an additive, near-identity shortcut that a gradient can flow through undiminished, so it never has to pass through a transformation at every step. The transformation becomes an optional adjustment on top and is no longer the only path.</p>
-      <p>LSTM's cell state is a <strong>gradient highway through time</strong>, in exactly the sense a residual stream is a gradient highway through depth. Same failure mode: repeated lossy transformations. Same fix: an additive path that bypasses them.</p>
-    </div>
+    <p>If this reminds you of something, it should. It's the trick behind the residual connection in a ResNet or a Transformer block (see 04 and 08): give information an additive, near-identity shortcut that a gradient can flow through undiminished, so it never has to pass through a transformation at every step. The transformation becomes an optional adjustment on top and is no longer the only path. LSTM's cell state is a <strong>gradient highway through time</strong>, in the same sense that a residual stream is a gradient highway through depth. The failure is the same, repeated lossy transformations, and so is the fix, an additive path that bypasses them.</p>
 
-    <p>Gating doesn't make the vanishing gradient problem disappear entirely. With poor initialization, or extremely long sequences of thousands of steps, LSTMs still degrade. But it pushes the effective range of dependencies the network can learn from roughly 10-20 steps to several hundred. That was enough to make RNNs useful for translation, speech, and language modeling for most of the 2010s.</p>
+    <p>Gating doesn't make the vanishing gradient problem disappear entirely. With poor initialization, or extremely long sequences of thousands of steps, LSTMs still degrade. What it does is push the range of dependencies the network can learn from roughly 10 to 20 steps out to several hundred, and that was enough to make RNNs useful for translation, speech, and language modeling for most of the 2010s. Translation, though, brings a limit of a different kind.</p>
+  </section>
+
+  <section id="bottleneck">
+    <h2><span class="num">06</span>Encoders, decoders and one vector</h2>
+
+    <h3>Translating with two networks</h3>
+
+    <p>Translating a sentence means reading one sequence and writing another, and the two can differ in length. The architecture that dominated neural machine translation until attention arrived, <strong>sequence-to-sequence</strong> or seq2seq (Sutskever et al., 2014), uses two recurrent networks to do it. An <strong>encoder</strong> reads the source sentence and ends with a final hidden state. A <strong>decoder</strong>, a second network, starts from that vector and writes the translation one word at a time, feeding each word it produces back in as its next input.</p>
+
+    <h3>Reading in both directions</h3>
+
+    <p>One limitation of a plain left-to-right RNN is easy to fix. Its hidden state at position <span>$t$</span> knows only the words <em>before</em> <span>$t$</span>, never the ones after. When the whole sequence is available up front, you can run a second RNN right to left over the same input and join the two hidden states at each position. That's a <strong>bidirectional</strong> RNN, and now every position has context from both sides. It suits tasks like these:</p>
+
+    <ul>
+      <li><strong>Tagging.</strong> Labelling each word, with its part of speech or as a named entity, where the word after often disambiguates the word before.</li>
+      <li><strong>Classification.</strong> The whole sentence is in hand before you need a verdict.</li>
+      <li><strong>Encoding for translation.</strong> The source sentence is fully known, and only the target is generated left to right.</li>
+    </ul>
+
+    <p>Notice what this doesn't touch. It doesn't fix vanishing gradients, only a blind spot. That's why encoders in seq2seq systems were very often bidirectional while decoders never were. A decoder generates left to right and can't peek at words it hasn't produced yet.</p>
+
+    <h3>The second bottleneck</h3>
+
+    <p>However the encoder reads, the decoder receives only its final hidden state. Look back at the unrolled diagram, where the final <span>$h_5$</span> pulsed. In seq2seq that one vector is the entire summary the decoder gets of the source, and it has the same fixed length whether the source had 5 words or 500. A longer sentence means more to compress into the same number of slots, so quality drops as sentences grow, and gating doesn't change the size of that vector. Bahdanau attention (2015) let the decoder look back at every encoder state instead of just the last one, and in 2017 Vaswani et al. asked what happens if you delete the RNN and keep only the attention (chapter 08). Production notes after the Build section come back to seq2seq, including how its decoder is trained. For now, here are the designs side by side.</p>
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">06</span>RNN vs. LSTM vs. GRU vs. Transformer</h2>
+    <h2><span class="num">07</span>RNN, LSTM, GRU and Transformer side by side</h2>
+
+    <p>We've now met four ways to read a sequence: the vanilla RNN, the LSTM, the GRU, and the Transformer, the attention-based architecture of chapter 08. The table lines them up on what we've seen so far. How far apart can two words be before the model stops linking them? How does the gradient travel? Can the steps run at once? And what does each one cost?</p>
+
     <div class="tbl-wrap">
       <table class="cmp">
         <thead><tr><th></th><th>Vanilla RNN</th><th>LSTM</th><th>GRU</th><th>Transformer</th></tr></thead>
@@ -450,13 +463,33 @@ print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></p
         </tbody>
       </table>
     </div>
-    <p>That last row is worth sitting with. RNNs never lost the argument on <em>inference</em> efficiency. A recurrent model's memory is a fixed-size vector regardless of how long the conversation gets, while a Transformer's KV cache grows with every token generated.</p>
 
-    <p>RNNs lost on <em>trainability</em> and <em>parallelism</em> at scale. That tradeoff is exactly why state-space models (Mamba-style) resurfaced in the 2020s as a research direction. See the 2026 status note on page 08.</p>
+    <p>The first three rows repeat the chapter: recurrent models can't run their steps at once, the gated ones reach several hundred steps where the vanilla one reaches 10 to 20, and the Transformer connects any two positions through a single attention weight. Parameters follow from the equations: an LSTM has four weight sets (forget, input, candidate and output), a GRU has three (update, reset and candidate), and a vanilla RNN has one. For the Transformer, <span>$d_{model}$</span> is the width of its vectors, and its parameters grow with that width and with depth, not with sequence length. The last row is probably the one that surprises people.</p>
+
+    <h4 class="why">Did RNNs lose on everything?</h4>
+
+    <p>No. They never lost the argument on <em>inference</em> efficiency. A recurrent model's memory is a fixed-size vector, however long the conversation gets, while a Transformer has to keep a stored entry for every token it has already processed, called the KV cache, and that grows with every token it generates. RNNs lost on <em>trainability</em> and <em>parallelism</em> at scale. That trade is exactly why state-space models (Mamba-style, a newer family of recurrent-style models) resurfaced in the 2020s as a research direction. See the 2026 status note on page 08.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">08</span>Summary</h2>
+
+    <ol>
+      <li><strong>A recurrent network reads with a fixed-size memory.</strong> The hidden state is a vector, rewritten at every word, and it's the only thing that carries the past into the present. That replaced the short fixed window of Markov chains and HMMs, which couldn't use context beyond a word or two.</li>
+      <li><strong>One cell, used at every step.</strong> <span>$h_t = \tanh(W_h h_{t-1} + W_x x_t + b)$</span> with the same weights each time, so the parameter count doesn't depend on length. Because each step needs the one before, the steps can't run in parallel.</li>
+      <li><strong>The learning signal is a product of Jacobians.</strong> Sending a gradient back <span>$t$</span> steps multiplies it by the same <span>$W_h$</span> and a tanh derivative at most 1 each time, so it shrinks or grows exponentially in <span>$t$</span>.</li>
+      <li><strong>Vanishing is the one that hurts.</strong> Exploding gradients crash training loudly with NaN. Vanishing ones silently leave a vanilla RNN unable to learn dependencies more than roughly 10 to 20 steps apart.</li>
+      <li><strong>The LSTM gives memory an additive path.</strong> A separate cell state is updated as <span>$C_t = f_t \odot C_{t-1} + i_t \odot \tilde{C}_t$</span>, with forget, input and output gates, all sigmoids between 0 and 1, deciding what to keep, write and show.</li>
+      <li><strong>The GRU does the same with less.</strong> It merges the two states, uses two gates, and blends the old state and a new candidate. It performs about as well on most tasks at lower cost.</li>
+      <li><strong>Gating works because <span>$\partial C_t / \partial C_{t-1} \approx f_t$</span>.</strong> With the forget gate near 1 each step is close to an identity, a gradient highway through time, much like a residual connection turned sideways. It stretches the useful range from 10 to 20 steps to several hundred without removing the problem.</li>
+      <li><strong>Seq2seq adds a second bottleneck.</strong> The decoder sees the source only through the encoder's final state, one fixed-size vector whether the input is 5 words or 500. Bidirectional encoders fix a blind spot, not that limit.</li>
+      <li><strong>Attention removes both limits.</strong> Letting every position look at every other gives an <span>$O(1)$</span> path and parallel computation, at the cost of an inference memory that grows with length.</li>
+      <li><strong>RNNs still win on inference memory and lose on training.</strong> A fixed-size state costs the same per token however long the conversation, but recurrence can't be parallelised and gradients still decay. In one line: RNNs forget because gradients decay multiplicatively over time, and the fixes either build a straighter path for the gradient (LSTM, GRU) or remove the sequential bottleneck entirely (attention).</li>
+    </ol>
   </section>
 
   <section id="build">
-    <h2><span class="num">07</span>Build this</h2>
+    <h2><span class="num">09</span>Build this</h2>
     <p class="lede">This page claims a vanilla RNN gives up somewhere around 10 to 20 steps, and that gating stretches that to several hundred. Both of those are numbers you can measure yourself, on a laptop CPU.</p>
 
     <div class="project">
@@ -467,7 +500,7 @@ print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></p
       </div>
       <p>Train a recurrent network on the <strong>remember-one-bit task</strong>. The first element of the sequence is 0 or 1. Then come <span>$T$</span> steps of noise, and the model must output that first bit at the end. Guessing scores 50%, so there is exactly one thing to look at. Sweep <span>$T$</span> and find where the model stops beating a coin.</p>
       <ol class="proj-steps">
-        <li>Write the vanilla RNN cell by hand from the update rule in section 04, plus one linear head on the final hidden state. Avoid <code>nn.RNN</code>.</li>
+        <li>Write the vanilla RNN cell by hand from the update rule in section 02, plus one linear head on the final hidden state. Avoid <code>nn.RNN</code>.</li>
         <li>Generate the task on the fly. Train a fresh model for each gap length <span>$T$</span> in 5, 10, 20, 40, 80, 160.</li>
         <li>Plot final accuracy against <span>$T$</span>. Mark the length where the curve drops to chance and stays there.</li>
         <li>Log the gradient norm at the first timestep, <span>$\lVert \partial \mathcal{L} / \partial h_1 \rVert$</span>, for every <span>$T$</span>. Plot it on a log axis beside the accuracy curve.</li>
@@ -510,7 +543,7 @@ print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></p
   </section>
 
   <section id="interview">
-    <h2><span class="num">08</span>Interview questions</h2>
+    <h2><span class="num">10</span>Interview questions</h2>
 
     <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What does an RNN's hidden state actually represent?</summary>
       <div class="qa-body"><p>A fixed-size vector that's the network's entire summary of everything it has read so far. It's recomputed at every timestep from the previous hidden state and the current input using the <em>same</em> shared weights, which is what lets the network handle sequences of any length with a fixed number of parameters — and also what forces arbitrarily long histories through a fixed-size bottleneck.</p></div>
@@ -539,7 +572,7 @@ print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></p
   </section>
 
   <section id="resources">
-    <h2><span class="num">09</span>Go deeper</h2>
+    <h2><span class="num">11</span>Go deeper</h2>
     <div class="resource-grid">
       <a class="resource-card" href="https://colah.github.io/posts/2015-08-Understanding-LSTMs/" target="_blank" rel="noopener">
         <div class="r-icon">📰</div>
@@ -571,7 +604,7 @@ print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></p
   </section>
 
   <section id="related">
-    <h2><span class="num">10</span>Related pages</h2>
+    <h2><span class="num">12</span>Related pages</h2>
     <div class="related-grid">
       <a class="related-card" href="./08-attention-transformers.html"><div class="rc-sec" style="color:var(--c-attention)">08 · What changed next</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">Removes the fixed-vector bottleneck this page ends on.</div></a>
       <a class="related-card" href="./04-neural-network-fundamentals.html"><div class="rc-sec" style="color:var(--c-nn)">04 · Underpins this</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">Backprop through time is still just backprop — and the same gradient highway idea shows up as residuals.</div></a>
@@ -639,7 +672,7 @@ print(f&quot;\nwith w = 1.5, after 20 steps: x {1.5 ** 20:,.0f}&quot;)</code></p
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=199a2f78"></script>
+<script defer src="../assets/js/search-data.js?v=c663b9b2"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>
