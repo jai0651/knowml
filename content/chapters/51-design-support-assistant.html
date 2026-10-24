@@ -1,0 +1,1317 @@
+---
+title: "Designing an LLM Support Assistant"
+dek: "Follow Imani, a delivery driver stuck at a locked gate, as her chat message becomes a checked answer from a help centre. We build the assistant from the obvious version, fix each failure in turn, and use DoorDash's and LinkedIn's published designs."
+readingTime: "~78 min"
+prereqs: "RAG (11), recommenders (16), MLOps (24), evaluation (25)"
+group: "ML System Design"
+label: "Case study 51"
+description: "From a messy Dasher chat to a grounded reply: conversation summaries, hybrid retrieval, a two-tier guardrail, escalation, LLM-judge evaluation and the feedback loop, built on DoorDash and LinkedIn's published systems."
+---
+<section id="tldr">
+    <p>Imani, a DoorDash delivery driver (the company calls them Dashers), is parked outside a gated apartment complex in Columbus, Ohio, a little after seven on a Thursday evening. She has a paper bag of pad thai on the passenger seat and a delivery on her phone that says to leave it at the door. There is no door to reach: the gate is locked, the keypad wants a code nobody gave her, and the customer isn't picking up. She types into the support chat, one message at a time. First "app says leave at door but its a gated building", then "customer isnt picking up", and after nine minutes of waiting, "been waiting 9 min and the food is getting cold". A reply appears within a few seconds, tells her to try the customer once more, explains how long to wait before she can mark the order undeliverable, and says what to do with the food. She follows the steps and drives to her next pickup.</p>
+
+    <p>Nothing in that reply came from a person. A large language model, or LLM, wrote it, from a help-centre article that a person wrote months earlier, and a lot of machinery stood between the article and Imani's screen. Her three messages each say something different, and none says what the problem is. Taken alone, the last one sounds like a complaint about cold food. Left to itself, the model that writes the reply knows nothing of DoorDash's rules and will produce a fluent answer from whatever it absorbed from public forums, text that may be out of date or wrong in ways Imani can't detect. And if the reply is wrong, she will act on it anyway, because she is standing in the dark with a bag going cold.</p>
+
+    <p>Software of this kind answers a person's question by first looking up relevant passages in a trusted collection and then writing from them. That technique is <strong>retrieval-augmented generation</strong>, usually shortened to <strong>RAG</strong>, and the collection is the <strong>knowledge base</strong>. So the question this chapter answers is: <strong>how does a support assistant turn a messy chat into the right answer from a company's own documents, check that the answer is true and allowed before anyone sees it, and recognise when to hand the chat to a person?</strong></p>
+
+    <p>We build the design from its most obvious version and repair each failure in turn: reading the whole conversation, finding passages with keyword and vector search together, writing an answer that stays inside what was found, checking every reply in two tiers, and handing off to a person. Then come the latency budget, the feedback from resolved tickets, and the evaluation that tells a team whether any of it works. We draw mainly on DoorDash's engineering posts about its Dasher support chatbot (September 2024, January 2026 and June 2026) and a SIGIR 2024 paper from LinkedIn about customer-service retrieval. We say plainly where those sources stop, and it is often earlier than a reader would like.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>DoorDash calls the independent contractors who deliver orders <strong>Dashers</strong>. In its September 2024 post, DoorDash's engineers say Dashers sometimes need support to resolve problems during a delivery, and that the existing automated system worked through <strong>flow-based</strong> resolutions: hand-built decision trees where the Dasher picks options and each choice leads to the next branch. Such a system answers quickly, but only for issues somebody built a path for. That post lists three problems with the knowledge base that sat beside it. It was hard to find the relevant article, hard to find the useful part inside an article, and written in English when many Dashers prefer another language.</p>
+
+    <p>Those three problems define the job. It takes a free-text conversation, finds the relevant guidance, and writes a short reply in the Dasher's language. It must also decide, on every turn, whether to answer at all. Seen from Imani's side, the requirements are these:</p>
+
+    <ul>
+      <li><strong>Understand the issue from the whole chat,</strong> not only the last message, because the issue changes as the conversation goes on.</li>
+      <li><strong>Answer from the knowledge base.</strong> Replies should say what the company's own articles say, and nothing else. A reply that states things the sources don't support is called a <strong>hallucination</strong>.</li>
+      <li><strong>Stay within policy.</strong> It must not promise pay, bonuses or exceptions that the company hasn't authorised.</li>
+      <li><strong>Be fast enough for a person standing at a locked gate.</strong> DoorDash says model latency ranges from sub-second to tens of seconds depending on the model and the prompt, so speed is a design constraint and not a given.</li>
+      <li><strong>Hand over cleanly</strong> (the usual word is <strong>escalate</strong>). When it can't help, a human agent should receive the chat with enough context that Imani doesn't have to start again.</li>
+      <li><strong>Be testable.</strong> A language model's answers vary, so every change to a prompt, an article or a model needs a way to be checked before it reaches a Dasher.</li>
+    </ul>
+
+    <p>Testability is easy to overlook, and DoorDash's 2026 posts are mostly about it. In a flow-based system a change to one node has a predictable effect that you can trace down one branch. In a system driven by a language model, the same change can improve one kind of chat and quietly damage another, and nobody can trace it.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>DoorDash publishes very little about volume. In 2024 DoorDash said only that the system "autonomously assists thousands of Dashers" each day. It gives no figure for messages per day, no breakdown of resolved versus escalated chats, and no model or latency numbers. Its 2026 post on the simulation platform gives a few counts from the customer-side chatbot, a sibling system: one test of an order-status feature ran 302 simulated conversations in five minutes, and the same feature handled 175 real conversations in seven hours at one percent of production traffic. Those counts describe one feature of the customer-side chatbot, so they say nothing about Dasher volume, but they do show how DoorDash tests: a change used to go to one percent of live users and be judged by reading transcripts, a slow job when only 175 conversations arrive in seven hours.</p>
+
+
+    <p>With traffic figures mostly unpublished, we do the one piece of arithmetic that shapes the design using illustrative numbers.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose the knowledge base has 800 articles of about 600 tokens each (illustrative; DoorDash hasn't published the size of its own). A <strong>token</strong> is a word fragment, the unit a language model reads and is billed by. What happens if we paste the whole knowledge base into every prompt? Compare that with pasting only the three most relevant articles.</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>The whole knowledge base is 800 &times; 600 = 480,000 tokens per reply. That is more than most models' context windows allow, and where it does fit it costs a great deal and is slow, because the model reads every token before it writes the first word. Three articles are about 1,800 tokens, over 250 times smaller. There is a second cost on top of the price. A model handed 480,000 tokens of mostly irrelevant text is more likely to latch onto the wrong passage, and DoorDash's January 2026 post says exactly this about too much context: it found that a flood of raw data in the context window led to hallucinations, like misreading a field or suggesting a policy that doesn't exist.</p>
+        <p>So the design has to include a step that picks the right few passages out of many, and that step has to be good, because the model will believe whatever it is handed.</p>
+      </details>
+    </div>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: embed the last message, paste three chunks</h2>
+
+    <p>The first design most teams build is short. Take Imani's newest message and convert it into a vector, a list of numbers in which texts with similar meaning land near each other. That list is an <strong>embedding</strong>, and the program that makes it is an <strong>embedding model</strong>. Embed every knowledge-base article in advance, split into pieces called <strong>chunks</strong>, and store them in a <strong>vector index</strong> that can find the nearest few to any new vector. At request time we look up the three nearest chunks, paste them into a <strong>prompt</strong>, the text we send to the model, beside her message, and ask a language model to answer. Lewis and colleagues described this pattern in 2020 under the name RAG, with a retriever that returns the top documents and a generator that conditions on them, and it has changed little at this level of description.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Version 1: embed the newest message, paste three chunks, generate
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="120" height="76" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="120" height="76" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="80.0" y="68.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">LAST MESSAGE</text>
+<text x="80.0" y="82.0" text-anchor="middle" font-size="10" class="dim">Imani's newest</text>
+<text x="80.0" y="96.0" text-anchor="middle" font-size="10" class="dim">line of chat</text>
+<rect x="168" y="40" width="132" height="76" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="168" y="40" width="132" height="76" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="234.0" y="68.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">EMBED + TOP 3</text>
+<text x="234.0" y="82.0" text-anchor="middle" font-size="10" class="dim">nearest knowledge</text>
+<text x="234.0" y="96.0" text-anchor="middle" font-size="10" class="dim">base chunks</text>
+<rect x="328" y="40" width="120" height="76" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="328" y="40" width="120" height="76" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="388.0" y="68.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">PROMPT</text>
+<text x="388.0" y="82.0" text-anchor="middle" font-size="10" class="dim">chunks + last</text>
+<text x="388.0" y="96.0" text-anchor="middle" font-size="10" class="dim">message</text>
+<rect x="476" y="40" width="100" height="76" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="476" y="40" width="100" height="76" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="526.0" y="68.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">LLM</text>
+<text x="526.0" y="82.0" text-anchor="middle" font-size="10" class="dim">writes the</text>
+<text x="526.0" y="96.0" text-anchor="middle" font-size="10" class="dim">answer</text>
+<rect x="604" y="40" width="76" height="76" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="604" y="40" width="76" height="76" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="642.0" y="75.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">REPLY</text>
+<text x="642.0" y="89.0" text-anchor="middle" font-size="10" class="dim">sent at once</text>
+<path d="M144,78 L164,78" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M304,78 L324,78" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M452,78 L472,78" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M580,78 L600,78" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="160" text-anchor="start" font-size="10.5" class="dim">Short and cheap: one embedding lookup, one model call, nothing to run before or after.</text>
+<text x="20" y="188" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Imani's last line is 'been waiting 9 min and the food is getting cold'. It matches the cold-food article.</text>
+<text x="20" y="210" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Nothing checks the reply against the chunks, and nothing can say 'I don't know' or hand the chat to a person.</text>
+      </svg>
+      <div class="diagram-caption">Read left to right. Each box is cheap, which is why every team starts here, and the two amber lines underneath are where this design fails.</div>
+    </div>
+
+    <p>It has real strengths, and they explain why teams start here. It has two moving parts, one embedding call and one generation call. It already fixes the biggest problem with a bare model, whose knowledge of DoorDash comes from whatever public text it was trained on. DoorDash's 2024 post is blunt about that source: such text includes discussions on Quora, Reddit and Twitter, so there is a heightened risk of repeating wrong information. Putting the company's own article in front of the model gives it something better to say.</p>
+
+    <p>Version 1 breaks in several places, and every later section repairs exactly one of them.</p>
+
+    <ul>
+      <li><strong>It reads one line of a conversation.</strong> Imani's last message mentions the wait and the cold food. That line's embedding sits next to articles about cold food, not about a locked gate. Section 03 fixes this by summarising the chat.</li>
+      <li><strong>Embedding search misses exact terms and splits answers.</strong> A vector search is good at meaning and weak on exact words, and a fixed-size chunk can cut an answer in half. Section 04 fixes the search.</li>
+      <li><strong>It can wander off the page.</strong> Handed three chunks, it may still blend them with what it half remembers. Section 06 constrains how it writes.</li>
+      <li><strong>Nothing checks the reply.</strong> A fluent wrong answer reaches Imani at the same speed as a right one. Section 07 adds a check.</li>
+      <li><strong>It has no way to say "I can't help".</strong> Section 08 adds the handoff.</li>
+      <li><strong>Nobody can tell whether a change helped.</strong> Section 11 builds the evaluation.</li>
+    </ul>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Approach to answering Dasher questions</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Flow-based decision trees</td><td>Predictable, easy to test, fast, no hallucination</td><td>Covers only the issues someone built a path for; rigid wording</td></tr>
+        <tr><td>Bare LLM, no retrieval</td><td>Fluent, flexible, handles any phrasing</td><td>Knows DoorDash only through public text, which may be outdated or wrong</td></tr>
+        <tr><td>Naive RAG over the last message</td><td>Grounded in company articles, cheap, fast to build</td><td>Misreads multi-turn issues, can mix retrieved text with invented text, no safety net</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>DoorDash did not discard the flow-based system when it adopted the model. Its January 2026 post describes the model as achieving higher-quality resolutions than deterministic workflows, because it is more flexible and conversational, and it also says what that costs: the loss of traceability. Most of what follows is the cost of making that flexibility something you can trust.</p>
+  </section>
+
+  <section id="summary-query">
+    <h2><span class="num">03</span>Read the whole chat: summarising it into a query</h2>
+
+    <p>Imani's three messages arrive over ten minutes. Version 1 embeds only the third, "been waiting 9 min and the food is getting cold", and finds the cold-food article, which tells her to take a photo of the bag and report the order issue. That is the wrong advice for a locked gate, and it is wrong because the retriever never saw the first two messages. No single line contains the issue. It is the combination of a gated building, an unanswered customer and a long wait.</p>
+
+    <p>One obvious fix is to embed the whole transcript, but a chat is full of greetings, repeated lines and details that stopped mattering three turns ago, so its vector is a blur of everything said. DoorDash's engineers describe what they did instead: before retrieving anything, the system condenses the entire conversation to pinpoint the core problem. Their 2024 post says why this step carries weight. Because the issue changes as a conversation progresses, and the summary's wording affects what retrieval returns, the summarisation has to be highly accurate for the rest of the system to find the right resolution. Their list of retrieval improvements names the same idea as <strong>query contextualization</strong>: reduce the query to a single concise prompt, while keeping the full conversation history available as context.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Turning a chat into one query
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="30" width="250" height="48" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="30" width="250" height="48" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="145.0" y="51.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">1  Imani</text>
+<text x="145.0" y="65.0" text-anchor="middle" font-size="10" class="dim">'app says leave at door but its a gated building'</text>
+<rect x="20" y="92" width="250" height="48" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="92" width="250" height="48" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="145.0" y="113.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">2  Imani</text>
+<text x="145.0" y="127.0" text-anchor="middle" font-size="10" class="dim">'customer isnt picking up'</text>
+<rect x="20" y="154" width="250" height="48" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="154" width="250" height="48" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="145.0" y="175.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">3  Imani</text>
+<text x="145.0" y="189.0" text-anchor="middle" font-size="10" class="dim">'been waiting 9 min and the food is getting cold'</text>
+<rect x="20" y="216" width="250" height="48" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="216" width="250" height="48" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="145.0" y="237.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">CONTEXT</text>
+<text x="145.0" y="251.0" text-anchor="middle" font-size="10" class="dim">order, address, wait time on the clock</text>
+<rect x="330" y="70" width="150" height="120" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="330" y="70" width="150" height="120" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="405.0" y="106.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">SUMMARISER</text>
+<text x="405.0" y="120.0" text-anchor="middle" font-size="10" class="dim">LLM call: condense</text>
+<text x="405.0" y="134.0" text-anchor="middle" font-size="10" class="dim">the whole chat plus</text>
+<text x="405.0" y="148.0" text-anchor="middle" font-size="10" class="dim">context into one</text>
+<text x="405.0" y="162.0" text-anchor="middle" font-size="10" class="dim">short issue statement</text>
+<rect x="530" y="70" width="150" height="120" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="530" y="70" width="150" height="120" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="605.0" y="106.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">QUERY</text>
+<text x="605.0" y="120.0" text-anchor="middle" font-size="10" class="dim">'Dasher at a gated</text>
+<text x="605.0" y="134.0" text-anchor="middle" font-size="10" class="dim">building cannot reach</text>
+<text x="605.0" y="148.0" text-anchor="middle" font-size="10" class="dim">the customer, waited</text>
+<text x="605.0" y="162.0" text-anchor="middle" font-size="10" class="dim">9 minutes. What now?'</text>
+<path d="M274,54 L326,130" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M274,116 L326,130" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M274,178 L326,130" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M274,240 L326,130" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M484,130 L526,130" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="330" y="226" text-anchor="start" font-size="10.5" class="dim">The query is rewritten every turn, so it follows the issue as it changes.</text>
+<text x="330" y="250" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A summary that drops 'gated' retrieves cold-food advice. Everything</text>
+<text x="330" y="266" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">downstream inherits that mistake.</text>
+      </svg>
+      <div class="diagram-caption">The chat and the order context go into a summariser, and its one-line output is what retrieval searches with. The amber lines say what happens when the summary is wrong.</div>
+    </div>
+
+    <h3 id="3-1-what-the-summariser-does">3.1 What the summariser sees and produces</h3>
+
+    <p>The summariser is a language model call that runs before retrieval. Its input is the chat so far and, in a system like this one, some facts about the delivery the Dasher is on. DoorDash's January 2026 post lists the kind of context involved in the customer-side system: order details, delivery address and drop-off options, drop-off instructions, and the conversation itself. Its output is a short issue statement that reads like a good search query, something such as "Dasher at gated building cannot reach customer, has waited nine minutes, asks what to do".</p>
+
+    <p>Three properties of that output matter more than the wording. It should name the situation (gated building, unresponsive customer), because those words are what the articles contain, and carry the numbers that change the answer, such as how long she has waited. It should leave out the emotion, since "getting cold" would pull the query towards the food-quality article. And it should be regenerated on every turn: if Imani's next message is "the customer just called back", the old summary is wrong.</p>
+
+    <p>We can see the effect with a small experiment. Here the knowledge base is six made-up articles, and the retriever is a TF-IDF cosine search: each text becomes a vector of word counts, down-weighted for words that appear in many articles, and the score is the cosine of the angle between query and article. It is cruder than a neural embedding but makes the same point in a way you can read. We search twice, once with Imani's last message and once with a summary of the whole chat.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Search with the last message, then with a summary of the whole chat</span>
+      </summary>
+<pre><code>import numpy as np, re
+kb = {
+ &quot;A1 Customer not answering at drop-off&quot;:
+  &quot;if the customer is not answering call and message them then wait &quot;
+  &quot;at the address for the wait time shown in the app before you mark &quot;
+  &quot;the order undeliverable and contact support&quot;,
+ &quot;A2 Gate codes and building access&quot;:
+  &quot;if a building is gated or locked check the drop-off instructions &quot;
+  &quot;for a gate code or call the customer and ask for access&quot;,
+ &quot;A3 Long waits at the restaurant&quot;:
+  &quot;if the restaurant is taking too long to prepare an order you can &quot;
+  &quot;report a long wait and earn wait time pay after ten minutes&quot;,
+ &quot;A4 Food is cold or damaged&quot;:
+  &quot;if food arrives cold or damaged report the order issue so the &quot;
+  &quot;customer can be refunded and your rating is protected&quot;,
+ &quot;A5 Cancelled orders and pay&quot;:
+  &quot;if a customer cancels after pickup you keep the order and are paid &quot;
+  &quot;the full amount for the delivery&quot;,
+ &quot;A6 Wrong address on the order&quot;:
+  &quot;if the address looks wrong confirm with the customer in the app &quot;
+  &quot;before driving and contact support if the map pin is far off&quot;,
+}
+stop = set(&quot;a an the is if or to of in at and you your are can be it &quot;
+           &quot;for so on after before with from i my&quot;.split())
+def toks(s): return [w for w in re.findall(r&quot;[a-z]+&quot;, s.lower())
+                     if w not in stop]
+docs = {k: toks(v + &quot; &quot; + k) for k, v in kb.items()}
+vocab = sorted({w for d in docs.values() for w in d})
+idx = {w: i for i, w in enumerate(vocab)}
+N = len(docs)
+df = np.zeros(len(vocab))
+for d in docs.values():
+    for w in set(d): df[idx[w]] += 1
+idf = np.log((1 + N) / (1 + df)) + 1
+def vec(ts):
+    v = np.zeros(len(vocab))
+    for w in ts:
+        if w in idx: v[idx[w]] += 1
+    v *= idf
+    return v / (np.linalg.norm(v) + 1e-9)
+D = np.stack([vec(d) for d in docs.values()])
+names = list(docs)
+def show(label, q):
+    s = D @ vec(toks(q))
+    top = np.argsort(-s)[:3]
+    print(label)
+    for i in top: print(f&quot;   {s[i]:.2f}  {names[i]}&quot;)
+last = &quot;been waiting 9 min and the food is getting cold&quot;
+summ = (&quot;Dasher arrived with the order but the building is gated and &quot;
+        &quot;the customer is not answering after waiting 9 minutes; what &quot;
+        &quot;should the Dasher do&quot;)
+show(&quot;last message only:&quot;, last)
+show(&quot;summary of whole chat:&quot;, summ)</code></pre>
+      <div class="tryit-out"><pre><code>last message only:
+   0.66  A4 Food is cold or damaged
+   0.00  A1 Customer not answering at drop-off
+   0.00  A2 Gate codes and building access
+summary of whole chat:
+   0.42  A1 Customer not answering at drop-off
+   0.30  A2 Gate codes and building access
+   0.11  A3 Long waits at the restaurant</code></pre></div>
+    </details>
+
+    <p>The last message alone puts the cold-food article first, with a clear gap to everything else, and gives the two relevant articles a score of zero because it shares no words with them. With the summary, the unresponsive-customer article leads and the gate-access article comes second. The top score is lower, 0.42 against 0.66, and that is fine: retrieval cares about order, and a confident wrong match is worse than a modest right one.</p>
+
+    <h3 id="3-2-what-it-costs">3.2 What the summary costs</h3>
+
+    <p>Summarisation adds a full model call to the front of every turn. Where the wait for a reply matters, that is a real cost, and it adds a new place for errors: a summary that drops "gated" retrieves cold-food advice, and everything after it inherits the mistake. DoorDash's engineers treat the summary's accuracy as a precondition for the rest of the system for exactly this reason.</p>
+
+    <p>A second problem is language. DoorDash says its articles are all in English and many Dashers prefer another language, and it hasn't published how the system bridges the two. There are two standard options. The summariser can write its query in English whatever the Dasher typed, which adds a translation step that can lose detail. Or retrieval can use a multilingual embedding model that places a Spanish sentence near its English equivalent, which depends on how well the model handles the language in question. The 2024 post also mentions the problem on the way out: a model may ignore an instruction to reply in the Dasher's language when the prompt itself is in English, a mistake it says is infrequent and fades as models grow.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What to search with</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Last message only</td><td>Free, fast</td><td>Loses everything said earlier; pulled around by the emotion of the last line</td></tr>
+        <tr><td>Whole transcript as one text</td><td>Free, nothing dropped</td><td>The vector blurs greetings, repetition and stale details together</td></tr>
+        <tr><td>Last few turns, concatenated</td><td>Cheap, keeps recent context</td><td>Arbitrary cutoff; a key fact from turn one falls out</td></tr>
+        <tr><td>LLM-written summary (DoorDash)</td><td>Targets the issue; adapts every turn; can add order context</td><td>An extra model call of latency; a wrong summary poisons every later step</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>DoorDash chose the summary, and its 2024 post says so. It accepts the extra model call, and elsewhere in the same post it notes that prompts can be split into smaller parts and run in parallel where possible. Which model it uses for this step isn't published. A smaller, faster one is probably a good fit, since rewriting a chat into a sentence is far easier than answering the Dasher's question, but that is a design argument and not a published fact.</p>
+
+    <p>Search engines and conversational question-answering systems call this <strong>query rewriting</strong>: a follow-up such as "what about the next one?" is rewritten, using the session's history, into a question that stands on its own. Our summariser is that idea applied to a support chat.</p>
+
+    <h4 class="why">Why not give the retriever the whole transcript and let the embedding model sort it out?</h4>
+
+    <p>Because an embedding is a single point, and a messy text with six topics lands somewhere between them, near none of the articles. Summarising does the selecting before the squeeze, and selecting is a job a language model does well.</p>
+  </section>
+
+  <section id="retrieval">
+    <h2><span class="num">04</span>Finding the right passages</h2>
+
+    <p>With a good query in hand, the next step is the search itself. Version 1 used one vector index over fixed-size chunks, and it fails in two quiet ways. Chunks can cut an answer in half. And a vector search that understands meaning can miss a passage that matches the query's exact words. We handle the chunks first, then the search.</p>
+
+    <h3 id="4-1-chunking-the-articles">4.1 Chunking the articles</h3>
+
+    <p>Why chunk at all? An embedding model reads a limited amount of text, and one vector for a whole article averages all its topics, so smaller pieces give sharper matches and keep the prompt short. But a piece can be too small to answer from. A help article often states a rule in one sentence and its condition in the next ("For orders with an access problem that time is ten minutes"), and a chunk that holds the first sentence without the second tells the model nothing it can use. LinkedIn's authors name the same failure in their SIGIR 2024 paper: an issue ticket that describes a problem at its start and its fix at its end can be split in the middle during segmentation, so the retrieved part omits the solution.</p>
+
+    <p>We can measure how chunk size trades these off. Our experiment uses three short invented articles of eight sentences each and seven questions. For each question we know which two sentences are needed to answer it fully. We split the articles several ways, search with the same TF-IDF retriever as before, and ask two things of the top chunk: is it from the right article, and does it contain both needed sentences?</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Chunk size against the sentences a question needs</span>
+      </summary>
+<pre><code>import numpy as np, re
+arts = {
+ &quot;unresponsive&quot;: [
+  &quot;Customer not answering at drop-off.&quot;,
+  &quot;Call the customer and send a message in the app.&quot;,
+  &quot;Then wait at the address for the time shown in the app.&quot;,
+  &quot;For orders with an access problem that time is ten minutes.&quot;,
+  &quot;After that time you can mark the order undeliverable.&quot;,
+  &quot;Do this only after you have tried the call and the message.&quot;,
+  &quot;Support will confirm the order and your pay.&quot;,
+  &quot;Keep the order with you until support replies.&quot;],
+ &quot;restaurant&quot;: [
+  &quot;Long waits at the restaurant.&quot;,
+  &quot;Check the order status screen when you arrive.&quot;,
+  &quot;If the order is not ready ask the staff for an estimate.&quot;,
+  &quot;You can report a long wait from the order screen.&quot;,
+  &quot;Wait time pay starts after the grace period.&quot;,
+  &quot;The grace period depends on the order type.&quot;,
+  &quot;It is shown on the order screen before you accept.&quot;,
+  &quot;Pay is added once the order is completed.&quot;],
+ &quot;cold&quot;: [
+  &quot;Food is cold or damaged.&quot;,
+  &quot;Take a photo of the bag before you leave the store.&quot;,
+  &quot;If the customer complains report the order issue.&quot;,
+  &quot;The photo shows the order was fine when you left.&quot;,
+  &quot;Support reviews the report and the photo together.&quot;,
+  &quot;A valid report keeps your rating protected.&quot;,
+  &quot;Reports must be sent within a day of the delivery.&quot;,
+  &quot;Late reports cannot be reviewed.&quot;],
+}
+# (question, article, sentence numbers needed to answer it fully)
+qs = [
+ (&quot;how long do i wait for a customer who is not answering&quot;,
+  &quot;unresponsive&quot;, {2, 3}),
+ (&quot;when can i mark the order undeliverable&quot;, &quot;unresponsive&quot;, {4, 5}),
+ (&quot;do i keep the order if the customer never answers&quot;,
+  &quot;unresponsive&quot;, {6, 7}),
+ (&quot;when does wait time pay start at the restaurant&quot;,
+  &quot;restaurant&quot;, {4, 5}),
+ (&quot;where is the grace period shown for restaurant waits&quot;,
+  &quot;restaurant&quot;, {5, 6}),
+ (&quot;is the photo of the bag needed for a cold food report&quot;,
+  &quot;cold&quot;, {1, 3}),
+ (&quot;how late can i report a cold food order&quot;, &quot;cold&quot;, {6, 7}),
+]
+stop = set(&quot;a an the is if or to of in at and you your are can be it &quot;
+           &quot;for so on after before with from i do not when how&quot;.split())
+def toks(s):
+    return [w for w in re.findall(r&quot;[a-z]+&quot;, s.lower()) if w not in stop]
+def chunks(size, step):
+    out = []
+    for a, sents in arts.items():
+        for s in range(0, len(sents), step):
+            idx = set(range(s, min(s + size, len(sents))))
+            text = &quot; &quot;.join(sents[i] for i in sorted(idx))
+            out.append((a, idx, text))
+            if s + size &gt;= len(sents): break
+    return out
+def evaluate(cs):
+    docs = [toks(c[2]) for c in cs]
+    vocab = sorted({w for d in docs for w in d})
+    ix = {w: i for i, w in enumerate(vocab)}
+    df = np.zeros(len(vocab))
+    for d in docs:
+        for w in set(d): df[ix[w]] += 1
+    idf = np.log((1 + len(cs)) / (1 + df)) + 1
+    def vec(ts):
+        v = np.zeros(len(vocab))
+        for w in ts:
+            if w in ix: v[ix[w]] += 1
+        v *= idf
+        return v / (np.linalg.norm(v) + 1e-9)
+    D = np.stack([vec(d) for d in docs])
+    right = full = 0
+    for q, a, need in qs:
+        top = cs[int(np.argmax(D @ vec(toks(q))))]
+        right += top[0] == a
+        full += top[0] == a and need &lt;= top[1]
+    return right, full, np.mean([len(c[2].split()) for c in cs])
+head = (&quot;chunking&quot;, &quot;chunks&quot;, &quot;words&quot;, &quot;article&quot;, &quot;answer&quot;)
+print(f&quot;{head[0]:24}{head[1]:&gt;7}{head[2]:&gt;6}{head[3]:&gt;9}{head[4]:&gt;8}&quot;)
+for name, size, step in [(&quot;1 sentence&quot;, 1, 1), (&quot;2 sentences&quot;, 2, 2),
+        (&quot;4 sentences&quot;, 4, 4), (&quot;4 sent., overlap 2&quot;, 4, 2),
+        (&quot;4 sent., overlap 3&quot;, 4, 1), (&quot;whole article&quot;, 8, 8)]:
+    cs = chunks(size, step)
+    r, f, w = evaluate(cs)
+    print(f&quot;{name:24}{len(cs):7}{w:6.0f}{r:&gt;7}/7{f:&gt;6}/7&quot;)</code></pre>
+      <div class="tryit-out"><pre><code>chunking                 chunks words  article  answer
+1 sentence                   24     9      7/7     0/7
+2 sentences                  12    17      6/7     2/7
+4 sentences                   6    35      7/7     6/7
+4 sent., overlap 2            9    36      7/7     6/7
+4 sent., overlap 3           15    37      7/7     5/7
+whole article                 3    69      6/7     6/7</code></pre></div>
+    </details>
+
+    <p>One-sentence chunks find the right article every time and never contain a complete answer, because each question needs two sentences. Two-sentence chunks do slightly better, and only when the needed pair happens to fall inside one chunk. Four-sentence chunks hold a full answer for six of seven questions at about half the words of the whole article. Whole articles also get six of seven, but at 69 words per chunk they nearly double the prompt, and one question already pulled the wrong article. Overlapping the chunks didn't help here, and seven questions are too few to rank those variants. The pattern is what to keep: the unit has to be large enough to hold a rule with its condition, and small enough that finding it is still precise.</p>
+
+    <p>DoorDash's post sidesteps most of this. As described, its system looks up the top N most similar earlier cases that were resolved using knowledge-base articles, and each of those cases corresponds to a specific article that is placed in the prompt. So the unit that gets retrieved is a past case, and the unit that reaches the model is an article. That is a different design from chunk retrieval, with its own tradeoff, which we compare after the search methods.</p>
+
+    <h3 id="4-2-dense-retrieval">4.2 Vector search: matching meaning</h3>
+
+    <p>Vector search is the part of Version 1 that works. An embedding model maps a text to a vector, and relevance is the cosine of the angle between the query vector <span>$q$</span> and the chunk vector <span>$d$</span>:</p>
+
+    <div class="eq-block"><span>$$\text{score}(q, d) \;=\; \cos(q, d) \;=\; \frac{q \cdot d}{\lVert q \rVert \, \lVert d \rVert}$$</span></div>
+
+    <p>The numerator multiplies the two vectors coordinate by coordinate and adds the results, so it is large when both point the same way. Dividing by each vector's length keeps a long chunk from winning just by being long. The value runs from 1 for identical direction down to 0 for unrelated (and below, for opposite). Lewis and colleagues scored documents the same way in 2020, by the inner product of a query vector and a document vector, and found the top K with <strong>maximum inner product search</strong>, an approximate nearest-neighbour method that runs in less than linear time, using the FAISS library. For a few thousand chunks even a full scan is fast, so such an index matters mostly when the collection is large.</p>
+
+    <p>Vector search's strength is that "gated building" and "locked entrance" land close together even though they share no words. Its weakness is the reverse. A dense vector is a compressed summary, and exact strings such as an error code, a product name or a policy number can disappear in the compression. Two articles about different errors can look nearly identical to the embedding model.</p>
+
+    <h3 id="4-3-bm25">4.3 Keyword search: BM25</h3>
+
+    <p>The oldest answer to that weakness is to match words directly. <strong>BM25</strong> scores a chunk against a query by summing, over each query word, how rare the word is in the collection and how often it appears in the chunk:</p>
+
+    <div class="eq-block"><span>$$\text{BM25}(q, d) \;=\; \sum_{t \in q} \text{IDF}(t) \cdot \frac{f(t,d)\,(k_1 + 1)}{f(t,d) + k_1\left(1 - b + b\,\frac{|d|}{\text{avgdl}}\right)}$$</span></div>
+
+    <p>Here <span>$f(t,d)$</span> is how many times word <span>$t$</span> occurs in chunk <span>$d$</span>, <span>$|d|$</span> is the chunk's length and avgdl is the average chunk length. <span>$\text{IDF}(t)$</span> is the word's rarity, a large number for a word found in few chunks and near zero for "the". The fraction does two jobs. First, it saturates: the tenth occurrence of a word adds much less than the second, controlled by <span>$k_1$</span>, commonly set around 1.2. Second, it normalises by length through <span>$b$</span>, commonly 0.75, so a long chunk doesn't score well just for containing more words. BM25 comes from the probabilistic retrieval literature and is the standard keyword baseline; Robertson and Zaragoza's 2009 survey is the usual reference.</p>
+
+    <p>BM25 is blind to meaning, the opposite of a dense vector's blind spot: "locked entrance" scores zero against an article that says "gated building" unless some other word overlaps. It is excellent at the identifiers that a vector blurs.</p>
+
+    <h3 id="4-4-fusing-the-two">4.4 Fusing the two rankings</h3>
+
+    <p>We can run both searches and merge the results, with one trap. BM25 scores run from zero to well above ten and shift with the query and the collection, while cosine scores sit between roughly 0 and 1. Adding them gives BM25 almost all the influence, and rescaling is fragile. <strong>Reciprocal rank fusion</strong>, or <strong>RRF</strong>, avoids scores altogether and uses only each chunk's rank in each list:</p>
+
+    <div class="eq-block"><span>$$\text{RRF}(d) \;=\; \sum_{r \in R} \frac{1}{k + \text{rank}_r(d)}$$</span></div>
+
+    <p>Here <span>$R$</span> is the set of ranked lists (BM25 and dense), <span>$\text{rank}_r(d)$</span> is the chunk's position in list <span>$r$</span> starting from 1, and <span>$k$</span> is a constant that flattens the curve so that the difference between rank 1 and rank 2 isn't enormous. Cormack, Clarke and Buettcher introduced it at SIGIR 2009 and used <span>$k = 60$</span>, which they say was fixed during a pilot investigation and later found near-optimal. A chunk that appears in both lists gets two terms and rises. Take a chunk ranked 1st by BM25 and 3rd by the dense search: <span>$1/61 + 1/63 \approx 0.0323$</span>. A chunk ranked 2nd by BM25 and 1st by the dense search scores <span>$1/62 + 1/61 \approx 0.0325$</span> and edges ahead. A chunk ranked 1st in only one list scores <span>$1/61 \approx 0.0164$</span>, about half of either. Agreement between the two methods counts for more than a single enthusiastic vote.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Hybrid retrieval with a reranker
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="110" width="100" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="110" width="100" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="70.0" y="142.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">QUERY</text>
+<text x="70.0" y="156.0" text-anchor="middle" font-size="10" class="dim">issue summary</text>
+<rect x="170" y="40" width="160" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="170" y="40" width="160" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="250.0" y="65.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">BM25</text>
+<text x="250.0" y="79.0" text-anchor="middle" font-size="10" class="dim">exact words, codes,</text>
+<text x="250.0" y="93.0" text-anchor="middle" font-size="10" class="dim">product names</text>
+<rect x="170" y="180" width="160" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="170" y="180" width="160" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="250.0" y="205.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">DENSE VECTORS</text>
+<text x="250.0" y="219.0" text-anchor="middle" font-size="10" class="dim">meaning, other</text>
+<text x="250.0" y="233.0" text-anchor="middle" font-size="10" class="dim">words, other languages</text>
+<rect x="380" y="110" width="120" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="380" y="110" width="120" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="440.0" y="135.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">FUSE (RRF)</text>
+<text x="440.0" y="149.0" text-anchor="middle" font-size="10" class="dim">rank-based vote</text>
+<text x="440.0" y="163.0" text-anchor="middle" font-size="10" class="dim">top 20</text>
+<rect x="550" y="110" width="130" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="550" y="110" width="130" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="615.0" y="135.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">RERANK</text>
+<text x="615.0" y="149.0" text-anchor="middle" font-size="10" class="dim">cross-encoder reads</text>
+<text x="615.0" y="163.0" text-anchor="middle" font-size="10" class="dim">query + chunk, top 3</text>
+<path d="M124,135 L166,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M124,155 L166,205" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M334,80 L376,130" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M334,215 L376,160" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M504,145 L546,145" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="250" y="28" text-anchor="middle" font-size="10" fill="#fbbf24">top 50 chunks</text>
+<text x="250" y="268" text-anchor="middle" font-size="10" fill="#34d399">top 50 chunks</text>
+<text x="440" y="100" text-anchor="middle" font-size="10" fill="#f472b6">20 chunks</text>
+<text x="615" y="100" text-anchor="middle" font-size="10" fill="#818cf8">3 chunks</text>
+<text x="20" y="290" text-anchor="start" font-size="10.5" class="dim">The counts (50, 20, 3) are illustrative. DoorDash has not published its retrieval settings.</text>
+      </svg>
+      <div class="diagram-caption">Two cheap searches run in parallel, a rank-based vote merges them, and a slower model reads only the survivors. Each stage sees fewer chunks and can afford more work on each.</div>
+    </div>
+
+    <h3 id="4-5-reranking">4.5 Reranking the shortlist</h3>
+
+    <p>Neither search reads the query and the chunk together: a chunk's embedding was computed in advance, and BM25 just counts words. A <strong>cross-encoder</strong> does the reading: it takes the query and one chunk as a single input, lets every word of each attend to every word of the other, and outputs one relevance score. That is far more accurate and far too slow to run over thousands of chunks, so it runs only on the fused shortlist. In 2019 Nogueira and Cho showed how much this can matter, using BERT as a reranker of a first-stage search on the MS MARCO passage benchmark and beating the previous best by 27% in relative MRR@10.</p>
+
+    <p>Cost grows with the shortlist, since 20 chunks mean 20 model reads, though they can run in parallel. A longer shortlist protects against a missing right chunk, and a shorter one saves time.</p>
+
+    <p>One thing needs saying plainly. DoorDash's 2024 post mentions a vector store and the choice of an embedding model "from a few choices", but doesn't describe keyword search, fusion or a reranker. This section is therefore the standard toolkit for the problem, not DoorDash's published design. What DoorDash did publish is the choice we turn to next.</p>
+
+    <h3 id="4-6-what-to-retrieve">4.6 What to retrieve: chunks, past cases, or a graph</h3>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Design</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Dense vectors over chunks</td><td>Finds meaning across wording; simple; one index</td><td>Misses exact terms; chunks can cut answers; no notion of structure</td></tr>
+        <tr><td>BM25 + dense + RRF + reranker</td><td>Covers both blind spots; reranker reads query and chunk together</td><td>Three components to run and tune; a reranker call per candidate</td></tr>
+        <tr><td>Similar past cases, then their article (DoorDash)</td><td>Matches the Dasher's phrasing against how real Dashers phrase problems; the article is a complete answer</td><td>Only as good as the case history and its labels; new issues have no past cases</td></tr>
+        <tr><td>Knowledge graph of tickets (LinkedIn)</td><td>Keeps ticket structure and links; answers are whole sections</td><td>Needs parsing and a graph database; the schema is built by hand</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>DoorDash retrieves similar past cases, a sensible choice because Dashers don't write the way help articles do. A search over how past Dashers described the same trouble, linked to the article that resolved it, probably closes much of the vocabulary gap that BM25 and dense search try to bridge. The cost appears for an issue nobody has had before, when the nearest cases point at the wrong article. That is where the escalation path of section 08 matters.</p>
+
+    <p>This two-stage shape, a cheap search that gathers a few hundred or thousand candidates and an expensive model that orders a handful, is the backbone of recommenders and web search too. Chapter 16 describes it in general, and the YouTube case study (chapter 41) builds it for video.</p>
+
+  </section>
+
+  <section id="graph">
+    <h2><span class="num">05</span>When the corpus is past tickets: LinkedIn's graph</h2>
+
+    <p>DoorDash's retrieval looks at past resolved cases, and LinkedIn's SIGIR 2024 paper (Xu et al.) is about exactly that kind of corpus, historical support tickets. It shows what flat chunks lose. A ticket in a system such as Jira is not a paragraph of text. It has sections (summary, description, root cause, priority, steps to reproduce), and it links to other tickets: this one was cloned from that one, that one is a duplicate of another. Cutting such a ticket into fixed-length chunks throws away both kinds of structure, and the authors set out two limitations that follow. Ignoring structure lowers retrieval accuracy, and splitting a ticket can separate the description of the problem from its solution.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">LinkedIn's ticket knowledge graph, simplified from the paper
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 350" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="30" width="150" height="50" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="30" width="150" height="50" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="52.0" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">TICKET ENT-22970</text>
+<text x="95.0" y="66.0" text-anchor="middle" font-size="10" class="dim">a past support issue</text>
+<rect x="220" y="20" width="120" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="220" y="20" width="120" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="280.0" y="41.0" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">Summary</text>
+<rect x="220" y="60" width="120" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="220" y="60" width="120" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="280.0" y="81.0" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">Description</text>
+<rect x="220" y="100" width="120" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="220" y="100" width="120" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="280.0" y="121.0" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">Root cause</text>
+<rect x="220" y="140" width="120" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="220" y="140" width="120" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="280.0" y="161.0" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">Priority</text>
+<rect x="390" y="60" width="160" height="34" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="390" y="60" width="160" height="34" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="470.0" y="81.0" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">Steps to reproduce</text>
+<path d="M174,50 L216,37" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M174,55 L216,77" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M174,62 L216,117" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M174,70 L216,157" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M344,77 L386,77" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="215" width="150" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="215" width="150" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="95.0" y="237.0" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">TICKET PORT-133061</text>
+<text x="95.0" y="251.0" text-anchor="middle" font-size="10" class="dim">clone of ENT-22970</text>
+<rect x="220" y="215" width="150" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="220" y="215" width="150" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="295.0" y="237.0" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">TICKET ENT-1744</text>
+<text x="295.0" y="251.0" text-anchor="middle" font-size="10" class="dim">similar title (cosine)</text>
+<rect x="400" y="215" width="150" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="400" y="215" width="150" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="475.0" y="237.0" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">TICKET ENT-3547</text>
+<text x="475.0" y="251.0" text-anchor="middle" font-size="10" class="dim">similar title (cosine)</text>
+<path d="M60,84 L60,211" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M130,84 L130,196 L295,196 L295,211" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M295,196 L475,196 L475,211" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="30" y="150" text-anchor="start" font-size="10" fill="#f472b6">CLONE</text>
+<text x="160" y="190" text-anchor="start" font-size="10" fill="#f472b6">SIMILAR_TO</text>
+<rect x="580" y="20" width="100" height="100" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="580" y="20" width="100" height="100" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="630.0" y="46.0" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">QUESTION</text>
+<text x="630.0" y="60.0" text-anchor="middle" font-size="10" class="dim">entities:</text>
+<text x="630.0" y="74.0" text-anchor="middle" font-size="10" class="dim">summary, priority,</text>
+<text x="630.0" y="88.0" text-anchor="middle" font-size="10" class="dim">root cause</text>
+<text x="630.0" y="102.0" text-anchor="middle" font-size="10" class="dim">intent: steps</text>
+<path d="M576,77 L554,77" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="290" text-anchor="start" font-size="10.5" class="dim">Each ticket becomes a tree of sections. Tickets link through explicit fields and through similar titles.</text>
+<text x="20" y="312" text-anchor="start" font-size="10.5" class="dim">A query is matched to tickets by section, then an LLM writes a graph query that returns the right node.</text>
+<text x="20" y="334" text-anchor="start" font-size="10.5" class="" fill="#34d399">An answer is never cut in half by a chunk boundary, because the unit is a section.</text>
+      </svg>
+      <div class="diagram-caption">Left: one ticket parsed into a tree, linked to related tickets. Right: a question parsed into entities and an intent, which select tickets and then the exact section to return.</div>
+    </div>
+
+    <h3 id="5-1-building-the-graph">5.1 Building the graph</h3>
+
+    <p>The graph has two levels. Inside one ticket, a tree models the sections: each node is identified by the pair of the ticket and the section, and edges carry the relation between sections. Between tickets, the graph holds explicit links defined in the tracker and implicit links inferred by comparing the embeddings of ticket titles. In the paper's notation the implicit edges connect two tickets when the cosine similarity of their title embeddings reaches a threshold <span>$\theta$</span>:</p>
+
+    <div class="eq-block"><span>$$E_{\text{imp}} \;=\; \{(T_i, T_j) \;:\; \cos\big(\text{embed}(T_i), \text{embed}(T_j)\big) \ge \theta\}$$</span></div>
+
+    <p>To turn a raw ticket into a tree, they use rules for fields that are easy to extract (code sections found by keyword) and a language model for the rest, guided by a YAML template that lists the sections support teams use. They embed the text-rich nodes, such as issue summary and description, with pretrained models (the paper names BERT and E5 as examples) and store the vectors in a vector database. Qdrant is the paper's example store.</p>
+
+    <h3 id="5-2-answering-a-question">5.2 Answering a question</h3>
+
+    <p>At question time an LLM parses the user's query into named entities, each tied to a section of the template, and into an intent that says which section the user wants. "How to reproduce the issue where a user saw a CSV upload error with major priority due to a data issue" yields entities for summary, priority and root cause, and the intent "steps to reproduce". Tickets are then scored by summing cosine similarity over matching sections:</p>
+
+    <div class="eq-block"><span>$$S_{T_i} \;=\; \sum_{(k,v) \in P} \;\sum_{n \in T_i} \mathbb{1}[n.\text{sec} = k] \cdot \cos\big(\text{embed}(v), \text{embed}(n.\text{text})\big)$$</span></div>
+
+    <p>Read it from the inside out. For one extracted entity <span>$(k, v)$</span>, such as the section "priority" with the value "major", we compare the value's embedding with every node in ticket <span>$T_i$</span>, but only the nodes in section <span>$k$</span> count, because of the indicator <span>$\mathbb{1}$</span>. The outer sum adds those scores over all entities in the query. A ticket that matches on several sections beats a ticket that matches strongly on one, on the assumption that multiple matches signal a real link. Top tickets then go to a second step in which an LLM rewrites the question with the ticket's ID and translates it into a graph query (the paper uses Cypher for Neo4j), which returns exactly the requested node. If that query fails, the system falls back to ordinary text retrieval.</p>
+
+    <h3 id="5-3-the-numbers">5.3 The numbers, and what they do and don't show</h3>
+
+    <p>The authors evaluated on a curated "golden" dataset of typical queries, tickets and their authoritative solutions, holding the language model (GPT-4) and the embedding model (E5) fixed in both arms. Against a baseline of text chunks with embedding search, they report the following. MRR, Recall@K and NDCG@K are explained under the table and again in section 11, and BLEU is a score for how closely generated text matches a reference answer.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Metric</th><th>Baseline</th><th>With the graph</th></tr></thead>
+      <tbody>
+        <tr><td>MRR</td><td>0.522</td><td>0.927</td></tr>
+        <tr><td>Recall@1</td><td>0.400</td><td>0.860</td></tr>
+        <tr><td>Recall@3</td><td>0.640</td><td>1.000</td></tr>
+        <tr><td>NDCG@3</td><td>0.520</td><td>0.946</td></tr>
+        <tr><td>BLEU (answer text vs the golden answer)</td><td>0.057</td><td>0.377</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The headline "77.6% in MRR" is the ratio 0.927 / 0.522 less one. MRR, <strong>mean reciprocal rank</strong>, averages one divided by the rank of the first correct result over all queries, so 0.927 means the right ticket was almost always first. LinkedIn's online result comes from a random split of LinkedIn's customer-service team: the group using the tool had a median per-issue resolution time of 5 hours against 7 hours for the group without it, the 28.6% drop the authors report. The mean fell from 40 to 15 hours and the 90th percentile from 87 to 47.</p>
+
+    <p>Three cautions apply. First, the offline numbers come from a golden set the authors built, and the paper doesn't say how many queries it holds, so the gap between 0.522 and 0.927 shows direction more than magnitude. Second, the system is a tool for LinkedIn's human agents, who read the output and decide what to do, so it carries less risk than a bot that talks to the end user directly. Third, the median improved by 28.6% while the mean improved by much more, a hint that the tool probably helps most with the long tail of slow tickets. All of that fits this chapter's theme: structure in the corpus should be kept, and the unit of retrieval should match the unit of meaning.</p>
+
+    <p>Graph-shaped retrieval for text is a broad idea. It shows up wherever documents have natural parts and links: code search over functions and call graphs, legal retrieval over statutes and citations, and scientific search over papers and references.</p>
+  </section>
+
+  <section id="generation">
+    <h2><span class="num">06</span>Writing an answer that stays on the page</h2>
+
+    <p>Imani's query now retrieves the unresponsive-customer article and the gate-access article. The model receives both, and the question becomes how to make it write from them and nothing else. DoorDash's post describes the assembly plainly: the retrieved articles are placed into a prompt template, and the model writes a tailored reply using the conversation, the distilled issue summary and the articles. A <strong>prompt template</strong> is a fixed block of instructions with slots that the system fills in for each request.</p>
+
+    <h3 id="6-1-what-goes-in-the-prompt">6.1 What goes in the prompt</h3>
+
+    <p>A template for this job has five parts: instructions (who the assistant is, what it may do, the language to answer in, how long to be), the policy text that applies, the retrieved articles each labelled with an identifier, the conversation, and the issue summary. Order matters less than clarity, though putting the articles close to the question tends to help.</p>
+
+    <p>DoorDash lists several principles for writing these prompts. Break a complicated prompt into smaller parts and run the parts in parallel where possible. Avoid negative wording, because models typically struggle with it, and describe the desired action with examples instead. Use chain-of-thought prompting, where the model writes out its reasoning before the answer, which helps spot logic errors and hallucinations. The second principle sounds odd until you try it. "Do not mention bonuses" puts the word "bonuses" in front of the model, and the instruction "Describe only the pay rules that appear in the articles" gives it something to do.</p>
+
+    <p>We add three requirements that follow from the problem and are not documented in DoorDash's post, so they are our design and not its description. First, an explicit way out: if the articles don't answer the question, the model should say so, and the system should treat that as a signal to escalate. Without it, a model asked to answer will answer. Second, a citation: each claim in the reply should name the article it came from, with the sentence it relies on. Third, the reply and any action it triggers must agree. DoorDash lists "consistent action and response" among its challenges, since the model can also act by calling APIs and the calls must match what the reply says.</p>
+
+    <h3 id="6-2-the-research-version">6.2 The research version of grounding</h3>
+
+    <p>The 2020 RAG paper formalised the idea before production chatbots existed. It treats the retrieved document as a hidden variable. Its first model, RAG-Sequence, uses one document for the whole answer and sums over the top K documents the retriever returns:</p>
+
+    <div class="eq-block"><span>$$p(y \mid x) \;\approx\; \sum_{z \in \text{top-}K} p_\eta(z \mid x)\; \prod_{i=1}^{N} p_\theta\big(y_i \mid x, z, y_{1:i-1}\big)$$</span></div>
+
+    <p>Here <span>$x$</span> is the question, <span>$y$</span> the answer with <span>$N$</span> tokens, <span>$z$</span> a retrieved document, <span>$p_\eta(z \mid x)$</span> the retriever's probability for that document, and <span>$p_\theta$</span> the generator's probability of each next token given the question, the document and the tokens already written. In effect the model asks "how likely is this answer if the source were document 1, weighted by how likely document 1 is, plus the same for document 2", and so on. The second variant, RAG-Token, lets each token draw on a different document by moving the sum inside the product:</p>
+
+    <div class="eq-block"><span>$$p(y \mid x) \;\approx\; \prod_{i=1}^{N} \sum_{z \in \text{top-}K} p_\eta(z \mid x)\; p_\theta\big(y_i \mid x, z, y_{1:i-1}\big)$$</span></div>
+
+    <p>Production support bots rarely compute either sum. Chat models are large and hosted behind an API, so the usual approach is to paste all K documents into one prompt and let the model attend to whichever it needs, as DoorDash's template does. The formulas still say something useful: the answer depends on the retrieval probability and the text together, so a wrong retrieval weight or a wrong document pushes the answer off, which is why the earlier sections spent so long on retrieval. The paper also found that RAG produced more specific, diverse and factual language than a model with no retrieval, the benefit every support team is chasing.</p>
+
+    <h3 id="6-3-why-not-fine-tune">6.3 Why not teach the model the articles?</h3>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Way to give the model company knowledge</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Rely on what it already knows</td><td>Nothing to build</td><td>Public text, often outdated or wrong for this company</td></tr>
+        <tr><td>Fine-tune on the articles</td><td>Knowledge sits in the weights; shorter prompts</td><td>Every article edit means retraining; no way to point at a source; stale facts persist</td></tr>
+        <tr><td>Retrieve and paste (RAG)</td><td>An article edit takes effect at once; the source is visible and checkable</td><td>Needs good retrieval; longer prompts; the model can still ignore what it was given</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>DoorDash chose retrieval, and its post calls the knowledge base the "foundational truth" for responses. When a policy changes, an editor changes an article and the next reply uses it. DoorDash is also building a developer-friendly management portal for the knowledge base, which treats the articles as a product the system depends on and not as a one-time training set.</p>
+
+  </section>
+
+  <section id="guardrail">
+    <h2><span class="num">07</span>Checking every reply: the two-tier guardrail</h2>
+
+    <p>The prompt asks the model to stay on the page, and a request is not a guarantee. A reply can quote the article for two sentences and then add a bonus that doesn't exist. Imani will act on whatever appears, so the system needs a gate between the model and her screen. DoorDash's post calls it the <strong>LLM Guardrail</strong>, an online monitoring tool that evaluates each output for accuracy and compliance. It checks three things: that the reply is grounded in the retrieved articles, that it stays coherent with the earlier conversation, and that it doesn't violate company policy. A reply must pass all of them to be shown.</p>
+
+    <h3 id="7-1-the-obvious-gate-and-its-cost">7.1 The obvious gate, and why it was too expensive</h3>
+
+    <p>The obvious guardrail is a second language model that reads the reply, the articles and the conversation, and answers whether the reply is grounded. DoorDash's engineers tried a more sophisticated guardrail model at first and report that it increased response times and used so many tokens that it was prohibitively expensive. Reconstructing the arithmetic is easy. A grounding check has to read the articles again, so its input is about as large as the original prompt, and it adds a whole model round trip before Imani sees anything. Running it on every reply roughly doubles the model calls behind each answer and adds a full round trip to every one, in order to catch a problem that, as the same post says, affects a relatively small number of responses.</p>
+
+    <p>Their solution is a two-tier approach: a cost-effective shallow check built in-house, followed by an LLM-based evaluator that runs when the first check is not satisfied.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The two-tier guardrail
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="100" width="110" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="100" width="110" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="75.0" y="125.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">DRAFT REPLY</text>
+<text x="75.0" y="139.0" text-anchor="middle" font-size="10" class="dim">from the</text>
+<text x="75.0" y="153.0" text-anchor="middle" font-size="10" class="dim">generator</text>
+<rect x="180" y="100" width="170" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="180" y="100" width="170" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="265.0" y="125.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">TIER 1: SHALLOW</text>
+<text x="265.0" y="139.0" text-anchor="middle" font-size="10" class="dim">sliding-window</text>
+<text x="265.0" y="153.0" text-anchor="middle" font-size="10" class="dim">similarity to chunks</text>
+<rect x="400" y="100" width="140" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="400" y="100" width="140" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="470.0" y="125.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TIER 2: LLM</text>
+<text x="470.0" y="139.0" text-anchor="middle" font-size="10" class="dim">grounded? coherent?</text>
+<text x="470.0" y="153.0" text-anchor="middle" font-size="10" class="dim">policy-compliant?</text>
+<rect x="590" y="30" width="90" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="590" y="30" width="90" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="635.0" y="55.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">SHOW</text>
+<text x="635.0" y="69.0" text-anchor="middle" font-size="10" class="dim">to Imani</text>
+<rect x="590" y="124" width="90" height="46" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="590" y="124" width="90" height="46" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="635.0" y="144.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RETRY</text>
+<text x="635.0" y="158.0" text-anchor="middle" font-size="10" class="dim">or hand off</text>
+<path d="M134,135 L176,135" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M354,135 L396,135" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M270,96 L270,58 L586,58" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M544,135 L586,147" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M544,112 L586,84" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="430" y="52" text-anchor="middle" font-size="10" fill="#34d399">close match: pass</text>
+<text x="375" y="124" text-anchor="middle" font-size="10" fill="#fbbf24">flagged</text>
+<text x="565" y="100" text-anchor="middle" font-size="10" fill="#34d399">pass</text>
+<text x="573" y="176" text-anchor="middle" font-size="10" fill="#f472b6">fail</text>
+<text x="20" y="215" text-anchor="start" font-size="10.5" class="dim">Tier 1 costs milliseconds and no tokens. Tier 2 costs a model call, so it runs only on flagged replies.</text>
+<text x="20" y="238" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Blind spot: a reply that copies the article but changes a number still matches closely and skips tier 2.</text>
+<text x="20" y="260" text-anchor="start" font-size="10.5" class="dim">Illustrative load: tier 2 runs on about 14% of replies, so the extra delay averages ~124 ms, not 900.</text>
+      </svg>
+      <div class="diagram-caption">A reply must pass every check before it is shown. The cheap check clears most replies, the expensive check handles the doubtful ones, and anything that fails both is retried or handed to a person.</div>
+    </div>
+
+    <h3 id="7-2-tier-one">7.2 Tier one: a sliding window of similarity</h3>
+
+    <p>The shallow check, as described, measures semantic similarity between the reply and segments of the relevant articles with a sliding window. We can reconstruct how it probably works. Slide a window of a fixed number of words along the article, embed each window, and compare the embedding of the reply with each one. If some window is close to the reply, the reply is probably saying what the article says. In symbols, for a reply <span>$r$</span> and windows <span>$w_1, \dots, w_m$</span> of the article:</p>
+
+    <div class="eq-block"><span>$$g(r) \;=\; \max_{j}\; \cos\big(\text{embed}(r),\, \text{embed}(w_j)\big), \qquad \text{pass if } g(r) \ge \tau$$</span></div>
+
+    <p>The maximum asks whether any part of the article resembles the reply, which suits the usual case of a reply that paraphrases one passage. The threshold <span>$\tau$</span> sets how close counts as close, and choosing it is where the engineering lies. DoorDash's description gives the shape of this check, and its embedding model, window size and threshold aren't published, so the experiment below uses the same TF-IDF vectors as before and a window of twelve words, which stands in for the idea and not for DoorDash's numbers.</p>
+
+    <p>We give it three replies to the unresponsive-customer article: one that follows the article, one that changes "ten minutes" to "two minutes", and one that invents a bonus and a drop-off at the gate.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">In an illustrative day of 100,000 replies, 3% are bad. Tier one flags 70% of the bad replies and wrongly flags 12% of the good ones. A tier-two check costs $0.002 and 900 ms. What share of replies reaches tier two, and how many bad replies are never examined by tier two at all?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>That share is 0.03 &times; 0.70 + 0.97 &times; 0.12 = 13.7% of replies. Bad replies that tier one lets through number 3,000 &times; 0.30 = 900 a day, and tier two never sees them, because it runs only when tier one flags a reply. The experiment below computes the same numbers and shows why some bad replies look so much like good ones.</p>
+      </details>
+    </div>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Shallow similarity check and the cost of the second tier</span>
+      </summary>
+<pre><code>import numpy as np, re
+article = (&quot;Customer not answering at drop-off. Call the customer and &quot;
+  &quot;send a message in the app. Then wait at the address for the time &quot;
+  &quot;shown in the app. For orders with an access problem that time is &quot;
+  &quot;ten minutes. After that time you can mark the order undeliverable. &quot;
+  &quot;Support will confirm the order and your pay.&quot;)
+replies = {
+ &quot;grounded&quot;: &quot;Call and message the customer, then wait ten minutes at &quot;
+   &quot;the address. After that you can mark the order undeliverable.&quot;,
+ &quot;wrong number&quot;: &quot;Call and message the customer, then wait two minutes &quot;
+   &quot;at the address. After that you can mark the order undeliverable.&quot;,
+ &quot;invented policy&quot;: &quot;Wait five minutes, then leave the food at the gate &quot;
+   &quot;and take a photo. You will receive a bonus of twenty dollars.&quot;,
+}
+stop = set(&quot;a an the is if or to of in at and you your are can be it &quot;
+           &quot;for so on after before with from i then&quot;.split())
+def toks(s):
+    return [w for w in re.findall(r&quot;[a-z]+&quot;, s.lower()) if w not in stop]
+words = toks(article)
+every = {w for r in replies.values() for w in toks(r)}
+vocab = sorted(set(words) | every)
+ix = {w: i for i, w in enumerate(vocab)}
+def vec(ts):
+    v = np.zeros(len(vocab))
+    for w in ts: v[ix[w]] += 1
+    return v / (np.linalg.norm(v) + 1e-9)
+W, STRIDE = 12, 3                       # window of 12 words, step of 3
+starts = range(0, len(words) - W + 1, STRIDE)
+windows = [vec(words[s:s + W]) for s in starts]
+print(&quot;shallow check: best sliding-window cosine against the article&quot;)
+for name, r in replies.items():
+    sim = max(float(w @ vec(toks(r))) for w in windows)
+    print(f&quot;  {name:16} {sim:.2f}&quot;)
+# tier economics, illustrative numbers for 100,000 replies a day
+n, bad = 100_000, 0.03
+catch1, falseflag = 0.70, 0.12   # tier 1 flags 70% bad, 12% good
+c2, ms2 = 0.002, 900             # tier 2: dollars and ms per call
+share = bad * catch1 + (1 - bad) * falseflag
+print(f&quot;tier 2 runs on {share:.1%} of replies&quot;)
+print(f&quot;LLM on everything: ${n * c2:,.0f}/day, +{ms2} ms on every reply&quot;)
+print(f&quot;two tiers: ${n * share * c2:,.0f}/day, +{share * ms2:.0f} ms &quot;
+      f&quot;on average, +{ms2} ms on {share:.0%}&quot;)
+print(f&quot;bad replies skipping tier 2: {n * bad * (1 - catch1):,.0f}/day&quot;)</code></pre>
+      <div class="tryit-out"><pre><code>shallow check: best sliding-window cosine against the article
+  grounded         0.53
+  wrong number     0.48
+  invented policy  0.14
+tier 2 runs on 13.7% of replies
+LLM on everything: $200/day, +900 ms on every reply
+two tiers: $27/day, +124 ms on average, +900 ms on 14%
+bad replies skipping tier 2: 900/day</code></pre></div>
+    </details>
+
+    <p>The grounded reply scores 0.53 and the invented policy 0.14, so a threshold between them separates the two cleanly. The reply with the wrong number scores 0.48, close to the grounded one, because it differs by one word out of twenty. A similarity check cannot see that "two" is false and "ten" is true. It sees that the reply is made of the article's words, and that is the check's blind spot.</p>
+
+    <p>The cost lines tell the other half. Running the second tier on everything would add 900 ms to every reply and cost $200 a day in this made-up setting. With two tiers it runs on 13.7% of replies, costs $27 and adds 124 ms on average, though a flagged reply still waits the full 900. That saving is paid for with the 900 bad replies a day that tier one passes without a second look. All the figures in the experiment are illustrative. The shape of the tradeoff is the one DoorDash's post describes.</p>
+
+    <p>Expected cost per reply has a simple form. If tier one costs <span>$c_1$</span>, tier two costs <span>$c_2$</span> and tier one flags a share <span>$f$</span> of replies, then:</p>
+
+    <div class="eq-block"><span>$$\mathbb{E}[\text{cost}] \;=\; c_1 + f\,c_2, \qquad \text{leak} \;=\; p_{\text{bad}}\,(1 - r_1)$$</span></div>
+
+    <p>Here <span>$r_1$</span> is tier one's recall, the share of bad replies it flags. Raising the threshold <span>$\tau$</span> flags more replies, which raises <span>$r_1$</span> and shrinks the leak, and also raises <span>$f$</span> and the cost. Every guardrail team sits somewhere on that curve. A policy with severe consequences, such as a promise of pay, deserves a high threshold, and a low-stakes phrasing check can sit lower.</p>
+
+    <h3 id="7-3-tier-two">7.3 Tier two: an LLM reads the evidence</h3>
+
+    <p>When tier one flags a reply, DoorDash builds a prompt containing the initial response, the relevant articles and the conversation history, and passes it to an evaluation model. That model judges whether the reply is grounded in the information provided and, if needed, writes a rationale that helps with debugging. The post names the aspects it examines: groundedness, coherence and compliance. A model reading both texts catches what the similarity check couldn't, like a changed number, a policy that the articles don't contain, or an answer that contradicts something Imani said two turns earlier.</p>
+
+    <p>If the reply fails, the system has a few options. It can regenerate with the same prompt and check again, which DoorDash's post says is part of the loop. It can regenerate with extra instructions based on the rationale. Or it can stop and give the chat to a human. It names the cost directly: guardrail latency is a notable drawback because the end-to-end process includes generating a response, applying the guardrail and possibly retrying with a new check. And since problematic responses are relatively few, it says that defaulting to human agents, strategically, protects quality while keeping automation high.</p>
+
+    <p>DoorDash reports that this guardrail reduced overall hallucinations by 90% and potentially severe compliance issues by 99%. The post gives neither the baseline rates nor the measurement setup, so read the percentages as an order of magnitude and not as a benchmark for your own system.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Guardrail design</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>None; trust the prompt</td><td>No cost, no delay</td><td>Fluent errors reach the user</td></tr>
+        <tr><td>LLM judge on every reply</td><td>Most thorough</td><td>Doubles model cost and adds a round trip to each reply (DoorDash found it prohibitive)</td></tr>
+        <tr><td>Rules and regular expressions only</td><td>Instant, exact for known phrases</td><td>Catches only patterns someone thought of</td></tr>
+        <tr><td>Two tiers: similarity, then LLM (DoorDash)</td><td>Cheap for most replies; thorough for doubtful ones</td><td>Replies that mimic the article skip tier two; latency on flagged replies</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>DoorDash chose the two tiers, and the choice was driven by cost and latency, not by accuracy. A natural middle tier, which the post doesn't describe, is a small trained <strong>natural language inference</strong> model that predicts whether the article entails the reply. It sits between a similarity score and a full language model in cost and in sensitivity to details like numbers. We offer it as a design option and not as part of DoorDash's system.</p>
+
+    <p>Cheap-then-expensive cascades appear all over production ML: spam filters run a cheap rule before a heavy classifier, fraud systems score every transaction with a small model and send the doubtful ones for review, and section 04's funnel is the same shape applied to retrieval.</p>
+
+    <h4 class="why">Why can a wrong reply pass a similarity check?</h4>
+
+    <p>Similarity measures overlap in words and meaning, and a false statement can overlap almost completely with a true one. "Wait two minutes" and "wait ten minutes" differ in one token and in everything that matters. A check that rewards closeness to the source cannot tell a faithful copy from a subtly corrupted one, and that gap is what the second tier exists to cover, by reading for meaning and facts.</p>
+  </section>
+
+  <section id="escalation">
+    <h2><span class="num">08</span>Knowing when to hand over</h2>
+
+    <p>The guardrail removes bad replies, and that leaves a question it can't answer: what does Imani see instead? An empty chat is worse than a wrong answer. DoorDash's post says that the automated system can connect Dashers to human support agents as needed, and that its quality efforts are meant to let those agents focus on complex problems. So the assistant needs a policy for when to stop trying, and the policy has to work from signals the system can measure.</p>
+
+    <h3 id="8-1-signals">8.1 The signals</h3>
+
+    <p>Several signals say the system is out of its depth. A guardrail failure after a retry is the clearest, and DoorDash's post names it. Weak retrieval is another: if the best reranker score is low, or the top two articles disagree, the model is probably working from poor evidence. A third comes from the Dasher's side. In the January 2026 post, DoorDash's customer simulator escalates after repeated unhelpfulness or circular exchanges, having first given the bot several chances. That models what real users do, and it would probably make a usable signal in a live system: the same question asked three times, or a growing frustration across messages. Some categories can also be routed by policy regardless of confidence, such as anything involving a safety incident or an account decision. Which of these signals DoorDash uses in the Dasher system isn't published.</p>
+
+    <h3 id="8-2-the-threshold">8.2 Choosing the threshold</h3>
+
+    <p>We can turn the signals into a decision by comparing costs. Let <span>$p_{\text{err}}$</span> be the probability that an automated reply is wrong or unhelpful, <span>$L$</span> the loss when it is (a Dasher acts on bad advice, loses time and trust, and contacts support again), and <span>$C_h$</span> the cost of handing the chat to a person (agent time, and a wait for Imani). Answering costs <span>$p_{\text{err}} L$</span> in expectation, and escalating costs <span>$C_h$</span>, so we should escalate when:</p>
+
+    <div class="eq-block"><span>$$p_{\text{err}} \;>\; \frac{C_h}{L}$$</span></div>
+
+    <p>With an illustrative agent cost of $4 and a loss of $40 for a wrong answer, the threshold is 10%: any reply with more than a one-in-ten chance of being wrong goes to a human. If the loss is only $10, the threshold rises to 40% and the system answers more. Nobody outside DoorDash knows its numbers, but the structure is general, and it shows that the right escalation rate isn't zero.</p>
+
+    <p>This rule needs <span>$p_{\text{err}}$</span> to be a real probability, and the raw scores aren't. A cosine of 0.53 isn't a 53% chance of anything. The standard remedy is to collect labelled examples, a judged or human-reviewed sample of replies marked right or wrong, and fit a small model, usually logistic regression, on signals such as the top retrieval score, the margin between the first and second article, the guardrail outcome and the number of turns so far. The result is calibrated when, among replies given a 10% error estimate, about 10% turn out wrong. That is a reliability check the evaluation chapter (25) covers in general.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Escalation policy</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Always answer</td><td>Highest automation</td><td>Wrong answers reach people at a gate</td></tr>
+        <tr><td>Always send to a human on any doubt</td><td>Safest</td><td>Little automation; agents drown in routine chats</td></tr>
+        <tr><td>Threshold on calibrated error</td><td>Matches the decision to its cost</td><td>Needs labelled data and recalibration as the system changes</td></tr>
+        <tr><td>Ask one clarifying question first</td><td>Often fixes the doubt cheaply</td><td>Adds a turn; needs a limit so it doesn't loop</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The handoff itself should carry context. That same summary is the first thing a human agent needs: a one-line statement of the issue, the delivery state, what the assistant already told Imani. A handoff that makes her repeat the story spends the time that automation was meant to save. DoorDash's published position is that the system and the agents work together, with agents acting as subject experts who review responses and guide improvements, which turns every escalated chat into a source of learning, and that is where we go after the latency budget.</p>
+  </section>
+
+  <section id="latency">
+    <h2><span class="num">09</span>Serving one reply, and the latency budget</h2>
+
+    <p>We now have six stages between Imani's message and her screen, and each adds time. DoorDash's post says model latency can range from sub-second to tens of seconds depending on the model and the size of the prompt, with larger prompts leading to slower responses, and that the guardrail's loop of generating, checking and possibly retrying is a notable drawback. It publishes no per-stage numbers. So the figures in this section are illustrative, chosen to show how the budget behaves, and every one is labelled that way.</p>
+
+    <p>Here is Imani's third message travelling through the system.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Request</span><span>She presses send. The chat service stores the message and loads the three messages so far and the delivery context (order, address, drop-off instructions, how long she has been at the address). This is plain data access, probably a few tens of milliseconds, and unpublished.</span></li>
+      <li><span class="st-lane">Summarise</span><span>A model call condenses the chat and context into one issue statement. A short input and a short output keep it cheap. Illustrative: 450 ms.</span></li>
+      <li><span class="st-lane">Retrieve</span><span>The summary is embedded and searched against the vector index while BM25 runs in parallel, and the two lists are fused. DoorDash describes searching past resolved cases and mapping them to articles. Illustrative: 90 ms.</span></li>
+      <li><span class="st-lane">Rerank</span><span>A cross-encoder reads the shortlist against the summary and keeps the top few. DoorDash hasn't described this step. Illustrative: 120 ms.</span></li>
+      <li><span class="st-lane">Generate</span><span>The prompt template is filled with the instructions, policy, articles, conversation and summary, and the model writes the reply. This is the longest stage, since output length drives time. Illustrative: 1,800 ms.</span></li>
+      <li><span class="st-lane">Tier 1</span><span>The sliding-window similarity check compares the reply with the articles. No model call, so milliseconds. Illustrative: 10 ms. Most replies pass here and go straight to the screen.</span></li>
+      <li><span class="st-lane">Tier 2</span><span>If tier 1 flagged the reply, an evaluator model reads reply, articles and history. Illustrative: 900 ms, on roughly one reply in seven in our earlier example.</span></li>
+      <li><span class="st-lane">Show or hand off</span><span>A passing reply appears in the chat. A failing one is regenerated, or the chat goes to a human agent with the summary attached.</span></li>
+      <li><span class="st-lane">Log</span><span>The summary, retrieved articles, reply, guardrail results and Imani's next move are stored. This log feeds the judge, the human reviewers and the case index in the next section.</span></li>
+    </ol>
+
+    <div class="diagram">
+      <div class="diagram-title">Where the time could go for one reply (illustrative)
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 245" xmlns="http://www.w3.org/2000/svg">
+<rect x="20.0" y="60" width="88.1" height="44" fill="#818cf8" opacity="0.14"/>
+<rect x="20.0" y="60" width="88.1" height="44" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="64.1" y="80" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">SUMMARISE</text>
+<text x="64.1" y="96" text-anchor="middle" font-size="10" class="dim">450 ms</text>
+<rect x="108.1" y="60" width="17.6" height="44" fill="#34d399" opacity="0.14"/>
+<rect x="108.1" y="60" width="17.6" height="44" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<rect x="125.8" y="60" width="23.5" height="44" fill="#fbbf24" opacity="0.14"/>
+<rect x="125.8" y="60" width="23.5" height="44" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<rect x="149.3" y="60" width="352.5" height="44" fill="#f472b6" opacity="0.14"/>
+<rect x="149.3" y="60" width="352.5" height="44" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="325.5" y="80" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">GENERATE</text>
+<text x="325.5" y="96" text-anchor="middle" font-size="10" class="dim">1800 ms</text>
+<rect x="501.8" y="60" width="4.0" height="44" fill="#34d399" opacity="0.14"/>
+<rect x="501.8" y="60" width="4.0" height="44" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<rect x="505.8" y="60" width="176.3" height="44" fill="#fbbf24" opacity="0.14"/>
+<rect x="505.8" y="60" width="176.3" height="44" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="593.9" y="80" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">TIER 2</text>
+<text x="593.9" y="96" text-anchor="middle" font-size="10" class="dim">900 ms</text>
+<path d="M116.9,106 L108.1,114" stroke="#fbbf24" stroke-width="1" fill="none"/>
+<text x="105.13056379821958" y="124" text-anchor="end" font-size="10" fill="#fbbf24">Retrieve 90 ms</text>
+<path d="M137.5,106 L149.3,114" stroke="#fbbf24" stroke-width="1" fill="none"/>
+<text x="152.25816023738872" y="124" text-anchor="start" font-size="10" fill="#fbbf24">Rerank 120 ms</text>
+<path d="M503.8,106 L501.8,114" stroke="#fbbf24" stroke-width="1" fill="none"/>
+<text x="498.78041543026706" y="124" text-anchor="end" font-size="10" fill="#fbbf24">Tier 1 10 ms</text>
+<text x="20" y="50" text-anchor="start" font-size="10" fill="#fbbf24">0</text>
+<text x="680" y="50" text-anchor="end" font-size="10" fill="#fbbf24">3.37 s</text>
+<text x="20" y="154" text-anchor="start" font-size="10.5" class="dim">Every figure here is illustrative. DoorDash's post says model latency runs from sub-second to tens of seconds</text>
+<text x="20" y="172" text-anchor="start" font-size="10.5" class="dim">and that the guardrail, retries and the check itself add to it, but publishes no per-stage numbers.</text>
+<text x="20" y="200" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Generation dominates. Tier 2 is the only stage that can double the wait, so it runs on flagged replies only.</text>
+<text x="20" y="222" text-anchor="start" font-size="10.5" class="dim">The summariser is a whole extra model call before retrieval can start.</text>
+      </svg>
+      <div class="diagram-caption">The bar is drawn to scale. The long middle block is the generator, and the amber block at the end is the second guardrail tier on a flagged reply.</div>
+    </div>
+
+    <p>On these illustrative numbers a reply that passes tier 1 reaches Imani in about 2.5 seconds, and a flagged reply takes about 3.4 seconds. A flagged reply that then fails and is regenerated pays for generation and both checks a second time, so it can reach 6 seconds or more before the system gives up and hands over. This is why the average, which stays near 2.6 seconds, hides the experience of the unlucky few, and why a team watches the 95th percentile and not the mean.</p>
+
+    <h3 id="9-1-where-the-time-can-be-saved">9.1 Where the time can be saved</h3>
+
+    <p>DoorDash names one lever directly: break a complicated prompt into smaller parts and run them in parallel where possible. The summariser and retriever are sequential, because retrieval needs the summary, but a guardrail's separate checks for groundedness, coherence and policy can run at once. The remaining levers are standard practice and not published choices. A small, fast model can write the summary. Article vectors are computed ahead of time, so only the query is embedded at request time. Static parts of the prompt, such as instructions and policy text, can be cached by serving systems that support prefix caching (chapter 31 explains how). Limiting the reply's length matters more than almost any other setting, because generation time grows with the number of tokens written.</p>
+
+    <h3 id="9-2-the-streaming-problem">9.2 The streaming problem</h3>
+
+    <p>Chat products usually stream a model's reply word by word, so the first words appear after a fraction of a second even when the whole answer takes seconds. A guardrail that must read the complete reply before approving it can't be combined with that. If tokens go to Imani as they are produced, a reply that later fails the check has already been read. That leaves three designs.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Where the guardrail sits</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Block: check the full reply, then show it</td><td>Nothing unchecked is ever displayed</td><td>No streaming; she waits the full generation plus check time</td></tr>
+        <tr><td>Stream first, retract on failure</td><td>Fast first words</td><td>A bad reply is seen, then withdrawn; trust damage and confusion</td></tr>
+        <tr><td>Check sentence by sentence while streaming</td><td>Some early words, some safety</td><td>Context-free sentences are hard to judge; complexity</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>DoorDash's post says a response must pass all the guardrail tests to be shown to the end user, and that describes the blocking design. For a support chat where the content is advice that a person will act on, that is a reasonable choice. A typing indicator keeps the screen alive during the wait, and a few seconds is probably tolerable to a Dasher who is waiting at a gate anyway.</p>
+
+  </section>
+
+  <section id="feedback">
+    <h2><span class="num">10</span>Training data, labels and the feedback loop</h2>
+
+    <p>Everything so far can be bought or prompted, and what makes the system improve is the data around it. That data has several sources with different reliability.</p>
+
+    <h3 id="10-1-the-sources">10.1 The sources of signal</h3>
+
+    <p>The knowledge base is the ground truth the reply is checked against, and it is written and maintained by people. DoorDash's post calls it the foundational truth for the model's responses, and names an insufficient knowledge base as one of four quality problems, alongside inaccurate retrieval, model hallucination and suboptimal prompts. The history of resolved cases is the second source: past chats, linked to the articles that resolved them, which DoorDash's retrieval searches. Third comes the judgement of human support agents, whom the post describes as subject-matter experts who review the model's responses and guide improvements. Fourth is what Dashers themselves do. DoorDash lists Dasher feedback, human engagement rate and delivery speed as ways to evaluate quality, and then says that none of them gives actionable feedback for improving the chatbot, so it built the judge described in the next section.</p>
+
+    <p>A thumbs-down tells you a Dasher was unhappy and nothing about why. A cause might be a missing article, a bad retrieval, a hallucination or a clumsy prompt, and each has a different fix, so the cheap, plentiful signal is the least useful for debugging.</p>
+
+    <h3 id="10-2-the-loop-doordash-describes">10.2 The loop DoorDash describes</h3>
+
+    <p>The post describes the cycle in steps. Judge evaluations of transcripts lead to knowledge-base reviews and updates that remove misleading terminology. Retrieval gets two kinds of improvement, better query contextualization and a better choice of embedding model from a few candidates in the vector store. Prompts are refined under the principles from section 06. And every newly found problem is added to a <strong>regression suite</strong>, a set of tests that run whenever a prompt changes. DoorDash uses an open-source evaluation tool, Promptfoo, in a way the post compares to unit testing: any prompt change triggers the predefined tests, and failing prompts are blocked.</p>
+
+    <p>One consequence follows from the choice to retrieve past resolved cases, though the post doesn't spell it out. When a human agent resolves a new kind of problem, that chat can probably become a case the retriever finds next time. Coverage then grows with the work of the system's human colleagues, at less cost than retraining a model.</p>
+
+    <h3 id="10-3-learning-the-retriever">10.3 Learning the retriever from resolved cases</h3>
+
+    <p>A team with enough resolved cases can go further and train the retriever itself. This is a design option and not something DoorDash describes, since its post speaks only of choosing among embedding models. Training examples are pairs: a summary of a past issue and the article that resolved it. The standard loss is <strong>contrastive</strong>: for each pair, treat the other articles in the same batch as wrong answers and train the model to score the right one highest:</p>
+
+    <div class="eq-block"><span>$$\mathcal{L} \;=\; -\log \frac{\exp\big(s(q, d^{+}) / \tau\big)}{\sum_{j=1}^{B} \exp\big(s(q, d_j) / \tau\big)}$$</span></div>
+
+    <p>Here <span>$q$</span> is the issue summary, <span>$d^{+}$</span> the article that resolved it, and <span>$d_j$</span> ranges over all <span>$B$</span> articles in the batch, including <span>$d^{+}$</span> itself. Here <span>$s$</span> is the cosine similarity of the two embeddings, and the temperature <span>$\tau$</span> controls how sharply the loss separates a near miss from a clear miss: a small <span>$\tau$</span> punishes close wrong answers harder. The numerator rewards a high score for the right article, and the denominator penalises high scores for the others. Minimising the loss pulls each summary towards the article that solved it and pushes it away from the rest.</p>
+
+    <p>Popular articles appear as negatives in many batches, so a naively trained model can learn to avoid them, the weak point chapter 41 fixes with the logQ correction. Better still are <strong>hard negatives</strong>: articles the current retriever ranked highly that did not resolve the case. They teach the confusions the model makes in practice, such as cold food against a locked gate.</p>
+
+    <h3 id="10-4-when-the-labels-lie">10.4 When the labels lie</h3>
+
+    <p>The training pairs inherit a danger from the loop. "The chat ended" does not mean "the problem was solved". Imani may close the app because the answer was right, or because it was wrong and she gave up. If every conversation that ends without a complaint is stored as a resolved case, wrong answers become evidence for themselves: they enter the case index and are retrieved again next time. DoorDash's post describes the safeguards. A human team reviews random samples of transcripts, and a continuous calibration between that human review and the automated system keeps the coverage honest. Only cases confirmed by an agent or the judge should be trusted as labels. How DoorDash filters its own case history isn't published.</p>
+
+    <p>A system whose output creates its own future training data is the feedback loop at the centre of recommenders. The YouTube case study spends a whole section on it, and the same remedy applies here: put a source of ground truth outside the loop.</p>
+
+    <h4 class="why">Why not fine-tune the language model on the logged chats?</h4>
+
+    <p>Logs contain the system's own past replies, wrong ones included, and no clean label for which were wrong. Fine-tuning on them teaches the model to repeat its habits. Clean labels come from the judge and the human reviewers, and they are better spent on finding which articles and prompts to fix, the use DoorDash describes.</p>
+  </section>
+
+  <section id="evaluation">
+    <h2><span class="num">11</span>Offline and online evaluation</h2>
+
+    <p>We now need to know whether any change helped: a new article, a different embedding model, a rewritten prompt. Evaluation answers it, and for a language-model system it has several layers, each catching what the one below misses.</p>
+
+    <h3 id="11-1-retrieval-metrics">11.1 Retrieval metrics</h3>
+
+    <p>Retrieval can be measured without a language model, against a labelled set of queries and their correct articles. Three metrics cover most needs, and LinkedIn's paper uses all three. <strong>Recall@K</strong> is the share of queries for which a correct item appears in the top K. <strong>Mean reciprocal rank</strong> (MRR) averages the inverse of the position of the first correct item:</p>
+
+    <div class="eq-block"><span>$$\text{MRR} \;=\; \frac{1}{|Q|} \sum_{i=1}^{|Q|} \frac{1}{\text{rank}_i}$$</span></div>
+
+    <p>where <span>$\text{rank}_i$</span> is the position of the first correct result for query <span>$i$</span>. A first-place hit contributes 1, a second-place hit 0.5 and a tenth-place hit 0.1. <strong>NDCG@K</strong> adds position-aware credit when several items are relevant. These tell you whether the right passage reached the model, the first thing to rule out when an answer is wrong, and nothing about what the model did with it.</p>
+
+    <h3 id="11-2-the-llm-judge">11.2 The LLM judge</h3>
+
+    <p>For the reply itself, text-matching metrics such as BLEU and ROUGE compare against a reference answer and penalise any different wording, though many replies are valid. LinkedIn used them against golden answers, which suits a benchmark with one authoritative solution per question. A chat reply has many valid forms. DoorDash's route is a language model that grades replies, which it calls the <strong>LLM Judge</strong>.</p>
+
+    <p>DoorDash's 2024 post describes how it was built. The team read thousands of chat transcripts and sorted quality into five areas: retrieval correctness, response accuracy, grammar and language accuracy, coherence to context, and relevance to the Dasher's request. For each area they built a monitor, either by prompting a more capable language model or by writing rules with regular expressions. Overall quality for an area comes from prompting the judge with open-ended questions. Answers are processed and summarised into common issues, and the high-frequency issues become prompts or rules for continued monitoring. Open questions find the failure types, and multiple-choice questions then count them.</p>
+
+    <p>By 2026 the posts describe the judge as a function with three parts: inputs (the full conversation with the tool-call trace, plus the policy), a prompt, and a binary output with reasoning. Every rubric returns pass or fail. DoorDash frames that choice as the generator-verifier gap: acting as a full support agent means complex decisions across many scenarios, but verifying one narrow behaviour, such as "did the chatbot present all the options?", is a simple binary task, and language models are more reliable at simple tasks. So why trust a language model to grade a language model? Because grading and writing are different jobs, and one is much easier than the other.</p>
+
+    <h3 id="11-3-calibrating-the-judge">11.3 Calibrating the judge against people</h3>
+
+    <p>A judge is a measurement instrument, and an instrument needs calibration. DoorDash's 2026 post lists the procedure. Collect a sample of conversations, have people label each pass or fail, run the judge on all of them, compute precision, recall and F1 against the human labels, read the reasoning behind the mismatches, revise the prompt to fix systematic errors, and repeat until precision and recall pass the desired threshold. The post says the evaluation has to match an expert's judgement because its pass rate becomes the exit criterion, and without trust in the evaluation there is no trust in the iteration.</p>
+
+    <p>Here is that calibration with made-up numbers. Suppose 200 conversations are labelled by experts and by the judge for "no hallucination", where a positive means the judge flags a hallucination. It flags 44 conversations, of which 38 the experts also flagged and 6 they didn't. It misses 10 that the experts flagged, and agrees on 146 clean ones.</p>
+
+    <ul>
+      <li><strong>Precision</strong> is 38 / 44 = 0.86: of the conversations the judge flags, how many were bad.</li>
+      <li><strong>Recall</strong> is 38 / 48 = 0.79: of the conversations that were bad, how many the judge caught.</li>
+      <li><strong>F1</strong>, the harmonic mean of the two, is 0.83.</li>
+      <li><strong>Accuracy</strong> is 184 / 200 = 0.92, and it flatters the judge, because most conversations are clean.</li>
+    </ul>
+
+    <p>Accuracy flatters the judge because the clean majority agrees for free, and <strong>Cohen's kappa</strong> corrects for it. It compares the observed agreement <span>$p_o$</span> with the agreement <span>$p_e$</span> two raters would reach by chance given how often each says yes:</p>
+
+    <div class="eq-block"><span>$$\kappa \;=\; \frac{p_o - p_e}{1 - p_e}$$</span></div>
+
+    <p>With these numbers <span>$p_o = 0.92$</span>, chance agreement is <span>$p_e = 0.22 \times 0.24 + 0.78 \times 0.76 \approx 0.646$</span>, and so <span>$\kappa \approx 0.77$</span>. A kappa near 0.8 is usually read as strong agreement, though the 0.79 recall says the judge still misses about one real problem in five, which matters for a hallucination monitor. Raising recall by editing the prompt and re-measuring against fresh labels is the loop DoorDash describes.</p>
+
+    <h3 id="11-4-judge-biases">11.4 What judges get wrong</h3>
+
+    <p>Zheng and colleagues studied LLM judges in 2023 and measured three biases. <strong>Position bias</strong> is a preference for whichever answer comes first. When the order of two answers was swapped, GPT-4 stayed consistent in 65% of cases and Claude-v1 in only 23.8%, with most judges favouring the first position. <strong>Verbosity bias</strong> is a preference for longer answers even when they add nothing: in their "repetitive list" test, in which a rephrased copy of each list was added to the answer, Claude-v1 and GPT-3.5 preferred the padded version 91.3% of the time and GPT-4 8.7%. <strong>Self-enhancement bias</strong> is a tendency to favour answers written by the same model family. On the positive side, GPT-4's agreement with human experts reached 85%, above the 81% agreement among the humans themselves.</p>
+
+    <p>Each bias has a counter. Swapping the order and keeping only answers that win both ways handles position bias in pairwise comparisons. DoorDash's design, a binary check of one reply against a rubric, sidesteps position bias but not verbosity: one of its own sample rubrics is "Not Verbose". Using a different model family for judge and generator addresses self-enhancement, and calibration against people remains the final check.</p>
+
+    <h3 id="11-5-simulation">11.5 Testing before launch: the simulator</h3>
+
+    <p>For a long time DoorDash's validation loop depended on testing in production: it released a change to about one percent of users and read transcripts by hand, and its 2026 post says that review cycles stretched from weeks to months. DoorDash's fix was a platform that simulates traffic. It starts with real support transcripts, grouped by issue, and has a language model extract a structured scenario from each one: the customer's story, their characteristics, the issue types, the escalation signals. A second model plays the customer and keeps the conversation going turn by turn against the chatbot, which calls mock tools in place of the live systems. DoorDash compares the structure to a unit test: arrange the conditions with mocks, act by running the conversation, assert by evaluating the outcome.</p>
+
+    <p>After each conversation the judge scores the transcript on feature-specific pass-or-fail rubrics. One example in the post lists escalation decision, issue identified correctly, appropriate empathy, policy-compliant action, not verbose, not repetitive, no hallucination and not robotic.</p>
+
+    <p>DoorDash validated the simulator by comparing it with production for one feature, order-status inquiries. In simulation, 302 conversations ran in five minutes with a 46% escalation rate. Production, at one percent of traffic, handled 175 conversations in seven hours with a 44% escalation rate. Those rates are close, and DoorDash reads that as evidence that the simulator generates representative conversations as well as plausible ones. One feature on one metric is a thin basis, and the simulated customer is itself a language model that probably shares some blind spots with the chatbot it tests. Its separate result is that hallucinations in simulation fell by 90% after a change in how the chatbot's context was built, and that the improvement carried over to production.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">A team runs a simulation of 302 conversations, as in DoorDash's example, and its no-hallucination pass rate rises from 50% to 60% after a prompt change. A second 302-conversation run gives the new rate. Assuming the two runs are independent samples, is a ten-point rise convincing?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>The standard error of a pass rate <span>$\hat p$</span> measured on <span>$n$</span> conversations is <span>$\sqrt{\hat p(1-\hat p)/n}$</span>. At 50% and 302 conversations that is about 2.9 points. A difference between two independent runs has a standard error of <span>$\sqrt{2}$</span> times that, about 4.1 points, so a ten-point gain is roughly 2.5 standard errors: moderately convincing, with about a 1-in-70 chance of arising by luck alone. It would not justify shipping if the change were risky. Replaying the same scenarios in both runs is a paired design with a tighter error, one more reason fixed scenarios matter. Smaller changes, such as two points, would need thousands of conversations to see.</p>
+      </details>
+    </div>
+
+    <h3 id="11-6-online-evaluation">11.6 Online evaluation</h3>
+
+    <p>Simulation and judging are offline. The final test is what real Dashers do, and DoorDash's 2024 post names the outcome signals: Dasher feedback, how often a human gets involved, and delivery speed. An online experiment sends a share of live chats to the new version and compares such signals with the old. We would track together the share of chats resolved without a human, the share that contact support again within a day, time to resolution, the judge's pass rates on sampled live transcripts, and the guardrail's flag and retry rates. DoorDash publishes no experiment metrics beyond those signals, so that list is our proposal.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Way of evaluating a change</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Humans read transcripts</td><td>Most trustworthy; finds new failure types</td><td>Slow and expensive; weeks to months per cycle at DoorDash</td></tr>
+        <tr><td>Text-overlap metrics (BLEU, ROUGE)</td><td>Instant, objective</td><td>Penalises valid rewording; low correlation with usefulness</td></tr>
+        <tr><td>Calibrated LLM judge, binary rubrics</td><td>Scales; each check is auditable; tracks a pass rate</td><td>Needs calibration against people; can be biased; misses what no rubric covers</td></tr>
+        <tr><td>Simulator plus judge</td><td>Minutes per run; tests edge cases and regressions before launch</td><td>Only as realistic as the scenarios and mocks; the customer model is itself an LLM</td></tr>
+        <tr><td>Online A/B on live chats</td><td>Measures real outcomes</td><td>Exposes real users; slow; few rare cases</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>DoorDash uses several layers at once: in 2024 the judge plus a human team reviewing random samples, and by 2026 a simulator in front, with the regression suite from section 10 ahead of both. Each earlier layer is cheaper and faster than the next, so a bad change tends to be caught early. Chapter 25 covers LLM judges in general, and chapter 24 covers A/B testing and canary rollouts.</p>
+
+    <h4 class="why">Why use a binary pass or fail instead of a score from one to ten?</h4>
+
+    <p>A one-to-ten score gives a judge room to drift, and two runs of the same prompt can disagree by a point for no reason. A pass or fail question has a definite answer that people can label too, so precision, recall and kappa are well defined and a pass rate moves when something real changes. Eight narrow rubrics also tell a team which behaviour broke, where one quality score says only that something did.</p>
+  </section>
+
+  <section id="failures">
+    <h2><span class="num">12</span>What went wrong, and what it cost</h2>
+
+    <p>DoorDash publishes no postmortems or incident reports, so what follows is the set of failures it names in its own posts, dated by post, with what each fix cost. Each maps to a section above.</p>
+
+    <ul>
+      <li><strong>Groundedness (2024).</strong> The model produced replies that sounded natural and legitimate and still departed from the intended context, often because outdated or incorrect information from its training text had crept in. The fix cost a guardrail: extra latency and a retry loop.</li>
+      <li><strong>Action and reply mismatch (2024).</strong> When the model can call APIs as well as write text, the calls must agree with the text. DoorDash's 2026 scripted example shows the failure in a customer-side chat: the customer asks for a refund to the original payment method, the bot applies account credit instead, then admits the mistake and says it can't convert the credit into a card refund. The post presents it as a simulated conversation, exactly the kind of case such a platform exists to catch.</li>
+      <li><strong>The first guardrail was too slow and too expensive (2024).</strong> A more sophisticated model used too many tokens and too much time, so the team adopted two tiers, and the leak through tier one is the price.</li>
+      <li><strong>Too much context caused hallucination (2026).</strong> In human review of early launches, DoorDash's engineers saw the chatbot bogged down in the large amount of data in its context window, which led to errors like misreading a field or inventing a policy. They built a layer called the case state that condenses the tool history into a structured form. The post says that when the extraction logic was even slightly off, the agent lost context it needed to resolve the case, so the team tested dozens of context shapes with the simulator and cut simulated hallucinations by 90%, a result that carried into production.</li>
+      <li><strong>Testing in production was slow (2026).</strong> Releasing to one percent of users and reading transcripts stretched cycles from weeks to months, and prompt, knowledge-base or infrastructure changes could introduce regressions unnoticed. The simulator cut a run to minutes.</li>
+    </ul>
+
+    <p>Two patterns run through the list. Most problems concern the edges of the model's behaviour and not its average quality, and each fix added machinery around the model and left the model alone: a summariser before it, a guardrail after it, a judge and a simulator beside it. And each problem probably surfaced late: hallucination and latency when real users arrived, the testing bottleneck when the team tried to iterate quickly, and context overload once the system gave the model a lot of tool data.</p>
+
+    <p>One thing the posts don't give is the human cost: how many support agents the system relieved, or how often it escalates. The Dasher post says only that the system assists thousands of Dashers a day and that human work shifts towards complex problems, and we take that as stated.</p>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">13</span>The whole system</h2>
+
+    <p>The pieces form one request path and a set of offline components that watch it. Imani's message goes through the summariser to the retriever, which searches the knowledge-base chunks and the case index and returns a few articles. A generator writes a reply from those articles. The guardrail checks it in two tiers, and a passing reply is shown while a failing one goes back for another try or on to a human agent. Every stage logs what it saw and decided.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The whole support assistant
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 410" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="110" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="110" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="75.0" y="65.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">DASHER APP</text>
+<text x="75.0" y="79.0" text-anchor="middle" font-size="10" class="dim">Imani's chat</text>
+<rect x="165" y="40" width="110" height="56" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="165" y="40" width="110" height="56" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="220.0" y="58.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">SUMMARISE</text>
+<text x="220.0" y="72.0" text-anchor="middle" font-size="10" class="dim">chat + order</text>
+<text x="220.0" y="86.0" text-anchor="middle" font-size="10" class="dim">context</text>
+<rect x="310" y="40" width="120" height="56" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="310" y="40" width="120" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="370.0" y="58.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">RETRIEVE</text>
+<text x="370.0" y="72.0" text-anchor="middle" font-size="10" class="dim">hybrid + rerank</text>
+<text x="370.0" y="86.0" text-anchor="middle" font-size="10" class="dim">over KB chunks</text>
+<rect x="465" y="40" width="100" height="56" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="465" y="40" width="100" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="515.0" y="58.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">GENERATE</text>
+<text x="515.0" y="72.0" text-anchor="middle" font-size="10" class="dim">grounded in</text>
+<text x="515.0" y="86.0" text-anchor="middle" font-size="10" class="dim">retrieved text</text>
+<rect x="595" y="40" width="85" height="56" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="595" y="40" width="85" height="56" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="637.5" y="65.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">GUARDRAIL</text>
+<text x="637.5" y="79.0" text-anchor="middle" font-size="10" class="dim">2 tiers</text>
+<path d="M133,68 L162,68" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M278,68 L307,68" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M433,68 L462,68" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M568,68 L592,68" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M637,36 L637,16 L75,16 L75,36" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="356" y="12" text-anchor="middle" font-size="10" fill="#34d399">pass: the reply is shown in the chat</text>
+<rect x="290" y="140" width="160" height="56" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="290" y="140" width="160" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="370.0" y="158.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">KB + CASE INDEX</text>
+<text x="370.0" y="172.0" text-anchor="middle" font-size="10" class="dim">article chunks, BM25 +</text>
+<text x="370.0" y="186.0" text-anchor="middle" font-size="10" class="dim">vectors, resolved cases</text>
+<path d="M370,136 L370,100" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="540" y="140" width="140" height="56" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="540" y="140" width="140" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="610.0" y="165.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">HUMAN AGENT</text>
+<text x="610.0" y="179.0" text-anchor="middle" font-size="10" class="dim">gets summary + chat</text>
+<path d="M637,100 L637,136" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="660" y="122" text-anchor="start" font-size="10" fill="#f472b6">fail</text>
+<path d="M536,168 L454,168" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="495" y="160" text-anchor="middle" font-size="10" fill="#f472b6">resolved</text>
+<rect x="20" y="250" width="150" height="62" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="250" width="150" height="62" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="271.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">LLM JUDGE</text>
+<text x="95.0" y="285.0" text-anchor="middle" font-size="10" class="dim">five quality areas,</text>
+<text x="95.0" y="299.0" text-anchor="middle" font-size="10" class="dim">binary checks</text>
+<rect x="195" y="250" width="150" height="62" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="195" y="250" width="150" height="62" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="270.0" y="271.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">SIMULATOR</text>
+<text x="270.0" y="285.0" text-anchor="middle" font-size="10" class="dim">replayed scenarios,</text>
+<text x="270.0" y="299.0" text-anchor="middle" font-size="10" class="dim">mock tools</text>
+<rect x="370" y="250" width="150" height="62" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="370" y="250" width="150" height="62" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="445.0" y="271.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">HUMAN REVIEW</text>
+<text x="445.0" y="285.0" text-anchor="middle" font-size="10" class="dim">random samples,</text>
+<text x="445.0" y="299.0" text-anchor="middle" font-size="10" class="dim">calibrates the judge</text>
+<rect x="545" y="250" width="135" height="62" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="545" y="250" width="135" height="62" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="612.5" y="271.0" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">PROMPT TESTS</text>
+<text x="612.5" y="285.0" text-anchor="middle" font-size="10" class="dim">Promptfoo suite</text>
+<text x="612.5" y="299.0" text-anchor="middle" font-size="10" class="dim">blocks regressions</text>
+<path d="M95,246 L95,226" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M270,246 L270,226" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M445,246 L445,226" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M612,246 L612,226" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M95,226 L612,226" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M370,226 L370,200" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<text x="180" y="218" text-anchor="start" font-size="10" fill="#818cf8">findings flow back: KB edits, retrieval and prompt fixes, new cases</text>
+<text x="20" y="342" text-anchor="start" font-size="10.5" class="dim">Offline: judge, simulator, human reviewers and tests grade each change before launch and sample live chats afterwards.</text>
+<text x="20" y="364" text-anchor="start" font-size="10.5" class="dim">Every stage logs what it saw and decided, and those logs are what the judge and the reviewers read.</text>
+<text x="20" y="388" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Published by DoorDash: the components. Unpublished: models, thresholds, volumes, latency. Boxes carry no invented numbers.</text>
+      </svg>
+      <div class="diagram-caption">The top row is Imani's request path. A reply that fails its checks goes to a human agent, whose resolved chats join the case index. The lower rows are the offline machinery that keeps the top row honest.</div>
+    </div>
+
+    <p>Below the request path sits the machinery that keeps it honest. An LLM judge grades logged chats against binary rubrics in five areas, and human reviewers read random samples and calibrate the judge. A simulator replays scenarios built from real transcripts against a mocked version of the live systems before a change launches, and the Promptfoo suite blocks prompts that fail known cases. Findings flow back as knowledge-base edits, retrieval and prompt fixes, new test scenarios and newly resolved cases for the index.</p>
+
+    <p>Much of the picture is published only as a component list. DoorDash hasn't published its models, embedding choice, chunking or case-matching settings, guardrail thresholds, escalation rules, latency or volumes. The 2024 post describes the system as it was then, and the 2026 posts cover testing machinery for a broader family of support chatbots. The Dasher system has almost certainly moved on, so read the design above as the shape of the problem and the published answers to it, with our reasoning, marked as such, filling the gaps.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">14</span>Summary</h2>
+    <ol>
+      <li><strong>Naive RAG fails in predictable places.</strong> Embedding the last message, pasting three chunks and generating has no memory of the chat, no check on the reply and no way out. Each section of the design repairs one of those.</li>
+      <li><strong>Summarise the chat into a query.</strong> Issues live across messages, so DoorDash condenses the conversation before retrieval. In the toy experiment, the last message put the cold-food article first and the summary put the unresponsive-customer article first.</li>
+      <li><strong>Retrieved units have to hold a rule with its condition.</strong> One-sentence chunks never held a full answer in the experiment, four-sentence chunks did for six of seven questions, and LinkedIn names the same failure when tickets are cut in the middle.</li>
+      <li><strong>Vector search and keyword search fail in opposite ways.</strong> Cosine similarity matches meaning and blurs exact strings, and BM25 matches exact words and misses paraphrase. Reciprocal rank fusion, with <span>$k = 60$</span>, merges rankings without comparing scores, and a cross-encoder reranks the shortlist.</li>
+      <li><strong>DoorDash retrieves similar resolved cases and maps them to articles,</strong> matching Dashers' own phrasing, while LinkedIn parses tickets into a graph and reports MRR rising from 0.522 to 0.927 and median resolution time falling 28.6%.</li>
+      <li><strong>Grounding is a prompt and a habit of checking.</strong> The template carries the articles, the summary and the policy, positive instructions work better than prohibitions, and the model needs an explicit way to say the articles don't answer the question.</li>
+      <li><strong>A two-tier guardrail trades accuracy for cost.</strong> A cheap sliding-window similarity check clears most replies and an LLM evaluator reads the flagged ones. DoorDash reports 90% fewer hallucinations and 99% fewer severe compliance issues, and the cheap tier cannot see a changed number.</li>
+      <li><strong>Escalate when the chance of a wrong answer exceeds the agent's cost over the loss.</strong> The rule <span>$p_{\text{err}} &gt; C_h / L$</span> needs calibrated probabilities, which come from labelled samples and not from raw similarity scores.</li>
+      <li><strong>Latency is a budget spent in stages.</strong> Generation dominates, tier two can double the wait on flagged replies, and a blocking guardrail rules out streaming. DoorDash publishes no per-stage numbers, so the budget is yours to measure.</li>
+      <li><strong>Resolved chats feed the loop only when verified.</strong> The case index, regression suite and knowledge base improve from judged and reviewed failures, and a chat that merely ended is not evidence of a solved problem.</li>
+      <li><strong>Evaluation comes in layers.</strong> Retrieval metrics, a calibrated binary LLM judge, a simulator built from real transcripts (302 conversations in five minutes matched a 44% production escalation rate with 46%) and live experiments each catch what the cheaper layer misses.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">15</span>Build this</h2>
+    <p class="lede">You can rebuild the core of this system in a day with a small made-up knowledge base. Each fix should change a number, so you come to believe the order of the sections.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A support assistant with a guardrail, an escalation rule and a calibrated judge</span>
+        <span class="proj-meta">~8 hours &middot; numpy, a small embedding model, any LLM API or a local model</span>
+      </div>
+      <p>Write 30 short help articles for an invented delivery app, each 150 to 250 words, with a few that overlap on purpose (a locked gate, an unreachable customer, a long restaurant wait). Then write 60 test chats of two to five messages each, labelled with the article that should answer them, and make ten of them cases that no article covers.</p>
+      <ol class="proj-steps">
+        <li>Build Version 1: embed the last message, retrieve the top three chunks, generate a reply. Record Recall@3 and MRR against your labels.</li>
+        <li>Add a summariser that rewrites each chat into one issue statement. Re-measure, and read the chats where the summary made retrieval worse.</li>
+        <li>Add BM25 and reciprocal rank fusion with <span>$k = 60$</span>, then a reranker (a cross-encoder model, or an LLM scoring each chunk). Plot Recall@3 for dense only, BM25 only, fusion, and fusion plus rerank, and test chunk sizes of one, three and six sentences.</li>
+        <li>Write the generation prompt with citations and an explicit "the articles don't say" answer. Check how often the model uses that answer on your ten uncovered chats.</li>
+        <li>Build the two-tier guardrail: a sliding-window similarity check, then an LLM that reads reply and articles. Create 40 replies with deliberate errors, including changed numbers and invented perks, and report the leak through tier one and the share sent to tier two.</li>
+        <li>Fit a logistic regression on the top retrieval score, the score margin and the guardrail outcome to predict wrong replies, check its calibration, and set an escalation threshold from a cost ratio you choose.</li>
+        <li>Label 100 replies by hand for "no hallucination", write a binary judge prompt, and compute precision, recall, F1 and Cohen's kappa. Revise the prompt twice and recompute.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the summary raises MRR on multi-message chats and lowers it on at least a few single-message ones, fusion recovers the exact-term queries that dense search missed, the largest chunks answer more questions but cost more tokens, the guardrail's leak is visible as the changed-number replies that tier one passes, the escalation rule sends most of your ten uncovered chats to a person, and the judge's kappa moves when you rewrite its prompt.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Build a simulator: have an LLM turn each test chat into a scenario (story, tone, issue type) and play the customer against your assistant with mocked tools. Compare the escalation rate and no-hallucination pass rate from 60 simulated chats with your 60 written ones, and see whether the two agree.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">16</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is RAG, and why use it for a support assistant instead of fine-tuning the model?</summary>
+      <div class="qa-body"><p>Retrieval-augmented generation finds relevant passages in a trusted collection and puts them in the prompt, so the model writes from them. For support, the collection is the knowledge base. Fine-tuning would bake the articles into the model's weights, so every article edit means retraining, stale facts can persist, and there is no source to point at. With retrieval, an edited article is used by the next reply and the reply can be checked against the passages it was given. DoorDash's 2024 post describes this design and treats the knowledge base as the foundation for responses. Fine-tuning still has a role for tone and format, and it doesn't replace retrieval for facts that change.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why summarise the conversation before retrieving?</summary>
+      <div class="qa-body"><p>No single message usually holds the issue. A Dasher might say the building is gated, then that the customer isn't answering, then that she has waited nine minutes. The last message alone points at a different article than all three together. Embedding the whole transcript blurs greetings and stale details into one vector. A summary selects the facts that matter and names the situation in the words the articles use. DoorDash's 2024 post says the issue changes as a conversation progresses and that the summary's quality shapes what retrieval returns. It costs an extra model call per turn and a new failure point, since a wrong summary sends every later stage the wrong way.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why combine BM25 and dense retrieval, and how does reciprocal rank fusion work?</summary>
+      <div class="qa-body"><p>Dense retrieval matches meaning, so "locked entrance" finds "gated building", and it can blur exact strings such as error codes. BM25 matches words, rewarding rare terms and saturating repeated ones, and has no sense of paraphrase. Their errors differ, so merging helps. Their scores aren't comparable, since BM25 is unbounded and cosine sits near 0 to 1, so reciprocal rank fusion uses ranks only: each list contributes <span>$1/(k + \text{rank})$</span> and the contributions add. Cormack et al. used <span>$k = 60$</span> in 2009. A chunk ranked first in one list and third in the other scores about 0.0323 against 0.0164 for a single first place, so agreement beats a lone vote. A cross-encoder reranker then orders the fused shortlist, the usual production funnel.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How do you choose a chunk size for help-centre articles?</summary>
+      <div class="qa-body"><p>Chunks must be large enough to contain a rule with its condition and small enough that matching stays precise and the prompt stays short. Test it. Build questions for which you know the supporting sentences, vary the chunk size, and measure how often the top chunk contains them all, alongside the tokens per chunk. In a small experiment here, single sentences never held a full answer, four-sentence chunks did in six of seven cases at about half the words of whole articles, and overlap didn't help in that sample. Structure helps too: splitting at headings keeps sections intact, and LinkedIn's graph makes the section the unit of retrieval. DoorDash sidesteps the problem by matching past cases and returning whole articles.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Design a guardrail for hallucination that doesn't double your cost and latency. What are its weaknesses?</summary>
+      <div class="qa-body"><p>Use a cascade. A cheap first check, such as the maximum similarity between the reply and sliding windows of the retrieved articles, runs on every reply and costs milliseconds. Only replies it flags go to an LLM evaluator that reads the reply, the articles and the conversation, as DoorDash describes. Expected cost is <span>$c_1 + f c_2$</span>, where <span>$f$</span> is the flagged share. In an illustrative day with 3% bad replies, tier one flagging 70% of them and 12% of good ones, tier two runs on about 14% of replies. Its weakness is the leak, <span>$p_{\text{bad}}(1 - r_1)$</span>: replies that copy the article but change a fact, such as "two minutes" for "ten", match closely and skip tier two. Mitigations include a stricter threshold, a rule for numbers and policy terms, or an entailment model as a middle tier.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How do you decide when the assistant should hand off to a human?</summary>
+      <div class="qa-body"><p>Compare costs. If the chance the reply is wrong is <span>$p_{\text{err}}$</span>, the loss from a wrong reply is <span>$L$</span> and a handoff costs <span>$C_h$</span>, escalate when <span>$p_{\text{err}} > C_h / L$</span>. With illustrative costs of $4 and $40 the threshold is 10%. The estimate has to be calibrated: fit a small model on signals such as the reranker score, the margin between the top two articles, the guardrail result and the turn count, using labelled replies, and check that replies assigned 10% error are wrong about 10% of the time. Add policy-based routes for safety and account decisions, and a rule for repeated, circular exchanges. Pass the issue summary to the agent so the Dasher doesn't repeat the story.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How do you know you can trust an LLM judge, and what biases should you test?</summary>
+      <div class="qa-body"><p>Calibrate it against people. Label a sample of conversations pass or fail, run the judge, and compute precision, recall, F1 and Cohen's kappa, which corrects agreement for chance. Read the reasons behind the mismatches, revise the prompt, and repeat until the thresholds are met, the procedure in DoorDash's 2026 post. Keep rubrics narrow and binary: verifying one behaviour is easier than doing the whole task, the generator-verifier gap DoorDash describes. Test for position bias by swapping answer order (Zheng et al. found GPT-4 consistent in 65% of swaps and Claude-v1 in 23.8%), for verbosity bias with padded answers (two of three judges preferred the padded text 91.3% of the time), and for self-preference by using a different model family from the generator. Recalibrate whenever the judge prompt or the model changes.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Offline retrieval and judge scores improve but the live resolution rate doesn't move. What do you check?</summary>
+      <div class="qa-body"><p>First, whether the offline set resembles live traffic: a golden set built from tidy tickets misses the typos, mixed languages and emotional messages that real chats contain, and a reason DoorDash builds simulation scenarios from real transcripts. Second, whether the metric matches the outcome. A better top-three recall doesn't help if the model ignores the articles or if the guardrail now blocks more replies, so look at the flag, retry and escalation rates. Third, the judge's blind spots: a rubric that doesn't cover the failure that matters. Fourth, the experiment itself: sample size, novelty effects, and the share of chats the change touched. Finally, read transcripts from the live arm, because human review finds failure types no existing metric measures.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Your case index is built from past chats. How can the feedback loop poison it?</summary>
+      <div class="qa-body"><p>If a chat that ended without complaint is stored as resolved, a wrong answer that a Dasher gave up on becomes a successful case, and the retriever finds it again and strengthens the error. The index can also drift: when automation handles the common issues and humans handle the rare ones, the new cases skew towards rare problems. Remedies include admitting only cases confirmed by a human agent or a calibrated judge, to keep random human review of live transcripts as ground truth outside the loop, as DoorDash describes, to hold out a fixed labelled set that never enters the index, and to track retrieval metrics on that set over time. Hard negatives and popularity corrections matter if the retriever is trained on the cases.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>The guardrail needs the full reply before approving it, but users expect streaming. How do you budget latency?</summary>
+      <div class="qa-body"><p>Treat the pipeline as a sum of stages and watch the tail. With illustrative numbers (summary 450 ms, retrieval 90, rerank 120, generation 1,800, tier one 10, tier two 900 on flagged replies) a passing reply takes about 2.5 s and a flagged one 3.4 s, and a regenerated reply can exceed 6 s. A blocking guardrail, the design implied by DoorDash's rule that a response must pass all tests to be shown, rules out streaming. Savings come from a smaller summariser model, parallel guardrail checks, precomputed article vectors, prompt caching for static text and shorter replies. Cap retries, hand off when the cap is hit, and track the 95th percentile and the retry rate, not the mean.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">17</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://careersatdoordash.com/blog/large-language-modules-based-dasher-support-automation/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Path to high-quality LLM-based Dasher support automation</div><div class="r-sub">Jia, Wang, Bamba and Wang, DoorDash, September 17, 2024. RAG pipeline, two-tier guardrail, LLM Judge and quality loop, behind sections 03 and 06 to 11.</div></div>
+      </a>
+      <a class="resource-card" href="https://careersatdoordash.com/blog/doordash-simulation-evaluation-flywheel-to-develop-llm-chatbots-at-scale/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">A simulation and evaluation flywheel to develop LLM chatbots at scale</div><div class="r-sub">Warne, Gong, Bamba and Gode, DoorDash, January 26, 2026. Generator-verifier gap, judge calibration and the case-state fix of sections 11 and 12.</div></div>
+      </a>
+      <a class="resource-card" href="https://careersatdoordash.com/blog/doordashs-one-click-simulation-and-evaluation-platform-for-support-chatbots/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Inside DoorDash's one-click simulation and evaluation platform for support chatbots</div><div class="r-sub">Gong and Bamba, DoorDash, June 1, 2026. Scenario generation, the mock layer and the simulation-versus-production comparison.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2404.17723" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Retrieval-Augmented Generation with Knowledge Graphs for Customer Service Question Answering</div><div class="r-sub">Xu et al., LinkedIn, SIGIR 2024. Ticket graph, section-level scoring formula, MRR and resolution-time results. arXiv:2404.17723</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2005.11401" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</div><div class="r-sub">Lewis et al., NeurIPS 2020. RAG-Sequence and RAG-Token and the top-K approximation of section 06. arXiv:2005.11401</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2306.05685" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena</div><div class="r-sub">Zheng et al., NeurIPS 2023. Position, verbosity and self-enhancement bias, and agreement with human experts. arXiv:2306.05685</div></div>
+      </a>
+      <a class="resource-card" href="http://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank Learning Methods</div><div class="r-sub">Cormack, Clarke and Buettcher, SIGIR 2009. Fusion formula and the choice of k = 60 in section 04.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1901.04085" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Passage Re-ranking with BERT</div><div class="r-sub">Nogueira and Cho, 2019. A cross-encoder reranker and its gain on MS MARCO. arXiv:1901.04085</div></div>
+      </a>
+      <a class="resource-card" href="https://doi.org/10.1561/1500000019" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Survey</div><div class="r-title">The Probabilistic Relevance Framework: BM25 and Beyond</div><div class="r-sub">Robertson and Zaragoza, Foundations and Trends in Information Retrieval, 2009. Derivation behind the BM25 formula in section 04.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.promptfoo.dev/docs/intro/" target="_blank" rel="noopener">
+        <div class="r-icon">📚</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">Promptfoo documentation</div><div class="r-sub">The open-source evaluation tool DoorDash's 2024 post uses for prompt regression tests, in the style of unit tests.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">18</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/11-rag-agents-reasoning"><div class="rc-sec" style="color:var(--c-rag)">11 · The foundations</div><div class="rc-title">RAG, Agents &amp; Reasoning</div><div class="rc-hook">Why models hallucinate and why retrieval helps, in general form. This case study is those ideas in one company's support chat.</div></a>
+      <a class="related-card" href="/topics/16-recommenders-ranking-search"><div class="rc-sec" style="color:var(--c-rec)">16 · The funnel</div><div class="rc-title">Recommenders, Ranking &amp; Search</div><div class="rc-hook">Cheap retrieval then expensive ranking, the shape of section 04, and the feedback loop of section 10.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Calibration, hallucination and LLM-as-judge, behind sections 07, 08 and 11.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">A/B tests, canary rollouts and regression suites, the machinery around section 11.</div></a>
+      <a class="related-card" href="/topics/31-llm-inference-serving"><div class="rc-sec" style="color:var(--c-practice)">31 · Serving at scale</div><div class="rc-title">LLM Inference &amp; Serving</div><div class="rc-hook">Why generation dominates latency and how serving systems shorten it, for section 09.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · Another case study</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">Retrieval, ranking and a feedback loop for videos, with the logQ correction that section 10 borrows.</div></a>
+    </div>
+  </section>

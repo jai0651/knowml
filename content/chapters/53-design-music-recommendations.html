@@ -1,0 +1,1345 @@
+---
+title: "Designing Music Recommendations"
+dek: "Follow Sana's Monday commute and the playlist Spotify built for her, down to the machinery that picks two hours of new music from tens of millions of tracks. We build it from the obvious version and fix each failure in turn, using what Spotify has published."
+readingTime: "~61 min"
+prereqs: "recommenders (16), unsupervised learning (03), sequence modeling (07), evaluation (25)"
+group: "ML System Design"
+label: "Case study 53"
+description: "From play counts to a weekly playlist: implicit-feedback factorisation, playlist embeddings, audio for new tracks, session context, skips, diversity, Home calibration and off-policy evaluation, from Spotify's papers."
+---
+<section id="tldr">
+    <p>Sana is on the metro at twenty to nine on a Monday morning, one earbud in, phone in her hand. Spotify has a playlist called Discover Weekly waiting for her, refreshed for the new week. It holds roughly two hours of music, and nearly all of it is new to her. Track one is a guitar piece she gives six seconds before she skips it. Track two plays through. On the third she taps the heart. Track four is a singer she's never come across, and by the second chorus she has stopped looking at the station map. When she leaves the playlist, the Home screen has already arranged itself: a row of albums she played last week, a row of playlists, a row of podcasts.</p>
+
+    <p>Behind that Monday there are tens of millions of tracks, and nobody told the system what Sana likes. She has never rated a song. What it does have is a long trail of plays, skips, saves and playlist additions, and it has to read taste out of those traces. Three more problems sit inside the scene. Music isn't one taste, because what Sana wants at 8:40 on a crowded train isn't what she wants at midnight on a Saturday. Every pick sends a stream, and therefore a little money, to some artist and not to another. And the playlist was built ahead of time, so it can't react to anything she did this morning, while the Home screen has to.</p>
+
+    <p>So the question this chapter answers is: <strong>how does Spotify choose two hours of mostly new music for Sana, from tens of millions of tracks, using only what she played and what she skipped, and then keep Home fresh for her through the day?</strong></p>
+
+    <p>We'll start with the obvious design, "play the week's most popular songs in her favourite genres", and repair it step by step. Those repairs are a factorisation of the play counts that treats missing plays carefully, an embedding learned from other people's playlists, a model that guesses what a track sounds like before anyone has played it, and a user vector that changes with the time of day. After that come the weekly batch pipeline behind Discover Weekly, the real-time ranking behind Home, and the problems of diversity, fairness to artists and evaluation without a live test. Case study 41 covers video recommendations in depth, so this one concentrates on what is different about music.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>Two surfaces matter here, and they have different clocks. <strong>Discover Weekly</strong> is a personal playlist that Spotify refreshes every Monday. Spotify's own account of its design, in a 2015 engineering post by Sofie Lindblom and Matt Ogle, says the team settled on a length of roughly two hours, a weekly rhythm so that people would form a habit, and one or two recognisable tracks mixed in because familiar songs helped people trust the rest. <strong>Home</strong> is the screen Sana sees on opening the app, a stack of horizontal rows that Spotify calls <strong>shelves</strong>, each holding cards for playlists, albums, podcasts or other items. Home has to be assembled when she opens it, from her context at that moment.</p>
+
+    <p>Both surfaces serve a listener who gives no explicit ratings. Spotify's research papers call the traces she leaves <strong>implicit feedback</strong>: a play, a skip, a save, a playlist addition. A track might also be a good fit for only part of the week, so the system must treat context as an input, not a footnote. New releases arrive every Friday with no listening history at all, and they deserve a fair chance. Lists also shouldn't narrow someone's taste over time, and they shouldn't hand every stream to the same few artists.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>Spotify reported on October 22, 2026 that it had 788 million monthly active users and 306 million Premium subscribers in the third quarter. For Home, a Spotify RecSys 2025 paper describes building the page for more than 600 million users. For catalogue size, the most recent figure we can cite from a Spotify paper is "over 50 million songs", from the 2020 WWW paper by Anderson and colleagues, whose data came from July 2019. It has certainly grown since. In that same study, more than 100 million Premium users played about 70 billion streams in 28 days.</p>
+
+    <p>Discover Weekly's own numbers come from Spotify's newsroom. In its 2015 post the team said it delivered 75 million unique mixtapes every Monday. A 2020 post counted over 2.3 billion hours streamed between July 2015 and June 25, 2020. In June 2025, on the playlist's tenth anniversary, Spotify said it had passed 100 billion tracks streamed and that each week it produced more than 56 million new artist discoveries, 77% of them from emerging artists.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose each user and each track is described by 40 numbers, and the score for a pair is their dot product, which costs 40 multiply-adds. In 2015 Spotify had roughly 60 million users and roughly 4 million recommendable tracks in one of its models (figures from a 2015 engineering talk). How many multiply-adds does it take to score every track for every user, and how long does that take on 10,000 cores that each do a billion multiply-adds a second? Then try today's 788 million users against 50 million tracks, and a single Home request that scores every track for one user.</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>For 2015, 60 million times 4 million times 40 is roughly 9.6 quadrillion multiply-adds, which the 2015 talk gives as "about 9 peta-operations". Ten thousand cores at a billion a second do ten trillion a second, so the job takes about 960 seconds, roughly sixteen minutes. That is easy to afford once a week. Core count and speed are illustrative, since Spotify hasn't published its cluster size.</p>
+        <p>For 788 million users and 50 million tracks (the catalogue figure is older than the user figure, so this is a lower bound) the product is roughly 1.6 quintillion, and the same cluster would need roughly 44 hours. A single Home request that scores all 50 million tracks for one person is two billion multiply-adds, a second or two on one core, far too slow to do for every page view. Batch scoring of everything is a weekly luxury that stops being cheap at today's size, and per-request scoring has to look at a tiny fraction of the catalogue. Everything else in the design follows from that gap.</p>
+      </details>
+    </div>
+
+    <p>Spotify hasn't published a latency budget for Home or for the batch that builds Discover Weekly, and we won't invent one. We'll reason about each from what the work involves, and mark the reasoning as ours.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: popular songs in her genres</h2>
+
+    <p>Our simplest playlist takes the songs most played this week in Sana's country, keeps the ones tagged with genres she plays a lot, and shuffles them. It needs a tag per track and a play counter, nothing else. It also never sees how Sana behaves, so it's the baseline against which every later idea gets measured.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Version 1: this week's hits, filtered by her genres
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="190" height="80" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="190" height="80" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="115.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CHARTS</text>
+<text x="115.0" y="94" text-anchor="middle" font-size="10" class="dim">this week's most played</text>
+<text x="115.0" y="108" text-anchor="middle" font-size="10" class="dim">tracks in her country</text>
+<path d="M216,90 L244,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="250" y="50" width="190" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="250" y="50" width="190" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="345.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">GENRE FILTER</text>
+<text x="345.0" y="94" text-anchor="middle" font-size="10" class="dim">keep tracks tagged with</text>
+<text x="345.0" y="108" text-anchor="middle" font-size="10" class="dim">genres she plays often</text>
+<path d="M446,90 L474,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="480" y="50" width="200" height="80" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="480" y="50" width="200" height="80" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="580.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SHUFFLE</text>
+<text x="580.0" y="94" text-anchor="middle" font-size="10" class="dim">30 songs, the same for</text>
+<text x="580.0" y="108" text-anchor="middle" font-size="10" class="dim">everyone with her genres</text>
+<text x="20" y="175" text-anchor="start" font-size="10.5" class="dim">Built from counters and tags. There is no per-listener model, so there is no per-listener work.</text>
+<text x="20" y="200" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A track released on Friday has no plays, so it can never reach the charts.</text>
+<text x="20" y="222" text-anchor="start" font-size="10.5" class="dim">Nothing says which songs in a genre Sana would skip: the list guesses her genre, not her.</text>
+      </svg>
+      <div class="diagram-caption">Follow the arrows left to right, then read the two lines underneath. The list is cheap to build and identical for everyone who shares a genre, and the amber line is the first thing that breaks.</div>
+    </div>
+
+    <p>This design fails in two ways that we can state with published numbers. First, it can't tell which songs within a genre are right for her. A 2020 Spotify experiment by Anderson and colleagues put this to a test. On seven algorithmic playlists built around decades of music, such as "All Out 80s", they randomly assigned 540,000 free-tier listeners for a week to one of three rankers. One ranked songs by popularity. A second ranked them by the similarity between a listener vector and a song vector, a score we'll build in section 05, and a third was a neural network trained on whether listeners finished songs. Its authors call listeners with broad taste <em>generalists</em> and those with narrow taste <em>specialists</em>. Ranking by similarity produced 10.03% more streams than popularity for generalists and 25.66% more for specialists, at a cost of 4.71% and 2.89% more skips. Popularity is a respectable baseline, and personal similarity beats it by a wide margin.</p>
+
+    <p>Second, the design has nothing to say about a song released on Friday. Play counters start at zero, so a new track can't appear among the week's hits, and a system that only recommends what is already popular teaches artists that nothing else counts. We need two repairs: a way to learn each person's taste from their own behaviour, and a way to place a track in taste space before anyone has played it. Section 03 takes up the first repair.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Source of a playlist</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Most played, filtered by genre</td><td>Trivial to build, never empty, safe for brand-new users</td><td>Same list for everyone in a genre; popular tracks keep getting more popular</td></tr>
+        <tr><td>Editors' picks</td><td>Quality control, cultural judgement, covers new releases</td><td>A few hundred curators can't write millions of personal playlists</td></tr>
+        <tr><td>Learned from each listener's own behaviour</td><td>Personal, scales to every user</td><td>Needs a pipeline, labels from noisy traces, and care about narrowing taste</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Spotify's answer was never a choice between humans and machines. Its 2015 post says the playlist combines algorithms with human curation, and a 2020 study by Holtz and colleagues, which we'll meet in section 08, describes shelves on Home as ordered by "a combination of machine learning algorithms and human editors". Discover Weekly is the algorithmic half taken as far as it will go.</p>
+  </section>
+
+  <section id="implicit">
+    <h2><span class="num">03</span>Learning taste from plays, not ratings</h2>
+
+    <p>Our first repair has to learn from Sana's behaviour. Picture a table with one row per listener and one column per track, where each cell holds the number of times that listener played that track. Call the count <span>$r_{ui}$</span> for listener <span>$u$</span> and track <span>$i$</span>. For almost every pair the cell is empty, since nobody has heard more than a sliver of tens of millions of tracks. A familiar technique for a table like this is <strong>matrix factorisation</strong>: give every listener a short vector <span>$x_u$</span> and every track a short vector <span>$y_i$</span>, and train them so that the dot product <span>$x_u^{\top} y_i$</span> predicts the cell. These vectors are called <strong>latent factors</strong>, because nobody labels what each coordinate means. Once trained, the score for any listener and any track, including pairs nobody has tried, is one dot product.</p>
+
+    <p>Our first attempt follows the movie-rating recipe from the Netflix Prize years. Fit the vectors to the cells we observed and ignore the rest. That recipe fails on play counts, and it fails for a clear reason. Every observed cell is a play, so every target is positive. A model that predicts a high score everywhere fits perfectly, and what it learns about the missing cells is nothing.</p>
+
+    <p>Yifan Hu, Yehuda Koren and Chris Volinsky supplied the fix in a 2008 paper written about television viewing data, and it is the model Spotify's own engineers described using. It begins by changing what the table means. Replace the counts with a yes-or-no <strong>preference</strong>, <span>$p_{ui}=1$</span> if the listener played the track at all and <span>$p_{ui}=0$</span> if not. Then admit that these preferences are known with very different <strong>confidence</strong>. A zero is weak evidence, because Sana may never have heard the track, or couldn't reach it from where she was. A one is stronger, and a track she played forty times is much stronger than one she played once. Hu and colleagues write the confidence as</p>
+
+    <div class="eq-block"><span>$$c_{ui} \;=\; 1 + \alpha\, r_{ui}$$</span></div>
+
+    <p>where <span>$\alpha$</span> sets how fast confidence grows with plays, and they found <span>$\alpha = 40$</span> worked well on their data. Every cell now takes part in training, with a weight, and the loss sums over all pairs:</p>
+
+    <div class="eq-block"><span>$$\min_{x,\,y}\;\sum_{u,i} c_{ui}\,\big(p_{ui} - x_u^{\top} y_i\big)^{2} \;+\; \lambda\Big(\sum_u \lVert x_u\rVert^{2} + \sum_i \lVert y_i\rVert^{2}\Big)$$</span></div>
+
+    <p>Read it term by term. Its squared difference asks the dot product to match the 0 or 1 preference. Each weight <span>$c_{ui}$</span> makes mistakes on heavily played tracks expensive and mistakes on unplayed ones cheap, but never free. Last comes a term of strength <span>$\lambda$</span> that keeps the vectors small so the model doesn't memorise. That first sum has one term for every listener-track pair, billions of them, so the stochastic gradient descent that works for ratings would never finish. Hu and colleagues use a different method, called <strong>alternating least squares</strong> (ALS), that exploits a fact about this loss: if you freeze all the track vectors, the loss in each listener vector is an ordinary quadratic, with a closed-form minimum.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The play table, and what alternating least squares solves
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 322" xmlns="http://www.w3.org/2000/svg">
+<text x="214" y="40" text-anchor="middle" font-size="10.5" class="dim">tracks</text>
+<text x="88" y="62" text-anchor="middle" font-size="9.5" class="dim">t1</text>
+<text x="124" y="62" text-anchor="middle" font-size="9.5" class="dim">t2</text>
+<text x="160" y="62" text-anchor="middle" font-size="9.5" class="dim">t3</text>
+<text x="196" y="62" text-anchor="middle" font-size="9.5" class="dim">t4</text>
+<text x="232" y="62" text-anchor="middle" font-size="9.5" class="dim">t5</text>
+<text x="268" y="62" text-anchor="middle" font-size="9.5" class="dim">t6</text>
+<text x="304" y="62" text-anchor="middle" font-size="9.5" class="dim">t7</text>
+<text x="340" y="62" text-anchor="middle" font-size="9.5" class="dim">t8</text>
+<text x="62" y="90" text-anchor="end" font-size="10.5" class="dim">u1</text>
+<rect x="70" y="70" width="34" height="30" rx="4" fill="#34d399" opacity="0.85"/>
+<text x="87" y="90" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">5</text>
+<rect x="106" y="70" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="142" y="70" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="178" y="70" width="34" height="30" rx="4" fill="#34d399" opacity="0.25"/>
+<text x="195" y="90" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">1</text>
+<rect x="214" y="70" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="250" y="70" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="286" y="70" width="34" height="30" rx="4" fill="#34d399" opacity="0.5"/>
+<text x="303" y="90" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">3</text>
+<rect x="322" y="70" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<text x="62" y="122" text-anchor="end" font-size="10.5" class="dim">u2</text>
+<rect x="70" y="102" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="106" y="102" width="34" height="30" rx="4" fill="#34d399" opacity="0.85"/>
+<text x="123" y="122" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">4</text>
+<rect x="142" y="102" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="178" y="102" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="214" y="102" width="34" height="30" rx="4" fill="#34d399" opacity="0.5"/>
+<text x="231" y="122" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">2</text>
+<rect x="250" y="102" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="286" y="102" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="322" y="102" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<text x="62" y="154" text-anchor="end" font-size="10.5" class="" fill="#f472b6">Sana</text>
+<rect x="70" y="134" width="34" height="30" rx="4" fill="#34d399" opacity="0.85"/>
+<text x="87" y="154" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">6</text>
+<rect x="106" y="134" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="142" y="134" width="34" height="30" rx="4" fill="#34d399" opacity="0.5"/>
+<text x="159" y="154" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">3</text>
+<rect x="178" y="134" width="34" height="30" rx="4" fill="none" stroke="#f472b6" stroke-width="1.4" stroke-dasharray="4 3"/>
+<text x="195" y="154" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#f472b6">?</text>
+<rect x="214" y="134" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="250" y="134" width="34" height="30" rx="4" fill="#34d399" opacity="0.25"/>
+<text x="267" y="154" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">1</text>
+<rect x="286" y="134" width="34" height="30" rx="4" fill="none" stroke="#f472b6" stroke-width="1.4" stroke-dasharray="4 3"/>
+<text x="303" y="154" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#f472b6">?</text>
+<rect x="322" y="134" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<text x="62" y="186" text-anchor="end" font-size="10.5" class="dim">u4</text>
+<rect x="70" y="166" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="106" y="166" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="142" y="166" width="34" height="30" rx="4" fill="#34d399" opacity="0.25"/>
+<text x="159" y="186" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">1</text>
+<rect x="178" y="166" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="214" y="166" width="34" height="30" rx="4" fill="#34d399" opacity="0.85"/>
+<text x="231" y="186" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">7</text>
+<rect x="250" y="166" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="286" y="166" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="322" y="166" width="34" height="30" rx="4" fill="#34d399" opacity="0.5"/>
+<text x="339" y="186" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">2</text>
+<text x="62" y="218" text-anchor="end" font-size="10.5" class="dim">u5</text>
+<rect x="70" y="198" width="34" height="30" rx="4" fill="#34d399" opacity="0.5"/>
+<text x="87" y="218" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">2</text>
+<rect x="106" y="198" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="142" y="198" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="178" y="198" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="214" y="198" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="250" y="198" width="34" height="30" rx="4" fill="#34d399" opacity="0.85"/>
+<text x="267" y="218" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">5</text>
+<rect x="286" y="198" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="322" y="198" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<text x="62" y="250" text-anchor="end" font-size="10.5" class="dim">u6</text>
+<rect x="70" y="230" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="106" y="230" width="34" height="30" rx="4" fill="#34d399" opacity="0.5"/>
+<text x="123" y="250" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">3</text>
+<rect x="142" y="230" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="178" y="230" width="34" height="30" rx="4" fill="#34d399" opacity="0.5"/>
+<text x="195" y="250" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">2</text>
+<rect x="214" y="230" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="250" y="230" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="286" y="230" width="34" height="30" rx="4" fill="#818cf8" opacity="0.07"/>
+<rect x="322" y="230" width="34" height="30" rx="4" fill="#34d399" opacity="0.85"/>
+<text x="339" y="250" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">6</text>
+<rect x="24" y="132" width="336" height="34" rx="6" fill="none" stroke="#f472b6" stroke-width="1.4"/>
+<text x="20" y="284" text-anchor="start" font-size="10.5" class="dim">Cell weight c = 1 + α · plays. Empty cells keep weight 1 and a target of 0.</text>
+<text x="20" y="304" text-anchor="start" font-size="10.5" class="dim">Sana's two ? cells are scored with one dot product each.</text>
+<rect x="410" y="50" width="270" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="410" y="50" width="270" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="545.0" y="75" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">FIX TRACK VECTORS Y</text>
+<text x="545.0" y="89" text-anchor="middle" font-size="10" class="dim">solve every listener vector</text>
+<text x="545.0" y="103" text-anchor="middle" font-size="10" class="dim">x_u = (YᵀC_uY + λI)⁻¹ YᵀC_u p(u)</text>
+<path d="M545,122 L545,146" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="410" y="148" width="270" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="410" y="148" width="270" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="545.0" y="173" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">FIX LISTENER VECTORS X</text>
+<text x="545.0" y="187" text-anchor="middle" font-size="10" class="dim">solve every track vector</text>
+<text x="545.0" y="201" text-anchor="middle" font-size="10" class="dim">same formula with the roles swapped</text>
+<path d="M682,183 L694,183 L694,85 L682,85" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="600" y="238" text-anchor="middle" font-size="10" class="dim">repeat about 10 sweeps</text>
+<rect x="410" y="252" width="270" height="56" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="410" y="252" width="270" height="56" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="545.0" y="270" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">SCORE</text>
+<text x="545.0" y="284" text-anchor="middle" font-size="10" class="dim">p̂_ui = x_u · y_i</text>
+<text x="545.0" y="298" text-anchor="middle" font-size="10" class="dim">unplayed tracks included</text>
+      </svg>
+      <div class="diagram-caption">Read the grid first: dark cells are tracks played many times, pale cells a single play, empty cells unknown. Sana's row, outlined in pink, has question marks in the cells the model must fill. The boxes on the right show the two alternating steps.</div>
+    </div>
+
+    <p>Write the track vectors as the rows of a matrix <span>$Y$</span> with <span>$n$</span> rows and <span>$f$</span> columns, and let <span>$C^u$</span> be the diagonal matrix of listener <span>$u$</span>'s confidences over all tracks. Setting the gradient to zero gives the best listener vector in one line:</p>
+
+    <div class="eq-block"><span>$$x_u \;=\; \big(Y^{\top} C^{u} Y + \lambda I\big)^{-1} Y^{\top} C^{u}\, p(u)$$</span></div>
+
+    <p>Here <span>$p(u)$</span> is the 0-or-1 vector of that listener's preferences. This looks as expensive as the original problem, because <span>$Y^{\top} C^{u} Y$</span> sums over all <span>$n$</span> tracks, but a rewrite makes it cheap. Since <span>$C^u = I + (C^u - I)$</span>, we have <span>$Y^{\top} C^{u} Y = Y^{\top}Y + Y^{\top}(C^u - I)\,Y$</span>. Its first piece is the same for every listener and gets computed once. In the second, <span>$C^u - I$</span> is zero except for the <span>$n_u$</span> tracks the listener played. So the work per listener is proportional to how much they played, not to the size of the catalogue, and the paper gives the whole sweep as <span>$O(f^{2}N + f^{3}m)$</span>, where <span>$N$</span> is the number of non-zero cells and <span>$m$</span> the number of listeners. Then the roles swap: freeze the listener vectors and solve every track vector with the mirror-image formula. About ten alternations are typical in the paper. At the end, the score for any pair is <span>$\hat p_{ui}=x_u^{\top}y_i$</span>.</p>
+
+    <p>We can check the claims on a toy world we control. It has 1,500 listeners and 600 tracks in eight genres, where each listener likes one or two genres. Liked tracks get replayed, a handful of one-off stray plays add noise, and we hide a quarter of each listener's favourites and ask whether the model ranks them in its top 20. Tracks she has already played are never recommended, as in Discover Weekly. In the code below, <code>als</code> is the formula above, run for twelve alternations on dense matrices, which is fine at this size.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">In this world, one model is fitted only to the cells where a listener played the track, with a target of 1 for each. Another gives every cell a weight and a target of 0 or 1, with a flat weight for the unplayed ones. Compared with ranking by popularity, how will each do at finding the hidden favourites in its top 20?</p>
+      <ol>
+        <li>Both beat popularity by a wide margin</li>
+        <li>The played-cells-only model matches popularity, and the all-cells model beats it</li>
+        <li>The all-cells model is worse, because zeros are noisy negatives</li>
+      </ol>
+      <details>
+        <summary>Show the answer</summary>
+        <p><strong>B.</strong> With only positive targets the model has no reason to prefer one track over another except how often it was played, so it reproduces popularity. Counting the zeros, even at a flat weight, gives it the negative evidence it needs. The numbers follow the experiment below.</p>
+      </details>
+    </div>
+
+            <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Implicit ALS with and without confidence, on a toy music world</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(3)
+U, I, G, F = 1500, 600, 8, 8           # users, tracks, genres, factors
+genre = rng.integers(0, G, I)
+pop = 1 / np.arange(1, I + 1) ** 0.9
+pop = pop[rng.permutation(I)] / (1 / np.arange(1, I + 1) ** 0.9).mean()
+aff = rng.dirichlet(np.full(G, 0.15), U)          # taste: 1-2 genres
+liked = rng.random((U, I)) &lt; 0.42 * aff[:, genre] * pop
+fav = liked * (1 + rng.poisson(4, (U, I)))      # replays
+stray = rng.random((U, I)) &lt; 0.06 * pop           # one-off plays
+tr = (fav + stray).astype(float)                  # play counts
+te = np.zeros((U, I))
+for u in range(U):                                # hide some favourites
+    f = np.flatnonzero(fav[u] &gt;= 2)
+    if len(f) &gt;= 4:
+        h = rng.choice(f, len(f) // 4, replace=False)
+        te[u, h], tr[u, h] = 1, 0
+users = np.flatnonzero(te.sum(1) &gt; 0)
+
+def recall(S, k=20):
+    S = np.where(tr &gt; 0, -np.inf, S)              # never re-recommend
+    top = np.argsort(-S, 1)[:, :k]
+    hit = np.take_along_axis(te, top, 1).sum(1)
+    return np.mean(hit[users] / te[users].sum(1))
+
+def als(C, P, lam, iters=12):
+    X = rng.normal(0, .1, (U, F)); Y = rng.normal(0, .1, (I, F))
+    for _ in range(iters):
+        for A, B, Cm, Pm in ((X, Y, C, P), (Y, X, C.T, P.T)):
+            for j in range(len(A)):
+                M = (B.T * Cm[j]) @ B + lam * np.eye(F)
+                A[j] = np.linalg.solve(M, B.T @ (Cm[j] * Pm[j]))
+    return X @ Y.T
+
+P = (tr &gt; 0).astype(float)                        # p_ui: played or not
+print(&quot;popularity       &quot;, f&quot;{recall(np.tile(pop, (U, 1))):.3f}&quot;)
+print(&quot;played cells only&quot;, f&quot;{recall(als(P, P, 5.0)):.3f}&quot;)
+for a in (0, 1, 5, 40):
+    best = max((recall(als(1 + a * tr, P, l)), l) for l in (1, 125))
+    print(f&quot;alpha={a:&lt;2} best lam={best[1]:&lt;4} {best[0]:.3f}&quot;)</code></pre>
+      <div class="tryit-out">Popularity scores a top-20 recall of <code>0.357</code>, and the model fitted on played cells only scores exactly the same. Giving the unplayed cells a flat weight (<code>alpha=0</code>) lifts it to <code>0.487</code>. Confidence that grows with plays gives <code>0.561</code> at <code>alpha=1</code> and <code>0.555</code> at <code>alpha=5</code>. At <code>alpha=40</code>, with the stronger regulariser <code>lambda=125</code>, it falls back to <code>0.506</code>.</div>
+    </details>
+
+    <p>Fitting only the played cells gives exactly the popularity baseline, because the model learns nothing except that plays are common. Letting the unplayed cells count, even with a flat weight (<span>$\alpha = 0$</span>), lifts the top-20 recall from 0.357 to 0.487. Raising confidence with plays lifts it to 0.561, since a track played five times is much better evidence than a stray single play. At <span>$\alpha = 40$</span> the score drops to 0.506 even after we allow a much stronger <span>$\lambda$</span>. In this toy world, counts are noisy enough that trusting a heavy repeat too much hurts, so <span>$\alpha$</span> and <span>$\lambda$</span> are hyperparameters to tune on held-out data and not constants to copy from the paper. Hu and colleagues also describe a variant, <span>$c_{ui} = 1 + \alpha \log(1 + r_{ui}/\epsilon)$</span>, that compresses very large counts, which they needed because some television shows were recorded for hours a day.</p>
+
+    <p>Spotify's engineers described this model directly. In a talk given on January 27, 2015 at a Madison big-data meetup, Andy Sloane of Spotify presented the same objective, called "implicit matrix factorization" (IMF), solved by ALS on Hadoop, an open-source system for spreading a computation over many machines, with 40-dimensional vectors, roughly 60 million users and roughly 4 million recommendable items. Its input was a list of (user, item, count) tuples cut into a grid, in the most recent run 14 by 112, so that each worker (a reducer, in Hadoop's terms) solved the small <span>$f \times f$</span> systems for a slice of items. A practical note from the slides: there is no learning rate to tune, only <span>$f$</span>, <span>$\lambda$</span> and <span>$\alpha$</span>. That talk is the last time Spotify has published the details of this stage, so whether IMF still runs as is today is unpublished.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model of the play table</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Explicit-style factorisation on observed cells</td><td>Simple, cheap per step with SGD</td><td>Only positives, so it learns popularity (0.357 above)</td></tr>
+        <tr><td>Item-to-item neighbours on play counts</td><td>Explainable, easy to update</td><td>The pair table grows with the square of the catalogue, and plays of very popular tracks swamp it</td></tr>
+        <tr><td>Implicit ALS with confidence (Hu et al., 2008)</td><td>Uses every cell, confidence grows with plays, cost linear in the number of plays</td><td>Several hyperparameters, a batch method, no use of content or context</td></tr>
+        <tr><td>Neural towers trained on plays</td><td>Take any feature, including content</td><td>More machinery; the gain over ALS isn't published for music at Spotify</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>In the original paper's television test, the metric was the expected percentile rank of programs a viewer watched, where 50% is random. Popularity scored 16.46%, a neighbourhood model 10.74%, and the factor model 8.35% with 200 factors. Apache Spark's ALS library has an implicit-feedback mode built on this paper, with a parameter named <code>alpha</code>.</p>
+
+    <h4 class="why">Why is a zero in the table not a dislike?</h4>
+
+    <p>Because Sana can't dislike a track she has never heard. A zero means one of several things at once: she didn't know it existed, the system never showed it, or she heard it and moved on. Treating all of them as strong negatives teaches the model that unfamiliar means unwanted, and the recommendations would never leave her comfort zone. Giving zeros a small, flat weight is a compromise: they push the model slightly towards "not this" without drowning the real evidence. A skip, by contrast, is a genuine negative, and section 10 deals with how to use it.</p>
+  </section>
+
+  <section id="neighbours">
+    <h2><span class="num">04</span>From vectors to a list: nearest neighbours</h2>
+
+    <p>After ALS we have a vector for Sana and a vector for every track. Scores are dot products, and we want the tracks with the largest scores that she hasn't heard. Section 01's arithmetic showed that computing every score is affordable for a weekly batch at 2015 sizes and gets heavy at today's, and it's out of the question for a request that must answer while a person waits. We need a way to find the high-scoring tracks while looking at a small fraction of them. That's <strong>approximate nearest-neighbour search</strong>: build an index over the track vectors so that a query returns tracks very close to the best ones, at a small fraction of the cost, and accept that occasionally it misses one.</p>
+
+    <p>Spotify built its own library for this in 2013, called Annoy, and Sloane's 2015 talk describes how it works. It builds a forest of trees. Each tree is made by picking two track vectors at random and cutting the space with the hyperplane halfway between them, then repeating inside each half until the pieces are small. Tracks that are close together tend to land on the same side of most cuts. A query walks down each tree to a leaf, collects the tracks there, and ranks the union. Several trees are used because any one tree sometimes separates two close tracks. Its index is a read-only file, roughly 1.2 GB for all the tracks in the talk, and is loaded with <code>mmap</code>, a system call that maps a file into memory, so that every process on a machine shares one copy.</p>
+
+    <p>Annoy served Spotify for a decade. On October 25, 2023 Spotify's engineering blog introduced its successor, Voyager, built on the hierarchical navigable small world (HNSW) approach. An HNSW index is a layered graph: the top layer holds a few points with long links, each lower layer holds more points with shorter links, and a query starts at the top, walks greedily towards the target, and drops a layer whenever it can't get closer. According to the Voyager post, Annoy had fallen "solidly in the middle of the pack" on speed and accuracy benchmarks, and Voyager gives more than ten times the speed of Annoy at the same recall, or up to 50% more accuracy at the same speed, with up to four times less memory thanks to storing numbers as 8-bit floating-point values. The post also says Annoy powered personalisation, recommendation and search, and names Discover Weekly and Home among the features.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Way to find high-scoring tracks</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Score every track</td><td>Exact; no index to maintain</td><td>Cost grows with listeners times tracks (roughly 44 hours of the illustrative cluster today)</td></tr>
+        <tr><td>Random-hyperplane trees (Annoy, 2013)</td><td>Small read-only file, shared memory across processes, simple to ship to batch jobs</td><td>Middling recall per unit of time by 2023</td></tr>
+        <tr><td>Graph index, HNSW (Voyager, 2023)</td><td>Over ten times faster at equal recall, less memory</td><td>The graph is harder to update incrementally than a static file, and a new index format to maintain</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>One detail is easy to miss: ALS scores with a dot product, and trees and graphs are built for distances. For related-artist style similarity the vectors are normalised so that dot product equals cosine, which the 2015 slides note removes the effect of popularity. For personal recommendation, where a larger vector should be able to win, the usual trick is to append one extra coordinate to every vector so that ranking by distance matches ranking by dot product.</p>
+
+    <h3 id="4-1-from-neighbours-to-two-hours">4.1 From neighbours to two hours</h3>
+
+    <p>Neighbour search returns candidates, and a playlist is more than the top of a ranking. Spotify hasn't published the full architecture of Discover Weekly, so what follows is the design that fits the published pieces and the product's stated rules. A candidate pool comes from several sources: tracks near Sana's vector, tracks near the ones she recently saved in the playlist embedding of the next section, and tracks that are new and have no plays yet, covered in section 06. Next comes filtering. Tracks she has played or saved are removed, because Discover Weekly is for music she hasn't heard, and the 2015 post says one or two recognisable songs are added back on purpose, since the team found that familiar songs made people trust the rest and even kept a bug that let semi-familiar content in for that reason. A ranker scores what is left, and a final pass cuts it to roughly two hours with a limit on repeats of one artist or one sound. Sections 08 and 10 cover the ranker and the final pass.</p>
+  </section>
+
+  <section id="playlists">
+    <h2><span class="num">05</span>Playlists as sentences: embeddings for the long tail</h2>
+
+    <p>Implicit ALS learns from streams, and streams have a lopsided shape. A handful of tracks collect most of the plays, while the great majority have a few hundred or a few dozen, which gives them noisy vectors. Streams are also muddied by autoplay, shuffle and music left on in the background. We want a second source of "these songs belong together" that carries a clearer signal and covers the long tail.</p>
+
+    <p>People who build playlists already supply it. Someone who assembles forty songs for a long train journey is saying that those songs fit together, and she has spent effort to say so. Spotify treats this as language. Anderson and colleagues' 2020 paper describes the method: train word2vec, a model from natural-language processing that learns a vector for each word from the words around it, on playlists, where each playlist plays the role of a document and each track the role of a word. They used more than 850 million playlists, mostly made by users, after filtering out playlists that were too short to carry a signal, too long to be built around one theme, or not recently updated. They used the <strong>continuous bag-of-words</strong> variant, which predicts the track in the middle of a window from the tracks around it. Out comes a 40-dimensional vector for each track, retrained every day so that new content gets one, and the similarity between two tracks is the cosine of the angle between their vectors.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Playlists become training sentences
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 284" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="10.5" class="dim">One playlist is one sentence, and each track is a word.</text>
+<rect x="30" y="38" width="80" height="34" rx="8" fill="#818cf8" opacity="0.12"/>
+<rect x="30" y="38" width="80" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="70" y="60" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#818cf8">T41</text>
+<rect x="122" y="38" width="80" height="34" rx="8" fill="#818cf8" opacity="0.12"/>
+<rect x="122" y="38" width="80" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="162" y="60" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#818cf8">T7</text>
+<rect x="214" y="38" width="80" height="34" rx="8" fill="#818cf8" opacity="0.12"/>
+<rect x="214" y="38" width="80" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="254" y="60" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#818cf8">T202</text>
+<rect x="306" y="38" width="80" height="34" rx="8" fill="#fbbf24" opacity="0.25"/>
+<rect x="306" y="38" width="80" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="346" y="60" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#fbbf24">T9</text>
+<rect x="398" y="38" width="80" height="34" rx="8" fill="#818cf8" opacity="0.12"/>
+<rect x="398" y="38" width="80" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="438" y="60" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#818cf8">T88</text>
+<rect x="490" y="38" width="80" height="34" rx="8" fill="#818cf8" opacity="0.12"/>
+<rect x="490" y="38" width="80" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="530" y="60" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#818cf8">T15</text>
+<rect x="582" y="38" width="80" height="34" rx="8" fill="#818cf8" opacity="0.12"/>
+<rect x="582" y="38" width="80" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="622" y="60" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#818cf8">T63</text>
+<text x="346" y="88" text-anchor="middle" font-size="9.5" class="" fill="#fbbf24">centre</text>
+<path d="M70,74 L70,100 L150,100" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M162,74 L162,100 L150,100" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M438,74 L438,100 L330,100" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M530,74 L530,100 L330,100" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="60" y="104" width="290" height="62" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="60" y="104" width="290" height="62" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="205.0" y="125" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CONTEXT VECTOR h</text>
+<text x="205.0" y="139" text-anchor="middle" font-size="10" class="dim">average of the context tracks'</text>
+<text x="205.0" y="153" text-anchor="middle" font-size="10" class="dim">input vectors (window around T9)</text>
+<path d="M356,135 L404,135" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="410" y="104" width="270" height="62" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="410" y="104" width="270" height="62" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="545.0" y="125" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SCORE THE CENTRE TRACK</text>
+<text x="545.0" y="139" text-anchor="middle" font-size="10" class="dim">σ(v·h) up for T9</text>
+<text x="545.0" y="153" text-anchor="middle" font-size="10" class="dim">σ(−v·h) down for k random tracks</text>
+<path d="M545,168 L545,190" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="60" y="192" width="620" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="60" y="192" width="620" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="370.0" y="214" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">40-DIMENSIONAL UNIT VECTOR PER TRACK</text>
+<text x="370.0" y="228" text-anchor="middle" font-size="10" class="dim">retrained every day; cosine similarity of two vectors = how alike two tracks are</text>
+<text x="20" y="268" text-anchor="start" font-size="10.5" class="dim">850 million or more playlists, filtered for length and recency (Anderson et al., 2020).</text>
+      </svg>
+      <div class="diagram-caption">Follow one playlist left to right. The tracks around the highlighted one are averaged into a context vector, which is trained to score the highlighted track above random others. After many playlists, tracks that share company end up pointing the same way.</div>
+    </div>
+
+    <p>Training works like this. For a window of tracks around a centre track <span>$t$</span>, average the context tracks' input vectors into one vector <span>$h$</span>. Using its output vector, the model gives the centre track a score <span>$v_t^{\top}h$</span>. Computing a softmax over every track would cost as much as scoring the whole catalogue, so word2vec uses <strong>negative sampling</strong>: push the score of the true centre track up, and push down the scores of <span>$k$</span> tracks drawn at random from elsewhere:</p>
+
+    <div class="eq-block"><span>$$\ell \;=\; -\log\sigma\big(v_t^{\top}h\big)\;-\;\sum_{j=1}^{k}\log\sigma\big(-\,v_{n_j}^{\top}h\big),\qquad n_j \sim \text{popularity}^{3/4}$$</span></div>
+
+    <p>Here <span>$\sigma$</span> is the sigmoid, which turns a score into a number between 0 and 1, and the random tracks are drawn in proportion to their popularity raised to the power three-quarters, a choice from the original word2vec work that favours popular tracks a little less than their raw frequency would. There's a neat way to see what this training produces. Levy and Goldberg showed in 2014 that for the skip-gram form of the model, the vectors at the optimum satisfy a simple identity:</p>
+
+    <div class="eq-block"><span>$$v_t^{\top}u_c \;=\; \text{PMI}(t,c) - \log k,\qquad \text{PMI}(t,c)=\log\frac{P(t,c)}{P(t)\,P(c)}$$</span></div>
+
+    <p><strong>Pointwise mutual information</strong> (PMI) measures how much more often two tracks share a playlist than they would if playlists were filled at random. A PMI of zero means no relationship, and a large value means a strong one. So training the vectors is a way of factorising a table of "how surprising is it that these two tracks appear together", the same operation we did to the play table in section 03 with a different table. That insight lets us skip the training loop and factorise the PMI table directly with a singular value decomposition, which is what the next experiment does. It builds 500 synthetic playlists over 800 tracks in 20 sub-genres grouped into five families, with some noise, so each playlist mostly holds tracks from one or two sub-genres of the same family. A brand-new track is added to just three playlists.</p>
+
+            <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Playlist embeddings from a PMI table, a three-playlist track, and the GS-score</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(5)
+G, per = 20, 40                       # sub-genres, tracks per sub-genre
+N = G * per + 1                       # +1: a brand-new track (id N-1)
+genre = np.append(np.repeat(np.arange(G), per), 6)   # new track: 6
+fam = genre // 4                      # 5 families of 4 sub-genres
+w = 1 / np.arange(1, per + 1)         # popular tracks appear more often
+lists = []
+for _ in range(500):                  # 500 playlists
+    f = rng.integers(5)
+    gs = rng.choice(np.arange(4) + 4 * f, rng.choice([1, 2], p=[.5, .5]),
+                    replace=False)
+    pl = []
+    for g in gs:
+        n = rng.integers(6, 16)
+        pick = rng.choice(per, n, replace=False, p=w / w.sum())
+        pl += list(g * per + pick)
+    pl += list(rng.integers(0, N - 1, 5))             # stray tracks
+    lists.append(pl)
+new = N - 1                           # new track joins 3 playlists that
+for pl in [l for l in lists if l[0] // per == 6][:3]:   # hold sub-genre 6
+    pl.append(new)
+
+C = np.zeros((N, N))                  # co-occurrence inside a playlist
+for pl in lists:
+    pl = np.array(pl)
+    C[np.ix_(pl, pl)] += 1
+np.fill_diagonal(C, 0)
+tot, ri = C.sum(), C.sum(1, keepdims=True)
+with np.errstate(divide=&quot;ignore&quot;, invalid=&quot;ignore&quot;):
+    pmi = np.log(C * tot / (ri @ ri.T)) - np.log(5)   # shifted by log k
+pmi = np.where(np.isfinite(pmi) &amp; (pmi &gt; 0), pmi, 0)
+Uu, s, _ = np.linalg.svd(pmi)
+E_ = Uu[:, :16] * np.sqrt(s[:16])
+E_ /= np.linalg.norm(E_, axis=1, keepdims=True) + 1e-9   # unit vectors
+
+def nn(i, m=10):
+    sim = E_ @ E_[i]; sim[i] = -9
+    return np.argsort(-sim)[:m]
+a = np.mean([np.mean(genre[nn(i)] == genre[i]) for i in range(N - 1)])
+b = np.mean([np.mean(fam[nn(i)] == fam[i]) for i in range(N - 1)])
+print(f&quot;10 nearest tracks in same sub-genre {a:.2f}, same family {b:.2f}&quot;)
+nb = nn(new)
+print(f&quot;new track (3 playlists): {np.mean(genre[nb] == 6):.1f} in its &quot;
+      f&quot;sub-genre, {np.mean(fam[nb] == 1):.1f} in its family&quot;)
+
+def gs(ids):                          # generalist-specialist score
+    v = E_[ids]; mu = v.mean(0)
+    return np.mean(v @ mu / np.linalg.norm(mu))
+one = rng.choice(np.flatnonzero(genre == 2), 30, replace=False)
+six = np.concatenate([rng.choice(np.flatnonzero(genre == g), 5, False)
+                      for g in (0, 4, 8, 12, 16, 2)])
+print(f&quot;GS-score, one sub-genre  : {gs(one):.2f}&quot;)
+print(f&quot;GS-score, six sub-genres : {gs(six):.2f}&quot;)</code></pre>
+      <div class="tryit-out">The ten nearest tracks share a sub-genre <code>0.84</code> of the time and a family <code>0.94</code> of the time, against chance levels of 0.05 and 0.20. The new track, which appears in only three playlists, has all ten of its neighbours in its own sub-genre and family. The generalist-specialist score is <code>0.93</code> for the listener who plays one sub-genre and <code>0.48</code> for the listener who plays six.</div>
+    </details>
+
+    <p>With only 500 playlists, the ten nearest tracks to a typical track fall in its own sub-genre 84% of the time, against 5% by chance, and in its own family 94% of the time, against 20% by chance. Our new track, with only three playlist appearances, gets ten neighbours that are all in its own sub-genre. A few appearances are enough to place a track, which is the property we wanted for the long tail. Its last two lines compute a score that Spotify's researchers use to measure how broad a listener's taste is, the <strong>generalist-specialist score</strong>. For a listener with tracks <span>$s_j$</span> played <span>$w_j$</span> times, take the weighted average vector <span>$\mu$</span> and then the average cosine between each track and <span>$\mu$</span>:</p>
+
+    <div class="eq-block"><span>$$\text{GS}(u)=\frac{1}{\sum_j w_j}\sum_j w_j\,\frac{s_j\cdot\mu}{\lVert s_j\rVert\,\lVert\mu\rVert},\qquad \mu=\frac{1}{\sum_j w_j}\sum_j w_j\,s_j$$</span></div>
+
+    <p>A listener whose tracks all sit in one sub-genre scores 0.93 in the toy world, and a listener spread over six sub-genres scores 0.48. Section 08 puts this number to work.</p>
+
+    <p>Spotify's 2015 talk lists several sources of similarity beside playlists: the implicit factorisation of section 03, a probabilistic model trained by gradient descent that the slides call "Vector-Exp", and cultural similarity from the Echo Nest, a music-intelligence company Spotify had acquired, built from text scraped from web pages about music. For related artists, each model scores the candidates, the scores are ensembled, and a table of the 20 nearest artists is precomputed for each artist. In papers from 2020 and 2021, Spotify's researchers use the playlist embedding as a common track space for diversity analysis, as the target space of the session model in section 07, and as input to the rankers of section 08.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Where "these tracks go together" comes from</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Streams (implicit ALS)</td><td>Reflects what people play, at huge volume</td><td>Noisy for rarely played tracks; mixes in autoplay and background listening</td></tr>
+        <tr><td>Playlists (word2vec)</td><td>A person chose these songs together; works with few appearances</td><td>Playlists can be built for non-musical reasons; new tracks need at least a few adds</td></tr>
+        <tr><td>Editorial and web text (Echo Nest, 2015)</td><td>Captures cultural context audio can't</td><td>Slow to refresh, depends on text existing for the track</td></tr>
+        <tr><td>Audio signal</td><td>Exists the moment the file does</td><td>Misses popularity, lyrics and culture (section 06)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Treating sequences of items as sentences shows up wherever there are sessions or baskets. Airbnb trained word2vec-style embeddings on the listings that guests clicked in a session for its search ranking (KDD 2018), and online shops do the same on baskets of products.</p>
+
+    <h4 class="why">Why train on playlists instead of listening sessions?</h4>
+
+    <p>A listening session records what happened, including a track that autoplay chose, a song that was on while the dishes were washed, and a shuffle through a library. A playlist records a decision. Each track in it was added by someone who wanted it next to the others, so the co-occurrence is cleaner evidence of fit. Sessions have their own value, which is why the next section builds a model on them, but they answer a different question: what will this listener play next, in this setting.</p>
+  </section>
+
+  <section id="cold-start">
+    <h2><span class="num">06</span>Tracks nobody has played yet</h2>
+
+    <p>Every Friday new music arrives. A track released a few hours ago has no plays, so ALS can't give it a vector, and it belongs to no playlists, so word2vec can't either. In our toy world three playlist appearances were enough, but a real release can sit in zero playlists for hours. If the only route into Discover Weekly runs through behaviour, the newest music, which is the music a discovery feature should most want to surface, is the last to arrive. This is the <strong>cold-start problem</strong>: the model has nothing to work from for an item it hasn't seen used.</p>
+
+    <p>One way around it is to ask what the track sounds like. A 2013 NeurIPS paper by Aäron van den Oord, Sander Dieleman and Benjamin Schrauwen at Ghent University did this with a clean recipe. Take the latent factors from a matrix factorisation like the one in section 03, which exist for tracks that have usage. Train a model that predicts a track's factor vector from its audio. For a track with no usage, use the predicted vector in its place and recommend it to the listeners whose vectors it lines up with.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Predicting a track's taste vector from its audio
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 318" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11" font-weight="700" class="" fill="#818cf8">TRAINING: tracks that already have listeners</text>
+<rect x="20" y="36" width="150" height="64" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="36" width="150" height="64" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="65" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">AUDIO CLIP</text>
+<text x="95.0" y="79" text-anchor="middle" font-size="10" class="dim">a track with plays</text>
+<path d="M174,68 L186,68" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="190" y="36" width="150" height="64" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="190" y="36" width="150" height="64" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="265.0" y="65" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">MEL-SPECTROGRAM</text>
+<text x="265.0" y="79" text-anchor="middle" font-size="10" class="dim">128 bands, 3 s windows</text>
+<path d="M344,68 L356,68" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="360" y="36" width="150" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="360" y="36" width="150" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="435.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">CONV NET</text>
+<text x="435.0" y="72" text-anchor="middle" font-size="10" class="dim">filters + pooling</text>
+<text x="435.0" y="86" text-anchor="middle" font-size="10" class="dim">over time</text>
+<path d="M514,68 L526,68" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="530" y="36" width="150" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="530" y="36" width="150" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="605.0" y="65" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">PREDICTED ŷ</text>
+<text x="605.0" y="79" text-anchor="middle" font-size="10" class="dim">40-d factor vector</text>
+<rect x="360" y="124" width="150" height="48" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="360" y="124" width="150" height="48" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="435.0" y="145" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">TARGET y</text>
+<text x="435.0" y="159" text-anchor="middle" font-size="10" class="dim">from usage data (ALS)</text>
+<path d="M512,148 L570,148 L570,102" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="578" y="128" text-anchor="start" font-size="10" class="dim">loss ‖y − ŷ‖²</text>
+<text x="20" y="214" text-anchor="start" font-size="11" font-weight="700" class="" fill="#34d399">SERVING: a track released this morning</text>
+<rect x="20" y="226" width="150" height="64" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="226" width="150" height="64" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="255" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">NEW TRACK</text>
+<text x="95.0" y="269" text-anchor="middle" font-size="10" class="dim">no plays, no playlists</text>
+<path d="M174,258 L186,258" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="190" y="226" width="150" height="64" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="190" y="226" width="150" height="64" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="265.0" y="255" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">MEL-SPECTROGRAM</text>
+<text x="265.0" y="269" text-anchor="middle" font-size="10" class="dim">same front end</text>
+<path d="M344,258 L356,258" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="360" y="226" width="150" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="360" y="226" width="150" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="435.0" y="255" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SAME NETWORK</text>
+<text x="435.0" y="269" text-anchor="middle" font-size="10" class="dim">weights from above</text>
+<path d="M514,258 L526,258" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="530" y="226" width="150" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="530" y="226" width="150" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="605.0" y="255" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">ITS VECTOR ŷ</text>
+<text x="605.0" y="269" text-anchor="middle" font-size="10" class="dim">joins the index</text>
+<text x="20" y="312" text-anchor="start" font-size="10" class="dim">Handing over from ŷ to a usage-based vector as plays accumulate: unpublished.</text>
+      </svg>
+      <div class="diagram-caption">The top row is how the model is trained on tracks that have listeners. The bottom row is how a brand-new track gets a vector. Both rows end in the same space the listeners live in, so a predicted vector can be compared with any listener's.</div>
+    </div>
+
+    <p>Audio has to be turned into numbers a network can read. Each clip is cut into windows of 1,024 audio frames, moving 512 frames at a time, and each window becomes a <strong>mel-spectrogram</strong>. A spectrogram is a picture of a sound, with time along one axis and pitch along the other and brightness showing loudness. Mel spacing places the pitch bands the way human hearing does, and the values are log-compressed so very loud passages don't swamp quiet ones. The paper used 128 bands. A convolutional network, covered in chapter 05 for images, slides filters along the time axis, with pooling layers between them, to build up from short patterns to longer musical structure. It was trained on random three-second windows to keep training fast, and for a whole track it averaged the predictions over consecutive windows. Training targets are the factor vectors from usage data, and the loss is the squared distance between prediction and target:</p>
+
+    <div class="eq-block"><span>$$\mathcal{L}_{\text{MSE}} \;=\; \sum_i \big\lVert\, y_i - \hat y_i \,\big\rVert^{2}$$</span></div>
+
+    <p>where <span>$y_i$</span> is the usage-based factor vector for track <span>$i$</span> and <span>$\hat y_i$</span> is what the network predicts from the audio. They also tried a loss that asks the predicted vector to explain listening, the weighted prediction error of section 03, <span>$\sum_{u,i} c_{ui}(p_{ui} - x_u^{\top}\hat y_i)^2$</span>, and it didn't help. Their explanation is that the weights make a track's importance proportional to its popularity, so the network learns popular training tracks well at the expense of the rest.</p>
+
+    <p>Their baseline shows how much the network learned. It extracted 13 mel-frequency cepstral coefficients, a classic compact audio summary, from each window, grouped them into a dictionary of 4,000 typical sounds with k-means, counted how often each appeared in a clip, and predicted the factors from those counts with linear regression. On the full dataset, 382,410 songs and 1 million listeners from the Million Song Dataset's Echo Nest Taste Profile, evaluated by mean average precision at 500 recommendations and by AUC, the chance that a song a listener played scores above one she didn't, the table reads:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Predicting each song's factors from</th><th>Mean average precision</th><th>AUC</th></tr></thead>
+      <tbody>
+        <tr><td>Random vectors</td><td>0.00015</td><td>0.499</td></tr>
+        <tr><td>Bag of audio words + linear regression</td><td>0.00101</td><td>0.645</td></tr>
+        <tr><td>Convolutional network on mel-spectrograms</td><td>0.00672</td><td>0.772</td></tr>
+        <tr><td>Factors learned from usage (upper bound)</td><td>0.23278</td><td>0.961</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Against the older audio approach the network is roughly 6.7 times better on mean average precision, and far better than random. It is also far below what usage data gives, 0.0067 against 0.233. Much of what makes people like a song, the authors say, can't be heard in the waveform: popularity, lyrics, the artist's reputation, the cultural moment. In particular they note the model can't predict how popular a song will be. Still, the qualitative results looked sensible, with predicted neighbours of a song usually in the same style, so the vector from audio is a good-enough placeholder for a track that has nothing else, and a weak one for a track with a thousand listeners.</p>
+
+    <p>Sander Dieleman, one of the paper's authors, described applying the approach at Spotify in an August 5, 2014 blog post that Sloane's 2015 slides link to. Spotify hasn't published whether audio models feed Discover Weekly today. A 2021 Spotify paper does list track-level inputs to its rankers: 16 derived acoustic features, popularity, genres and duration, next to a 40-dimensional word2vec track vector. How a system moves from an audio-based vector to a usage-based one as plays accumulate is unpublished. The first rule a team would probably try is to blend the two, trusting the usage vector more as the play count grows, the way a shrinkage estimate leans on data as it arrives.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Handling a track with no history</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Wait for plays</td><td>No extra model</td><td>The newest music is invisible for days; popular artists get a head start</td></tr>
+        <tr><td>Genre and metadata tags</td><td>Available at upload, cheap</td><td>Coarse: one tag covers wildly different songs</td></tr>
+        <tr><td>Predict the factors from audio (2013)</td><td>Works from the first minute, uses the same space as listeners</td><td>Blind to popularity and culture; far below usage-based quality</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Predicting the embedding of a new item from its content is the standard answer to cold start. Online shops predict a product's vector from its photo and description, and video platforms from frames and titles. Case study 41's two-tower models do the same with an item tower that reads features.</p>
+  </section>
+
+  <section id="context">
+    <h2><span class="num">07</span>One vector isn't enough: context and sequence</h2>
+
+    <p>Now suppose the first six sections work. Sana has a vector, tracks have vectors, new tracks have predicted ones, and nearest-neighbour search returns candidates. There is still a mismatch. That vector is one average over everything she has played, and she doesn't listen as one average. At 8:40 on a Monday on the metro she wants something different from what she wants at midnight on Saturday, and last week's obsession matters more than last year's.</p>
+
+    <p>Casper Hansen and colleagues at Spotify quantified this in a RecSys 2020 paper. They worked with a sample of 200,000 users over two months, an average of 220 sessions each, where a <strong>session</strong> is a run of listening with no gap longer than 20 minutes, ten tracks on average. They defined context as the time of day and the device, and found that for a given listener, sessions sharing a context are more similar to each other than to sessions from another context. Most sessions were on mobile, 88.3%, and most were in the afternoon or evening, which means the minority contexts such as early morning and night are rare and also more varied. They also found that the further a session's tracks were from the listener's average taste, the more likely the listener was to skip.</p>
+
+    <p>Their model, <strong>CoSeRNN</strong> (contextual and sequential recurrent neural network), predicts at the start of a session a vector for what the listener will want, using the context of the moment and the history of previous sessions. It works in the playlist embedding space of section 05. It first summarises a session as the average of its tracks' vectors, scaled to length one, and keeps separate summaries for the tracks she played, <span>$s^{+}_t$</span>, and the tracks she skipped, <span>$s^{-}_t$</span>. For training it looks only at the first ten tracks of each session, since the start of a session is what we predict and long sessions drift.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">CoSeRNN: a taste vector for this session
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 374" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="30" width="200" height="62" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="30" width="200" height="62" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="120.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">PLAYED, LAST SESSION</text>
+<text x="120.0" y="72" text-anchor="middle" font-size="10" class="dim">s⁺ₜ₋₁: mean of track vectors</text>
+<rect x="250" y="30" width="200" height="62" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="250" y="30" width="200" height="62" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="350.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CONTEXT</text>
+<text x="350.0" y="72" text-anchor="middle" font-size="10" class="dim">day, hour, device (one-hot)</text>
+<rect x="480" y="30" width="200" height="62" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="480" y="30" width="200" height="62" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="580.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SKIPPED, LAST SESSION</text>
+<text x="580.0" y="72" text-anchor="middle" font-size="10" class="dim">s⁻ₜ₋₁: mean of track vectors</text>
+<path d="M120,94 L120,130" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M580,94 L580,130" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M350,94 L350,155 L222,155" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M350,155 L478,155" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="130" width="200" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="130" width="200" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="120.0" y="152" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">PLAY PATH</text>
+<text x="120.0" y="166" text-anchor="middle" font-size="10" class="dim">two FC layers → LSTM</text>
+<rect x="480" y="130" width="200" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="480" y="130" width="200" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="580.0" y="152" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SKIP PATH</text>
+<text x="580.0" y="166" text-anchor="middle" font-size="10" class="dim">two FC layers → LSTM</text>
+<path d="M120,182 L120,200 L250,200 L250,216" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M580,182 L580,200 L450,200 L450,216" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="200" y="216" width="300" height="46" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="200" y="216" width="300" height="46" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="350.0" y="236" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">COMBINE → OFFSET ûₜ</text>
+<text x="350.0" y="250" text-anchor="middle" font-size="10" class="dim">session- and context-specific part</text>
+<rect x="540" y="216" width="140" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="540" y="216" width="140" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="610.0" y="234" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">LONG-TERM ūₜ</text>
+<text x="610.0" y="248" text-anchor="middle" font-size="10" class="dim">recency-weighted</text>
+<text x="610.0" y="262" text-anchor="middle" font-size="10" class="dim">past sessions</text>
+<path d="M350,264 L350,292" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M610,274 L610,314 L552,314" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="150" y="292" width="400" height="46" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="150" y="292" width="400" height="46" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="312" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">ATTENTION FUSION</text>
+<text x="350.0" y="326" text-anchor="middle" font-size="10" class="dim">uₜ = β̂ₜ ûₜ + β̄ₜ ūₜ   (softmax weights from the LSTMs)</text>
+<text x="20" y="362" text-anchor="start" font-size="10.5" class="dim">uₜ goes to nearest-neighbour search over track vectors.  Training loss: 1 − uₜ · s⁺ₜ.</text>
+      </svg>
+      <div class="diagram-caption">Read from the top. Two recurrent networks, one for what she played and one for what she skipped, produce an offset from her long-term taste. An attention gate decides how much to trust the offset against the long-term average, and the result is a single vector that the nearest-neighbour index can use.</div>
+    </div>
+
+    <p>Inputs to the "play" network at session <span>$t$</span> are the context (day of week, hour, device, one-hot encoded), the previous session's play summary <span>$s^{+}_{t-1}$</span>, and a few numbers such as the gap since the last session. Its twin, the "skip" network, gets the same context and the previous skip summary <span>$s^{-}_{t-1}$</span>. Each feeds two fully connected layers and then an LSTM, a recurrent network that carries a memory from one session to the next. Their outputs combine into an offset <span>$\hat u_t$</span>. It doesn't predict the whole taste vector from scratch. It starts from a long-term vector that is a weighted average of all her earlier sessions, <span>$\bar u_t$</span>, with later sessions weighted more, and learns the deviation from it. An attention gate, a softmax over two weights, mixes the two:</p>
+
+    <div class="eq-block"><span>$$u_t \;=\; \hat\beta_t\,\hat u_t \;+\; \bar\beta_t\,\bar u_t,\qquad [\hat\beta_t,\ \bar\beta_t]=\operatorname{softmax}\big(W o_t + b\big)$$</span></div>
+
+    <p>where <span>$o_t$</span> is the combined output of the two LSTMs. When the recurrent part is unsure, as it is for a rare context, the gate can lean on <span>$\bar u_t$</span> and fall back to her long-term taste. Training pushes the predicted vector towards what she then played, by minimising one minus the dot product of two unit vectors:</p>
+
+    <div class="eq-block"><span>$$\ell \;=\; \sum_{(i,t)}\big(1-u_{it}^{\top} s^{+}_{it}\big)$$</span></div>
+
+    <p>Since both vectors have length one, this is one minus their cosine similarity. They trained it with the Adam optimiser, an LSTM of size 400 and a learning rate of 0.0005, and held out the last two weeks of data for testing. They compared it with simple baselines (the last session's vector, an average of past sessions, with or without matching context) and with three published models, JODIE, RRN and LatentCross, on two tasks: picking out the current session from the user's previous ones, and ranking the tracks a user played above ones they didn't. CoSeRNN beat the best baseline by more than 10% on every ranking metric, with the biggest gains in infrequent contexts, and an ablation showed that removing either the sequence or the context weakened it. The best simple baseline was "use the last session's vector", which seems to say that recency carries a lot of signal in music. The authors also note that a higher cosine score doesn't always mean a better ranking, so the loss is a proxy for what they care about.</p>
+
+    <p>This paper describes research on a Spotify sample, and the authors release code. Whether CoSeRNN or something like it runs in production is unpublished. Its design shows what a context-aware system for music needs, though: a representation that is cheap to compute at request time, because it ends in a single vector that goes straight to a nearest-neighbour index.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Representing the listener</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>One long-term vector (ALS or average)</td><td>Stable, cheap, computed once a week</td><td>Blind to time of day, device and recent drift</td></tr>
+        <tr><td>Last session's vector</td><td>Strong baseline; recency matters in music</td><td>Ignores context, noisy when the last session was unusual</td></tr>
+        <tr><td>Average of past sessions in the same context</td><td>Simple use of context</td><td>Sparse for rare contexts, slow to follow taste drift</td></tr>
+        <tr><td>Recurrent model over sessions with context (CoSeRNN, 2020)</td><td>Uses sequence, context and skips; one vector out</td><td>A model to train and serve per request; production use unpublished</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Per-session context vectors suit the Home screen far better than a weekly playlist, because Home is assembled when Sana opens the app. A playlist built ahead of time can guess that Monday morning is a commute but can't see this morning. That split between work that can be done ahead of time and work that must wait for the request is the next big design decision, and we'll come to it after a problem that every one of these models creates.</p>
+
+    <h4 class="why">Why keep separate summaries for played and skipped tracks?</h4>
+
+    <p>Because a skip says something the plays can't. If the last session's skipped tracks cluster in one area, such as slow acoustic songs on a morning when she was running late, the model can move away from that area. Averaging played and skipped tracks together would blur the two, and a listener who skipped five tracks and played five would look as if she liked the midpoint between them.</p>
+  </section>
+
+  <section id="diversity">
+    <h2><span class="num">08</span>When relevance narrows taste: diversity and artists</h2>
+
+    <p>Suppose the pieces above work well and the system keeps getting better at predicting what Sana will play. That success hides a risk. A system tuned to give a listener more of what she already plays can shrink her world a little each week, and there are two groups to worry about: the listener, whose taste might narrow, and the artists, who share a fixed pool of attention.</p>
+
+    <p>Anderson and colleagues measured the first of these in their 2020 paper. They defined a listener's diversity with the generalist-specialist score from section 05, computed in the playlist embedding for every Premium user in July 2019. They split listening into <strong>organic</strong> streams, those that follow a user's own action such as search, a saved library or someone else's playlist, and <strong>programmed</strong> streams, where the algorithm chose the content, such as Discover Weekly or a radio station. Programmed listening was less diverse than organic listening, and users who became more diverse over time did it by shifting towards organic listening. Scores also lined up with business outcomes. Controlling for how much people listened, the least active specialists churned at 30 percentage points above the global average over a year, against 5 points above for generalists, and the most active generalists converted from the free to the paid tier 38 percentage points above average, against 3 for the most active specialists. They stress that these are associations. A diverse listener may just be a more engaged one, and the data can't separate the two.</p>
+
+    <p>A randomised experiment by David Holtz, Sinan Aral and colleagues at Spotify and MIT, posted in March 2020, measured the effect on a smaller question. Users were randomly assigned to see a "Podcasts to Try" shelf on Home. For the control group it held popular podcasts among people in their demographic group, and for the treatment group it held podcasts personalised from their music listening history. Personalisation raised podcast streams per user by 28.90% and lowered the average diversity of an individual's podcast streams, measured as entropy over categories, by 11.51%, while raising the diversity across users as a group by 5.96%. In other words, each person's listening became more uniform and people differed from each other more. They call it an engagement-diversity trade-off.</p>
+
+    <p>A third paper by Christian Hansen and colleagues, at WSDM 2021, asks what can be done. They study two kinds of diversity for a track <span>$t$</span> and user <span>$u$</span>: the track's global popularity, and how unlike the user's earlier listening it is, measured as the cosine between the track's vector and the user's vector. In a sample of two million recommended tracks, popularity was uncorrelated with whether the listener skipped, but similarity to the user's past taste was positively correlated with not skipping. So popularity could probably be reduced without hurting satisfaction, while novelty can't be pushed as freely. The paper also shows what better ranking does to diversity. It compares four rankers: a plain cosine ranker, a feed-forward network predicting whether a track will be skipped, a "feedback aware" network that reads a dynamic user embedding built by attention over earlier sessions, and a reinforcement-learning ranker. Relative to the cosine ranker, the more complex ones raised the hit rate (how often a track the listener played appears in the list) by 2.0% to 2.7% and the NDCG (a score that rewards played tracks for appearing nearer the top) by 2.1% to 3.2%, and recommended tracks that were 4.1% to 4.5% more popular. Among the three neural rankers, the more complex the model, the more its tracks resembled what the user had already heard. The authors add that a 2% to 3% offline NDCG gain has translated in their experience to 10% to 15% gains in online satisfaction measures. Better prediction and narrower recommendations arrived together.</p>
+
+    <p>Their remedy is to put diversity into the ranker's objective. They compare four ways to do it, where <span>$s(u,t)$</span> is the ranker's relevance score, <span>$d(u,t)$</span> the diversity value of the track and <span>$\alpha$</span> a knob:</p>
+
+    <div class="eq-block"><span>$$\text{interpolation: } s(u,t)+\alpha\, d(u,t)\qquad\qquad \text{RL reward: } R(t,s)=r(t,u)-c+\alpha\, d(t,u)\,r(t,u)$$</span></div>
+
+    <p>Interpolation just adds a bonus for diverse tracks to the score. Reinforcement learning takes a different route: the ranker samples a track at a time from a softmax over the candidates, conditioned on the tracks already chosen in the session, and trains with the REINFORCE algorithm. Its reward <span>$r(t,u)$</span> is 1 if the listener didn't skip and 0 if she did, and <span>$c = 0.1$</span> turns a skip into a small negative reward. Its diversity term is multiplied by <span>$r$</span>, so a diverse track earns a bonus only when the listener also stays with it, and a diverse skipped track earns nothing extra. Two other methods are interleaving, which takes each next track from a relevance list with probability <span>$1-\alpha$</span> and from a diversity list otherwise, and a submodular objective, which rewards a set of tracks for having a range of diversity values, with diminishing returns for more of the same.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Relevance first, then a diversity term with a knob
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 298" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="10.5" class="dim">Six candidates: relevance s (blue) and diversity d (amber)</text>
+<text x="380" y="24" text-anchor="middle" font-size="10.5" font-weight="700" class="" fill="#818cf8">PLAIN top 3</text>
+<text x="480" y="24" text-anchor="middle" font-size="10.5" font-weight="700" class="" fill="#fbbf24">s + 0.4 d, top 3</text>
+<text x="30" y="58" text-anchor="middle" font-size="12" font-weight="700" class="">A</text>
+<rect x="48" y="44" width="108" height="10" rx="3" fill="#818cf8" opacity="0.8"/>
+<rect x="48" y="58" width="12" height="10" rx="3" fill="#fbbf24" opacity="0.8"/>
+<text x="174" y="53" text-anchor="start" font-size="9.5" class="dim">s 0.90</text>
+<text x="174" y="67" text-anchor="start" font-size="9.5" class="dim">d 0.10</text>
+<circle cx="380" cy="56" r="9" fill="#818cf8" opacity="0.85"/>
+<circle cx="480" cy="56" r="9" fill="#fbbf24" opacity="0.85"/>
+<text x="30" y="92" text-anchor="middle" font-size="12" font-weight="700" class="">B</text>
+<rect x="48" y="78" width="102" height="10" rx="3" fill="#818cf8" opacity="0.8"/>
+<rect x="48" y="92" width="18" height="10" rx="3" fill="#fbbf24" opacity="0.8"/>
+<text x="174" y="87" text-anchor="start" font-size="9.5" class="dim">s 0.85</text>
+<text x="174" y="101" text-anchor="start" font-size="9.5" class="dim">d 0.15</text>
+<circle cx="380" cy="90" r="9" fill="#818cf8" opacity="0.85"/>
+<circle cx="480" cy="90" r="9" fill="none" stroke="#fbbf24" stroke-opacity="0.35" stroke-width="1.2"/>
+<text x="30" y="126" text-anchor="middle" font-size="12" font-weight="700" class="">C</text>
+<rect x="48" y="112" width="96" height="10" rx="3" fill="#818cf8" opacity="0.8"/>
+<rect x="48" y="126" width="24" height="10" rx="3" fill="#fbbf24" opacity="0.8"/>
+<text x="174" y="121" text-anchor="start" font-size="9.5" class="dim">s 0.80</text>
+<text x="174" y="135" text-anchor="start" font-size="9.5" class="dim">d 0.20</text>
+<circle cx="380" cy="124" r="9" fill="#818cf8" opacity="0.85"/>
+<circle cx="480" cy="124" r="9" fill="none" stroke="#fbbf24" stroke-opacity="0.35" stroke-width="1.2"/>
+<text x="30" y="160" text-anchor="middle" font-size="12" font-weight="700" class="">D</text>
+<rect x="48" y="146" width="84" height="10" rx="3" fill="#818cf8" opacity="0.8"/>
+<rect x="48" y="160" width="96" height="10" rx="3" fill="#fbbf24" opacity="0.8"/>
+<text x="174" y="155" text-anchor="start" font-size="9.5" class="dim">s 0.70</text>
+<text x="174" y="169" text-anchor="start" font-size="9.5" class="dim">d 0.80</text>
+<circle cx="380" cy="158" r="9" fill="none" stroke="#818cf8" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="480" cy="158" r="9" fill="#fbbf24" opacity="0.85"/>
+<text x="30" y="194" text-anchor="middle" font-size="12" font-weight="700" class="">E</text>
+<rect x="48" y="180" width="78" height="10" rx="3" fill="#818cf8" opacity="0.8"/>
+<rect x="48" y="194" width="84" height="10" rx="3" fill="#fbbf24" opacity="0.8"/>
+<text x="174" y="189" text-anchor="start" font-size="9.5" class="dim">s 0.65</text>
+<text x="174" y="203" text-anchor="start" font-size="9.5" class="dim">d 0.70</text>
+<circle cx="380" cy="192" r="9" fill="none" stroke="#818cf8" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="480" cy="192" r="9" fill="#fbbf24" opacity="0.85"/>
+<text x="30" y="228" text-anchor="middle" font-size="12" font-weight="700" class="">F</text>
+<rect x="48" y="214" width="60" height="10" rx="3" fill="#818cf8" opacity="0.8"/>
+<rect x="48" y="228" width="108" height="10" rx="3" fill="#fbbf24" opacity="0.8"/>
+<text x="174" y="223" text-anchor="start" font-size="9.5" class="dim">s 0.50</text>
+<text x="174" y="237" text-anchor="start" font-size="9.5" class="dim">d 0.90</text>
+<circle cx="380" cy="226" r="9" fill="none" stroke="#818cf8" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="480" cy="226" r="9" fill="none" stroke="#fbbf24" stroke-opacity="0.35" stroke-width="1.2"/>
+<rect x="540" y="40" width="140" height="100" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="540" y="40" width="140" height="100" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="610.0" y="73" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">RL REWARD</text>
+<text x="610.0" y="87" text-anchor="middle" font-size="10" class="dim">r − c + α d r</text>
+<text x="610.0" y="101" text-anchor="middle" font-size="10" class="dim">bonus only if the</text>
+<text x="610.0" y="115" text-anchor="middle" font-size="10" class="dim">track is kept</text>
+<text x="20" y="262" text-anchor="start" font-size="10.5" class="dim">Plain relevance picks the three most similar tracks. The bonus swaps in D and E for B and C,</text>
+<text x="20" y="280" text-anchor="start" font-size="10.5" class="dim">and the reward-modelled ranker learns to prefer diverse tracks only when they are also not skipped.</text>
+      </svg>
+      <div class="diagram-caption">The same ranked candidates go through three treatments. Plain relevance keeps the top of the list, interpolation reorders with a bonus, and the reward-modelled ranker only pays the bonus when the track is also kept.</div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Adding diversity to a ranker</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Linear interpolation</td><td>One knob, works with any ranker, the widest range of trade-offs in the paper</td><td>Treats diversity as independent of relevance and of the rest of the list</td></tr>
+        <tr><td>Interleaving</td><td>Trivial to build and explain</td><td>Cost to the hit rate was large for the diversity gained</td></tr>
+        <tr><td>Submodular set objective</td><td>Principled for lists, near-optimal greedy solution</td><td>Cut popularity and similarity the least in these experiments</td></tr>
+        <tr><td>Reward modelling in RL</td><td>Best trade-off on popularity, trains the diversity into the policy</td><td>More computation and training time</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Hansen and colleagues report that the reward-modelling ranker gave the best trade-off between the hit rate and lower popularity, and that interpolation came close on both measures and covered a wider range of settings, which they note gives system designers more control. They call the benefit of reward modelling small, and notes its higher computational cost and longer training. Which of the four runs in Spotify's products, and where, is unpublished. This is a research comparison on a sample of one million users and 20 million sessions.</p>
+
+    <p>For the artists' side, the 2018 CIKM paper by Rishabh Mehrotra, James McInerney, Hugues Bouchard, Mounia Lalmas and Fernando Diaz frames music streaming as a two-sided marketplace, where listeners want relevance and artists want a fair chance to be heard. According to its abstract, the authors propose a framework that uses counterfactual estimation to compare recommendation policies without running many expensive live tests, propose policies that jointly optimise relevance and fairness to artists, and find a substantial improvement in artist fairness with no noticeable decline in listener satisfaction. They also add a personalised policy that accounts for how tolerant each listener is of content that is fair to artists. We only have the abstract of this paper, so we can't describe its fairness measure or its numbers. Spotify's own account of Discover Weekly shows the scale of the stakes. In June 2025 Spotify said that each week the playlist produced more than 56 million new artist discoveries, and that 77% of them were emerging artists.</p>
+
+    
+
+    <h4 class="why">Why multiply the diversity bonus by whether the listener stayed?</h4>
+
+    <p>Because a skipped track that happens to be unusual counts as a miss, not a success. If the reward gave the bonus unconditionally, the policy could earn it by recommending strange tracks no one wants, and relevance would collapse. Multiplying by the relevance indicator ties the bonus to the listener's own reaction. So the policy learns to find tracks that are different and wanted, which a listener would call a good discovery.</p>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">09</span>Serving: a weekly batch and a real-time Home</h2>
+
+    <p>We now have enough pieces to ask when each should run. Our two surfaces answer this differently, and the contrast between them is the most useful thing about music at Spotify.</p>
+
+    <h3 id="9-1-discover-weekly-as-a-batch">9.1 Discover Weekly as a batch</h3>
+
+    <p>Discover Weekly changes once a week. Spotify's 2015 post speaks of mixtapes delivered every Monday, and its 2020 and 2025 posts both say the playlist updates every Monday. That cadence makes a batch pipeline the natural design. Finding candidates, ranking them and assembling two hours of music for each listener can run for hours over the whole user base, ahead of when anyone opens the app, and its output is a stored list per listener. Three published facts support this. Sloane's 2015 talk says Discover recommendations were precomputed on Hadoop, though it doesn't say how often. In 2015, according to Spotify's post, the scale was 75 million unique mixtapes delivered every Monday. And the design choices reported there, a weekly rhythm so the playlist feels special and builds a habit, make a weekly batch a product requirement and not a compromise.</p>
+
+    <p>A batch can use the heaviest models, because nothing but the weekly deadline limits latency. It can enforce rules that need the whole list, like removing tracks Sana already knows and capping repeats of one artist, and it can be tested before it ships. Its price is staleness: a playlist built on Sunday can't see what Sana played on Monday morning, and it can only guess her context. The batch is probably heavy at today's scale, since our own arithmetic put the brute-force version at tens of hours on an illustrative cluster, which is why neighbour search (section 04) matters. Spotify hasn't published the batch's timing, hardware or current architecture.</p>
+
+    <p>One change suggests the weekly rhythm has loosened. In June 2025 Spotify said listeners could choose from up to five genre options, personalised from their history, and that each choice produces a fresh 30-track playlist. Whether those are built on tap or ahead of time is unpublished.</p>
+
+    <h3 id="9-2-home-on-request">9.2 Home on request</h3>
+
+    <p>Home has no such luxury. It is a page of shelves, each of a content type such as music, podcasts or audiobooks, assembled each time Sana opens the app, with her day, her time and her device known. Holtz and colleagues describe shelves and the cards within them as ordered by a combination of machine-learning models and human editors, and point to a 2018 RecSys paper by McInerney and colleagues, "Explore, Exploit, and Explain", for how Home content is ranked. That paper personalises explainable recommendations with bandits, learners that choose among options while still testing the ones they know less about.</p>
+
+    <p>A 2025 paper by Diego Feijer and colleagues describes one current piece of Home in detail: deciding the mix of content types, such as music against podcasts, across the page. Historical data is heavily skewed to music, so a model trained on it alone would rarely put a podcast first, and a listener's appetite for podcasts also changes by hour and by day. It starts from <strong>calibration</strong>, a re-ranking idea from Harald Steck's 2018 RecSys paper. Each shelf <span>$i$</span> has a content-type distribution <span>$p(c\mid i)$</span> over music, podcast and so on. A page of <span>$N$</span> shelves is chosen to maximise relevance minus a penalty for straying from a target mix <span>$p(c\mid u)$</span> for this user:</p>
+
+    <div class="eq-block"><span>$$I^{*}=\arg\max_{|I|=N}\;(1-\lambda)\,s(I)\;-\;\lambda\,\mathrm{KL}\big(p(\cdot\mid u)\,\Vert\,q(\cdot\mid I)\big),\qquad q(c\mid I)=\frac{\sum_{i\in I} w_{r(i)}\,p(c\mid i)}{\sum_{i\in I} w_{r(i)}}$$</span></div>
+
+    <p>Here <span>$s(I)$</span> is the sum of the recommender's scores for the shelves in the page, <span>$\lambda$</span> sets how much calibration matters, and <span>$q(c\mid I)$</span> is the mix of content types that the page has, weighting each shelf by its position through <span>$w_{r(i)}$</span> so that shelves near the top count more. KL divergence measures how far the page's mix is from the target, and it's zero when they match. It builds the page greedily, adding one shelf at a time, because the exact problem is hard, and notes that alternatives, one of which is a minimum-cost-flow method from a 2023 WSDM paper by Spotify authors including Tony Jebara, take much longer, which matters for a page built for more than 600 million users.</p>
+
+    <p>Earlier approaches set the target mix <span>$p(c\mid u)$</span> from the user's own history, for example the last 90 days, which assumes her preferences are fixed. Here a <strong>contextual bandit</strong>, a model that picks an action given the situation and learns from the reward, chooses the target mix for each request instead. Her context is her features and the moment: a neural network with two hidden layers of 256 and 64 units, trained with binary cross-entropy, takes demographics, past consumption by content type over several windows, content features, device and time of day, with time encoded as sine and cosine so that 23:59 sits near 00:01. A reward of 1 means she streamed from any shelf on the page, and 0 means she didn't. To learn about mixes the old policy rarely tried, the system explores. With probability 1.5% it samples a mix at random, and the authors found that sampling around the user's own interests, a Gaussian, worked better than uniform sampling, because uniform sampling often built pages far from what she wanted and produced mostly negative examples.</p>
+
+    <p>On an online A/B test against the 90-day historical-preference baseline, the bandit raised podcast impression-to-stream, the fraction of impressions that lead to a stream, by 36.6%, the overall ratio by 3.93%, consumption by 1.28% and the share of users starting a stream from Home by 1.54%. Per the paper, it was deployed as of March 2025.</p>
+
+    <p>Spotify hasn't published a latency budget or a per-stage timing for Home. Here is the path of Sana's Monday morning as the sources describe it, with the missing numbers marked as such.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Before</span><span>Her Discover Weekly playlist was built ahead of time and stored. Monday is when the new one appears, per Spotify's posts in 2015, 2020 and 2025. When it runs and how long it takes is unpublished.</span></li>
+      <li><span class="st-lane">Open</span><span>At about 8:40 she opens the app. It carries her context, which in the research papers means day of the week, time of day and device. No latency figures are published.</span></li>
+      <li><span class="st-lane">Candidates</span><span>The backend gathers shelves for her. Some are editorial or rule-based, some are ranked by models. Retrieval from vectors goes through a nearest-neighbour index, and Spotify's 2023 post says its libraries, Annoy and now Voyager, power features including Discover Weekly and Home.</span></li>
+      <li><span class="st-lane">Mix</span><span>A model picks the target mix of content types for this context. Most of the time it takes its best choice, and 1.5% of the time it explores.</span></li>
+      <li><span class="st-lane">Page</span><span>A greedy pass builds the visible shelves so that relevance is high and the page's mix of music and podcasts is close to the target.</span></li>
+      <li><span class="st-lane">Render</span><span>The page appears. The Discover Weekly card is probably one more item in a shelf, and tapping it opens the stored playlist, which plays from the first track.</span></li>
+      <li><span class="st-lane">Log</span><span>Every shelf shown, its position, and what she plays, skips or saves is logged, with the probability the system had of choosing that mix. Section 10 uses that log.</span></li>
+    </ol>
+
+        <div class="diagram">
+      <div class="diagram-title">Two clocks: the weekly batch and the request path
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 334" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" text-anchor="start" font-size="11" font-weight="700" class="" fill="#818cf8">WEEKLY BATCH: the calendar sets the clock</text>
+<rect x="20" y="34" width="120" height="64" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="34" width="120" height="64" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="80.0" y="56" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">LOGS</text>
+<text x="80.0" y="70" text-anchor="middle" font-size="10" class="dim">plays, skips, saves,</text>
+<text x="80.0" y="84" text-anchor="middle" font-size="10" class="dim">playlists</text>
+<path d="M142,66 L158,66" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="160" y="34" width="120" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="160" y="34" width="120" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="220.0" y="56" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">VECTORS</text>
+<text x="220.0" y="70" text-anchor="middle" font-size="10" class="dim">ALS, playlist w2v,</text>
+<text x="220.0" y="84" text-anchor="middle" font-size="10" class="dim">audio for new</text>
+<path d="M282,66 L298,66" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="300" y="34" width="120" height="64" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="300" y="34" width="120" height="64" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="360.0" y="56" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">INDEX</text>
+<text x="360.0" y="70" text-anchor="middle" font-size="10" class="dim">Annoy → Voyager</text>
+<text x="360.0" y="84" text-anchor="middle" font-size="10" class="dim">candidates</text>
+<path d="M422,66 L438,66" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="440" y="34" width="120" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="440" y="34" width="120" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="500.0" y="56" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RANK + RULES</text>
+<text x="500.0" y="70" text-anchor="middle" font-size="10" class="dim">skip model, filters,</text>
+<text x="500.0" y="84" text-anchor="middle" font-size="10" class="dim">diversity</text>
+<path d="M562,66 L578,66" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="580" y="34" width="100" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="580" y="34" width="100" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="630.0" y="56" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">STORED LIST</text>
+<text x="630.0" y="70" text-anchor="middle" font-size="10" class="dim">one per listener,</text>
+<text x="630.0" y="84" text-anchor="middle" font-size="10" class="dim">new on Monday</text>
+<path d="M630,100 L630,122 L260,122 L260,152" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="140" text-anchor="start" font-size="11" font-weight="700" class="" fill="#34d399">REQUEST PATH: Sana's tap sets the clock</text>
+<rect x="20" y="152" width="120" height="64" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="152" width="120" height="64" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="80.0" y="181" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">OPEN APP</text>
+<text x="80.0" y="195" text-anchor="middle" font-size="10" class="dim">day, time, device</text>
+<path d="M142,184 L158,184" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="160" y="152" width="120" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="160" y="152" width="120" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="220.0" y="174" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SHELVES</text>
+<text x="220.0" y="188" text-anchor="middle" font-size="10" class="dim">editorial, ranked,</text>
+<text x="220.0" y="202" text-anchor="middle" font-size="10" class="dim">stored playlist</text>
+<path d="M282,184 L298,184" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="300" y="152" width="120" height="64" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="300" y="152" width="120" height="64" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="360.0" y="174" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">MIX BANDIT</text>
+<text x="360.0" y="188" text-anchor="middle" font-size="10" class="dim">target content mix,</text>
+<text x="360.0" y="202" text-anchor="middle" font-size="10" class="dim">1.5% explore</text>
+<path d="M422,184 L438,184" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="440" y="152" width="120" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="440" y="152" width="120" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="500.0" y="174" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">GREEDY PAGE</text>
+<text x="500.0" y="188" text-anchor="middle" font-size="10" class="dim">relevance minus</text>
+<text x="500.0" y="202" text-anchor="middle" font-size="10" class="dim">KL to the mix</text>
+<path d="M562,184 L578,184" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="580" y="152" width="100" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="580" y="152" width="100" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="630.0" y="181" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">HOME</text>
+<text x="630.0" y="195" text-anchor="middle" font-size="10" class="dim">rendered page</text>
+<path d="M630,218 L630,246" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="248" width="660" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="248" width="660" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="350.0" y="267" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">OUTCOMES LOGGED</text>
+<text x="350.0" y="281" text-anchor="middle" font-size="10" class="dim">every shelf shown, its position, plays, skips, saves, and the probability of each choice</text>
+<text x="20" y="316" text-anchor="start" font-size="10.5" class="dim">The log is the first box of the next batch run, and the training data for every model above.</text>
+      </svg>
+      <div class="diagram-caption">The top lane runs on the calendar and stores one list per listener. The bottom lane runs on Sana's tap and has to finish while she waits. The stored playlist from the top lane shows up as one item in the bottom lane.</div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>When to compute recommendations</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Weekly batch for everyone</td><td>Heaviest models, list-level rules, testable before shipping, steady cost</td><td>Stale by the time it's read; blind to this morning</td></tr>
+        <tr><td>On every request</td><td>Sees context and last-hour behaviour</td><td>Tight latency, so lighter models and a small candidate set; cost grows with traffic</td></tr>
+        <tr><td>Hybrid: precomputed pieces, assembled per request</td><td>Cheap vectors and candidates ahead of time, context applied at the end</td><td>Two systems to keep consistent</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Spotify's published design is the hybrid in the last row: Discover Weekly as a batch with a weekly cadence since 2015, and Home as a per-request assembly that, by 2025, includes a context-aware bandit. Precomputing the expensive part and applying cheap context at the end is how most large recommenders divide the work. YouTube's candidate and ranking funnel in case study 41 makes the same split, with retrieval indexes built ahead of time and a ranker run per request.</p>
+
+    <h4 class="why">Why not rebuild Discover Weekly on every open?</h4>
+
+    <p>Spotify's own account of the product says part of its appeal is the ritual: a new set each Monday makes the playlist feel special and builds a habit, and a playlist that changed on every open would have none of that. There's a technical reason too, which is cost. Building a list means retrieval, filtering against everything the listener has heard, ranking and list-level rules, and doing that for every open by hundreds of millions of people costs far more than doing it once a week. Spotify's 2025 genre controls show it is willing to build on demand when a person asks.</p>
+  </section>
+
+  <section id="labels">
+    <h2><span class="num">10</span>Training data: skips, labels and the feedback loop</h2>
+
+    <p>Every model so far learns from logs, and the next question is what in the logs counts as a good or a bad outcome for a recommendation. Spotify's papers give a consistent answer. In Anderson and colleagues' 2020 experiment, song streams were a proxy for satisfaction and song skips a proxy for dissatisfaction. Their learned ranker was a five-layer network trained on a label of whether the listener finished the song. Rankers in the 2021 diversity paper of Hansen and colleagues treat a skipped track as irrelevant and a listened track as relevant, and train a network with cross-entropy to predict skipping.</p>
+
+    <h3 id="10-1-what-a-skip-says">10.1 What a skip says, and what it doesn't</h3>
+
+    <p>A <strong>skip</strong> is the press of the next button before a track has finished. It's cheap for the listener, immediate, and available for every play, which makes it the most abundant negative signal a music service has. But the skip is a noisy label, and the dataset Spotify released in 2019 shows how noisy. Brian Brost, Rishabh Mehrotra and Tristan Jehan describe the Music Streaming Sessions Dataset: more than 160 million listening sessions, with metadata and audio features for roughly 3.7 million tracks, drawn from sessions on a set of listening contexts over eight weeks. Each play carries flags for whether it ended after a very brief play, a brief one, or after most of the track had played, and whether it was played in full. Under the strictest flag, which counts only the briefest plays, the share of plays that weren't skipped stayed between 34% and 35% at every position in a session. That seems to mean most plays in this data end early, so skipping is part of how people browse music and not a rare verdict of dislike. They also found that a track was least likely to be skipped when the previous track had been played to the end. They suggest this reflects a lean-back mode, in which a listener who is not choosing songs one at a time tolerates what comes.</p>
+
+    <p>Two more facts from the research tell us how to read a skip. In the CoSeRNN paper, the further a session was from the listener's average taste, the more skips it had, which means some skips are about context and not about the track. And the same paper's model keeps skipped tracks in a separate summary, as we saw in section 07, since the skipped set carries its own information about where to avoid. A skip within three seconds is a different statement from one at the three-minute mark, and a skip on the fifth track of a lean-back session is a different statement from one on the first track of a session she started herself.</p>
+
+    <p>How Spotify uses skips inside its collaborative-filtering stage isn't published, so here is the natural extension of section 03, which is our design reasoning. In the implicit-feedback loss, every unplayed track has preference 0 with low confidence. A track Sana skipped after a few seconds is better evidence than that, because she heard it and rejected it. We could probably give it preference 0 with a high confidence, so the model learns that the track doesn't fit, while keeping tracks she never heard at weak confidence. Hansen's reinforcement-learning ranker does the equivalent, with the reward <span>$r - c$</span>: a played track pays 0.9, and a skipped one costs 0.1.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Label for "she liked it"</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Played at all (a stream)</td><td>Plentiful, matches how the product counts</td><td>Includes autoplay and tracks she gave one second</td></tr>
+        <tr><td>Played to the end (completion)</td><td>Stronger evidence of fit; used by the learned ranker of Anderson et al., 2020</td><td>Rewards short tracks; lean-back sessions complete anything</td></tr>
+        <tr><td>Not skipped (the 2021 rankers)</td><td>Available for every play, a clear negative class</td><td>Skips mix dislike with mood, context and having heard it before</td></tr>
+        <tr><td>Saved or added to a playlist</td><td>Deliberate, strong, and also feeds the playlist embedding</td><td>Rare; many good plays never get saved</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 id="10-2-the-feedback-loop">10.2 The loop</h3>
+
+    <p>Logs record what earlier recommenders chose to show. A track that was never placed in Sana's playlist has no skip or save to learn from, so the next model has no evidence about it, and a track that was placed often collects evidence and gets placed more. Anderson and colleagues' split into organic and programmed streams is a first defence, because organic listening, from search or her own library, doesn't depend on the previous recommender's choices in the same way. They also found that programmed listening is less diverse, so training only on programmed listening would sharpen the narrowing.</p>
+
+    <p>Three published practices counter the loop. One is exploration. In the Home calibration system of section 09, a small share of requests, 1.5%, chooses a content mix away from the model's best guess, and exploring in the neighbourhood of the user's interests produced more useful data than exploring uniformly. Another is to log the probability that the system chose each action, called the <strong>propensity</strong>, so that the logs can later be reweighted to evaluate a different policy, which section 11 shows. A third is to collect some data from uniform randomness. Spotify's sessions dataset includes a subset in which the shuffle was uniformly random, with a snapshot of the playlist the tracks came from and the probability each track had of being played next, so that researchers can test counterfactual methods on sequences. Its authors point out that for sequences a naive counterfactual estimate has propensities that grow exponentially in the length of the sequence, which is one reason sequential recommendation is hard to evaluate offline.</p>
+
+    <p>Freshness is the other half of data design. Playlist embeddings (section 05) are retrained daily so that new content gets vectors, and Home calibration (section 09) trains on logs split in time: three weeks collected, two for training and the last for evaluation. CoSeRNN also tests on the last two weeks of its dataset, with validation on the five days before. Splitting by time guards against a model seeing the future, the same concern YouTube's team had with random hold-outs in case study 41.</p>
+
+    <p>In September 2026 Spotify added another kind of signal to Home. According to its third-quarter 2026 earnings release, a beta feature called Taste Profile lets Premium users aged 18 and over in the United States see how Spotify understands their taste and shape what Home recommends next. Explicit feedback like this is a clean label of the kind the implicit logs can't give, though it is probably volunteered by a self-selected group. Spotify hasn't published how it is used in training.</p>
+  </section>
+
+  <section id="evaluation">
+    <h2><span class="num">11</span>How Spotify knows a change helped</h2>
+
+    <p>Each design choice so far was justified by an experiment, and the experiments come in two layers. Offline, the team replays logged data through a new model and scores it. Online, it runs a controlled test on real listeners. They disagree often enough that Spotify's papers take care over both.</p>
+
+    <h3 id="11-1-offline">11.1 Offline: ranking metrics and counterfactual estimates</h3>
+
+    <p>For ranking models, the papers report the metrics we'd expect. Hansen's diversity paper uses hit rate and NDCG, which score whether tracks the listener played appear near the top of the list. CoSeRNN's authors use mean reciprocal rank and average rank for picking out the current session among earlier ones, and mean average precision and recall at 10 for ranking the tracks a listener played. They watch these instead of the training loss, and the paper notes that a better cosine loss didn't guarantee better ranking metrics.</p>
+
+    <p>Offline ranking metrics have the weakness we saw in section 10: the logs show only what the old system chose. To judge a new policy that would choose differently, such as a Home page with a different content mix, the Home calibration paper uses <strong>off-policy evaluation</strong> with inverse propensity weighting. Each logged session has the context, the action the old policy took, and the reward. If the new policy would take the same action, we count the reward, scaled up by one over the probability the old policy had of taking it, so that actions the old policy rarely tried count for more when the new policy repeats them. For a new policy <span>$\pi$</span> and a logging policy <span>$\mu$</span>, the estimate is</p>
+
+    <div class="eq-block"><span>$$\hat V(\pi)\;=\;\frac{1}{n}\sum_{k=1}^{n}\min\!\Big(\frac{\pi(a_k\mid x_k)}{\mu(a_k\mid x_k)},\;M\Big)\, r_k$$</span></div>
+
+    <p>where <span>$x_k$</span> is the context of logged session <span>$k$</span>, <span>$a_k$</span> the action taken, <span>$r_k$</span> the reward, and <span>$M$</span> a cap on the weight. Without the cap this is unbiased: on average it gives the new policy's true value. But a rare action has a huge weight, and a few sessions can dominate. It applies the cap "to mitigate the increased variance", citing work on truncated importance sampling. Capping costs bias, and the next experiment shows how big both effects are.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Our old policy chose the mix best for evening listening almost all the time and explored 5% of the time. A new policy would choose the best mix for each context, commute or evening. If we average the logged rewards, will the result over-estimate, under-estimate or match the new policy's true value? Then, if we reweight by one over the logged probability, what happens when we also cap the weights at 20 or at 5?</p>
+      <ol>
+        <li>Over-estimate, since logged sessions are the ones that went well</li>
+        <li>Under-estimate, since the old policy often picked a worse mix than the new one would</li>
+        <li>About right</li>
+      </ol>
+      <details>
+        <summary>Show the answer</summary>
+        <p><strong>B, under-estimate.</strong> A logged average is the old policy's value, and the new policy is better in the commute context where the old one chose badly. Reweighting without a cap recovers the right value on average but is noisy. Capping the weights lowers the noise and also pulls the estimate down, because the weights that matter most are the large ones. Below, an experiment puts numbers on all three.</p>
+      </details>
+    </div>
+
+            <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Off-policy evaluation: logged average, inverse propensity weighting and caps</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(11)
+A, eps = 3, 0.05
+# chance a session ends with a stream, by context (rows) and mix (cols)
+base = np.array([[.60, .40, .20],    # context 0: commute  (mix 0 best)
+                 [.25, .35, .55]])   # context 1: evening  (mix 2 best)
+new = base.argmax(1)                 # new policy: best mix per context
+truth = base[[0, 1], new].mean()
+
+def run(n):
+    ctx = rng.integers(0, 2, n)
+    greedy = np.where(ctx == 0, 1, 2)         # old policy favours mix 1/2
+    p = np.full((n, A), eps / A)
+    p[np.arange(n), greedy] += 1 - eps        # epsilon-greedy logging
+    a = (rng.random(n)[:, None] &gt; p.cumsum(1)).sum(1)
+    r = rng.random(n) &lt; base[ctx, a]
+    w = (new[ctx] == a) / p[np.arange(n), a]  # pi(a|x) / mu(a|x)
+    out = [r.mean()]
+    for cap in (np.inf, 20, 5):
+        out.append(np.mean(np.minimum(w, cap) * r))
+    return out
+
+res = np.array([run(3000) for _ in range(400)])
+print(f&quot;true value of the new policy: {truth:.3f}&quot;)
+print(&quot;3,000 logged sessions, repeated 400 times&quot;)
+for name, col in zip([&quot;logged average&quot;, &quot;IPS, no cap&quot;, &quot;IPS, cap 20&quot;,
+                      &quot;IPS, cap 5&quot;], res.T):
+    print(f&quot;{name:15} mean {col.mean():.3f}  spread {col.std():.3f}&quot;)</code></pre>
+      <div class="tryit-out">The new policy's true value is <code>0.575</code>. The logged average, <code>0.471</code>, is the old policy's value. Uncapped weighting averages <code>0.569</code> but with a spread of <code>0.081</code> between runs. Capping at 20 gives a mean of <code>0.373</code> and a spread of <code>0.028</code>, and capping at 5 gives <code>0.300</code> and <code>0.010</code>: less noise, and a larger downward bias.</div>
+    </details>
+
+    <p>The new policy's true value is 0.575. A logged average gives 0.471, stuck at the old policy's value. Uncapped weighting averages 0.569, close to the truth, but its spread across 400 repeated runs of 3,000 sessions is 0.081, so a single run can be off by a tenth. Capping at 20 shrinks the spread to 0.028 and sinks the mean to 0.373. Capping at 5 gives a spread of 0.010 and a mean of 0.300. In this toy the rare actions that the new policy wants carry a weight of 60, since exploration gave them a 1.7% chance, so any cap below 60 throws away real signal. A cap is a bias-variance dial, and a team using one has to know how rarely its logging policy tried the actions it is evaluating. This is also why exploration is not optional, and why Spotify's Home system keeps a small exploration rate.</p>
+
+    <h3 id="11-2-online">11.2 Online: A/B tests</h3>
+
+    <p>Final decisions go through controlled experiments. Anderson and colleagues' 2020 study is a typical example: a one-week test on 540,000 free-tier listeners, split into three buckets by ranker, measuring streams as a proxy for satisfaction and skips as a proxy for dissatisfaction. It found the learned neural ranker only slightly ahead of the plain cosine ranker on streams (+1.82% for generalists, +1.30% for specialists) and, for specialists, 9.76% fewer skips. They point out that sorting by similarity stayed competitive with a model trained on many features, which is a reminder that complexity has to earn its cost. Home's calibration test reported impression-to-stream ratios, the share of users starting a stream from Home, and total minutes streamed.</p>
+
+    <p>Long-run effects are harder to measure. A 2023 paper by Lucas Maystre, Daniel Russo and Yu Zhao on podcast recommendations describes a reinforcement-learning approach aimed at the listening a recommendation leads to over months. In one A/B test it raised average listening time attributable to recommendations by 81% for affected users over 60 days. That is a podcast result, and the paper's central point is that a recommendation's value includes the listening journey it starts and not only the stream right after it.</p>
+
+    <p>Spotify has also described how it organises this. A January 2026 engineering post by Yu Zhao and Mårten Schultzberg says it keeps personalisation and experimentation on separate stacks: the ML platform serves recommendations, including contextual bandits, and an experimentation platform called Confidence runs A/B tests on them, treating contextual bandits and any personalisation system as treatment variants. It says that over 300 teams run thousands of experiments, and that in the previous year 58 teams ran 520 experiments on the mobile app's home page alone. Experiments have primary metrics and guardrail metrics that catch harmful trade-offs, such as a gain in streams that comes with a rise in skips. It adds that Spotify doesn't use multi-armed bandits for experimentation, citing slow feedback and the need to balance several objectives.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Way to judge a change</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Offline ranking metrics (hit rate, NDCG, MRR)</td><td>Fast, cheap, good for tuning</td><td>Only rewards what the old system showed</td></tr>
+        <tr><td>Off-policy evaluation (capped IPS)</td><td>Estimates a new policy from old logs, needs no live test</td><td>Needs logged propensities; noisy or biased depending on the cap</td></tr>
+        <tr><td>Short A/B test (streams, skips, impression-to-stream)</td><td>Real listeners, causal</td><td>Measures this week, not the next six months</td></tr>
+        <tr><td>Long-horizon and guardrail metrics</td><td>Catch narrowing, churn and harm to some groups</td><td>Slow, and harder to attribute to one change</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h4 class="why">Why can't we skip the A/B test when the off-policy estimate looks good?</h4>
+
+    <p>An estimate is only as good as the logging policy's coverage of what the new policy would do. If the old system never tried an action, the estimate has nothing to say about it, and capped weights make that gap look like a loss. A live test shows what happens, including effects the logged reward doesn't capture, like a listener who stops opening the app. Estimates decide which candidates deserve a live test, and tests decide which one ships.</p>
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">12</span>What went wrong, and what it cost</h2>
+
+    <p>Spotify hasn't published post-mortems of recommendation failures in the way some companies publish outage reports, so this section collects the problems that its own papers and posts describe, and doesn't list incidents we can't source.</p>
+
+    <p>First comes narrowing. Anderson's 2020 paper found algorithmic listening less diverse than organic listening. A randomised test in the same year found a personalised shelf raised podcast streams by 28.90% while individual diversity fell by 11.51%. There is a business side too. Diversity scores were associated with churn and conversion by tens of percentage points, which is correlation and not proof of cause, but large enough that Spotify's researchers treat it as a business metric.</p>
+
+    <p>Second, accuracy gains have side effects. In the 2021 paper, moving from a cosine ranker to the best neural ranker lifted the hit rate by 2.7% and raised the popularity of what it recommended by 4.5%. Spotify's response in that paper is a research programme on putting diversity in the objective, not a statement that the production ranker changed.</p>
+
+    <p>Third, there is the audio gap in cold start. Audio-based vectors were a good start in 2013 and no match for usage data, with a mean average precision of 0.0067 against 0.233. A new track predicted from sound alone is a weak candidate, and how Spotify closes the gap for a Friday release is unpublished.</p>
+
+    <p>Fourth, infrastructure ages. Annoy served from 2013, and by 2023 sat in the middle of the pack on benchmarks. Spotify wanted changes to the data format and API of the open-source HNSW library it had chosen as a base, and since those would have broken compatibility for that library's many users, it built a new package, Voyager. What the replacement cost isn't published.</p>
+
+    <p>Fifth, proxies drift. CoSeRNN's authors note that a better cosine loss doesn't guarantee a better ranking, and the A/B test of 2020 found a model with many features only slightly ahead of a plain similarity score. Even a favourable offline number is a hypothesis.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What goes wrong</th><th>What the listener or artist sees</th><th>What the design does</th></tr></thead>
+      <tbody>
+        <tr><td>Relevance-only ranking narrows taste</td><td>The same sounds every week; fewer artists heard</td><td>Diversity terms in the objective, calibration of content mix, exploration</td></tr>
+        <tr><td>Brand-new track has no history</td><td>New releases absent from Discover Weekly</td><td>Audio-based vectors, playlist embeddings that need few adds</td></tr>
+        <tr><td>Skips are ambiguous</td><td>Good tracks demoted because of a bad moment</td><td>Context features, separate skip summaries, completion labels</td></tr>
+        <tr><td>Logs only show old choices</td><td>Models that echo the old system</td><td>Propensity logging, capped IPS, exploration, random-shuffle data</td></tr>
+        <tr><td>Home skews to music</td><td>Podcasts rarely shown first, even to those who want them</td><td>Contextual-bandit content mix (deployed March 2025)</td></tr>
+        <tr><td>Index library falls behind</td><td>Slower, less accurate retrieval</td><td>Replaced Annoy with Voyager in 2023</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">13</span>The whole system</h2>
+
+    <p>We can now draw the system end to end. On the left is what runs ahead of time, on a schedule: it learns vectors for listeners and tracks, predicts vectors for tracks with no history, builds indexes, and assembles each listener's weekly playlist. On the right is the request path that runs when Sana opens the app. At the bottom, the logs from both paths feed the next round of training and the next round of experiments.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The whole design, batch and request
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 550" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" text-anchor="start" font-size="11" font-weight="700" class="" fill="#818cf8">BATCH: ahead of time, on a schedule</text>
+<text x="380" y="22" text-anchor="start" font-size="11" font-weight="700" class="" fill="#34d399">REQUEST: when Sana opens the app</text>
+<rect x="20" y="34" width="300" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="34" width="300" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="170.0" y="53" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">LOGS</text>
+<text x="170.0" y="67" text-anchor="middle" font-size="10" class="dim">plays, skips, saves, playlists, propensities</text>
+<path d="M170,80 L170,98" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="100" width="96" height="58" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="100" width="96" height="58" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="68.0" y="126" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">Implicit ALS</text>
+<text x="68.0" y="140" text-anchor="middle" font-size="10" class="dim">plays → vectors</text>
+<rect x="124" y="100" width="96" height="58" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="124" y="100" width="96" height="58" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="172.0" y="126" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">Playlist w2v</text>
+<text x="172.0" y="140" text-anchor="middle" font-size="10" class="dim">retrained daily</text>
+<rect x="228" y="100" width="92" height="58" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="228" y="100" width="92" height="58" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="274.0" y="126" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">Audio CNN</text>
+<text x="274.0" y="140" text-anchor="middle" font-size="10" class="dim">new tracks</text>
+<path d="M170,160 L170,178" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="180" width="300" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="180" width="300" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="170.0" y="199" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">NEIGHBOUR INDEX</text>
+<text x="170.0" y="213" text-anchor="middle" font-size="10" class="dim">Annoy from 2013, Voyager from 2023</text>
+<path d="M170,226 L170,244" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="246" width="300" height="58" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="246" width="300" height="58" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="170.0" y="265" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">WEEKLY BUILD</text>
+<text x="170.0" y="279" text-anchor="middle" font-size="10" class="dim">candidates, drop heard tracks, skip model,</text>
+<text x="170.0" y="293" text-anchor="middle" font-size="10" class="dim">diversity, a couple of familiar anchors</text>
+<path d="M170,306 L170,324" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="326" width="300" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="326" width="300" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="170.0" y="345" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">STORED PLAYLIST</text>
+<text x="170.0" y="359" text-anchor="middle" font-size="10" class="dim">one per listener, new every Monday</text>
+<rect x="380" y="34" width="300" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="380" y="34" width="300" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="530.0" y="53" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">MEERA OPENS THE APP</text>
+<text x="530.0" y="67" text-anchor="middle" font-size="10" class="dim">context: day, hour, device</text>
+<path d="M530,80 L530,98" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="100" width="300" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="380" y="100" width="300" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="530.0" y="122" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">SHELF CANDIDATES</text>
+<text x="530.0" y="136" text-anchor="middle" font-size="10" class="dim">editorial, model-ranked, stored playlist</text>
+<path d="M530,152 L530,170" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="172" width="300" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="380" y="172" width="300" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="530.0" y="194" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">CONTENT-MIX BANDIT</text>
+<text x="530.0" y="208" text-anchor="middle" font-size="10" class="dim">target music/podcast mix, 1.5% explore</text>
+<path d="M530,224 L530,244" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="246" width="300" height="58" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="380" y="246" width="300" height="58" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="530.0" y="272" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">GREEDY PAGE BUILD</text>
+<text x="530.0" y="286" text-anchor="middle" font-size="10" class="dim">relevance minus KL to the target mix</text>
+<path d="M530,306 L530,324" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="326" width="300" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="380" y="326" width="300" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="530.0" y="345" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">HOME PAGE</text>
+<text x="530.0" y="359" text-anchor="middle" font-size="10" class="dim">Discover Weekly is one card among the shelves</text>
+<path d="M322,348 L350,348 L350,125 L378,125" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M322,202 L340,202 L340,137 L378,137" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M530,372 L530,396" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="398" width="660" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="398" width="660" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="350.0" y="417" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">OUTCOMES</text>
+<text x="350.0" y="431" text-anchor="middle" font-size="10" class="dim">plays, skips, saves with position, context and the probability of each choice</text>
+<path d="M20,420 L8,420 L8,56 L18,56" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M350,444 L350,462" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="464" width="660" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="464" width="660" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="350.0" y="483" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">A/B TEST WITH GUARDRAILS</text>
+<text x="350.0" y="497" text-anchor="middle" font-size="10" class="dim">every new model and bandit is a treatment variant; guardrails catch harm to skips and diversity</text>
+<text x="20" y="534" text-anchor="start" font-size="10.5" class="dim">Unpublished: batch schedule and size, the current ranker, Home latency, how audio and usage vectors are blended.</text>
+      </svg>
+      <div class="diagram-caption">Start at the logs, top left, and follow the batch down to the stored playlist. Then follow the request path on the right, where Home pulls in the stored playlist and the live context. Outcomes at the bottom return to the logs along the left edge, and every new model passes an A/B test on the way out.</div>
+    </div>
+
+    <p>Sana's Monday runs like this. By the time she opens the app, the batch has already built her playlist from her vectors, new-track vectors and the filters of section 04, and stored it. The request path then takes her context, retrieves and ranks shelves, picks a content mix with a bandit that occasionally explores, and renders Home with the stored playlist as one of its items. She skips the first track within six seconds, saves the third, and plays the fourth to the end. Each of those events, with the position and the context, goes into the logs. That log joins the pool that trains the vectors and the rankers and, through A/B tests with guardrails, helps decide which model versions ship.</p>
+
+    <p>Several parts of this picture are unpublished: the exact structure of the Discover Weekly batch today, the current candidate generators, how the ranker uses skips, the latency of Home, how audio-based and usage-based vectors are combined, and whether session models such as CoSeRNN are in production. Sources describe the system in pieces from 2013 to 2026, and the pieces were not all in service at the same time.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">14</span>Summary</h2>
+    <ol>
+      <li><strong>Two surfaces run on two clocks.</strong> Discover Weekly is a stored playlist rebuilt every Monday, and Home is assembled when the app opens, so the work splits into precomputed vectors and indexes and a cheap per-request step.</li>
+      <li><strong>Scoring everything is a weekly luxury.</strong> At 2015 sizes (60 million users, 4 million tracks, 40 dimensions) it is roughly 9.6 quadrillion multiply-adds; at today's user count against 50 million tracks it grows past a day on an illustrative cluster, and per-request scoring has to touch a sliver of the catalogue.</li>
+      <li><strong>Plays are not ratings.</strong> Hu, Koren and Volinsky's model turns counts into a 0-or-1 preference with confidence <span>$1+\alpha r_{ui}$</span>, lets every cell join the loss, and solves it with alternating least squares in time linear in the number of plays. Fitting only played cells reproduces popularity.</li>
+      <li><strong>Neighbour search finds candidates.</strong> Annoy's random-hyperplane trees served Spotify from 2013, and Voyager, a graph index announced in October 2023, is over ten times faster at equal recall and uses up to four times less memory.</li>
+      <li><strong>Playlists are sentences.</strong> Word2vec trained on more than 850 million playlists gives 40-dimensional track vectors whose cosine measures similarity, and it works for the long tail because a track needs only a few playlist adds. Training factorises a PMI table.</li>
+      <li><strong>Cold start needs content.</strong> A convolutional network on mel-spectrograms predicts a track's factor vector from audio, roughly 6.7 times better than bag-of-audio-words and still far below usage-based quality (0.0067 against 0.233 mean average precision).</li>
+      <li><strong>Listeners are not one vector.</strong> CoSeRNN predicts a session vector from context, the last sessions' played and skipped tracks, and an attention-fused long-term average, and beats the best published baseline by over 10% on ranking metrics.</li>
+      <li><strong>Relevance narrows taste and the numbers say so.</strong> Programmed listening is less diverse than organic listening, a personalised shelf raised podcast streams 28.90% and cut individual diversity 11.51%, and diversity terms in the objective, such as a reward that pays a bonus only for kept tracks, are the studied remedy.</li>
+      <li><strong>Home calibrates its mix with a bandit.</strong> A contextual bandit picks the target content-type mix per request, a greedy KL-penalised pass builds the page, 1.5% of requests explore, and the A/B test showed +36.6% podcast impression-to-stream.</li>
+      <li><strong>A skip is a useful but ambiguous negative.</strong> Most plays in the public sessions dataset end early, and skips depend on context and listening mode, so models keep skipped tracks separate and weigh them by timing.</li>
+      <li><strong>Offline numbers need propensities.</strong> Capped inverse propensity weighting evaluates a new policy from old logs, and the cap trades variance for bias, so exploration and logged probabilities are part of the design, and live A/B tests with guardrails make the final call.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">15</span>Build this</h2>
+    <p class="lede">You can rebuild a small Discover Weekly in a day or two with synthetic data and numpy, and watch each repair from this chapter change what gets recommended.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A mini Discover Weekly with a cold-start model and an off-policy check</span>
+        <span class="proj-meta">~8 hours &middot; numpy only</span>
+      </div>
+      <p>Build a world where you know the truth: 3,000 listeners with tastes over 12 genres, 2,000 tracks with a long-tailed popularity, 300 further tracks with no plays at all, and a 16-number "audio" vector per track that is correlated with its genre but noisy. Every model you train is judged against what the simulation says the listener would play.</p>
+      <ol class="proj-steps">
+        <li>Generate play counts with replays for liked tracks and one-off stray plays, hide a quarter of each listener's favourites, and report top-20 recall for popularity, for a model fitted on played cells only, and for implicit ALS with confidence <span>$1+\alpha r$</span>. Sweep <span>$\alpha$</span> and <span>$\lambda$</span> together.</li>
+        <li>Generate 4,000 playlists, each mostly from one or two genres, and build track vectors by factorising shifted positive PMI. Measure how often a track's nearest ten fall in its genre, and compute a generalist-specialist score for each listener.</li>
+        <li>Fit a ridge regression from the audio vector to the ALS track factors on tracks with plays, then score the 300 new tracks. Compare its recall on new tracks with an oracle that knows their true factors, and try blending the two vectors with a weight that grows with play count.</li>
+        <li>Assemble a 30-track weekly list per listener: candidates from ALS neighbours, playlist-embedding neighbours and new tracks, remove everything already played, rank by a logistic regression that predicts "not skipped", add an <span>$\alpha d(u,t)$</span> diversity bonus, and put two familiar tracks back in.</li>
+        <li>Log the lists with an epsilon-greedy policy and record the probability of each choice. Evaluate a different policy with capped inverse propensity weighting and compare with the simulation's true value, for several caps.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the played-cells-only model matches popularity while ALS beats it clearly, a track with only a handful of playlist appearances lands among neighbours of its own genre, the audio-based vector recovers part of the gap on new tracks and the blend improves as plays accumulate, and the capped estimate sits below the truth while the uncapped one is right on average but noisy.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Give each listener a morning and an evening taste, and train a small recurrent or exponential-smoothing model that predicts a session vector from the hour and the last session's played and skipped tracks. See whether it recovers the evening taste on the first track of an evening session better than the long-term vector does.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">16</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is implicit feedback, and why can't you treat play counts as ratings?</summary>
+      <div class="qa-body"><p>Implicit feedback is behaviour that hints at taste without stating it: plays, skips, saves. Counts differ from ratings in two ways. Every observed value is positive, and the missing cells are not negatives, since the listener may never have met the track. A model fitted only on observed cells learns that everything is liked and ends up ranking by popularity. Hu, Koren and Volinsky's fix is to treat the table as 0-or-1 preferences with confidence <span>$c_{ui}=1+\alpha r_{ui}$</span> and include every cell in the loss, so unplayed tracks count a little and heavily replayed tracks count a lot.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why is Discover Weekly a weekly batch while Home is built live?</summary>
+      <div class="qa-body"><p>Discover Weekly is one stored list per listener that changes on Mondays, and Spotify says the weekly rhythm is part of the product because it makes the playlist feel special and builds a habit. A batch can run the heaviest models, apply list-level rules such as removing known tracks, and be tested before shipping. Home needs the listener's current context, such as time of day and device, so it is assembled per request with lighter models and a small candidate set. On Home it appears as one item.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Walk through implicit ALS. Why alternating least squares instead of SGD, and what does it cost?</summary>
+      <div class="qa-body"><p>Its loss sums a weighted squared error over every user-track pair, which is billions of terms, so SGD would sweep a mostly empty table forever. With the track vectors fixed, the loss in each user vector is quadratic, with minimum <span>$x_u=(Y^{\top}C^uY+\lambda I)^{-1}Y^{\top}C^up(u)$</span>. Its expensive term splits as <span>$Y^{\top}Y+Y^{\top}(C^u-I)Y$</span>, where the first part is shared and the second only involves the tracks that user played, so the cost per user is <span>$O(f^2n_u+f^3)$</span> and a sweep is <span>$O(f^2N+f^3m)$</span>, linear in the number of plays. Then swap roles and solve the tracks. About ten sweeps are typical, and there is no learning rate, only <span>$f$</span>, <span>$\lambda$</span> and <span>$\alpha$</span>. Spotify's 2015 talk described 40-dimensional factors solved on Hadoop.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why would you train word2vec on playlists, and what does it learn?</summary>
+      <div class="qa-body"><p>A playlist records a deliberate choice that these tracks belong together, which is cleaner evidence than a stream that may have come from autoplay. Treating a playlist as a document and a track as a word, continuous bag-of-words training predicts a track from its neighbours with negative sampling. For skip-gram with negative sampling, Levy and Goldberg showed that the optimum satisfies <span>$v\cdot u=\mathrm{PMI}-\log k$</span>, so the model factorises a table of how much more often two tracks share a playlist than chance. Spotify's 2020 paper used more than 850 million playlists, 40 dimensions and daily retraining. Because a track needs only a few playlist adds to get a sensible vector, it covers the long tail better than stream-based vectors.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>A track is released this morning and has no plays. How can Discover Weekly still consider it?</summary>
+      <div class="qa-body"><p>Predict the track's latent vector from its audio. A 2013 recipe takes the factor vectors from usage data for tracks that have them, trains a convolutional network on log-mel spectrograms to regress those vectors with squared error, and uses the prediction for tracks without usage. It beat a bag-of-audio-words baseline by roughly 6.7 times on mean average precision, but at 0.0067 it is far below the 0.233 achieved by usage-based factors, because audio can't convey popularity or culture. A system also needs a rule for moving from the audio vector to the usage vector as plays arrive, such as a weight that grows with play count. As soon as a few playlists include the track, a playlist embedding can place it too.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What does CoSeRNN predict, and why does it fuse with a long-term vector?</summary>
+      <div class="qa-body"><p>At the start of a session it predicts a 40-dimensional taste vector in the playlist embedding space, from the context (day, hour, device) and the previous session's played and skipped summaries, each passed through an LSTM. It doesn't predict from scratch. It predicts an offset from a long-term vector, a recency-weighted average of past sessions, and an attention gate with two softmax weights decides how far to trust the offset. When the context is rare, the gate leans on the long-term vector. Training minimises one minus the dot product with the actual session vector. It reports over 10% better ranking metrics than JODIE, with biggest gains in infrequent contexts.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why do you need approximate nearest-neighbour search, and how did Spotify's approach change?</summary>
+      <div class="qa-body"><p>Scoring every track for every request is far too slow, and even a weekly batch grows with users times tracks. An approximate index returns near-best items at a fraction of the cost. Spotify's Annoy builds a forest of trees, each cutting the space with random hyperplanes, and ships as a read-only memory-mapped file of roughly 1.2 GB in the 2015 talk. In October 2023 Spotify announced Voyager, based on the HNSW layered graph, which it says is over ten times faster than Annoy at equal recall, or up to 50% more accurate at equal speed, using up to four times less memory with 8-bit floats.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you evaluate a new Home policy without running an A/B test first?</summary>
+      <div class="qa-body"><p>Use off-policy evaluation. Log, for each session, the context, the action the old policy took, its probability (the propensity), and the reward. For a deterministic new policy, the estimate is the average of the reward times an indicator that the new policy agrees with the log divided by the propensity. Uncapped it is unbiased but high variance when the logging policy rarely tried the action, and capping the weights lowers variance at the price of a downward bias. Spotify's Home calibration paper uses capped inverse propensity weighting, with Precision@1 on the first shelf. It needs exploration in the logging policy, here 1.5%, because with none the estimate can't say anything about actions the old policy never took. It decides what deserves a live test and doesn't replace it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you balance relevance, diversity and fairness to artists?</summary>
+      <div class="qa-body"><p>First measure each. Diversity of a listener can be the generalist-specialist score, the average cosine between each played track and the centroid of her tracks in the embedding. Then put the extra goal into the objective. Spotify's 2021 paper compared interpolation, <span>$s+\alpha d$</span>, interleaving, a submodular set objective and a reinforcement-learning reward <span>$r-c+\alpha d\,r$</span> that pays a diversity bonus only when the track is kept. Reward modelling gave the best popularity trade-off at higher cost, and interpolation covered a wider range with one knob. For artists, Mehrotra et al. (2018) frame a two-sided marketplace and evaluate policies that trade relevance against fairness to artists by counterfactual estimation, reporting a substantial gain in artist fairness with no noticeable loss of listener satisfaction in the abstract. Validate in an A/B test with guardrails, and watch long-run metrics, since diversity is associated with retention.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Is a skip a negative label? How would you use it?</summary>
+      <div class="qa-body"><p>It is a negative with caveats. In the public sessions dataset, most plays end early under the strictest definition, and skips depend on context and listening mode: tracks after a completed track are skipped least, and sessions far from a listener's average taste are skipped more. So use skip timing, not a single flag, keep context as input, and don't treat a skip as permanent dislike. Spotify's papers use skips as the negative class for a ranker trained with cross-entropy, as a reward of minus 0.1 in a reinforcement-learning ranker, and as a separate skipped-track summary in CoSeRNN. In an implicit-feedback factorisation, a quick skip would deserve preference 0 with high confidence, against low confidence for tracks never heard.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">17</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="http://yifanhu.net/PUB/cf.pdf" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Collaborative Filtering for Implicit Feedback Datasets</div><div class="r-sub">Hu, Koren and Volinsky, ICDM 2008. Preferences, confidence weights and the alternating least squares solution of section 03.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.a1k0n.net/spotify/ml-madison/" target="_blank" rel="noopener">
+        <div class="r-icon">🎤</div>
+        <div class="r-body"><div class="r-kind">Talk</div><div class="r-title">Machine Learning &amp; Big Data at Spotify</div><div class="r-sub">Andy Sloane, Madison Big Data Meetup, January 27, 2015. Implicit matrix factorisation on Hadoop, Annoy, related artists and radio.</div></div>
+      </a>
+      <a class="resource-card" href="https://papers.nips.cc/paper_files/paper/2013/file/b3ba8f1bee1238a2f37603d90b58898d-Paper.pdf" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Deep Content-Based Music Recommendation</div><div class="r-sub">van den Oord, Dieleman and Schrauwen, NeurIPS 2013. Predicting latent factors from audio for the cold-start tracks of section 06.</div></div>
+      </a>
+      <a class="resource-card" href="https://dl.acm.org/doi/10.1145/3366423.3380281" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Algorithmic Effects on the Diversity of Consumption on Spotify</div><div class="r-sub">Anderson, Maystre, Mehrotra, Anderson and Lalmas, WWW 2020. Playlist word2vec, the generalist-specialist score and the ranker experiment.</div></div>
+      </a>
+      <a class="resource-card" href="https://doi.org/10.1145/3383313.3412248" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Contextual and Sequential User Embeddings for Large-Scale Music Recommendation</div><div class="r-sub">Hansen et al., RecSys 2020. CoSeRNN, with code at github.com/spotify-research/cosernn.</div></div>
+      </a>
+      <a class="resource-card" href="https://doi.org/10.1145/3437963.3441775" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Shifting Consumption towards Diverse Content on Music Streaming Platforms</div><div class="r-sub">Hansen et al., WSDM 2021. Four rankers, four diversity methods and the reward-modelling trade-off.</div></div>
+      </a>
+      <a class="resource-card" href="https://doi.org/10.1145/3269206.3272027" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Towards a Fair Marketplace</div><div class="r-sub">Mehrotra, McInerney, Bouchard, Lalmas and Diaz, CIKM 2018. Counterfactual evaluation of relevance, artist fairness and satisfaction.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2003.08203" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">The Engagement-Diversity Connection: Evidence from a Field Experiment on Spotify</div><div class="r-sub">Holtz et al., 2020. The podcast shelf experiment. arXiv:2003.08203</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2509.05460" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Calibrated Recommendations with Contextual Bandits</div><div class="r-sub">Feijer et al., RecSys 2025. The Home page content mix, capped inverse propensity evaluation and the online test. arXiv:2509.05460</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1901.09851" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Dataset paper</div><div class="r-title">The Music Streaming Sessions Dataset</div><div class="r-sub">Brost, Mehrotra and Jehan, WWW 2019. 160 million sessions, skip flags and a uniformly random shuffle subset. arXiv:1901.09851</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2302.03561" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Optimizing Audio Recommendations for the Long-Term</div><div class="r-sub">Maystre, Russo and Zhao, 2023. A reinforcement-learning view of podcast recommendation. arXiv:2302.03561</div></div>
+      </a>
+      <a class="resource-card" href="https://engineering.atspotify.com/2015/11/what-made-discover-weekly-one-of-our-most-successful-feature-launches-to-date" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">What made Discover Weekly one of our most successful feature launches to date?</div><div class="r-sub">Spotify Engineering, November 18, 2015. The product decisions behind the playlist.</div></div>
+      </a>
+      <a class="resource-card" href="https://engineering.atspotify.com/2023/10/introducing-voyager-spotifys-new-nearest-neighbor-search-library" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Introducing Voyager: Spotify's New Nearest-Neighbor Search Library</div><div class="r-sub">Peter Sobot, October 25, 2023. Why Annoy was replaced.</div></div>
+      </a>
+      <a class="resource-card" href="https://engineering.atspotify.com/2026/1/why-we-use-separate-tech-stacks-for-personalization-and-experimentation" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Why We Use Separate Tech Stacks for Personalization and Experimentation</div><div class="r-sub">Yu Zhao and Mårten Schultzberg, January 7, 2026. Bandits as treatments in A/B tests.</div></div>
+      </a>
+      <a class="resource-card" href="https://newsroom.spotify.com/2025-06-30/discover-weekly-turns-10-celebrating-100-billion-tracks-streamed-and-a-decade-of-personalized-discovery/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company post</div><div class="r-title">Discover Weekly Turns 10</div><div class="r-sub">Spotify Newsroom, June 30, 2025. The playlist's scale and the new genre controls.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">18</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/16-recommenders-ranking-search"><div class="rc-sec" style="color:var(--c-rec)">16 · The foundations</div><div class="rc-title">Recommenders, Ranking &amp; Search</div><div class="rc-hook">Collaborative filtering, two towers, the funnel and the feedback loop in general form.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · The video version</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">The same problem for video: two-tower retrieval, the logQ correction, watch time and position bias.</div></a>
+      <a class="related-card" href="/topics/03-unsupervised-self-supervised"><div class="rc-sec" style="color:var(--c-unsup)">03 · Embeddings</div><div class="rc-title">Unsupervised &amp; Self-Supervised</div><div class="rc-hook">Where word2vec-style embeddings and learned similarity come from.</div></a>
+      <a class="related-card" href="/topics/07-sequence-modeling-pre-transformer"><div class="rc-sec" style="color:var(--c-sequence)">07 · Sequences</div><div class="rc-title">Sequence Modeling Pre-Transformer</div><div class="rc-hook">LSTMs, the recurrent building block inside the session model of section 07.</div></a>
+      <a class="related-card" href="/topics/13-speech-audio"><div class="rc-sec" style="color:var(--c-speech)">13 · Audio</div><div class="rc-title">Speech &amp; Audio</div><div class="rc-hook">Spectrograms, mel scales and the audio front end behind the cold-start model.</div></a>
+      <a class="related-card" href="/topics/15-reinforcement-learning"><div class="rc-sec" style="color:var(--c-rl)">15 · Bandits and policies</div><div class="rc-title">Reinforcement Learning</div><div class="rc-hook">Exploration, importance weights and the policy view behind Home's bandit.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Why offline metrics mislead and how to run a trustworthy experiment.</div></a>
+      <a class="related-card" href="/topics/47-design-visual-search"><div class="rc-sec" style="color:var(--c-rec)">47 · The index side</div><div class="rc-title">Designing Visual Search</div><div class="rc-hook">Another system built on vector search and approximate nearest neighbours.</div></a>
+    </div>
+  </section>

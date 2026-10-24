@@ -1,0 +1,1186 @@
+---
+title: "Designing Card Fraud Detection"
+dek: "Follow Meera's $64 apron purchase through the system that decides in a fraction of a second whether she is the real cardholder. We build it from rules on one shop and fix each failure in turn, using what Stripe has published about Radar."
+readingTime: "~78 min"
+prereqs: "classical ML (02), MLOps (24), evaluation (25)"
+group: "ML System Design"
+label: "Case study 42"
+description: "From one shop's rules to network-wide counters, cost-weighted thresholds, calibration, late labels and counterfactual evaluation of blocked payments, built on Stripe Radar's own posts, talks and docs."
+---
+<section id="tldr">
+    <p>Meera Nair is on her sofa in Leeds with a laptop on her knees, buying a linen apron for $64 from Loomwell, a two-person shop in Portland, Oregon. She types in her card number, checks her postcode and taps Pay. A spinner turns for a moment and the page says her order is confirmed. Nothing on the screen suggests that anything happened beyond a card being charged.</p>
+
+    <p>Something did happen in that moment. Before her bank was even asked, a system run by the payments company Stripe looked at hundreds of facts about the payment and decided that the person tapping Pay was probably the cardholder. It had a fraction of a second to decide. It had never seen Meera before, at least not at Loomwell, and a wrong answer costs something in both directions. If it lets a thief through, Loomwell loses the apron, the money and a fee, and finds out weeks later. If it blocks Meera, a customer who did nothing wrong is told her card was declined, and Loomwell loses a sale and possibly the customer. Fraud is rare, about one payment in a thousand by Stripe's own account, so the system has to be right about nearly everyone while it hunts for a few. And it learns of its mistakes slowly. A stolen-card dispute can arrive months after the purchase, and a payment the system blocks never produces any evidence at all.</p>
+
+    <p>So the question this chapter answers is: <strong>how does Stripe decide in under a tenth of a second whether the person paying is the real cardholder, when fraud is one payment in a thousand, the proof arrives months late, and the payments it blocks can never be checked?</strong></p>
+
+    <p>We'll build the design the way an engineer would, starting from rules and a small model that see only one shop and fixing each failure in turn. That takes us through counters computed across the whole network and how they're served in milliseconds, the move from simpler models to deep networks, the arithmetic that sets the cut-off between allow and block, and the way rules and the model share the work. After that come the delay in fraud labels, the trick of letting a few blocked payments through so the model can learn from them, the way attackers adapt, and the explanations shown to merchants. We rely on Stripe's own engineering posts, documentation and talks, and we say plainly where its internals are unpublished.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>First, some vocabulary from Meera's purchase. She paid with a card, over the internet, with nobody checking it in person, which the industry calls a <strong>card-not-present</strong> payment. Her card was issued by a bank in the UK, called the <strong>issuer</strong>, and the issuer makes its own decision to approve or decline every charge. A payment counts as <strong>fraud</strong> here when the person paying wasn't the cardholder. Cardholders usually find out from a bank statement they don't recognise, and merchants find out through a <strong>dispute</strong>, also called a <strong>chargeback</strong>: the cardholder tells their bank they didn't make the purchase, and the bank takes the money back from the merchant and adds a fee.</p>
+
+    <p>Stripe's fraud product is called Radar. Its job is to look at each payment as it arrives, before the issuer is asked, and choose one of a few actions: allow it, block it, ask the cardholder to prove who they are with an extra check, or allow it but queue it for a human to look at. Around that decision it also has to do several other things. It has to explain its choice to the merchant, let the merchant add rules of their own, keep up with attackers who change tactics, and do all this for card payments from the smallest shop to the largest platform.</p>
+
+    <p>Four qualities follow from that job. It has to be <strong>fast</strong>, since it sits in the middle of a checkout that a person is waiting on. It has to be <strong>precise about rarity</strong>: with fraud this uncommon, a small error rate on good payments can outnumber the fraud it catches. It has to be <strong>fresh</strong>, because an attack that starts at 9:00 should change decisions by 9:05. And it has to be <strong>safe when it breaks</strong>, since a fraud system that goes down shouldn't take every shop's checkout with it.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>Stripe's engineering post "How we built it: Stripe Radar", by Ryan Drapeau and published in March 2023, gives the headline numbers. Radar scores over 1,000 characteristics of a transaction and decides in under 100 milliseconds whether to let it through, block it or send it to additional checks. Fraud is about one payment in a thousand, and the post says Radar incorrectly blocks 0.1% of legitimate payments. A later Stripe post, from December 2024, says the company's yearly payment volume had grown past $1 trillion. Stripe doesn't publish how many payments it scores per second, so the exercise below uses an average ticket size we've made up.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose $1 trillion a year is made up of payments averaging $50 each (an illustrative figure, since Stripe doesn't publish its average). How many payments is that per second on average? If one in a thousand is fraud and Radar wrongly blocks 0.1% of the good ones, roughly how many fraudulent payments and how many wrongly blocked good payments does that give per second?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>$1 trillion divided by $50 is 20 billion payments a year. A year has about 31.5 million seconds, so that's roughly 630 payments a second on average, and several thousand a second at a busy peak. One in a thousand is fraud, which is about 0.6 fraudulent payments a second. Blocking 0.1% of the good ones gives another 0.6 good payments a second wrongly blocked.</p>
+        <p>Those two numbers are about the same size. That's the shape of the whole problem: because fraud is so rare, even a system that wrongly blocks only one good payment in a thousand creates as many unhappy customers as it stops thieves, and every design choice later in the chapter is about moving that balance. Radar doesn't screen every payment on the platform, so the true figures are probably smaller, but the ratio holds.</p>
+      </details>
+    </div>
+
+    <p>Two timing facts will come up repeatedly. One is the budget of under 100 milliseconds for the whole decision. The other is the delay in learning the truth, which section 09 measures. Stripe's documentation says card networks typically allow cardholders to start a dispute within 120 days of the payment, so the answer to "was Meera's payment fraud?" may not exist for four months.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: rules and a model that only see one shop</h2>
+
+    <p>The obvious first design is the one a single merchant could build alone. Loomwell's owner, Dan, would write a few rules from experience: block orders over $500, block when the card's country differs from the country of the buyer's internet connection, block a second order from the same email within a minute. Then, if he had a few years of order history, he might train a small <strong>logistic regression</strong>. That's a model which multiplies each input number by a learned weight, adds them up and squashes the total into a probability between 0 and 1. Those inputs are called <strong>features</strong>: the amount, whether the countries match, the hour of the day, how long the email address looks.</p>
+
+    <p>Training it needs labelled examples, meaning past payments tagged as fraud or not. Training adjusts the weights to minimise the <strong>cross-entropy loss</strong>, which punishes confident wrong answers heavily:</p>
+
+    <div class="eq-block"><span>$$\mathcal{L} \;=\; -\sum_{i}\Big[\, y_i \log p_i \;+\; (1-y_i)\log(1-p_i) \Big], \qquad p_i = \sigma(w^{\top}x_i)$$</span></div>
+
+    <p>Here <span>$y_i$</span> is 1 if payment <span>$i$</span> turned out to be fraud and 0 otherwise, <span>$x_i$</span> is its feature vector, <span>$w$</span> the weights, and <span>$\sigma$</span> the sigmoid function that turns any number into a probability. A payment that's fraud but gets a probability near zero adds a very large term, and that pressure shapes the weights.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">Version 1: rules and a model that only see one merchant
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="130" height="80" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="130" height="80" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="85.0" y="81" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CHECKOUT</text>
+<text x="85.0" y="95" text-anchor="middle" font-size="10" class="dim">Meera, card, email,</text>
+<text x="85.0" y="109" text-anchor="middle" font-size="10" class="dim">IP, amount $64</text>
+<path d="M154,90 L178,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="182" y="50" width="156" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="182" y="50" width="156" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="260.0" y="74" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">LOOMWELL'S RULES</text>
+<text x="260.0" y="88" text-anchor="middle" font-size="10" class="dim">block if amount &gt; $500</text>
+<text x="260.0" y="102" text-anchor="middle" font-size="10" class="dim">block if card country</text>
+<text x="260.0" y="116" text-anchor="middle" font-size="10" class="dim">differs from IP country</text>
+<path d="M342,90 L366,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="370" y="50" width="150" height="80" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="370" y="50" width="150" height="80" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="445.0" y="74" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">ONE SMALL MODEL</text>
+<text x="445.0" y="88" text-anchor="middle" font-size="10" class="dim">logistic regression on</text>
+<text x="445.0" y="102" text-anchor="middle" font-size="10" class="dim">this shop's payments</text>
+<text x="445.0" y="116" text-anchor="middle" font-size="10" class="dim">only</text>
+<path d="M524,90 L548,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="552" y="50" width="128" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="552" y="50" width="128" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="616.0" y="81" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">DECISION</text>
+<text x="616.0" y="95" text-anchor="middle" font-size="10" class="dim">allow or block,</text>
+<text x="616.0" y="109" text-anchor="middle" font-size="10" class="dim">no explanation</text>
+<text x="20" y="170" text-anchor="start" font-size="10.5" class="dim">Loomwell has a few thousand payments a year, and a handful of those ever turned out to be fraud.</text>
+<text x="20" y="196" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A card that was tried 40 times at 40 other shops this morning looks brand new here.</text>
+<text x="20" y="220" text-anchor="start" font-size="10.5" class="dim">The rules never change until somebody notices an attack and edits them by hand.</text>
+      </svg>
+      <div class="diagram-caption">Follow the arrows left to right. Every box is simple and fast, and the amber line under them is what makes the whole design blind: it only knows what happened inside one shop.</div>
+    </div>
+
+    <p>This design is fast, because it reads a handful of fields and does a handful of multiplications. It's easy to explain, since each rule is a sentence. For a very large merchant with a long history, a version of it could even work. For Loomwell it breaks in three places, and each tells us what to add.</p>
+
+    <p>First, data: Loomwell has a few thousand orders a year, and if two or three of them ever turned into disputes, there are too few examples of fraud for any model to learn from. Second, vision: Meera's card and email may have been used at forty other shops this morning, some of them with failed attempts, but Loomwell's records show a stranger. A thief working through a list of stolen card numbers deliberately spreads the attempts across many small merchants, so each shop sees one or two. Third, speed of change: rules stay as they are until somebody notices an attack and edits them, and the owner of a two-person shop isn't watching attack patterns.</p>
+
+    <p>All three problems come from the same limit, which is that one merchant sees a thin slice of the world. A company that processes payments for millions of merchants sees all the slices. That's the fix we build next, and Stripe's own description of Radar says it exactly: it "trains on data across millions of global companies".</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What the model gets to see</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>One merchant's own history</td><td>Private, simple, tuned to that shop's customers</td><td>Few fraud examples, blind to attacks that spread across shops, nothing for a new merchant</td></tr>
+        <tr><td>A pooled model trained on many merchants, scoring one payment at a time</td><td>Many more examples, works on day one for a new shop</td><td>Still can't see that this card was tried elsewhere a minute ago</td></tr>
+        <tr><td>Pooled training plus aggregates computed across the whole network</td><td>Sees the card, email, IP address and device history wherever they've appeared</td><td>Needs real-time counters over everyone's traffic, and a careful story about data use</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Stripe's 2021 primer on machine learning for fraud detection says this directly: Radar uses hundreds of features, and most of them are aggregates computed across the Stripe network. We follow how those aggregates are built in the next section.</p>
+  </section>
+  <section id="features">
+    <h2><span class="num">03</span>Features computed across the whole network</h2>
+
+    <p>Meera's payment carries several things that can be recognised again: her card number (which Stripe represents by a fingerprint, so the number itself probably isn't used as a key), her email address, the IP address her laptop connected from, and a set of characteristics of her browser and device. Each of these is an <strong>entity</strong>, and the useful question to ask about an entity is what it has been doing across the whole network lately. How many different cards has this IP address tried in the last hour? How many times has this card been charged today, and from how many countries? What share of this email address's past payments, at any merchant, were approved?</p>
+
+    <p>Two published examples show the kinds of question involved. Stripe's primer mentions counts such as the number of distinct countries a card was used from in the past day. Stripe's rule reference lists attributes such as <code>total_charges_per_email_daily</code>, the number of earlier charge attempts from an email in the preceding day, and the "Related payments" view in its documentation groups payments that share a customer ID, IP address or card number. Stripe's documentation says what these groups reveal: <em>card testing</em>, many different cards sharing a single IP address, and <em>trial abuse</em>, many apparent customers sharing the same card.</p>
+
+    <p>Put Meera next to a thief and the difference is easy to see. Meera's card has been used for months at a handful of merchants, nearly always approved, from addresses in West Yorkshire. A thief testing a list of stolen numbers on Loomwell has a card that first appeared four minutes ago, from an IP address that has tried thirty-eight different card numbers in the last ten minutes, nearly all declined. (These two profiles are made up to show the shape of the signal.) Neither profile can be computed from Loomwell's records alone, because each is a statement about the whole network. Stripe's documentation backs this up with an estimate of how much each kind of input improves the fraud model: device and activity signals collected by Stripe.js 36%, the IP address 12%, the customer email 11%, the customer name 3% and the billing address 1%. Since the page doesn't define the metric, read the numbers as a ranking more than as exact gains.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">Features keyed by the entities of a payment, counted across the whole network
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="170" height="50" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="170" height="50" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="105.0" y="61" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CARD</text>
+<text x="105.0" y="75" text-anchor="middle" font-size="10" class="dim">fingerprint of the number</text>
+<path d="M194,65 L246,113.0" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="102" width="170" height="50" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="102" width="170" height="50" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="105.0" y="123" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">EMAIL</text>
+<text x="105.0" y="137" text-anchor="middle" font-size="10" class="dim">address and domain</text>
+<path d="M194,127 L246,131.0" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="164" width="170" height="50" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="164" width="170" height="50" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="105.0" y="185" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">IP ADDRESS</text>
+<text x="105.0" y="199" text-anchor="middle" font-size="10" class="dim">and its network</text>
+<path d="M194,189 L246,149.0" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="226" width="170" height="50" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="226" width="170" height="50" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="105.0" y="247" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">DEVICE</text>
+<text x="105.0" y="261" text-anchor="middle" font-size="10" class="dim">browser, screen, behaviour</text>
+<path d="M194,251 L246,167.0" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="250" y="40" width="220" height="236" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="250" y="40" width="220" height="236" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="360.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">COUNTERS PER ENTITY</text>
+<text x="360.0" y="76" text-anchor="middle" font-size="10" class="dim">kept across every merchant</text>
+<text x="360.0" y="90" text-anchor="middle" font-size="10" class="dim"></text>
+<text x="360.0" y="104" text-anchor="middle" font-size="10" class="dim">distinct cards seen from</text>
+<text x="360.0" y="118" text-anchor="middle" font-size="10" class="dim">this IP in the last hour</text>
+<text x="360.0" y="132" text-anchor="middle" font-size="10" class="dim"></text>
+<text x="360.0" y="146" text-anchor="middle" font-size="10" class="dim">payments on this card in</text>
+<text x="360.0" y="160" text-anchor="middle" font-size="10" class="dim">the last day</text>
+<text x="360.0" y="174" text-anchor="middle" font-size="10" class="dim"></text>
+<text x="360.0" y="188" text-anchor="middle" font-size="10" class="dim">share of this email's past</text>
+<text x="360.0" y="202" text-anchor="middle" font-size="10" class="dim">payments that were approved</text>
+<text x="360.0" y="216" text-anchor="middle" font-size="10" class="dim"></text>
+<text x="360.0" y="230" text-anchor="middle" font-size="10" class="dim">days since this card was</text>
+<text x="360.0" y="244" text-anchor="middle" font-size="10" class="dim">first seen anywhere</text>
+<path d="M474,158 L516,158" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="520" y="100" width="160" height="116" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="520" y="100" width="160" height="116" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="600.0" y="135" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">FEATURE VECTOR</text>
+<text x="600.0" y="149" text-anchor="middle" font-size="10" class="dim">hundreds of numbers</text>
+<text x="600.0" y="163" text-anchor="middle" font-size="10" class="dim">about this one</text>
+<text x="600.0" y="177" text-anchor="middle" font-size="10" class="dim">payment, ready for</text>
+<text x="600.0" y="191" text-anchor="middle" font-size="10" class="dim">the model</text>
+<text x="20" y="304" text-anchor="start" font-size="10.5" class="dim">Meera's card and email are new to Loomwell, but the network has seen both before. That history is the signal.</text>
+      </svg>
+      <div class="diagram-caption">Read left to right. Each thing on a payment becomes a key, and the counters kept under that key include every merchant that uses the platform, which is what Loomwell alone could never compute. The counters listed are examples of the kinds Stripe's primer and rule reference describe.</div>
+    </div>
+
+    <h3 id="3-1-counting-in-buckets">3.1 Counting without storing every event</h3>
+
+    <p>Counting what an IP address did in the last hour sounds like a query: select the events from the last sixty minutes and count them. At the scale of a payment network that query would be slow, and it would have to run for several entities on every payment, inside the 100 millisecond budget. The way out is to keep the count itself and update it as events arrive. Stripe's rule documentation describes how this is done, in the section on <strong>velocity rules</strong>, which are rules that refer to counts over time windows. Time is divided into fixed <strong>buckets</strong>, and each bucket holds the number of events that landed in it. An hourly counter uses five-minute buckets, a daily counter uses one-hour buckets, a yearly counter uses one-day buckets, and the "all time" counters cover five years.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">Velocity counters as buckets
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 285" xmlns="http://www.w3.org/2000/svg">
+<rect x="40" y="80" width="40" height="52" rx="6" fill="#fbbf24" opacity="0.18"/>
+<rect x="40" y="80" width="40" height="52" rx="6" fill="none" stroke="#fbbf24" stroke-width="1.2"/>
+<text x="60.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">0</text>
+<text x="60.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-60</text>
+<rect x="84" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="84" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="104.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">0</text>
+<text x="104.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-55</text>
+<rect x="128" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="128" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="148.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">1</text>
+<text x="148.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-50</text>
+<rect x="172" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="172" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="192.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">0</text>
+<text x="192.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-45</text>
+<rect x="216" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="216" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="236.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">0</text>
+<text x="236.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-40</text>
+<rect x="260" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="260" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="280.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">0</text>
+<text x="280.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-35</text>
+<rect x="304" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="304" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="324.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">2</text>
+<text x="324.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-30</text>
+<rect x="348" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="348" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="368.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">3</text>
+<text x="368.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-25</text>
+<rect x="392" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="392" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="412.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">5</text>
+<text x="412.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-20</text>
+<rect x="436" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="436" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="456.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">9</text>
+<text x="456.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-15</text>
+<rect x="480" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="480" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="500.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">14</text>
+<text x="500.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-10</text>
+<rect x="524" y="80" width="40" height="52" rx="6" fill="#34d399" opacity="0.18"/>
+<rect x="524" y="80" width="40" height="52" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="544.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">22</text>
+<text x="544.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-5</text>
+<rect x="568" y="80" width="40" height="52" rx="6" fill="#f472b6" opacity="0.18"/>
+<rect x="568" y="80" width="40" height="52" rx="6" fill="none" stroke="#f472b6" stroke-width="1.2"/>
+<text x="588.0" y="112" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#e9e9ef">11</text>
+<text x="588.0" y="150" text-anchor="middle" font-size="9.5" class="dim">-0</text>
+<text x="40" y="54" text-anchor="start" font-size="10.5" class="" fill="#e9e9ef">One counter: 'card attempts from this IP', stored as 13 five-minute buckets (illustrative counts)</text>
+<text x="40" y="172" text-anchor="start" font-size="9.5" class="dim">minutes ago</text>
+<text x="40" y="205" text-anchor="start" font-size="10.5" class="" fill="#e9e9ef">Window total = 0+0+1+0+0+0+2+3+5+9+14+22+11 = 67 attempts.</text>
+<text x="40" y="225" text-anchor="start" font-size="10.5" class="dim">Amber bucket: may hold events up to 5 minutes older than an hour, so 'hourly' means up to 65 minutes.</text>
+<text x="40" y="245" text-anchor="start" font-size="10.5" class="dim">Pink bucket: still filling; a new event only increments one number.</text>
+<text x="40" y="265" text-anchor="start" font-size="10.5" class="dim">Cost per entity: 13 integers, however many events it has had. Memory does not grow with traffic.</text>
+      </svg>
+      <div class="diagram-caption">Each square is one five-minute bucket and the number inside is how many attempts landed in it. Summing the thirteen squares gives the hourly velocity without ever storing individual events, and the ramp towards the right is what a card-testing burst looks like.</div>
+    </div>
+
+    <p>The window's total is the sum of the bucket counts. If <span>$n_k$</span> is the count in bucket <span>$k$</span>, <span>$b$</span> is the bucket length and <span>$W$</span> the window we want, a counter at time <span>$t$</span> returns</p>
+
+    <div class="eq-block"><span>$$c_W(t) \;=\; \sum_{k \,=\, \lfloor t/b \rfloor - W/b}^{\lfloor t/b \rfloor} n_k$$</span></div>
+
+    <p>The sum runs over the <span>$W/b$</span> older buckets plus the one still filling, so it covers between <span>$W$</span> and <span>$W+b$</span> of time. Stripe's documentation says exactly that: an "hourly" attribute may cover up to 3,900 seconds, an hour and five minutes. The approximation costs a slightly blurry window edge. In return, memory per entity is fixed at thirteen numbers however many events it has had, and an arriving event touches one number. The documentation adds two details. Counts exclude the payment currently being processed, so the first attempt in an hour sees a count of zero. And some counters are <strong>bounded</strong>, capped at a maximum: once the cap is reached, the counter drops its oldest timestamp for each new one, so it always describes the most recent few events.</p>
+
+    <p>Some questions need more than a count. "How many distinct cards has this IP tried" needs to know whether each card has been seen already, and that takes a set, or a compact approximation of one, for every entity and window. Stripe hasn't published which structure it uses for distinct counts, though a compact sketch such as HyperLogLog is a common choice and it probably uses something like it.</p>
+
+    <h3 id="3-2-the-same-number-in-training-and-serving">3.2 The same number in training and in serving</h3>
+
+    <p>There's a quieter problem. A model learns from history, and for every past payment it needs the value each counter had at that payment's moment, as it would have been seen live. If a training example for a payment made at 9:00 accidentally includes a counter that already counts the burst of attempts at 9:03, the model will look brilliant offline, because the answer leaked into the input, and fail live, where the future isn't available. This mismatch is called <strong>training-serving skew</strong>, and counters are especially exposed to it because they exist in two forms: a stream that updates them in real time and a batch job that recomputes them from history.</p>
+
+    <p>Stripe described its answer in a 2024 post by Ben Mears of its ML Features team, about a platform it calls Shepherd. Shepherd adapts Chronon, a feature platform that Airbnb built and that Stripe began partnering on in 2022 and now co-maintains as open-source software. Engineers define a feature once, in a Python and SQL interface, and the platform computes both the online and the offline versions from that one definition. To keep the two versions equal, Stripe implemented Spark SQL expressions inside Flink, the streaming engine, so the same expression runs in batch and in streaming. Built-in consistency monitoring compares online and offline values, and for training data it can model the delay in batch data so the examples reflect the staleness the model will see at serving time. All of this exists to make the number the model learned from the same number it will read.</p>
+
+    <h3 id="3-3-tiles-and-the-freshness-latency-trade">3.3 Fresh counters, fast reads</h3>
+
+    <p>Counters are only worth having if they're fresh, since an attack that started a minute ago should already be in them, and they also have to be read quickly. Those pull in opposite directions. Stripe's Shepherd post lays out the trade: precomputing a value as events arrive keeps reads fast, while computing it at read time keeps it fresh. Its design is <strong>tiles</strong>: pre-aggregated values held in the streaming job's state and flushed periodically to a key-value store, so that computing a feature at read time means summing a few tiles and not scanning many raw events. That's the same bucket idea as above, applied to the serving path. It also mentions two key-value store implementations, a low-cost one for bulk uploads that are written once and read many times, and a more expensive distributed memcache-based one for data written and read often. For one of its newer models, a fraud model for SEPA Direct Debit payments with over 200 features, the post reports that after moving the streaming work to Flink it reached a p99 feature freshness of 150 milliseconds (the 99th percentile, so 99% of updates were at least that fast). Here freshness means how quickly feature values update after new events, and it doesn't state a serving latency figure.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Way to get "events in the last hour"</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Query raw events at request time</td><td>Always exact and as fresh as the last event</td><td>Slow for busy entities, and the cost grows with traffic</td></tr>
+        <tr><td>One running count per entity, updated on write</td><td>Constant-time reads</td><td>Can't expire old events without knowing when they happened</td></tr>
+        <tr><td>Buckets or tiles, summed at read time</td><td>Fixed memory, a few cheap reads, expiry by dropping old buckets</td><td>Window edges blur by up to one bucket; more moving parts to keep consistent</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The current rules documentation describes bucket counters, and the Shepherd post, from April 2024, describes tiles as the way Stripe serves features with many events. Both are the same idea at different layers. Stripe hasn't published how long it ran on each, so we can't date a change of mind here. What the post does tell us is why it chose tiles: computing a feature from many raw events at read time was too slow.</p>
+
+    <h4 class="why">Why count across merchants when merchants can already see their own customers?</h4>
+
+    <p>Because the signal that separates Meera from a thief is spread across merchants. A card tester deliberately sends one or two attempts to each of many shops, so no single shop's count is high. Only a counter keyed by the card or the IP address, and fed by everyone, sees the burst. There's a cost to this design too. It means Stripe holds and uses data about devices and behaviour from checkouts all over the internet, and its documentation asks merchants to disclose that in their privacy policy.</p>
+
+    <p>Sliding-window counters like these are everywhere in systems that need to react to recent behaviour. API rate limiters count requests per key per minute in the same way, spam filters count messages per sender, and recommenders keep "clicks in the last hour" features. Feature platforms such as Chronon or Feast exist so that these counters are defined once and are consistent between training and serving.</p>
+  </section>
+
+  <section id="model">
+    <h2><span class="num">04</span>From a linear model to a deep network</h2>
+
+    <p>With network-wide features in hand, the next question is what model should read them. Our logistic regression from section 02 adds up weighted features, so each feature pushes the score the same way regardless of the others. Fraud rarely works like that. A high amount means little on a card that has paid this merchant for years and a lot on a card that was first seen ten minutes ago, and a mismatched country matters differently for a hotel booking and for an apron. Capturing these interactions in a linear model means writing the combinations by hand, which doesn't scale to a thousand characteristics.</p>
+
+    <p>Two families of model learn interactions by themselves. <strong>Gradient-boosted trees</strong>, such as XGBoost, build many small decision trees one after another, each correcting the errors of the ones before it. They are very good on tables of numbers and categories, and they are good at <strong>memorisation</strong>: remembering a specific combination, such as one issuer with one kind of card, that was fraudulent before. <strong>Deep neural networks</strong> stack layers of weighted sums with non-linear steps between them, and they can turn categories such as a merchant or an issuing bank into <strong>embeddings</strong>, which are short learned lists of numbers that place similar categories near each other. Stripe's primer says Radar uses embeddings for categorical values such as merchant and issuing bank, so that patterns seen in one region can transfer to another.</p>
+
+    <p>A common compromise from the recommender world is to run both and combine them, which Google called <strong>Wide &amp; Deep</strong>: a wide part that memorises specific feature combinations and a deep part that generalises. Stripe's 2023 post tells the story of how Radar's models changed. It says Radar moved from simple models, such as logistic regression, to deep neural networks as the Stripe network grew. In mid-2022 it replaced a Wide &amp; Deep ensemble, XGBoost plus a DNN, with a DNN-only model that the post calls a multi-branch architecture inspired by ResNeXt.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">How Radar's model family changed
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="150" height="100" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="150" height="100" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="77" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">LINEAR MODELS</text>
+<text x="95.0" y="91" text-anchor="middle" font-size="10" class="dim">logistic regression</text>
+<text x="95.0" y="105" text-anchor="middle" font-size="10" class="dim">on hand-made</text>
+<text x="95.0" y="119" text-anchor="middle" font-size="10" class="dim">features</text>
+<text x="95.0" y="133" text-anchor="middle" font-size="10" class="dim">(the early years)</text>
+<path d="M173,100 L187,100" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="190" y="50" width="150" height="100" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="190" y="50" width="150" height="100" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="265.0" y="77" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">WIDE &amp; DEEP</text>
+<text x="265.0" y="91" text-anchor="middle" font-size="10" class="dim">XGBoost trees plus</text>
+<text x="265.0" y="105" text-anchor="middle" font-size="10" class="dim">a deep network,</text>
+<text x="265.0" y="119" text-anchor="middle" font-size="10" class="dim">scores combined</text>
+<text x="265.0" y="133" text-anchor="middle" font-size="10" class="dim">(until mid-2022)</text>
+<path d="M343,100 L357,100" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="360" y="50" width="150" height="100" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="360" y="50" width="150" height="100" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="435.0" y="77" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">MULTI-BRANCH DNN</text>
+<text x="435.0" y="91" text-anchor="middle" font-size="10" class="dim">DNN only, ResNeXt-</text>
+<text x="435.0" y="105" text-anchor="middle" font-size="10" class="dim">inspired branches,</text>
+<text x="435.0" y="119" text-anchor="middle" font-size="10" class="dim">training time down</text>
+<text x="435.0" y="133" text-anchor="middle" font-size="10" class="dim">over 85% (mid-2022)</text>
+<path d="M513,100 L527,100" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="530" y="50" width="150" height="100" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="530" y="50" width="150" height="100" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="605.0" y="77" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">FOUNDATION MODEL</text>
+<text x="605.0" y="91" text-anchor="middle" font-size="10" class="dim">transformer on tens</text>
+<text x="605.0" y="105" text-anchor="middle" font-size="10" class="dim">of billions of</text>
+<text x="605.0" y="119" text-anchor="middle" font-size="10" class="dim">payments; embeddings</text>
+<text x="605.0" y="133" text-anchor="middle" font-size="10" class="dim">feed classifiers (2025)</text>
+<text x="20" y="185" text-anchor="start" font-size="10.5" class="dim">Each step was driven by what the network had grown into: more data, more features, more attacks.</text>
+<text x="20" y="207" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Stripe's 2023 post says removing XGBoost alone would have cost 1.5% recall, so the new design had to</text>
+<text x="20" y="225" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">recover what the trees were good at, memorising specific patterns.</text>
+      </svg>
+      <div class="diagram-caption">Read left to right. The dates are the ones Stripe gave in its own posts; it has not published exact layer counts or sizes for any of these models.</div>
+    </div>
+
+    <p>ResNeXt is an image-recognition architecture (Xie et al., CVPR 2017). Its building block splits the input across several parallel branches that all have the same small structure, adds up their outputs, and then adds the original input back, which is the residual connection:</p>
+
+    <div class="eq-block"><span>$$y \;=\; x \;+\; \sum_{i=1}^{C} \mathcal{T}_i(x)$$</span></div>
+
+    <p>Here <span>$x$</span> is the block's input, <span>$\mathcal{T}_i$</span> is the <span>$i$</span>-th branch, a small stack of layers, and <span>$C$</span> is the number of branches, called the cardinality. In the ResNeXt paper, adding branches improves accuracy more efficiently than making each branch wider or the network deeper. How Stripe's branches are built, how many there are and what they take as input aren't in the post, so we leave it there. What the post does say is why it needed a careful design. Removing XGBoost from the ensemble, without any other change, would have cost 1.5% of recall, the share of fraud caught, so the new network was designed to keep what the trees had been providing, the ability to remember specific patterns. The payoff was speed: training time fell by more than 85%, to under two hours.</p>
+
+    <p>That last number is as important for the product as any accuracy gain. A model that trains in under two hours should let a team try several ideas in a working day, and the post says what the ideas are: a continual search for new features, built from reviewing past attacks in detail, spotting patterns such as throwaway email addresses, and a weekly meeting on fraud trends found through research into criminal marketplaces. It adds that not every feature pays off. A Boolean feature saying whether a business was under a distributed attack gave less gain than expected, because the model had already learned those patterns from the other inputs. On scale, the post reports that a tenfold increase in training data still produced significant improvements, with a hundredfold experiment in progress.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model family</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Logistic regression</td><td>Fast, easy to explain, hard to break</td><td>Needs hand-built interactions; can't memorise rare patterns</td></tr>
+        <tr><td>Gradient-boosted trees</td><td>Strong on tabular data, memorises specific combinations</td><td>Awkward with embeddings and with ever-growing categories; slow to retrain at huge scale</td></tr>
+        <tr><td>Wide &amp; Deep ensemble</td><td>Memorises and generalises, trees and network side by side</td><td>Two systems to train, serve and keep consistent</td></tr>
+        <tr><td>Multi-branch DNN only</td><td>One model, over 85% faster to train in Stripe's account, uses embeddings</td><td>Harder to explain than the models before it; must be designed to match the trees' memory</td></tr>
+        <tr><td>Foundation-model embeddings feeding classifiers</td><td>Learns from the whole payment stream without needing a label for every pattern</td><td>Large to train and serve; Stripe hasn't published its training objective</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Stripe chose the DNN-only design in mid-2022, according to its 2023 post. That post also lists transfer learning, embeddings and multi-task learning as directions it was exploring in 2023. By December 2024, a Stripe post on card testing describes a large transformer trained on billions of transactions, supplementing smaller task-specific models, that turns payments into embeddings which feed classifiers. At its Sessions event in May 2025, Stripe presented this as a payments foundation model, trained on tens of billions of transactions according to press coverage of the announcement. Whether trees still run anywhere in the pipeline is unpublished.</p>
+
+    <p>It's a mistake to read this as proof that deep networks always beat trees on tables. A 2022 NeurIPS study by Grinsztajn and colleagues found that tree-based models still win on many medium-sized tabular datasets. Stripe's setting differs in size, in the amount of categorical structure and in how much it values retraining speed, and the post gives those as its reasons.</p>
+  </section>
+  <section id="threshold">
+    <h2><span class="num">05</span>Where to draw the line: expected cost and calibration</h2>
+
+    <p>The model now gives Meera's payment a number. Radar's number runs from 0 to 99, where higher means riskier, but the first thing to settle is what the number should mean, since somebody has to turn it into allow or block. Block when fraud looks more likely than not, meaning a probability above 50%, is the natural rule. That sounds sensible, and for Loomwell it turns out to be far too lenient, as the arithmetic of what each mistake costs will show.</p>
+
+    <p>Take illustrative figures for Loomwell's apron. The sale price is $64 and the goods cost $44.80, so a good sale earns Dan a margin of $19.20. If a thief gets through, Dan refunds the sale, loses the apron he has already posted, and pays a dispute fee, which we'll set at $15, the figure Stripe uses in its own primer. Letting a fraudulent payment through costs $44.80 + $15 = $59.80. Blocking a good customer costs the $19.20 margin the sale would have earned, and probably more, since a customer who is refused may not come back.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Using those costs, suppose the model says a payment has probability <em>p</em> of being fraud. At roughly what value of <em>p</em> is Dan indifferent between blocking and allowing? Is it above or below 50%?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>About 24%, well below 50%. If he allows the payment, the expected cost is <em>p</em> × $59.80. If he blocks it, the expected cost is (1 − <em>p</em>) × $19.20. Setting them equal gives <em>p</em> = 19.20 / (19.20 + 59.80) = 24.3%. A mistake in one direction costs about three times as much as a mistake in the other, so the break-even point sits where the odds of fraud are about one to three.</p>
+        <p>Moving a threshold from 50% to 24% blocks more payments, and the extra ones blocked are mostly good. The arithmetic recommends that for a merchant with these costs.</p>
+      </details>
+    </div>
+
+    <h3 id="5-1-the-cost-rule">5.1 The cost rule</h3>
+
+    <p>Let <span>$C_{FN}$</span> be the cost of letting a fraudulent payment through (a false negative, in the language of classifiers) and <span>$C_{FP}$</span> the cost of blocking a good one (a false positive). For a payment with fraud probability <span>$p$</span>, the expected cost of each action is</p>
+
+    <div class="eq-block"><span>$$\mathbb{E}[\text{allow}] = p\, C_{FN}, \qquad \mathbb{E}[\text{block}] = (1-p)\, C_{FP}$$</span></div>
+
+    <p>Block exactly when blocking is cheaper, which means when <span>$p\,C_{FN} > (1-p)\,C_{FP}$</span>. Rearranging gives the threshold</p>
+
+    <div class="eq-block"><span>$$p^{*} \;=\; \frac{C_{FP}}{C_{FP} + C_{FN}}$$</span></div>
+
+    <p>The threshold depends only on the ratio of the two costs. Stripe's primer works through its own example: a $26 sale, an 8% margin and a $15 chargeback fee. That margin is $2.08. A fraudulent sale costs the $23.92 of goods plus the $15 fee, $38.92, which wipes out the profit of about 18.71 good sales. The threshold works out to 2.08 / (2.08 + 38.92), or about 5%. Stripe's primer states the break-even precision as 5.07%, meaning the merchant gains from blocking as long as at least one in twenty blocked payments is fraud. For that merchant, with thin margins, almost any suspicion is worth a block.</p>
+
+    <p>This rule gives a very different answer to a merchant selling software with a 90% margin. For a $64 sale, a good sale earns $57.60 and a fraudulent one costs $6.40 of goods plus the $15 fee, $21.40. Its threshold is 57.60 / (57.60 + 21.40), about 73%. Software merchants should be cautious about blocking because turning away a good customer is the expensive mistake, and that is the opposite of the apron shop.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Threshold from costs, and what a miscalibrated score does to it</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(3)
+N, base = 1_000_000, 0.001
+fraud = rng.random(N) &lt; base
+# model output (logit); fraud and good payments overlap
+z = np.where(fraud, rng.normal(3.0, 1.6, N), rng.normal(-3.2, 1.6, N))
+def logpdf(x, m, s): return -0.5*((x-m)/s)**2 - np.log(s)
+llr = logpdf(z, 3.0, 1.6) - logpdf(z, -3.2, 1.6)
+prior = np.log(base/(1-base))
+p_cal = 1/(1+np.exp(-(llr + prior)))           # calibrated P(fraud | z)
+# a model trained on 1 good payment in 100 sees odds 100x too high
+p_ds = 1/(1+np.exp(-(llr + prior + np.log(100))))
+price = 64.0
+def cost_of(block, margin):
+    fp_cost = margin * price                # profit lost on a good sale
+    fn_cost = (1-margin)*price + 15.0           # goods lost + dispute fee
+    return (block &amp; ~fraud).sum()*fp_cost + (~block &amp; fraud).sum()*fn_cost
+print(f&quot;fraud payments: {fraud.sum():,} of {N:,}&quot;)
+shops = [(&quot;apron shop, 30% margin&quot;, .30), (&quot;software, 90% margin&quot;, .90)]
+for name, m in shops:
+    fp, fn = m*price, (1-m)*price+15
+    t = fp/(fp+fn)
+    print(f&quot;\n{name}: FP cost ${fp:.2f}, FN cost ${fn:.2f}, &quot;
+          f&quot;break-even p = {t:.1%}&quot;)
+    none = cost_of(np.zeros(N, bool), m)
+    print(f&quot;  block nothing        cost ${none:&gt;9,.0f}&quot;)
+    for lab, p, th in [(&quot;calibrated, p&gt;0.5   &quot;, p_cal, .5),
+                       (&quot;calibrated, p&gt;t     &quot;, p_cal, t),
+                       (&quot;1:100-sample, p&gt;t   &quot;, p_ds, t)]:
+        b = p &gt; th
+        print(f&quot;  {lab} cost ${cost_of(b, m):&gt;9,.0f}  &quot;
+              f&quot;blocked {b.sum():&gt;6,}  caught {(b&amp;fraud).sum():&gt;4,}&quot;)</code></pre>
+      <div class="tryit-out">With calibrated scores, the cost-based threshold beats both a 50% threshold and blocking nothing for each shop, and the thresholds are <code>24.3%</code> and <code>72.9%</code>. The 1:100-sampled model blocks <code>13,597</code> payments in the apron shop and costs <code>$246,252</code>, against <code>$58,185</code> for blocking nothing.<pre><code>fraud payments: 973 of 1,000,000
+
+apron shop, 30% margin: FP cost $19.20, FN cost $59.80, break-even p = 24.3%
+  block nothing        cost $   58,185
+  calibrated, p&gt;0.5    cost $   28,110  blocked    639  caught  536
+  calibrated, p&gt;t      cost $   25,380  blocked    970  caught  651
+  1:100-sample, p&gt;t    cost $  246,252  blocked 13,597  caught  924
+
+software, 90% margin: FP cost $57.60, FN cost $21.40, break-even p = 72.9%
+  block nothing        cost $   20,822
+  calibrated, p&gt;0.5    cost $   15,285  blocked    639  caught  536
+  calibrated, p&gt;t      cost $   12,920  blocked    480  caught  450
+  1:100-sample, p&gt;t    cost $  156,637  blocked  3,499  caught  832</code></pre></div>
+    </details>
+
+    <p>The experiment builds a million payments with the 1-in-1,000 fraud rate and a model whose scores overlap realistically between fraud and good payments. With perfectly calibrated probabilities, the 50% rule saves the apron shop about half of what it would lose by blocking nothing, and the cost-based threshold of 24.3% does better again: $25,380 against $28,110 and $58,185. For the software shop the best threshold is 72.9%, and that choice again beats 50%. The last line of each block is the surprising one. The third scoring uses the same model, trained as if it had seen only one good payment for every hundred it sees, a common shortcut when fraud is rare. Used with the same cost-based threshold, it blocks 13,597 payments instead of 970 and costs the apron shop $246,252, more than four times the cost of doing nothing.</p>
+
+    <h3 id="5-2-calibration">5.2 Why the number has to mean what it says</h3>
+
+    <p>The cost rule works only if <span>$p$</span> is a real probability. A score is <strong>calibrated</strong> when, among all payments that receive a score of 0.2, about 20% turn out to be fraud. To check, group payments by score, and compare each group's average score with its observed fraud rate. A model can rank payments perfectly, putting every fraud above every good payment, and still be badly calibrated, because ranking says nothing about the size of the numbers. The cost rule needs those sizes.</p>
+
+    <p>Miscalibration in fraud models most often comes from the training data itself. Fraud is one payment in a thousand, so teams often keep all the fraud and a fraction <span>$\beta$</span> of the good payments, which makes training cheaper and balances the classes. A model trained on that sample sees the odds of fraud multiplied by <span>$1/\beta$</span>, and its outputs are too high by the same factor. A one-line correction fixes a score <span>$p_s$</span> from the sampled model:</p>
+
+    <div class="eq-block"><span>$$p \;=\; \frac{\beta\, p_s}{\beta\, p_s + 1 - p_s}$$</span></div>
+
+    <p>With <span>$\beta = 1/100$</span>, a score of 0.5 from the sampled model corresponds to a true probability of about 1%. Stripe hasn't said whether it downsamples, so this is the general technique, and the experiment shows what happens without it. Other corrections fit the same pattern, such as fitting a small monotone curve from model score to observed fraud rate on held-out, mature data, called Platt scaling or isotonic regression.</p>
+
+    <p>What Stripe says about its own scores is limited. Its primer says Radar's models output probabilities, such as a 65% chance of fraud, and its documentation says the risk score from 0 to 99 is the probability that a payment results in a fraudulent dispute or an early fraud warning. How a probability maps to the 0–99 scale isn't published. The primer does describe one practical calibration check. When Stripe releases a new model it compares the old and new score distributions, and it aims to keep the share of transactions above the blocking threshold stable, so a merchant's block rate doesn't change just because the model did. Stripe also watches the block rate, false positive rate and authorisation rate per merchant as guardrails.</p>
+
+    <h3 id="5-3-one-threshold-for-everyone">5.3 One threshold for everyone, or one each</h3>
+
+    <p>The cost rule says the right threshold depends on the merchant's margins, fees and tolerance, so one cut-off for everyone can't be right for both Dan and the software seller. Stripe's documentation gives the default meanings: a risk score of 65 or above marks elevated risk and 75 or above marks highest risk, which Radar blocks by default, and merchants on plans that support it can move both lines. Newer controls go further. Merchants choose a risk setting such as "Maximise protection", "Balance risk and revenue" or "Maximise revenue", and the dashboard shows projected effects from the last four months of that merchant's payments. Each risk control uses what the documentation calls individualised machine learning, to set the actual threshold for that merchant. Stripe is deprecating the older single-number block rule in favour of this.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to set the cut-off</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>One global threshold</td><td>Simple to explain and to monitor</td><td>Wrong for almost every merchant, since costs differ widely</td></tr>
+        <tr><td>Merchant picks a number from 0 to 99</td><td>The merchant's own costs enter the decision</td><td>Few merchants know their break-even; a small change in the number can move the block rate a lot</td></tr>
+        <tr><td>Merchant picks a goal, the platform sets the number</td><td>Thresholds follow costs and shift as models change</td><td>The merchant can't see the number, so trust depends on previews and reports</td></tr>
+        <tr><td>Threshold that moves when an attack is detected</td><td>Tightens during an attack, relaxes afterward</td><td>Good customers are caught during the tight period</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Radar's defaults sit in the first and second rows: a default block line at 75 on a score the merchant can see and move. Newer controls in the current documentation sit in the third and fourth rows. It also describes "dynamic risk thresholds" that automatically block additional elevated and high-risk payments when an account is under fraud pressure, and readjust to the merchant's default setting when the threat is gone. It doesn't give dates for these changes.</p>
+
+    <h4 class="why">Why would Dan block a payment that the model thinks is 76% likely to be genuine?</h4>
+
+    <p>Because the two mistakes aren't equally expensive. At 24% fraud probability, he'd expect to lose $59.80 about a quarter of the time, which is roughly $14.50 on average, while blocking costs him $19.20 about three-quarters of the time, which is roughly $14.50 on average as well. Both expectations are even, and anything riskier than that is a bad bet to accept. That maths also explains why a software seller does the reverse and lets through payments the model thinks are quite likely fraudulent.</p>
+
+    <p>This cost-ratio rule shows up in any decision with unequal mistakes. Medical screening tests are set to catch more cases than strictly likely because a missed illness costs far more than a false alarm, and spam filters are set the other way, because a lost real email costs more than a spam message that slips through.</p>
+  </section>
+
+  <section id="rules">
+    <h2><span class="num">06</span>Rules and the model, working together</h2>
+
+    <p>A good score and a good threshold still leave gaps. A model learns from past data, so it learns about new attacks only after enough examples exist. A merchant also knows things Stripe doesn't: that Loomwell never ships to certain countries, or that a particular product is a target. And some decisions are policy and not prediction, such as "never allow orders over a certain size without a review". For all of these Radar lets merchants write <strong>rules</strong>, which are conditions on a payment's attributes with an action attached, such as <code>Block if :card_country: != :ip_country:</code>.</p>
+
+    <p>Stripe's documentation gives the order in which Radar evaluates them, and the order matters. Rules that request 3D Secure run first. <strong>3D Secure</strong>, usually shortened to 3DS, is a check run by the card issuer, where the cardholder confirms their identity in a banking app or with a code, and if it succeeds the liability for a fraud dispute on that payment usually moves from the merchant to the issuer. After the 3DS rules come the allow rules, then the block rules, then the review rules. When a payment matches a rule, Radar takes that action and stops evaluating. An allow rule therefore beats everything below it, including the model's own block.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">Rules around the score: who decides, and in what order
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 360" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="300" height="52" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="300" height="52" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="170.0" y="61" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">1  REQUEST 3DS RULES</text>
+<text x="170.0" y="75" text-anchor="middle" font-size="10" class="dim">ask the bank to challenge the customer</text>
+<path d="M170,95 L170,109" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="112" width="300" height="52" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="112" width="300" height="52" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="170.0" y="133" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">2  ALLOW RULES</text>
+<text x="170.0" y="147" text-anchor="middle" font-size="10" class="dim">match here and nothing below runs</text>
+<path d="M170,167 L170,181" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="184" width="300" height="52" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="184" width="300" height="52" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="170.0" y="205" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">3  BLOCK RULES</text>
+<text x="170.0" y="219" text-anchor="middle" font-size="10" class="dim">built in: block if risk level is highest</text>
+<path d="M170,239 L170,253" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="256" width="300" height="52" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="256" width="300" height="52" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="170.0" y="277" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">4  REVIEW RULES</text>
+<text x="170.0" y="291" text-anchor="middle" font-size="10" class="dim">let it through, queue it for a human</text>
+<text x="20" y="336" text-anchor="start" font-size="10.5" class="dim">The first matching action ends the evaluation. Rules of the same type are not ordered.</text>
+<text x="360" y="40" text-anchor="start" font-size="11" class="" fill="#e9e9ef">The model's risk score, 0 to 99 (default thresholds)</text>
+<rect x="360" y="60" width="208.0" height="40" rx="6" fill="#34d399" opacity="0.25"/>
+<rect x="360" y="60" width="208.0" height="40" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<rect x="568.0" y="60" width="32.0" height="40" rx="6" fill="#fbbf24" opacity="0.25"/>
+<rect x="568.0" y="60" width="32.0" height="40" rx="6" fill="none" stroke="#fbbf24" stroke-width="1.2"/>
+<rect x="600.0" y="60" width="80.0" height="40" rx="6" fill="#f472b6" opacity="0.25"/>
+<rect x="600.0" y="60" width="80.0" height="40" rx="6" fill="none" stroke="#f472b6" stroke-width="1.2"/>
+<text x="464.0" y="85" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#e9e9ef">normal</text>
+<text x="584.0" y="85" text-anchor="middle" font-size="10" font-weight="700" class="" fill="#e9e9ef">elev.</text>
+<text x="640.0" y="85" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#e9e9ef">highest</text>
+<text x="360" y="118" text-anchor="start" font-size="10" class="dim">0</text>
+<text x="568.0" y="118" text-anchor="middle" font-size="10" class="dim">65</text>
+<text x="600.0" y="132" text-anchor="middle" font-size="10" class="dim">75</text>
+<text x="680" y="118" text-anchor="end" font-size="10" class="dim">99</text>
+<text x="360" y="170" text-anchor="start" font-size="10.5" class="dim">65 and above: elevated risk. Allowed by default;</text>
+<text x="360" y="186" text-anchor="start" font-size="10.5" class="dim">queued for review on Radar for Fraud Teams.</text>
+<text x="360" y="214" text-anchor="start" font-size="10.5" class="dim">75 and above: highest risk. Blocked by default.</text>
+<text x="360" y="244" text-anchor="start" font-size="10.5" class="dim">Merchants can move both lines. Newer risk settings</text>
+<text x="360" y="260" text-anchor="start" font-size="10.5" class="dim">choose thresholds per control instead of one</text>
+<text x="360" y="276" text-anchor="start" font-size="10.5" class="dim">number for everyone.</text>
+<text x="360" y="306" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A score is a ranking first. Section 5 shows why</text>
+<text x="360" y="322" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">the right cut-off differs for every shop.</text>
+      </svg>
+      <div class="diagram-caption">The left column is the order Radar's documentation gives for evaluating rules, and the right bar is the default meaning of the risk score. The score proposes and the rules dispose, so a merchant's allow rule can override even a very high score.</div>
+    </div>
+
+    <p>The rule language has a few details that are easy to get wrong, and the documentation spells them out. Rules can use velocity attributes, the counters from section 03, for example to block when one email address has made too many attempts in an hour. Counts exclude the payment being processed. A comparison involving a missing attribute is always false, so <code>Review if :email_domain: != 'definitelysafe.com'</code> does not match a payment without an email address, which surprises people who read "not equal" as "anything else". Some attributes only count payments from 2020 onwards, and the documentation points out the consequence: a rule to block high-value payments from new cards may block a good customer who last bought in 2019. Before a rule goes live, Radar shows historical statistics for the payments it would have matched, and merchants on higher plans can backtest it.</p>
+
+    <p>Model and rules cover different time scales. Retraining a model takes hours at best and needs labels, and Stripe's December 2024 post on card testing says that its process turns "reactive recognition of breakthrough attacks" into proactive identification within hours. A rule can be written in a minute. Used together, each fills the other's gap. A merchant seeing a burst of orders from a new pattern can block it right away with a rule, and the pattern later becomes labelled data the model learns from.</p>
+
+    <p>Between allow and block sits a third action, which the cost rule leaves out: ask the cardholder to prove it's them. Stripe's documentation describes <strong>adaptive 3DS</strong>, in which Stripe runs machine learning in the background to authenticate medium-risk payments. Most of the time no action is needed from the customer, and if the issuer sees something unusual it may ask for a security challenge. A payment that passes usually moves fraud liability to the issuer, and a thief usually can't complete the check. Friction is the price, since some genuine customers give up at a challenge, so the band of medium scores is probably where the trade pays best.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Who decides</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Merchant rules only</td><td>Instant to change, carry local knowledge</td><td>Blunt; each rule catches good customers too, and attackers learn the rules</td></tr>
+        <tr><td>Model only</td><td>Learns from the whole network, adapts without edits</td><td>Slow to learn a brand-new attack; can't hold merchant policy</td></tr>
+        <tr><td>Model score plus merchant rules plus 3DS</td><td>Each covers the other's gap, and the risky middle gets a challenge</td><td>More ways for the pieces to disagree; merchants can break their own checkout</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Stripe's primer says blocking a specific fraud pattern the model misses can raise recall at little cost in precision, and that sending borderline payments to manual review can add precision or recall at the cost of human effort. Together they work in layers: the model proposes a score from network evidence, and rules and 3DS adjust the action to the merchant's circumstances.</p>
+
+    <h4 class="why">Why keep rules at all if the model is strong?</h4>
+
+    <p>Because a rule is the one tool that reacts in minutes and that the merchant controls. A model sees patterns that have happened often enough to learn. A rule can respond to something that happened an hour ago, or to a fact about the business that no network data could contain, and it can encode a policy the merchant wants. Every rule is also a blunt instrument that will catch some good customers, which is why Radar previews its effect on past payments first.</p>
+
+    <p>Hybrids of rules and learned scores are the usual shape of production fraud and abuse systems, and of spam and content moderation, where a model scores and a policy layer applies thresholds, allowlists and overrides.</p>
+  </section>
+
+  <section id="explain">
+    <h2><span class="num">07</span>Explaining a decision to the merchant</h2>
+
+    <p>One more thing has to come out of the system besides allow or block. When Dan opens his dashboard and finds that a payment was blocked, or queued for review, he needs to know why. Without a reason he can't tell whether to trust the block, whether to add an allow rule, or whether his own checkout is sending bad data. A payment's outcome carries a short reason, such as <code>highest_risk_level</code>, and a message to the merchant such as "Stripe blocked this charge as too risky". That isn't enough to act on.</p>
+
+    <p>Stripe's 2023 post makes the argument its own lesson: explanation matters as much as detection. It admits that deep networks are harder to explain than simpler models, and says the team accepted that trade. The feature it describes, risk insights, was introduced in 2020. According to the documentation, it shows the risk factors that power Radar, such as whether the cardholder's name matches the email, the success rate on the Stripe network for the email address (a low authorisation rate can hint at past attempts), and the billing, shipping and IP locations. It also lists related payments, the network of other payments to the same business that share a customer ID, IP address or card. Later additions, per the post, include maps of purchase and shipping locations and views of related transactions powered by Elasticsearch, and the team has internal tooling that shows which features raised or lowered a fraud score the most, with plans to share such insights with users.</p>
+
+    <p>Stripe hasn't said how it computes per-feature contributions for a neural network. A standard technique is <strong>Shapley-value attribution</strong>, which assigns each input a share of the difference between a payment's score and the average score, but that is general background, and the post doesn't name its method. Stripe's documentation says risk insights data is stored for up to six months, and that if the integration doesn't send details such as email or IP address, Radar can't compute all the data it needs. That last point loops back to the explanation's purpose: it tells merchants what to fix on their side.</p>
+
+    <p>Credit scoring faced the same demand long ago, since lenders must give reasons when they refuse an applicant. Fraud scoring isn't bound by the same rules, but the merchant relationship works the same way: a score without reasons gets overridden or ignored.</p>
+  </section>
+  <section id="serving">
+    <h2><span class="num">08</span>Serving: Meera's payment, step by step</h2>
+
+    <p>We now have all the pieces that run while Meera waits, so we can follow her request through them. Stripe's published budget is the one number from the introduction: under 100 milliseconds for the whole decision. Stripe hasn't published the split between steps, and we won't invent one. What we can do is walk the steps in order and say, for each, what the documentation and posts tell us.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Earlier</span><span>While Meera browsed Loomwell, a script from Stripe called Stripe.js ran on the pages she visited. Stripe's documentation asks merchants to include it on every page, not just the checkout, because it helps detect unusual behaviour as customers browse and collects device and activity signals. This ran before she ever tapped Pay, so it costs the decision no time.</span></li>
+      <li><span class="st-lane">Request</span><span>She taps Pay. Loomwell's checkout confirms a payment with Stripe, and Radar evaluates it as the charge is created. Stripe's documentation notes that Radar works per charge, so a retried payment is scored again.</span></li>
+      <li><span class="st-lane">Features</span><span>Radar looks up the counters for her card fingerprint, email, IP address and device, plus Loomwell's own history, and sums the tiles it needs. Stripe hasn't published read latency. Stripe's Shepherd post gives a p99 feature freshness of 150 milliseconds for one model, which says how stale a counter can be and not how long a read takes.</span></li>
+      <li><span class="st-lane">Score</span><span>The feature vector, over a thousand characteristics in the 2023 post's count, goes through the network and comes out as a risk score. How long the model takes is unpublished. Whatever it is, it has to fit in what remains of the 100 milliseconds after the lookups.</span></li>
+      <li><span class="st-lane">Rules</span><span>Loomwell's rules and Stripe's built-in ones run in the order from section 06: 3DS requests, allow rules, block rules, review rules. Meera's score is low, so the built-in block rule doesn't fire. (For Stripe Billing subscriptions the documentation says the models score only the first payment, while rules run on all of them.)</span></li>
+      <li><span class="st-lane">Issuer</span><span>The payment goes to her bank. Checks that need the bank's answer, such as whether the CVC and postcode match, come back here, and rules that use them run afterwards. The bank approves, and the outcome records <code>risk_level: normal</code> and the message "The charge was authorized."</span></li>
+      <li><span class="st-lane">Log</span><span>Radar records the decision, the score and the features behind it. The payment probably also becomes an event that updates the counters the next payment will read.</span></li>
+    </ol>
+
+
+    <h3 id="8-1-when-scoring-fails">8.1 When scoring itself fails</h3>
+
+    <p>Every pipeline fails occasionally: a key-value store times out, a model server restarts. A design has to say what happens to Meera's payment when the score can't be computed. Stripe's documentation says that in unusual cases an error can make risk evaluation fail, and the payment is then reported with an <code>unknown</code> risk level. The sample outcome has type authorized, with the message "Something went wrong while evaluating this payment. Our engineers have been notified". In other words the payment goes on to the issuer without a score.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>If the score can't be computed</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Block the payment (fail closed)</td><td>No fraud slips through during the failure</td><td>Every merchant's checkout stops whenever Radar has a problem</td></tr>
+        <tr><td>Allow it, flag it unknown (fail open)</td><td>Checkouts keep working; the issuer's own checks still apply</td><td>A short window where fraud is not screened by the model, and an attacker could try to cause it</td></tr>
+        <tr><td>Fall back to a simpler model or rules</td><td>Some screening continues</td><td>Another path to build, test and keep in sync</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Stripe's documented behaviour is the second row. The economics from section 05 probably explain it: a failed checkout costs every good customer, and the failures are rare, flagged unknown in the outcome, and the documentation says engineers are notified. Whether Stripe also keeps a fallback model is unpublished.</p>
+
+    <h4 class="why">Why does Stripe let payments through when its fraud check breaks?</h4>
+
+    <p>Because the fraud check serves the merchant, and a merchant who can't take payments loses far more than one who sees a short burst of unscored ones. The issuer also makes its own decision and, in the unknown case, still sees the payment. Cost falls on the rare attacker who happens to arrive during an outage, and the flagged outcome probably lets the platform go back and check what passed.</p>
+
+    <p>This choice shows up wherever a protective check sits in a critical path. Web application firewalls and rate limiters are usually set to fail open for ordinary traffic, and strict systems such as authentication usually fail closed, so the right setting depends on the cost of an outage against the cost of a miss.</p>
+  </section>
+
+  <section id="labels">
+    <h2><span class="num">09</span>Training data: labels that arrive late, and labels that never arrive</h2>
+
+    <p>Everything so far assumed a trained model. Training needs labelled examples, and fraud labels are unusual in two ways that shape the whole training pipeline. They come late, so a payment made yesterday can't yet say whether it was fraud. And they can be missing for a reason connected with the model itself, because payments the model blocks never reveal what would have happened. We take the delay first.</p>
+
+    <h3 id="9-1-label-delay">9.1 Labels that come months late</h3>
+
+    <p>Where do fraud labels come from? Stripe's primer says Radar gets ground truth directly from the usual Stripe payment flow, so merchants don't have to send labels. There are three main sources. A cardholder's dispute, filed as unauthorised, is the clearest. An early fraud warning, which Stripe's documentation describes as a message from card issuers flagging payments they suspect, arrives sooner, and the documentation says that about 40% of Visa and Mastercard early fraud warnings become fraud disputes if the merchant doesn't refund. And merchants themselves can refund a payment with the reason "fraudulent", which the documentation says also adds the email address and card fingerprint to default block lists.</p>
+
+    <p>Timing is the difficulty. Stripe's documentation says card networks typically allow cardholders to start a dispute within 120 days of the payment, with more time in some situations, and that for future events the window may start on the event date. After a dispute begins, the full lifecycle can take two to three months. So the truth about Meera's apron could arrive after anything between a few days and four months, and for a ticket to a concert next year, later still.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">When a fraud label arrives
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<path d="M40,230 L660,230" stroke="#9a9aae" stroke-width="1.5" fill="none"/>
+<text x="40.0" y="248" text-anchor="middle" font-size="10" class="dim">0</text>
+<path d="M40.0,230 L40.0,235" stroke="#9a9aae" stroke-width="1" fill="none"/>
+<text x="143.33333333333331" y="248" text-anchor="middle" font-size="10" class="dim">30</text>
+<path d="M143.33333333333331,230 L143.33333333333331,235" stroke="#9a9aae" stroke-width="1" fill="none"/>
+<text x="246.66666666666666" y="248" text-anchor="middle" font-size="10" class="dim">60</text>
+<path d="M246.66666666666666,230 L246.66666666666666,235" stroke="#9a9aae" stroke-width="1" fill="none"/>
+<text x="350.0" y="248" text-anchor="middle" font-size="10" class="dim">90</text>
+<path d="M350.0,230 L350.0,235" stroke="#9a9aae" stroke-width="1" fill="none"/>
+<text x="453.3333333333333" y="248" text-anchor="middle" font-size="10" class="dim">120</text>
+<path d="M453.3333333333333,230 L453.3333333333333,235" stroke="#9a9aae" stroke-width="1" fill="none"/>
+<text x="556.6666666666666" y="248" text-anchor="middle" font-size="10" class="dim">150</text>
+<path d="M556.6666666666666,230 L556.6666666666666,235" stroke="#9a9aae" stroke-width="1" fill="none"/>
+<text x="660.0" y="248" text-anchor="middle" font-size="10" class="dim">180</text>
+<path d="M660.0,230 L660.0,235" stroke="#9a9aae" stroke-width="1" fill="none"/>
+<text x="350.0" y="266" text-anchor="middle" font-size="10" class="dim">days after the payment</text>
+<path d="M40,216 L74,203 L143,138 L247,100 L350,90 L453,86 L660,86" stroke="#34d399" stroke-width="2.5" fill="none"/>
+<text x="384.44444444444446" y="78" text-anchor="middle" font-size="10" class="" fill="#34d399">fraud labels received (illustrative)</text>
+<rect x="40.0" y="222" width="206.66666666666666" height="8" rx="2" fill="#f472b6" opacity="0.3"/>
+<path d="M246.66666666666666,80 L246.66666666666666,230" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5 4" fill="none"/>
+<text x="238.66666666666666" y="52" text-anchor="end" font-size="10.5" class="" fill="#fbbf24">60 days: the buffer Stripe's 2018 talk</text>
+<text x="238.66666666666666" y="66" text-anchor="end" font-size="10.5" class="" fill="#fbbf24">used before trusting a label set</text>
+<path d="M453.3333333333333,130 L453.3333333333333,230" stroke="#f472b6" stroke-width="1.5" stroke-dasharray="5 4" fill="none"/>
+<text x="459.3333333333333" y="124" text-anchor="start" font-size="10.5" class="" fill="#f472b6">120 days: usual card-network</text>
+<text x="459.3333333333333" y="138" text-anchor="start" font-size="10.5" class="" fill="#f472b6">dispute window</text>
+<text x="20" y="22" text-anchor="start" font-size="10.5" class="" fill="#e9e9ef">Meera's payment on day 0 has no label. A fraud label, if any, arrives late.</text>
+<text x="20" y="278" text-anchor="start" font-size="10.5" class="dim">Pink strip: payments this young are still mostly unlabelled, and 'no label yet' is not the same as 'good'.</text>
+      </svg>
+      <div class="diagram-caption">Read along the days axis. The green curve is an invented but plausible shape for the share of fraud disputes already received at each age. The two vertical lines are facts from Stripe's talk and documentation, and the curve is only there to show why a young payment cannot be treated as a good one.</div>
+    </div>
+
+    <p>Suppose we ignore this and train every night on the last 90 days of payments, labelling each one fraud if a dispute has arrived and not fraud otherwise. Old payments are labelled nearly correctly, since most of their disputes are in. Recent payments are labelled wrongly: a stolen-card payment from last week looks exactly like a good one, because its dispute hasn't come yet. The damage lands where it hurts most, on new attacks. A new attack that began ten days ago has had almost none of its labels delivered, so the model trains on thousands of examples of the new pattern all marked good, and learns that the pattern is safe.</p>
+
+    <p>An experiment makes the effect concrete. It simulates 300 days of 20,000 payments a day, an overall fraud rate under 0.1%, and a dispute delay with a median of about 25 days. On day 240 a new attack pattern starts, with 12% of its payments fraudulent. We then look at the data from the standpoint of day 300.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">How late disputes make a new attack look safe, and one way to correct for it</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(7)
+DAYS, PER_DAY = 300, 20_000
+day = np.repeat(np.arange(DAYS), PER_DAY)
+n = len(day)
+# 0.1% fraud overall; a new attack pattern starts on day 240
+attack = (day &gt;= 240) &amp; (rng.random(n) &lt; 0.01)
+fraud = np.where(attack, rng.random(n) &lt; 0.12, rng.random(n) &lt; 0.0008)
+# days from purchase until the dispute lands (lognormal, median ~25 d)
+delay = rng.lognormal(np.log(25), 0.7, n).clip(1, 120)
+age_now = (DAYS - 1) - day                     # age of each payment today
+labelled = fraud &amp; (delay &lt;= age_now)          # dispute already received
+def F(a):                       # share of disputes in by age a
+    return np.mean(delay &lt;= a)
+print(f&quot;share of fraud labelled after 10/30/60/90 d: &quot;
+      f&quot;{F(10):.2f} {F(30):.2f} {F(60):.2f} {F(90):.2f}&quot;)
+old = (day &lt; 200)
+print(f&quot;old payments, true fraud rate {fraud[old].mean():.4%}, &quot;
+      f&quot;labelled {labelled[old].mean():.4%}&quot;)
+seg = attack
+print(f&quot;attack segment: {seg.sum():,} payments, true rate &quot;
+      f&quot;{fraud[seg].mean():.1%}&quot;)
+print(f&quot;  naive labels today:        {labelled[seg].mean():.1%}&quot;)
+mature = seg &amp; (age_now &gt;= 60)
+print(f&quot;  payments old enough (60 d): {mature.sum():,}&quot;)
+Fa = np.array([F(a) for a in range(DAYS)])[age_now]
+est = labelled[seg].sum() / Fa[seg].sum()      # labels seen / labels due
+print(f&quot;  corrected for delay (1/F):  {est:.1%}&quot;)</code></pre>
+      <div class="tryit-out">The delay is built so that disputes arrive on the schedule in the first line. Old payments show the labels are sound: true and labelled rates agree. For the new attack segment, naive labels say <code>6.2%</code> against a true <code>12.0%</code>, there are <code>0</code> payments old enough for a 60-day buffer, and dividing labels seen by labels due recovers <code>12.0%</code>.<pre><code>share of fraud labelled after 10/30/60/90 d: 0.10 0.60 0.89 0.97
+old payments, true fraud rate 0.0773%, labelled 0.0771%
+attack segment: 11,958 payments, true rate 12.0%
+  naive labels today:        6.2%
+  payments old enough (60 d): 0
+  corrected for delay (1/F):  12.0%</code></pre></div>
+    </details>
+
+    <p>The delay is built so that 10% of disputes have arrived at ten days, 60% at thirty, and 89% at sixty. Old payments show the labels are sound: their true fraud rate and their labelled rate agree to three digits, 0.0773% against 0.0771%. For the new attack pattern, whose payments are all younger than 60 days, the naive labels say 6.2% fraud against a true 12.0%. A buffer doesn't help either: if we only train on payments at least 60 days old, there are no attack payments in the training set at all. The last line shows a correction. If the delay distribution is known, then the number of labels that should have arrived by now is the sum over payments of <span>$F(\text{age}_i)$</span>, the share of disputes in by that age, so dividing the labels seen by that sum recovers 12.0%. This is the idea behind the delayed-feedback model Olivier Chapelle published for display advertising at KDD 2014, where conversions lag clicks in the same way.</p>
+
+    <p>Stripe's talk on how it evaluates and trains models, given by Michael Manapat at QCon.ai in May 2018, describes the plain option: chargebacks arrive late, so training and validation data needed a buffer of about 60 days. Stripe's documentation shows the other options in use, in part. Radar produces three separate scores that target different labels. The fraudulent payment score aims at fraud whether or not it ever becomes a dispute, the fraudulent dispute score aims at payments that lead to a dispute, and the early fraud warning score aims at the earlier signal. Using the sooner label for a model trades truth for speed, since only about 40% of warnings become disputes. Card testing has no explicit labels at all, and Stripe's December 2024 post says it derives them by pooling intelligence on new attack vectors, combining weak signals automatically and applying expert review.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to train with late labels</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Treat "no dispute yet" as good</td><td>Uses every payment, including the newest</td><td>New attacks are labelled safe, and the model learns the wrong lesson</td></tr>
+        <tr><td>Train only on payments older than a buffer (Manapat's talk: about 60 days)</td><td>Labels are mostly correct</td><td>The model is always blind to the last two months, which includes the newest attacks</td></tr>
+        <tr><td>Model the delay and correct for it</td><td>Uses recent payments without bias, if the delay model is right</td><td>Delay varies by merchant type, season and card network; estimates are noisy for the youngest payments</td></tr>
+        <tr><td>Use an earlier, noisier label (early fraud warnings, expert labels)</td><td>Arrives in days</td><td>A different target; only part of the warnings become disputes</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>In practice Stripe probably uses several of these together. The 2018 talk used a buffer, and the current documentation describes different scores aimed at different labels. And the rules of section 06, along with the attack-response loop of section 11, give the system a way to react to new attacks before their labels exist. Stripe hasn't published whether its main model applies a delay correction.</p>
+
+    <h4 class="why">Why not wait until the labels are complete before training?</h4>
+
+    <p>Because the newest data is the most valuable. Attackers change what they do, and a model trained only on payments from two months ago describes what attackers did two months ago. Stripe's primer says that retraining on more recent data can increase recall by as much as half a percentage point each month, which is the benefit of freshness in one number.</p>
+
+    <p>Delayed labels are common wherever the outcome takes time: loan defaults, subscription churn, insurance claims and ad conversions all label with a lag, and all of them end up with a maturity window, a delay model, or an early proxy.</p>
+
+    <h3 id="9-2-blocked-payments">9.2 Payments that never get labelled</h3>
+
+    <p>The second problem is harder. When Radar blocks a payment, the sale doesn't happen, nobody disputes anything, and nobody ever learns whether it was fraud. Training data therefore contains only payments the old model allowed. That has a consequence which Manapat's 2018 talk describes with an example. A model trained on data from January to September 2013, validated on October, was deployed to block scores above 50. A model retrained a year later in the same way performed much worse, and he said fraudsters adapting wasn't enough to explain the drop. His point was that training on what the old model allowed gives the new model a biased view of the world, with few examples of the payments the old model judged risky.</p>
+
+    <p>There's a deeper issue with measuring. To know how good the live model is, we need its <strong>recall</strong>, the share of all fraud that it catches, and its <strong>precision</strong>, the share of blocked payments that were fraud. Both depend on what the blocked payments would have turned out to be. Without that, the arithmetic in section 05 has nothing to stand on. Our experiment below shows the naive position: if the model blocks above a score of 75, no blocked payment is labelled, so no fraud above 75 is ever observed, and the measured recall is undefined.</p>
+
+    <p>Manapat's answer was to inject a little randomness. Let a small random share of payments that would have been blocked go through, observe what happens to them, and treat each as standing for all the similar ones that were blocked. If a payment is let through with probability <span>$p_i$</span>, the one we observe stands in for <span>$1/p_i$</span> payments like it, so each allowed payment gets the weight <span>$w_i = 1/p_i$</span>. That weight makes the estimates fair. For a quantity such as the total number of fraud payments, the weighted sum is correct on average:</p>
+
+    <div class="eq-block"><span>$$\hat{N}_{\text{fraud}} \;=\; \sum_{i} \frac{\mathbb{1}[\text{allowed}_i]}{p_i}\, y_i, \qquad \mathbb{E}\big[\hat{N}_{\text{fraud}}\big] \;=\; \sum_i y_i$$</span></div>
+
+    <p>Each payment's indicator <span>$\mathbb{1}[\text{allowed}_i]$</span> equals 1 with probability exactly <span>$p_i$</span>, so dividing by <span>$p_i$</span> cancels that probability on average. Recall at a threshold is then the weighted fraud above the threshold divided by the total weighted fraud, and precision is the weighted fraud above the threshold divided by the weighted number of payments above it. Those weights also go into the training loss, so the model is trained as if it had seen the blocked payments too. In the talk's worked example, with a 5% chance of letting through everything scoring above 50, each allowed high-score payment gets weight 20. Of 5,000 let through, 4,000 were fraud, so the estimate for high-score fraud is 4,000 × 20 = 80,000 and recall comes out at about 0.89.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">Letting a few would-be blocks through so the model can learn from them
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="120" width="120" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="120" width="120" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="80.0" y="146" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">ALL PAYMENTS</text>
+<text x="80.0" y="160" text-anchor="middle" font-size="10" class="dim">each one scored</text>
+<text x="80.0" y="174" text-anchor="middle" font-size="10" class="dim">0 to 99</text>
+<path d="M144,140 L200,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M144,170 L200,240" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="204" y="56" width="170" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="204" y="56" width="170" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="289.0" y="82" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SCORE BELOW 75</text>
+<text x="289.0" y="96" text-anchor="middle" font-size="10" class="dim">allow it</text>
+<text x="289.0" y="110" text-anchor="middle" font-size="10" class="dim">label arrives later</text>
+<rect x="204" y="206" width="170" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="204" y="206" width="170" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="289.0" y="232" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SCORE 75 OR MORE</text>
+<text x="289.0" y="246" text-anchor="middle" font-size="10" class="dim">draw a random number</text>
+<text x="289.0" y="260" text-anchor="middle" font-size="10" class="dim">(this is the policy)</text>
+<path d="M378,91 L440,91" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="444" y="56" width="236" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="444" y="56" width="236" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="562.0" y="82" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">LABELLED, WEIGHT 1</text>
+<text x="562.0" y="96" text-anchor="middle" font-size="10" class="dim">counts once in training</text>
+<text x="562.0" y="110" text-anchor="middle" font-size="10" class="dim">and in evaluation</text>
+<path d="M378,226 L440,190" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M378,256 L440,270" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="444" y="160" width="236" height="62" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="444" y="160" width="236" height="62" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="562.0" y="182" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">95%: BLOCKED</text>
+<text x="562.0" y="196" text-anchor="middle" font-size="10" class="dim">customer sees a decline</text>
+<text x="562.0" y="210" text-anchor="middle" font-size="10" class="dim">outcome never observed</text>
+<rect x="444" y="244" width="236" height="62" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="444" y="244" width="236" height="62" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="562.0" y="266" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">5%: ALLOWED ANYWAY</text>
+<text x="562.0" y="280" text-anchor="middle" font-size="10" class="dim">label arrives weeks later</text>
+<text x="562.0" y="294" text-anchor="middle" font-size="10" class="dim">counts as 1 / 0.05 = 20</text>
+<text x="20" y="322" text-anchor="start" font-size="10" class="dim">Illustrative numbers. Stripe's talk describes allowing a small random share of would-be blocks and weighting each by 1/p.</text>
+      </svg>
+      <div class="diagram-caption">Follow the pink path. Most high-score payments are blocked, so their outcomes stay unknown, but the small random share that goes through stands in, with a bigger weight, for all the ones that didn't.</div>
+    </div>
+
+    <p>The experiment runs this on 2 million simulated payments. It shows the estimates against the truth, and how the width of the uncertainty depends on how much we allow through.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Estimating recall of payments we never see, by letting a few through</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(11)
+N = 2_000_000
+fraud = rng.random(N) &lt; 0.001
+score = np.where(fraud, rng.beta(5, 2.0, N), rng.beta(1, 5.5, N)) * 99
+score = np.floor(score).astype(int)
+live = score &gt;= 75            # blocks in production today
+cand = score &gt;= 85            # a stricter policy we would like to test
+rec = lambda m: (m &amp; fraud).sum() / fraud.sum()
+print(f&quot;truth: fraud {fraud.sum():,}, blocked {live.sum():,}, &quot;
+      f&quot;recall at 75: {rec(live):.3f}, at 85: {rec(cand):.3f}&quot;)
+print(&quot;naive: fraud labelled among blocked payments:&quot;,
+      (live &amp; fraud &amp; ~live).sum(), &quot;-&gt; recall is undefined&quot;)
+def one(p):
+    allowed = rng.random(N) &lt; p              # p = chance of letting it by
+    w = np.where(allowed, 1 / p, 0.0)        # weight 1/p when allowed
+    tot = (w * fraud).sum()
+    return ((w * (fraud &amp; live)).sum() / tot,
+            (w * (fraud &amp; cand)).sum() / tot,
+            (allowed &amp; live &amp; fraud).sum())
+for q in (0.01, 0.05, 0.20):
+    p = np.where(live, q, 1.0)
+    r = np.array([one(p) for _ in range(300)])
+    a, b = np.percentile(r[:, 1], [2.5, 97.5])
+    print(f&quot;let {q:4.0%} through: recall@85 {r[:,1].mean():.3f}&quot;
+          f&quot;  95% range [{a:.3f}, {b:.3f}]&quot;
+          f&quot;  fraud let through {r[:,2].mean():.0f}&quot;)</code></pre>
+      <div class="tryit-out">Without randomisation no fraud above the line is ever observed. With weights of 1/p the estimate for the stricter threshold sits at about <code>0.20</code> every time, and the 95% range narrows from <code>[0.054, 0.342]</code> at a 1% let-through to <code>[0.168, 0.235]</code> at 20%, while the fraud let through rises from <code>9</code> to <code>181</code>.<pre><code>truth: fraud 2,042, blocked 1,722, recall at 75: 0.444, at 85: 0.203
+naive: fraud labelled among blocked payments: 0 -&gt; recall is undefined
+let   1% through: recall@85 0.198  95% range [0.054, 0.342]  fraud let through 9
+let   5% through: recall@85 0.200  95% range [0.125, 0.272]  fraud let through 45
+let  20% through: recall@85 0.202  95% range [0.168, 0.235]  fraud let through 181</code></pre></div>
+    </details>
+
+    <p>The truth in this simulation is a recall of 0.444 at the live threshold of 75, and 0.203 for a stricter threshold of 85, a policy we might want to test without deploying it. A naive view can't answer either question. Weighting the let-through payments recovers 0.20 on average at every budget, but the uncertainty carries the lesson. Letting 1% of blocked payments through leaves a 95% range of 0.054 to 0.342, which is too wide to decide anything from. At 5% it narrows to 0.125 to 0.272, and at 20% to 0.168 to 0.235. Fraud that goes through is the price: 9, 45 and 181 payments in the simulation. Manapat described this as a trade between exploration and exploitation, and framed it as a budget: a fixed amount of fraud, for example $10,000 a month in his illustration, deliberately incurred to buy measurement.</p>
+
+    <p>The talk adds several refinements. A uniform 5% is wasteful, because payments with very high scores are almost certainly fraud and teach little, so the second method in the talk gives each payment a propensity that falls as its score rises, concentrating the budget near the decision boundary where the model is least sure. Payments with very high scores are allowed only about one time in a thousand to ten thousand. Error bars come from the bootstrap: resample the labelled rows with replacement, recompute the metric, and repeat about a thousand times. The method assumes independent events, and repeated attempts from one fraudster break that assumption, so the talk suggests treating a whole checkout session as one unit that is either allowed or blocked together. Very large weights make metrics unstable: a rolling 90-day metric moved sharply whenever a single payment with a weight of 10,000 entered or left the window.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Learning from blocked payments</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Train and evaluate on what was allowed</td><td>Costs nothing, no deliberate fraud</td><td>Biased: the model never sees the cases it blocks; metrics for blocked cases are undefined</td></tr>
+        <tr><td>Let a uniform random share through</td><td>Easy to reason about, unbiased with weights</td><td>Spends budget on high scores that teach little; large weights are noisy</td></tr>
+        <tr><td>Let payments through with a propensity that falls with score</td><td>Budget goes where the model is uncertain; many candidate models can be scored on the same data</td><td>More complex; weights up to 1/p can be large and need careful curve design</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The 2018 talk presented the propensity version as the more efficient refinement. Today's documentation says that for a small subset of payments, Stripe modifies the reported risk score so that it can measure model performance, such as false positive rate and recall, and obtain data for later models. Stripe doesn't describe the mechanism. It fits the approach in Manapat's talk, but we can't say how closely Stripe's current process matches it. Manapat said the idea was inspired by a Microsoft and Facebook paper on counterfactual evaluation of ad click models.</p>
+
+    <h4 class="why">Why would a payments company deliberately let some fraud through?</h4>
+
+    <p>Because the alternative is a model that can never be checked. If every high-score payment is blocked, nothing can be learned about whether the blocking was right, whether a stricter or looser policy would do better, or whether the model is drifting. A small, controlled and weighted sample, chosen where it teaches most, is the price of knowing. He frames the cost as a budget that's set in advance and compared with the benefit.</p>
+
+    <p>This is the same structure as exploration in recommenders, which page 41 covers: a system that only acts on its best guess never learns about the options it doesn't take. Lending has the same problem, called reject inference, since declined applicants never reveal whether they'd have repaid, and ad systems use the same inverse-propensity weighting to evaluate policies from logs.</p>
+  </section>
+
+  <section id="evaluation">
+    <h2><span class="num">10</span>Knowing whether a new model is better</h2>
+
+    <p>Each retrain produces a candidate, and before it replaces the model Meera's payment passed through, someone has to decide whether it is better. Two layers of tools do this, offline measurement on held-out data and live comparison, and both are shaped by the label problems of the previous section.</p>
+
+    <h3 id="10-1-offline">10.1 Offline: precision, recall and the base rate</h3>
+
+    <p>Stripe's primer defines the basic measures with a small table. With a threshold chosen, <strong>precision</strong> is the fraction of blocked payments that are fraud, <strong>recall</strong> is the fraction of all fraud that is blocked, and the <strong>false positive rate</strong> is the fraction of good payments blocked. In its toy example of 4 correctly blocked frauds, 2 wrongly blocked good payments and 1 missed fraud, precision is 4/6, recall is 4/5, and the false positive rate is 2/5. Moving the threshold trades one against the other, and a curve of precision against recall shows the whole trade for a model. Stripe's primer separates two questions: model quality, the shape of that curve, and policy, the point on the curve we operate at, which is what section 05 chose.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">A model catches 99% of all fraud and wrongly blocks 0.1% of good payments, which is Stripe's published false-positive figure (the 99% is invented for the exercise). Fraud is one payment in a thousand. Of the payments it blocks, what fraction are fraud?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>About half. Take a million payments. One thousand are fraud and 999,000 are good. It catches 990 frauds. It wrongly blocks 0.1% of 999,000, which is 999 good payments. Of 1,989 blocked payments, 990 are fraud, so precision is 990 / 1,989, about 50%.</p>
+        <p>Both numbers sound superb, a 99% catch rate and a 0.1% false alarm rate, and yet every second block is a mistake. That's what rarity does, and it's why the primer keeps using precision and recall, and why a plain accuracy figure is useless here: a model that allows everything is 99.9% accurate.</p>
+      </details>
+    </div>
+
+    <p>The primer also uses the ROC curve and its area, the AUC, which plot the share of fraud caught against the false positive rate. These are standard, but with this base rate the false positive rate on the horizontal axis hides the problem we just saw, since 0.1% looks tiny on a scale that goes to 100%. A look at the score distribution is the other check the primer suggests. A useless model gives a nearly uniform spread of scores, and a good one pushes scores toward the two ends, with peaks near 0 and near 1. It adds that a two-humped distribution isn't proof of quality by itself. On release, Stripe compares the old and new distributions and aims to keep the share of payments above the threshold stable.</p>
+
+
+    <h3 id="10-2-online">10.2 Online: guardrails and live comparison</h3>
+
+    <p>Offline numbers narrow the choices and a live test settles them, but a live test has a catch for fraud. A usual A/B test measures the outcome you care about in each group and compares. For fraud, the outcome is a dispute, which arrives months later, so waiting for it would delay every release by a season. Stripe's posts describe the pieces it uses instead. Its December 2024 post says retrained models are evaluated on offline data and then compared with the current model in blue-green tests, meaning the new model runs against the existing one on live traffic before it takes over. Stripe lists the guardrails it monitors per merchant in the primer: block rate, false positive rate and authorisation rate, all of which can be measured immediately, and it describes the release check of keeping the share above the threshold stable. Randomised let-throughs from section 09 provide the labels for the slower measures once they mature.</p>
+
+    <p>Manapat's talk points out a benefit of the randomised data beyond fixing bias. Once there is a set of weighted, labelled data, any number of candidate models and thresholds can be scored on the same set, which goes well beyond what a two-group A/B test can compare. Raising the threshold from 50 to 62 can be evaluated without deploying it. The primer also reports the pace this supports: Stripe says it has tripled the speed at which it releases models, that retraining on more recent data can raise recall by up to half a percentage point per month, and that new models have improved performance by over 20% year over year.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to judge a candidate</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Replay on logged, allowed payments</td><td>Fast and free</td><td>Only rewards agreement with the old model; blind to anything it blocked</td></tr>
+        <tr><td>Replay on randomised, weighted data</td><td>Unbiased; scores many models and thresholds at once</td><td>Needs the let-through budget; noisy at high scores; waits for labels to mature</td></tr>
+        <tr><td>Live blue-green comparison with guardrail metrics</td><td>Real traffic, real merchants, immediate block and authorisation rates</td><td>Fraud outcomes still arrive late, so it can't be the only judge</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Stripe's posts suggest it uses all three, probably in that order: offline replay to narrow the candidates, randomised data to estimate recall and precision for them, and live comparison with guardrails before release. Manapat's talk argues for planning the evaluation strategy before a model first goes into production, because the cost of adding randomisation later is that earlier data can probably not be repaired.</p>
+  </section>
+
+  <section id="adversaries">
+    <h2><span class="num">11</span>Attackers who adapt, and what went wrong</h2>
+
+    <p>A model of cat photos stays right because cats don't change. Fraud is different, because the people behind it respond to whatever stops them. Stripe's 2023 post says fraud has shifted from mainly stolen-card fraud to a mix of traditional card fraud and high-velocity card testing attacks. Stripe's primer puts the consequence plainly: because fraud trends change quickly, models quickly start to drift. Over time, a model's inputs and the relation between inputs and labels move, and its accuracy slips unless it's retrained or supplemented.</p>
+
+    <h3 id="11-1-card-testing">11.1 A case study: card testing</h3>
+
+    <p>The December 2024 post by Ryan Drapeau and Inayat Khosla describes how Stripe handles one adapting attack. <strong>Card testing</strong> is how fraudsters check which stolen card numbers still work. In <em>verification</em>, they run small or zero-dollar charges against a finite list of stolen credentials. In <em>enumeration</em>, they guess card numbers, often within a numeric range, to separate chargeable cards from unchargeable ones. A card that passes becomes more valuable, since it can then be used for large purchases or sold. These attacks are a small share of all transactions and their tactics keep changing, which probably explains why they are hard to detect. It also notes that successful attacks on Stripe have decreased by 80% over two years.</p>
+
+    <p>Its design is a loop. Card testing has no explicit labels, so Stripe pools intelligence on new attack vectors, automatically combines weak signals and applies expert review to produce labels. The ML Features platform of section 03 makes it cheap to add features, models are retrained with the proposed features and evaluated offline, the highest-precision features are kept, and blue-green tests compare the new model with the current one. If the tests succeed the model is deployed, including during incident response. Stripe calls it a flywheel: detection enables new labels and features, which make the next detection better.</p>
+
+    <p>Thresholds adapt too, through three levels of model. A <em>prevalence</em> model estimates overall card testing across Stripe and updates its risk posture daily. A <em>location</em> model identifies which businesses, issuers or surfaces are under attack, and tells an attack from an event like a flash sale. A <em>transaction</em> model scores each payment using many signals. Their outputs together adjust the blocking threshold in real time, so that controls fall on a small slice of traffic and ease when an attack subsides. That is presumably section 05's cost rule applied to a threshold that moves, since the cost of a miss is far higher during an attack than outside one. Stripe's post adds that a large transformer, trained on billions of global transactions, supplements the smaller models. It helps with subtle or novel attacks on large businesses, where attack traffic blends into high volume, and turns payments into embeddings that feed classifiers judging whether an entity is under attack. Press coverage of Stripe's May 2025 announcement reported its claim that the foundation model raised the detection rate for card-testing attacks on large businesses by 64% almost overnight. That figure is Stripe's own, and the underlying numbers aren't published.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to keep up with attackers</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Retrain on a schedule</td><td>Predictable and easy to operate</td><td>Always behind by at least one cycle plus the label delay</td></tr>
+        <tr><td>Fast loop: new labels, new features, quick retrain, blue-green test</td><td>Reactive recognition becomes proactive identification within hours, per Stripe's 2024 post</td><td>Needs weak-signal labelling and expert review in the loop; risk of overreacting to noise</td></tr>
+        <tr><td>Thresholds that follow detected attacks</td><td>Tight during an attack and loose after</td><td>Good customers caught during the tight period</td></tr>
+        <tr><td>Shared representation (foundation model) for the whole stream</td><td>Notices subtle patterns without a hand-built feature for each</td><td>Costly to train and serve; hard to explain</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+
+    <h3 id="11-2-what-went-wrong">11.2 What went wrong, as far as it's published</h3>
+
+    <p>Stripe doesn't publish incident reports, so what follows is built from what its own posts and documentation admit went less well. They are small stories, each with a lesson that this chapter has already used.</p>
+
+    <ul>
+      <li><strong>A retrained model that was much worse (2013 data, in the 2018 talk).</strong> Retraining on data produced under the old model's blocking gave a model that performed far worse a year later. Missing labels for blocked payments were the cause, and they led to the randomisation in section 09.</li>
+      <li><strong>A feature that helped less than expected (2023 post).</strong> A Boolean saying whether a business was under a distributed attack added little, because the model already captured those patterns. Not every plausible feature earns its place.</li>
+      <li><strong>The cost of simplifying (2023 post).</strong> Dropping XGBoost would have lost 1.5% recall, and the network was redesigned to avoid it. A simplification that saves a lot of training time still has to prove it hasn't lost something.</li>
+      <li><strong>Rules that catch the wrong people (documentation).</strong> Stripe's rule reference warns that a "new card" rule may block a good customer whose last purchase was in 2019, and that "not equal" doesn't match a missing value. Rules fail quietly.</li>
+      <li><strong>False positives are the standing cost (2023 post).</strong> Even at 0.1% of good payments, the sums in section 01 show how many customers that is. A blocked sale leaves no dispute and no complaint behind, so these mistakes are easy to undercount.</li>
+      <li><strong>Disputes cost more than the money (documentation).</strong> A dispute debits the amount and a fee, and disputes raise a merchant's dispute rate with the card network, which the risk controls try to keep out of the networks' monitoring programmes.</li>
+    </ul>
+
+    <p>What links them is what the signals measured. A model trained only on what it had allowed measured itself against its own earlier decisions. A rule built on a stale field measured something other than what its author meant. In each case the repair was to measure the right thing, whether by randomising, by previewing a rule on history or by testing a simplification against recall.</p>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">12</span>The whole system</h2>
+
+    <p>We can now draw the complete design. On the left is the online path, Meera's payment inside its 100 milliseconds. On the right is the loop that keeps it correct, in which every attempt becomes an event, events refresh the counters, labels trickle in weeks later, training combines them, and each candidate is evaluated before replacing the live model.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">The whole design, online and offline
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 584" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">ONLINE: Meera's payment, under 100 ms</text>
+<text x="430" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">OFFLINE: the loop that keeps it current</text>
+<rect x="20" y="40" width="290" height="64" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="290" height="64" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="165.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CHECKOUT</text>
+<text x="165.0" y="76" text-anchor="middle" font-size="10" class="dim">Stripe.js: device signals,</text>
+<text x="165.0" y="90" text-anchor="middle" font-size="10" class="dim">email, IP, card</text>
+<rect x="20" y="124" width="290" height="78" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="124" width="290" height="78" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="165.0" y="146" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">FEATURES</text>
+<text x="165.0" y="160" text-anchor="middle" font-size="10" class="dim">entity counters from the</text>
+<text x="165.0" y="174" text-anchor="middle" font-size="10" class="dim">online store, plus the</text>
+<text x="165.0" y="188" text-anchor="middle" font-size="10" class="dim">payment's own fields</text>
+<rect x="20" y="222" width="290" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="222" width="290" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="165.0" y="244" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">MODEL</text>
+<text x="165.0" y="258" text-anchor="middle" font-size="10" class="dim">one network scores the</text>
+<text x="165.0" y="272" text-anchor="middle" font-size="10" class="dim">payment 0 to 99</text>
+<rect x="20" y="306" width="290" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="306" width="290" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="165.0" y="328" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RULES + 3DS</text>
+<text x="165.0" y="342" text-anchor="middle" font-size="10" class="dim">merchant rules, thresholds,</text>
+<text x="165.0" y="356" text-anchor="middle" font-size="10" class="dim">request 3DS, review queue</text>
+<rect x="20" y="390" width="290" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="390" width="290" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="165.0" y="412" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">DECISION</text>
+<text x="165.0" y="426" text-anchor="middle" font-size="10" class="dim">allow, challenge,</text>
+<text x="165.0" y="440" text-anchor="middle" font-size="10" class="dim">review or block</text>
+<path d="M165,106 L165,122" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M165,204 L165,220" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M165,288 L165,304" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M165,372 L165,388" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="474" width="290" height="52" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="474" width="290" height="52" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="165.0" y="495" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">ISSUER BANK</text>
+<text x="165.0" y="509" text-anchor="middle" font-size="10" class="dim">authorises or declines; CVC and</text>
+<text x="165.0" y="523" text-anchor="middle" font-size="10" class="dim">postcode checks come back here</text>
+<path d="M165,456 L165,472" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="430" y="40" width="250" height="64" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="430" y="40" width="250" height="64" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="555.0" y="61" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">EVENT STREAM</text>
+<text x="555.0" y="75" text-anchor="middle" font-size="10" class="dim">every attempt, on every</text>
+<text x="555.0" y="89" text-anchor="middle" font-size="10" class="dim">merchant</text>
+<rect x="430" y="124" width="250" height="64" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="430" y="124" width="250" height="64" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="555.0" y="145" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">COUNTER JOBS</text>
+<text x="555.0" y="159" text-anchor="middle" font-size="10" class="dim">tiles of counts in a stream</text>
+<text x="555.0" y="173" text-anchor="middle" font-size="10" class="dim">job, flushed to a KV store</text>
+<rect x="430" y="208" width="250" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="430" y="208" width="250" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="555.0" y="229" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">LABELS</text>
+<text x="555.0" y="243" text-anchor="middle" font-size="10" class="dim">disputes, early warnings, fraud</text>
+<text x="555.0" y="257" text-anchor="middle" font-size="10" class="dim">refunds, randomised allows</text>
+<rect x="430" y="292" width="250" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="430" y="292" width="250" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="555.0" y="313" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAINING</text>
+<text x="555.0" y="327" text-anchor="middle" font-size="10" class="dim">backfilled features at the</text>
+<text x="555.0" y="341" text-anchor="middle" font-size="10" class="dim">time of each payment</text>
+<rect x="430" y="376" width="250" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="430" y="376" width="250" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="555.0" y="397" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">EVALUATION</text>
+<text x="555.0" y="411" text-anchor="middle" font-size="10" class="dim">weighted offline metrics, then</text>
+<text x="555.0" y="425" text-anchor="middle" font-size="10" class="dim">a live comparison of models</text>
+<path d="M555,106 L555,122" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M555,190 L555,206" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M555,274 L555,290" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M555,358 L555,374" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M430,156 L340,156 L340,154 L314,154" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M430,408 L364,408 L364,250 L314,250" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M314,412 L388,412 L388,72 L428,72" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="550" text-anchor="start" font-size="10" class="dim">Blue: attempts become events. Amber: fresh counters return to the lookup. Pink: a new model replaces the live one.</text>
+<text x="20" y="568" text-anchor="start" font-size="10" class="dim">Weeks later, disputes label what happened and the next model trains on them.</text>
+      </svg>
+      <div class="diagram-caption">Start at the checkout on the left and follow the payment down to the bank. Then follow the blue line across to the right: events refresh the counters the next payment will read, labels arrive weeks later, and training and testing produce the model that replaces the current one.</div>
+    </div>
+
+    <p>Meera's payment goes through Stripe.js signals, the feature lookup, the model, the rules and any 3DS request, and then on to her bank. Radar logs the result, and its event updates the counters for the next payment on the same card or IP address. A few of the payments that would have been blocked are allowed through at random and carry a weight. Weeks later, disputes and early fraud warnings arrive and label what happened. Training uses the features as they were at the moment of each payment, with delay-aware labels and weights, and a candidate is judged offline, on randomised data and live, before it takes over.</p>
+
+    <p>Several parts of this picture are unpublished: how long each online step takes, how the multi-branch network is built, which structure holds distinct counts, how the 0–99 score maps to probabilities, how large the let-through budget is and how its propensities are set, and how the foundation-model embeddings connect to the main model. These sources describe Radar as of 2018, 2021, 2023 and 2024, and the current system has moved on.</p>
+  </section>
+  <section id="summary">
+    <h2><span class="num">13</span>Summary</h2>
+    <ol>
+      <li><strong>One shop sees too little.</strong> Rules and a model built on Loomwell's own orders have few fraud examples and can't see a card tested at forty other shops, so the design starts from data pooled across the network (section 02).</li>
+      <li><strong>Features are counters keyed by entities, computed across every merchant.</strong> Card, email, IP address and device each carry counts such as attempts in the last hour. Stripe's 2023 post counts over 1,000 characteristics per payment, and the primer says most features are network aggregates (section 03).</li>
+      <li><strong>Buckets and tiles make counts cheap and fresh.</strong> Stripe's rule reference describes five-minute, one-hour and one-day buckets, so an "hourly" count can span up to 65 minutes with fixed memory, and its 2024 post describes tiles flushed to a key-value store (section 03).</li>
+      <li><strong>The model must read in serving the same number it trained on.</strong> Defining each feature once and computing it for both batch and streaming, as the Shepherd platform does, avoids training-serving skew (section 03).</li>
+      <li><strong>The model family followed the network's growth.</strong> Logistic regression gave way to a Wide &amp; Deep ensemble and then, in mid-2022, to a ResNeXt-inspired DNN that trained over 85% faster and was designed to keep the 1.5% recall the trees provided (section 04).</li>
+      <li><strong>The threshold comes from the costs of the two mistakes.</strong> Block when <span>$p &gt; C_{FP}/(C_{FP}+C_{FN})$</span>: about 24% for our apron shop, about 73% for a high-margin software seller, and about 5% in Stripe's own primer example (section 05).</li>
+      <li><strong>A score has to be a calibrated probability for that rule to work.</strong> A model trained on downsampled good payments overstates risk by the sampling factor and, used with a cost threshold, cost our apron shop more than blocking nothing (section 05).</li>
+      <li><strong>Rules, 3DS and the model cover different time scales.</strong> A rule reacts in minutes and carries merchant knowledge, a model learns network-wide patterns, and adaptive 3DS handles the medium-risk band. Radar evaluates them in a fixed order (section 06).</li>
+      <li><strong>Labels arrive late, so "no dispute yet" can't mean "good".</strong> Disputes can come up to 120 days later or beyond, and a naive nightly retrain labels a new attack as safe. Stripe's 2018 talk used a 60-day buffer, and delay-aware estimates recover the real rate (section 09).</li>
+      <li><strong>Blocked payments need deliberate randomisation.</strong> Letting a small random share through and weighting each by 1/p lets recall and precision be estimated without bias, at the price of a budget of fraud that goes through (section 09).</li>
+      <li><strong>Offline metrics narrow, guardrails and live comparison decide, and attackers keep moving.</strong> With fraud at one in a thousand, even a 0.1% false positive rate gives about 50% precision, and the loop of new labels, new features and blue-green tests is how Stripe responds to adapting attacks (sections 10 and 11).</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">14</span>Build this</h2>
+    <p class="lede">You can rebuild the central ideas of this chapter with synthetic data and numpy, and watch each fix change what gets blocked. Simulating means you know the truth, which no real system can.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A small Radar: network counters, a cost threshold, late labels and a randomised let-through</span>
+        <span class="proj-meta">~6 hours &middot; numpy, plus scikit-learn or torch</span>
+      </div>
+      <p>Simulate 200 merchants, 50,000 cards and 20,000 IP addresses over 120 days. Most payments are genuine. A few percent of cards are stolen and used for fraud, and every few weeks a card-testing burst appears: one IP address tries dozens of cards at many small merchants within an hour. Give each fraudulent payment a dispute that arrives after a random delay with a median of about 25 days.</p>
+      <ol class="proj-steps">
+        <li>Train a per-merchant model, using only each merchant's own history. Train one pooled model with the payment's own fields. Then add network counters (attempts per IP in the last hour, payments per card in the last day, distinct countries per card) built from five-minute and one-hour buckets, and compare precision at a fixed recall for all three.</li>
+        <li>Compute the counters twice, once as a live stream and once as a batch recomputation. Introduce a deliberate leak in the batch version by letting it count events after the payment, and compare offline and live performance of the model trained on it.</li>
+        <li>Give each merchant a price, margin and dispute fee. Calibrate your model on mature labels, then pick each merchant's threshold from <span>$C_{FP}/(C_{FP}+C_{FN})$</span> and report the total cost against a 50% threshold and against blocking nothing. Retrain with the good payments downsampled to 1 in 100, and apply the correction in section 05.</li>
+        <li>Train nightly on labels as they stand, and plot the fraud rate your model assigns to a new attack pattern against the true rate. Fix it three ways: a 60-day buffer, the delay-corrected estimate, and an early proxy label that arrives after 7 days for half of the fraud.</li>
+        <li>Block everything above your threshold, then rerun with a 5% random let-through and weights of 1/p. Estimate recall for a stricter threshold, with bootstrap intervals, at 1%, 5% and 20% budgets.</li>
+        <li>Introduce a new attack that your model has never seen and measure how many days pass until recall recovers under each of three responses: retraining weekly, a hand-written rule on the day it appears, and a threshold that tightens when the per-IP counter spikes.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the network counters lift precision well above the per-merchant model, the leaky counters look excellent offline and fail live, the cost-based thresholds differ widely between a thin-margin and a high-margin merchant and beat 50%, the downsampled model's block count balloons until you correct it, the naive nightly model assigns the new attack a rate far below the truth, and your randomised estimate of recall at the stricter threshold brackets the true value with an interval that narrows as the budget grows.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Replace the uniform let-through with a propensity that falls with score, spend the same fraud budget, and compare interval widths. Then treat a whole checkout session as the unit for the let-through decision and see what happens to your intervals when one fraudster makes ten attempts.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">15</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why is accuracy a poor metric for card fraud, and what do you use?</summary>
+      <div class="qa-body"><p>Fraud is about one payment in a thousand, so a model that allows everything is 99.9% accurate and catches nothing. Use precision, the fraction of blocked payments that are fraud, and recall, the fraction of all fraud that is blocked, and look at the whole precision-recall curve. Even a model that catches 99% of fraud while blocking only 0.1% of good payments has about 50% precision at that base rate, because the good payments are 999 times more numerous. ROC curves hide this, since 0.1% looks tiny on a false-positive axis.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why does Stripe compute features across all merchants and not per merchant?</summary>
+      <div class="qa-body"><p>Signals that identify fraud are spread across merchants. A card tester sends one or two attempts to each of many shops, so no shop sees a burst, and a stolen card may be used at dozens of shops in a morning. Counters keyed by the card, email, IP address or device and fed by the whole network see the burst. Stripe's primer says most of Radar's features are aggregates computed across the network. A small merchant also has too few fraud examples to train a model alone, which pooled training fixes.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What should happen if the fraud scoring service is down?</summary>
+      <div class="qa-body"><p>It's a decision between failing closed, which blocks every payment and stops all checkouts, and failing open, which lets payments proceed unscored. Stripe's documentation describes failing open: the payment is reported with an unknown risk level, goes on to the issuer, which still makes its own decision, and engineers are notified. Reasoning: an outage that blocks every merchant costs far more than a short window of unscored payments. A middle option is a simpler fallback model or a rule set, at the cost of one more path to maintain.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How do you choose the blocking threshold for a merchant?</summary>
+      <div class="qa-body"><p>Estimate the cost of letting fraud through, C<sub>FN</sub>, which is the lost goods plus the dispute fee, and the cost of blocking a good customer, C<sub>FP</sub>, which is at least the margin of the lost sale. Block when the fraud probability exceeds C<sub>FP</sub> / (C<sub>FP</sub> + C<sub>FN</sub>). With a $64 sale, a 30% margin and a $15 fee, that's about 24%. With a 90% margin it's about 73%. Stripe's primer example, a $26 sale at 8% margin with a $15 fee, gives a break-even precision of 5.07%. That rule needs calibrated probabilities, and in practice Stripe lets merchants choose goals such as maximising protection or revenue and previews the effect on four months of their payments.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What is calibration, and how can a fraud model lose it?</summary>
+      <div class="qa-body"><p>A score is calibrated when payments scored 0.2 turn out to be fraud about 20% of the time. A model can rank payments perfectly and still be miscalibrated. Fraud models most often lose it by downsampling good payments by a factor beta to balance the classes, which multiplies the model's odds by 1/beta. Correct it with p = beta p<sub>s</sub> / (beta p<sub>s</sub> + 1 - p<sub>s</sub>). Calibration can also be repaired afterwards with Platt scaling or isotonic regression on mature labels. If it's wrong, a cost-based threshold is wrong too: in a simulation, using a 1-in-100 sampled model with the correct threshold blocked about 14 times as many payments as the calibrated one and cost more than blocking nothing.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How would you serve "attempts from this IP in the last hour" in under 100 ms, and keep it consistent with training?</summary>
+      <div class="qa-body"><p>Keep a bucketed counter per entity, in a key-value store. Stripe's rule documentation describes five-minute buckets for hourly counts, so an event increments one number and a read sums thirteen. Window edges blur by up to one bucket. For high-volume features, the 2024 Shepherd post describes tiles, pre-aggregated values held in streaming state and flushed to the store, summed at read time. For consistency, define each feature once and compute both the streaming and batch versions from that definition, run the same expressions in both engines, monitor online against offline values, and model batch delay in the training data so it reflects what the model will see live.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Fraud labels arrive up to months late. How do you train?</summary>
+      <div class="qa-body"><p>A recent payment without a dispute is unlabelled, and calling it good teaches the model that new attacks are safe. Options are a maturity buffer, which Stripe's 2018 talk set at about 60 days, at the price of being blind to the newest two months, or a delay model, as in Chapelle's delayed-feedback work, where the labels expected so far for a segment are the sum of the share of disputes arrived at each payment's age. In a simulation with a median delay of 25 days, that recovered a true 12% rate where naive labels said 6.2%. A third option is an earlier proxy label, such as early fraud warnings, about 40% of which become disputes. Rules and an attack-response loop cover the gap while labels mature.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Blocked payments never get labels. How do you evaluate and retrain?</summary>
+      <div class="qa-body"><p>Data contains only what the old policy allowed, so recall and precision for the blocked region are undefined and a retrained model inherits a biased view. Manapat's 2018 talk fixes this by letting payments through with a known probability p, even above the threshold, and to weight each observed one by 1/p. A weighted count of fraud is unbiased because the indicator of being allowed has expectation p. Recall and precision for any threshold, and training weights, follow from the weighted data, and bootstrap resampling gives intervals. Costs: it spends a budget of real fraud; weights as large as 1/p make metrics noisy, so propensities should fall with score but not to zero; repeated attempts from one fraudster violate independence, so use a session as the unit. Stripe's documentation says it modifies the reported risk score for a small subset of payments to measure model performance.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>A new model beats the old one offline. How do you ship it safely when fraud outcomes take months?</summary>
+      <div class="qa-body"><p>An offline win may come from agreeing with the old model on payments it allowed, so first confirm on randomised, weighted data, where recall and precision are unbiased, and on a temporal split with matured labels. Then run it live alongside the current model, as the 2024 Stripe post describes with blue-green tests, and watch the metrics available at once: block rate, false positive rate and authorisation rate per merchant, with the share of payments above the threshold kept stable, which the primer describes. Slower measures such as disputes are read from the randomised sample as labels mature. Because the randomised data supports many candidates at once, several thresholds and models can be compared without a separate live test for each.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Design the response to a card-testing attack that is adapting.</summary>
+      <div class="qa-body"><p>Treat it as a loop with several speeds. At minutes, merchant rules and velocity counters block a visible pattern. At hours, labels come from pooled attack intelligence, combined weak signals and expert review, since card testing has no explicit labels, and new features go into a retrain that's evaluated offline and then by blue-green test, as the 2024 Stripe post describes. Thresholds adapt: a prevalence model for overall attack levels, a location model for which businesses or issuers are under attack, which also separates attacks from flash sales, and a per-transaction model, with their outputs adjusting the threshold in real time so controls fall on a small slice of traffic and ease afterward. Large businesses, where attack traffic blends into volume, benefit from shared embeddings of the whole payment stream. Watch false positives throughout, since a tight threshold during a flash sale costs real customers.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">16</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://stripe.dev/blog/how-we-built-it-stripe-radar" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">How we built it: Stripe Radar</div><div class="r-sub">Ryan Drapeau, March 2023. The move to a DNN-only model, the search for features and the case for explanations.</div></div>
+      </a>
+      <a class="resource-card" href="https://stripe.com/guides/primer-on-machine-learning-for-fraud-protection" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Guide</div><div class="r-title">A primer on machine learning for fraud detection</div><div class="r-sub">Stripe, last updated December 2021. Features, precision and recall, score distributions, thresholds and the break-even example of section 05.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.infoq.com/presentations/stripe-ml-models-fraud/" target="_blank" rel="noopener">
+        <div class="r-icon">🎤</div>
+        <div class="r-body"><div class="r-kind">Talk</div><div class="r-title">Counterfactual Evaluation of Machine Learning Models</div><div class="r-sub">Michael Manapat, QCon.ai, May 2018. Unlabelled blocked payments, randomisation, 1/p weights and bootstrap intervals.</div></div>
+      </a>
+      <a class="resource-card" href="https://stripe.dev/blog/shepherd-how-stripe-adapted-chronon-to-scale-ml-feature-development" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Shepherd: How Stripe adapted Chronon to scale ML feature development</div><div class="r-sub">Ben Mears, April 2024. One feature definition for batch and streaming, tiles, and freshness against latency.</div></div>
+      </a>
+      <a class="resource-card" href="https://stripe.com/blog/the-ml-flywheel-how-we-continually-improve-our-models-to-reduce-card-testing" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">The ML flywheel: how we continually improve our models to reduce card testing</div><div class="r-sub">Ryan Drapeau and Inayat Khosla, December 2024. Labels without ground truth, multi-level thresholds and the foundation model.</div></div>
+      </a>
+      <a class="resource-card" href="https://docs.stripe.com/radar/rules/reference" target="_blank" rel="noopener">
+        <div class="r-icon">📘</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">Radar rules reference</div><div class="r-sub">Rule order, velocity attributes and their bucket sizes, missing-value behaviour.</div></div>
+      </a>
+      <a class="resource-card" href="https://docs.stripe.com/radar/risk-settings" target="_blank" rel="noopener">
+        <div class="r-icon">📘</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">Radar risk settings and risk controls</div><div class="r-sub">Risk scores and levels, adaptive 3DS, dynamic risk thresholds and the separate dispute and early-warning scores.</div></div>
+      </a>
+      <a class="resource-card" href="https://docs.stripe.com/radar/transaction-risk-prevention" target="_blank" rel="noopener">
+        <div class="r-icon">📘</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">Transaction risk prevention</div><div class="r-sub">Risk outcomes, the default 65 and 75 thresholds, unknown-risk handling and the note on modified scores for measurement.</div></div>
+      </a>
+      <a class="resource-card" href="https://docs.stripe.com/disputes/how-disputes-work" target="_blank" rel="noopener">
+        <div class="r-icon">📘</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">How disputes work</div><div class="r-sub">The 120-day window, the dispute lifecycle and early fraud warnings, which set the label delay of section 09.</div></div>
+      </a>
+      <a class="resource-card" href="https://docs.stripe.com/radar/reviews/risk-insights" target="_blank" rel="noopener">
+        <div class="r-icon">📘</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">Risk insights</div><div class="r-sub">What merchants are shown about a payment, and the related-payments view.</div></div>
+      </a>
+      <a class="resource-card" href="https://dl.acm.org/doi/10.1145/2623330.2623634" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Modeling Delayed Feedback in Display Advertising</div><div class="r-sub">Olivier Chapelle, KDD 2014. The delay model behind the correction in section 09.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1611.05431" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Aggregated Residual Transformations for Deep Neural Networks (ResNeXt)</div><div class="r-sub">Xie et al., CVPR 2017. The multi-branch block that Stripe's 2023 post cites as inspiration. arXiv:1611.05431</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1606.07792" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Wide &amp; Deep Learning for Recommender Systems</div><div class="r-sub">Cheng et al., 2016. The memorise-and-generalise combination behind Radar's earlier ensemble. arXiv:1606.07792</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">17</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/02-classical-ml"><div class="rc-sec" style="color:var(--c-classical)">02 · The model family</div><div class="rc-title">Classical Supervised ML</div><div class="rc-hook">Logistic regression, boosted trees, class imbalance and thresholds, the models of sections 02 and 04.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">Feature stores, training-serving skew, drift and canary deploys, the machinery behind sections 03 and 10.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Calibration, metrics under imbalance and why offline numbers mislead.</div></a>
+      <a class="related-card" href="/topics/16-recommenders-ranking-search"><div class="rc-sec" style="color:var(--c-rec)">16 · The feedback loop</div><div class="rc-title">Recommenders, Ranking &amp; Search</div><div class="rc-hook">A system learning from the consequences of its own choices, as the blocked payments of section 09 do.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · Another case study</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">Position bias, logQ correction and exploration: the same selection-bias problem in a different product.</div></a>
+      <a class="related-card" href="/topics/18-graph-ml"><div class="rc-sec" style="color:var(--c-graph)">18 · Linked entities</div><div class="rc-title">Graph ML</div><div class="rc-hook">Cards, emails and IP addresses form a graph; this is how deeper links than one hop get used.</div></a>
+    </div>
+  </section>

@@ -1,0 +1,1182 @@
+---
+title: "Designing ETA Prediction"
+dek: "Follow Farah's pickup and trip estimates in Bengaluru from a road graph and a shortest-path sum down to the models that correct it. We build the design from the obvious version, fix each failure in turn, and look at the choices Uber and Google published."
+readingTime: "~84 min"
+prereqs: "graph ML (18), recommenders (16), evaluation (25)"
+group: "ML System Design"
+label: "Case study 45"
+description: "From a routing engine's sum of road times to a residual model with asymmetric loss, hashed embeddings and linear attention, plus Google's supersegment GNN, built on Uber's and Google's papers."
+---
+<section id="tldr">
+    <p>Farah is standing outside Indiranagar metro station in Bengaluru at twenty to seven on a Friday evening, with rain starting to darken the pavement. She opens a ride-hailing app, enters the airport as her destination and taps Request. Two numbers appear almost at once. Her car will arrive in 7 minutes, and the trip will take about 58, so she'll land at the airport at 7:45. She decides on the spot: wait here, don't bother with the metro, tell her friend to expect her. Eleven minutes later the car pulls up, four minutes after the app said it would.</p>
+
+    <p>Those two numbers weren't read from anywhere. Nobody knew them. They were predictions, made in a few milliseconds, one of billions made every week, and each had to be a single figure for something that has a spread. A trip that might take 50 minutes on a good evening and 75 on a bad one gets one number on the screen. That number is also used by the system itself: it helps choose which driver Farah is matched with, it goes into the fare she was quoted, and it feeds the plans a delivery platform makes for a courier. A prediction of this kind is an <strong>estimated time of arrival</strong>, or ETA, and the real duration it is later compared with is the <strong>actual time of arrival</strong>, or ATA. That gap is the error, and it's easy to see why not every error costs the same: four minutes of lateness ruins Farah's evening in a way that four minutes of earliness doesn't.</p>
+
+    <p>So the question this chapter answers is: <strong>how does a ride-hailing app turn a road map and a pile of past trips into one trustworthy number of minutes, in a few milliseconds, for billions of requests a week?</strong></p>
+
+    <p>We'll build the design the way an engineer would, starting with the obvious version, a road graph and a shortest-path sum, and fixing each failure in turn. That leads to a model that learns only the routing engine's mistakes, to the lopsided loss function that makes lateness cost more than earliness, to the way features are turned into table lookups so the model stays fast, and to a transformer layer that is cheaper than the usual one. After that comes the Google Maps answer, a graph neural network that lets traffic on one road reach its neighbours. Then we look at serving, training data, how the estimates are judged and what went wrong. We rely on two sets of primary sources, Uber's DeepETA blog post (February 2022) and its DeeprETA paper (June 2022), and Google and DeepMind's blog post (September 2020) and CIKM 2021 paper, and we say plainly where internals are unpublished. How drivers are matched and how the map is cut into cells are different questions, and we leave them out. Here we care only about the estimate itself.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>Given a start, an end and a moment in time, the system returns how long the trip will take. That one job gets called from many places, and the callers don't want the same thing. Uber's 2022 paper lists them: fares, pickup estimates, matching riders to drivers, and delivery planning. A fare needs the average, because the company wants to charge a fair price over many trips. A figure shown to a rider on a screen may be better as a number she can rely on, meaning a late-ish estimate. A courier's plan cares about the tail, because a few very late deliveries do the most damage. Uber's paper makes exactly this point: a single point estimate isn't ideal when consumers need different things, such as the mean for fares and the 95th-percentile error for delivery.</p>
+
+    <p>Alongside that, the system has some firm properties to meet.</p>
+
+    <ul>
+      <li><strong>Accurate where it counts.</strong> Accuracy means the typical error, but also the bad errors in the tail, and it has to hold in every city and for every kind of trip.</li>
+      <li><strong>Fast.</strong> Uber's 2022 post says the model must answer "within a few milliseconds at most", because it sits inside other requests.</li>
+      <li><strong>General.</strong> One model for rides and deliveries, pickups and drop-offs, in every country. Uber's 2022 post names this as one of its three adoption challenges.</li>
+      <li><strong>Fresh.</strong> Traffic changes by the minute, and the estimate must follow it.</li>
+      <li><strong>Stable.</strong> Run the same trip twice and you shouldn't get answers that wander. Google's CIKM 2021 paper points out that models saved at different points in training give "different end user experiences", and treats that variance as a first-class problem.</li>
+    </ul>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>Both companies publish scale figures, from different years. Uber's 2022 paper says its post-processing system handles "billion-level requests" per week, and its 2022 blog post calls this the highest-QPS model at Uber, where QPS means queries per second. That paper also puts a price on accuracy: reducing ETA error "by even low single digit percentages unlocks tens of millions of dollars in value per year". An earlier post, from November 2015, said Uber's routing engine handled "hundreds of thousands of ETA requests per second", answering in single-digit milliseconds. Google's September 2020 blog post says more than a billion people use Google Maps, and that its predictive ETAs were already "consistently accurate for over 97% of trips" before the work we'll describe.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose a model sees 3 billion ETA requests a week (an illustrative figure, since Uber says only "billion-level"). What is the average number of requests per second? Take peak traffic as three times the average, and a model that takes 3 milliseconds of one CPU core per request. How many cores does the peak need? Then try 300,000 requests per second, the order of magnitude Uber's 2015 post gave for its routing engine.</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>A week has 604,800 seconds, so 3 billion requests is about 5,000 a second on average and about 15,000 at the assumed peak. One core serving a 3 ms request handles roughly 330 requests a second, so the peak needs about 45 cores before any headroom. At 300,000 a second the same arithmetic gives about 900 cores. Uber's two figures probably count different things, and the sources don't reconcile them, so don't read either as the other's growth.</p>
+        <p>What matters is how sensitive the bill is to per-request cost. A model that took 30 ms instead of 3 would need ten times the fleet, and every other step in the chain that wants an ETA, such as a matching step scoring a few dozen candidate drivers, multiplies the count again. That's why the published designs are so keen on lookups and one shallow layer.</p>
+      </details>
+    </div>
+
+    <p>One more pair of numbers shows the scale of the model itself. Its training set held about 1.4 billion ETA requests from 14 days of trips in September and October 2021. A model trained on them has about 141 million parameters, and the paper says more than 99% of those sit in lookup tables called embeddings, which section 05 explains. We'll see in section 05 why that's a deliberate choice.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: the road graph and a sum</h2>
+
+    <p>Our first design needs no machine learning. A map company already has a digital copy of the road network, so we can treat it as a <strong>graph</strong>: every intersection is a node and every stretch of road between two intersections is an edge, with a weight that says how long the stretch takes to drive. A <strong>routing engine</strong> is software that finds the cheapest path through such a graph from the start to the end, using a shortest-path algorithm, and the cost of the path is the ETA. Uber's 2022 paper describes it in these terms: routing engines "divide up the road network into small road segments represented by weighted edges", find the best path and add up the weights.</p>
+
+    <p>Where do the edge weights come from? Two sources, both measured from the phones of drivers who passed through earlier. One is the speed right now. Google's CIKM paper builds a baseline from it that averages each segment's speed over the last two minutes and sums the resulting times along the route. Another is history: the typical speed on this segment at this hour of this day of the week, averaged over the last 17 weeks in the same paper. Uber's 2015 routing engine, Gurafu, launched globally in April 2015 together with a historical traffic system built from GPS data collected from partner phones.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">Version 1: the routing engine's ETA
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="44" width="150" height="84" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="44" width="150" height="84" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="77" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">REQUEST</text>
+<text x="95.0" y="92" text-anchor="middle" font-size="10" class="dim">origin, destination,</text>
+<text x="95.0" y="106" text-anchor="middle" font-size="10" class="dim">time of day</text>
+<path d="M174,86 L196,86" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="200" y="44" width="150" height="84" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="200" y="44" width="150" height="84" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="275.0" y="77" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">ROAD GRAPH</text>
+<text x="275.0" y="92" text-anchor="middle" font-size="10" class="dim">intersections = nodes</text>
+<text x="275.0" y="106" text-anchor="middle" font-size="10" class="dim">road pieces = edges</text>
+<path d="M354,86 L376,86" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="44" width="150" height="84" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="380" y="44" width="150" height="84" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="455.0" y="77" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SHORTEST PATH</text>
+<text x="455.0" y="92" text-anchor="middle" font-size="10" class="dim">edge weight = length</text>
+<text x="455.0" y="106" text-anchor="middle" font-size="10" class="dim">/ current speed</text>
+<path d="M534,86 L556,86" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="560" y="44" width="120" height="84" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="560" y="44" width="120" height="84" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="620.0" y="77" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">ETA</text>
+<text x="620.0" y="92" text-anchor="middle" font-size="10" class="dim">sum of the</text>
+<text x="620.0" y="106" text-anchor="middle" font-size="10" class="dim">edge times</text>
+<text x="20" y="168" text-anchor="start" font-size="10.5" class="dim">Farah's request: one origin, one destination, one best route, one sum.</text>
+<text x="20" y="192" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A plain sum cannot see which route the driver really takes, or the minutes spent at the kerb.</text>
+<text x="20" y="212" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">It treats a pickup and a drop-off alike, and returns one number whatever the use.</text>
+<text x="20" y="236" text-anchor="start" font-size="10.5" class="dim">Every edge time is an estimate itself, built from historical and live speeds.</text>
+      </svg>
+      <div class="diagram-caption">Follow the arrows left to right, then read the two amber lines. Everything in the boxes is cheap and explainable, and the amber lines are what the next section sets out to fix.</div>
+    </div>
+
+    <p>Neither source is right everywhere, and Google's paper shows the trade-off in numbers. Its offline tables report the root mean squared error (RMSE) of the two baselines over a single supersegment (a route piece we'll define in section 07). In New York, with a prediction made for the present moment, the real-time sum scored 42.3 seconds and the historical sum 48.0, so live speeds win when you're predicting now. For a prediction an hour into the future, the real-time sum degrades to 69.6 and the historical one to 51.8, so history wins. Farah's trip to the airport lasts nearly an hour, and the road ahead of her will be in a different state when she reaches it. A system that only looks at where the cars are now describes the road she's leaving. This is the first break in version 1.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Edge weights come from</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Live speeds</td><td>Sees an accident or a closure as soon as phones report it</td><td>Describes now, so it's weak when the trip runs 30 or 60 minutes ahead</td></tr>
+        <tr><td>Historical speeds for this hour and weekday</td><td>Knows rush hours before they start</td><td>Blind to today's accident, weather, or an event that just ended</td></tr>
+        <tr><td>A hand-tuned blend of the two</td><td>Uses both</td><td>The blend has to be set by someone, per region and horizon, and it's still a sum of road pieces</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>A second break is more basic, and it holds even with perfect speeds. A routing engine returns the time of one best path from a point to a point. Uber's 2022 paper lists four ways that falls short of what the apps need.</p>
+
+    <ul>
+      <li><strong>Route uncertainty.</strong> Nobody knows in advance which route a driver will take. A driver may know a shortcut, or may follow the phone's turn-by-turn advice and then take a different turn.</li>
+      <li><strong>Human error.</strong> Drivers miss turns, especially in hard parts of the network, and a shortest-path algorithm can't model that.</li>
+      <li><strong>Distribution shift.</strong> Arrival times for driving to a restaurant differ markedly from those for driving to pick up a rider, "even when the shortest path is the same". Here <strong>distribution</strong> means the spread of actual times for a given routing estimate.</li>
+      <li><strong>Uncertainty estimation.</strong> Different callers want different summaries of that spread. A graph search returns one number and gives no hint about the spread.</li>
+    </ul>
+
+    <p>Uber's paper also notes that the beginning and end of a trip account for much of the noise. A driver arriving to pick Farah up may have to find a gap by the kerb in a street full of parked scooters, and the routing engine doesn't try to predict that, so it estimates the time between the neighbourhoods of the start and the end instead of between the exact points.</p>
+
+    <p>Uber had been through this before. Its first ETA system, Goldeta (in service from roughly 2011 to 2014, according to the 2015 post), sat on top of open-source routing engines such as OSRM and corrected their estimates using "hundreds of thousands of Uber trips" on similar routes. Its trouble was cold start: a new city had no history, so ETAs there were worse than in established cities. By 2022 the production ETA model was, in the paper's words, "a group of XGBoosts with each trained on one mega-region". XGBoost is a widely used library for gradient-boosted trees, ensembles of many small decision trees added one after another, each correcting the errors of those before it. All of these systems share one idea, that the routing engine's answer is a good start and its errors can be learned from data. Making that the explicit design is the next step.</p>
+  </section>
+
+  <section id="residual">
+    <h2><span class="num">03</span>Fix 1: learn the routing engine's mistakes</h2>
+
+    <p>We now have a log of past trips, and for each one two numbers: what the routing engine predicted and how long the trip took. With such a log, the simplest thing to do is to look at the errors. Uber's paper plots them and finds that both the routing ETAs and the gaps between routing ETA and ATA are skewed, with a long tail on the late side, and that the gaps for rides and for food deliveries have different shapes. Errors have structure. They depend on the hour, the place, the kind of trip and the traffic, and anything that depends on features can be learned.</p>
+
+    <p>There are two ways to set up the learning. One predicts the ATA directly from the features, and treats the routing ETA as one feature among many. Another predicts the <strong>residual</strong>, the amount by which the routing ETA is off, and adds it back. Uber's paper calls the second <strong>ETA post-processing</strong> and writes it as</p>
+
+    <div class="eq-block"><span>$$\hat{y}_i \;=\; \hat{y}^{0}_i + \hat{r}_i, \qquad \hat{r}_i = \mathcal{G}(q_i,\, \hat{y}^{0}_i)$$</span></div>
+
+    <p>Here <span>$\hat{y}^{0}_i$</span> is the routing engine's ETA for request <span>$i$</span>, <span>$q_i$</span> holds the request's features (time, route and other inputs), <span>$\mathcal{G}$</span> is the learned model, <span>$\hat{r}_i$</span> is its predicted residual and <span>$\hat{y}_i$</span> is the final ETA. For Farah, the routing engine might say 9.0 minutes to her pickup, the model says the gap is +2.5 minutes at this hour on a rainy Friday evening, and the app shows 11.5.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">Version 2: learn the residual on top of the routing ETA
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 318" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="36" width="230" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="36" width="230" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="135.0" y="67" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">ROUTING ENGINE</text>
+<text x="135.0" y="82" text-anchor="middle" font-size="10" class="dim">sum of segment times</text>
+<text x="135.0" y="96" text-anchor="middle" font-size="10" class="dim">9.0 min (illustrative)</text>
+<rect x="20" y="152" width="230" height="96" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="152" width="230" height="96" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="135.0" y="184" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">RESIDUAL MODEL</text>
+<text x="135.0" y="199" text-anchor="middle" font-size="10" class="dim">time, place, request type,</text>
+<text x="135.0" y="213" text-anchor="middle" font-size="10" class="dim">traffic, the routing ETA itself</text>
+<text x="135.0" y="227" text-anchor="middle" font-size="10" class="dim">predicts the gap: +2.5 min</text>
+<path d="M135,118 L135,150" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="146" y="139" text-anchor="start" font-size="10" class="dim">also an input</text>
+<path d="M254,76 L330,120" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M254,200 L330,150" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="334" y="108" width="110" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="334" y="108" width="110" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="389.0" y="134" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">ADD</text>
+<text x="389.0" y="149" text-anchor="middle" font-size="10" class="dim">9.0 + 2.5</text>
+<path d="M448,136 L500,136" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="504" y="96" width="176" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="504" y="96" width="176" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="592.0" y="127" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">ETA SHOWN</text>
+<text x="592.0" y="142" text-anchor="middle" font-size="10" class="dim">11.5 min</text>
+<text x="592.0" y="156" text-anchor="middle" font-size="10" class="dim">to Farah's pickup</text>
+<text x="20" y="282" text-anchor="start" font-size="10.5" class="dim">Geography is never rediscovered by the model. Road graphs handle that part.</text>
+<text x="20" y="304" text-anchor="start" font-size="10.5" class="dim">It only has to say how wrong the graph tends to be for this kind of trip at this hour.</text>
+      </svg>
+      <div class="diagram-caption">Two numbers meet at the plus sign. Routing supplies the big, smooth part; the learned residual supplies the small correction. Minutes are illustrative.</div>
+    </div>
+
+    <p>Why should predicting the gap beat predicting the whole answer? Most of the information is already in the routing ETA. It ranges over a hundred-fold, from a one-minute hop to an hour-long drive, and the structure of the road graph is what makes it so. If the model predicts from scratch, it has to rebuild that arithmetic from features, to within a few percent, using a finite number of table cells or parameters. If it predicts the gap, the routing engine does the arithmetic and the model only handles what the graph misses. An experiment below shows the effect in a deliberately small world. Trips have a routing ETA, a congestion effect that the graph misses during rush hours, a different handover time for pickups and drop-offs, and multiplicative noise. Two models share exactly the same grid of cells over hour, request type and the routing ETA cut into eight bins. One fills each cell with the average ATA, and the other fills each cell with the average gap and adds it to the exact routing ETA.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Predict the ATA from scratch, or predict the routing engine's gap</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(7)
+NB, NC = 8, 24 * 2 * 8              # routing-ETA bins, total cells
+
+def trips(n):
+    hour = rng.integers(0, 24, n)
+    kind = rng.integers(0, 2, n)            # 0 pickup, 1 drop-off
+    y0 = rng.lognormal(np.log(600), 0.7, n)  # routing ETA, seconds
+    rush = np.isin(hour, [8, 9, 18, 19, 20])
+    y = y0 * (1 + np.where(rush, 0.20, 0.0))  # congestion graph misses
+    y = y + np.where(kind == 0, 45, 120)      # kerb and handover time
+    return hour, kind, y0, y * rng.lognormal(0, 0.12, n)
+
+def cell(hour, kind, y0, edges):
+    return (hour * 2 + kind) * NB + np.searchsorted(edges, y0)
+
+def fit(c, target):
+    s = np.bincount(c, target, NC)
+    k = np.bincount(c, minlength=NC)
+    return np.where(k &gt; 0, s / np.maximum(k, 1), target.mean())
+
+hT, kT, y0T, yT = trips(50_000)
+print("train trips  routing  scratch  residual")
+for n in (1_000, 5_000, 50_000):
+    h, k, y0, y = trips(n)
+    edges = np.quantile(y0, np.linspace(0, 1, NB + 1)[1:-1])
+    c, cT = cell(h, k, y0, edges), cell(hT, kT, y0T, edges)
+    scratch = fit(c, y)[cT]                    # cell mean of the ATA
+    resid = y0T + fit(c, y - y0)[cT]           # exact ETA + cell mean gap
+    mae = lambda p: np.abs(yT - p).mean()
+    print(f"{n:&gt;11,} {mae(y0T):&gt;7.0f}s {mae(scratch):&gt;7.0f}s"
+          f" {mae(resid):&gt;8.0f}s")</code></pre>
+      <div class="tryit-out">The routing ETA alone is off by <code>145s</code> on average. The from-scratch table, which must store the whole answer in 384 cells, is at <code>190s</code> with 1,000 trips, worse than having no model, and only reaches <code>145s</code> at 50,000 trips. The residual table, with the same cells and the same data, is at <code>105s</code> with 1,000 trips, <code>90s</code> with 5,000 and <code>87s</code> with 50,000.</div>
+    </details>
+
+    <p>On average the routing ETA alone is off by 145 seconds. A from-scratch table, which has to store the whole answer in 384 cells, only reaches 145 at 50,000 training trips, and it's worse than not having a model at all when data is scarce (190 seconds with 1,000 trips), because each cell is a coarse average over trips whose routing ETAs differ by hundreds of seconds. A residual table starts at 105 seconds with 1,000 trips and settles at 87, about as low as this toy's noise allows. Cells and data are identical, so the only difference is what each cell had to remember. Real systems use far richer models than a table, but the same asymmetry of effort applies to them.</p>
+
+    <p>Uber's features for the residual model are the ones in Table 1 of the paper: temporal ones (minute of day, day of week), the latitude and longitude of the start and end, trip type, route type and request type, the routing ETA and estimated distances, real-time and historical speeds, and context such as country, region and city IDs. It says the spatial and temporal features matter most. Its label is the ATA, and its definition depends on the request. For a pickup it is the time from the driver accepting the request to starting the ride or delivery trip, and for a drop-off it is the time from the start of the trip to its end.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Design</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Routing engine only</td><td>Explainable, no training data, works in a new city on day one</td><td>Systematic errors it can't see: route choice, handover time, per-task bias</td></tr>
+        <tr><td>Learn the ATA from scratch</td><td>One model, no routing engine in the loop at serving time</td><td>Has to relearn road geometry; needs far more data to reach the same accuracy</td></tr>
+        <tr><td>Learn the residual on top of the routing ETA</td><td>Small, focused target; decoupled from the routing engine; the model can be updated without touching the router</td><td>Two systems to run, and the model inherits the router's blind spots</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Uber's published path runs through all three rows. Goldeta, in roughly 2011 to 2014, corrected open-source routing with historical trips. Then came the per-region XGBoost ensembles, and Uber's 2022 blog post says they grew into "one of the largest and deepest XGBoost ensembles in the world at that time" after the company's engineers contributed improvements to the open-source library. Scaling that approach further became "untenable", in the post's word, and the team moved to deep learning on the argument that neural networks scale with data through data-parallel stochastic gradient descent. Decoupling matters too. Uber's paper says the approach can be placed on top of any routing engine and that updating a post-processing model is easier than refactoring the routing engine itself. It also states a limit: it only tested the idea with Uber's own proprietary routing engine.</p>
+
+    <p>Learning a correction on top of a strong baseline appears all over machine learning. Gradient boosting fits each new tree to the errors of the trees before it, and residual connections in neural networks let a layer learn only the change it makes to its input. Weather services run statistical models over the output of physical forecasts for the same reason. It also fits the habit from chapter 17, to build a baseline before building a model, and to measure the model against that baseline.</p>
+
+    <p>We still have to decide what the model is trying to minimise, and the answer isn't obvious, because the residuals are skewed and the cost of an error isn't the same on both sides of zero.</p>
+  </section>
+
+  <section id="loss">
+    <h2><span class="num">04</span>Fix 2: a loss function that knows late is worse than early</h2>
+
+    <p>Training a model means choosing a <strong>loss function</strong>, a formula that turns an error into a cost, and then adjusting the model to reduce the average cost. Squared error is the obvious choice, where an error of 10 minutes costs 100 times an error of 1 minute. That works for tidy data and fails for ours, for two reasons. One is the long tail. Every so often a road closure or an accident turns a 20-minute trip into three hours, and under squared error that single trip can outweigh thousands of ordinary ones. So the model bends itself to explain an event it can't predict. A second problem is fairness. Squared error treats an early arrival and a late one of the same size as the same mistake, and for Farah they are not.</p>
+
+    <p>Absolute error, the opposite choice, charges 10 minutes exactly ten times as much as 1 minute, so outliers matter far less. It has its own cost. Its gradient is the same size whether the error is a second or an hour, so the final stage of training jittery. A well-known compromise is the <strong>Huber loss</strong>: quadratic for small errors and linear for big ones, joined smoothly at a threshold <span>$\delta$</span>. Uber's DeeprETA paper writes it, for actual time <span>$y$</span> and prediction <span>$\hat{y}$</span>, as</p>
+
+    <div class="eq-block"><span>$$\mathcal{L}_\delta(y,\hat{y}) \;=\; \begin{cases} \tfrac12\,(y-\hat{y})^2, & |y-\hat{y}| \lt \delta \\[2pt] \delta\,|y-\hat{y}| - \tfrac12\,\delta^2, & |y-\hat{y}| \ge \delta \end{cases}$$</span></div>
+
+    <p>Inside the threshold it behaves like squared error, with smooth gradients that shrink as the prediction improves. Outside, the penalty grows by a fixed amount per second of error, so the closure trip contributes a large but bounded amount. Uber's paper says that changing <span>$\delta$</span> "smoothly interpolates" between squared and absolute error.</p>
+
+    <p>A second step makes the loss lopsided. Uber's paper multiplies the Huber loss by a weight that depends on which side of the truth the prediction landed:</p>
+
+    <div class="eq-block"><span>$$\mathcal{L}_{\omega,\delta}(y,\hat{y}) \;=\; \begin{cases} \omega\;\mathcal{L}_\delta(y,\hat{y}), & y \lt \hat{y} \\[2pt] (1-\omega)\;\mathcal{L}_\delta(y,\hat{y}), & y \ge \hat{y} \end{cases}, \qquad \omega \in [0,1]$$</span></div>
+
+    <p>Read the cases carefully. When <span>$y \lt \hat{y}$</span> the actual time was shorter than predicted, so the traveller arrived early and the weight is <span>$\omega$</span>. When <span>$y \ge \hat{y}$</span> the trip ran longer than predicted, so she arrived late and the weight is <span>$1-\omega$</span>. With <span>$\omega = 0.5$</span> the two sides are equal and we recover plain Huber (halved). With <span>$\omega$</span> below one half, lateness costs more than earliness. Its authors say this is "useful in situations where being a minute late is worse than being a minute early". It also says that the two parameters let the loss "mimic other commonly used regression loss functions" and tailor the model's point estimate to what the consumer needs. Uber doesn't publish its production values of <span>$\omega$</span> or <span>$\delta$</span>.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">Asymmetric Huber loss, δ = 60 s
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 304" xmlns="http://www.w3.org/2000/svg">
+<line x1="60" y1="230" x2="660" y2="230" stroke="#8a8a99" stroke-width="1"/>
+<line x1="360" y1="50" x2="360" y2="232" stroke="#8a8a99" stroke-width="1" stroke-dasharray="3 4"/>
+<polyline points="60.0,108.6 70.0,113.1 80.0,117.6 90.0,122.1 100.0,126.6 110.0,131.1 120.0,135.6 130.0,140.1 140.0,144.6 150.0,149.0 160.0,153.5 170.0,158.0 180.0,162.5 190.0,167.0 200.0,171.5 210.0,176.0 220.0,180.5 230.0,185.0 240.0,189.5 250.0,194.0 260.0,198.5 270.0,203.0 280.0,207.5 290.0,212.0 300.0,216.5 310.0,220.6 320.0,224.0 330.0,226.6 340.0,228.5 350.0,229.6 360.0,230.0 370.0,229.6 380.0,228.5 390.0,226.6 400.0,224.0 410.0,220.6 420.0,216.5 430.0,212.0 440.0,207.5 450.0,203.0 460.0,198.5 470.0,194.0 480.0,189.5 490.0,185.0 500.0,180.5 510.0,176.0 520.0,171.5 530.0,167.0 540.0,162.5 550.0,158.0 560.0,153.5 570.0,149.0 580.0,144.6 590.0,140.1 600.0,135.6 610.0,131.1 620.0,126.6 630.0,122.1 640.0,117.6 650.0,113.1 660.0,108.6" fill="none" stroke="#818cf8" stroke-width="2.2"/>
+<polyline points="60.0,157.1 70.0,159.8 80.0,162.5 90.0,165.2 100.0,167.9 110.0,170.6 120.0,173.3 130.0,176.0 140.0,178.7 150.0,181.4 160.0,184.1 170.0,186.8 180.0,189.5 190.0,192.2 200.0,194.9 210.0,197.6 220.0,200.3 230.0,203.0 240.0,205.7 250.0,208.4 260.0,211.1 270.0,213.8 280.0,216.5 290.0,219.2 300.0,221.9 310.0,224.4 320.0,226.4 330.0,228.0 340.0,229.1 350.0,229.8 360.0,230.0 370.0,229.5 380.0,227.9 390.0,225.3 400.0,221.6 410.0,216.9 420.0,211.1 430.0,204.8 440.0,198.5 450.0,192.2 460.0,185.9 470.0,179.6 480.0,173.3 490.0,167.0 500.0,160.7 510.0,154.4 520.0,148.1 530.0,141.9 540.0,135.6 550.0,129.3 560.0,123.0 570.0,116.7 580.0,110.4 590.0,104.1 600.0,97.8 610.0,91.5 620.0,85.2 630.0,78.9 640.0,72.6 650.0,66.3 660.0,60.0" fill="none" stroke="#fbbf24" stroke-width="2.2"/>
+<text x="60" y="250" text-anchor="start" font-size="10" class="dim">-300 s</text>
+<text x="360" y="250" text-anchor="middle" font-size="10" class="dim">0</text>
+<text x="660" y="250" text-anchor="end" font-size="10" class="dim">+300 s</text>
+<text x="60" y="270" text-anchor="start" font-size="10" class="dim">arrived earlier than predicted</text>
+<text x="660" y="270" text-anchor="end" font-size="10" class="dim">arrived later than predicted</text>
+<text x="360" y="290" text-anchor="middle" font-size="10.5" class="dim">error  y - prediction</text>
+<text x="70" y="62" text-anchor="start" font-size="10" class="dim">loss</text>
+<text x="430" y="80" text-anchor="start" font-size="11" class="" fill="#818cf8">ω = 0.5: symmetric</text>
+<text x="430" y="98" text-anchor="start" font-size="11" class="" fill="#fbbf24">ω = 0.3: lateness costs 0.7, earliness 0.3</text>
+<text x="150" y="66" text-anchor="start" font-size="10" class="dim">quadratic near zero,</text>
+<text x="150" y="80" text-anchor="start" font-size="10" class="dim">straight lines in the tails</text>
+      </svg>
+      <div class="diagram-caption">Both curves (the 0.3 is illustrative) bend into straight lines past 60 seconds, so one terrible trip cannot dominate training. On the right the amber curve is steeper: with ω = 0.3 a late arrival is penalised more than twice as hard as an early one of the same size.</div>
+    </div>
+
+    <p>This picture shows the two parameters at work. Near zero both curves are parabolas, so small errors are cheap and training is smooth, and past 60 seconds both turn into straight lines. Amber has weight 0.3 on the early side and 0.7 on the late side, so its right half is more than twice as steep. Values are illustrative.</p>
+
+    <h3 id="4-1-what-the-weight-does-to-the-answer">4.1 What the weight does to the prediction</h3>
+
+    <p>A lopsided loss changes more than how the model feels about its mistakes. It changes the number the model reports, because the best single guess depends on how costly each direction is. Take the simplest case, where the loss is the asymmetric absolute error. If the guess is <span>$c$</span>, the loss falls on the early side with slope <span>$\omega$</span> and on the late side with slope <span>$1-\omega$</span>. At the best <span>$c$</span> the two pulls balance: <span>$\omega \cdot P(y \lt c) = (1-\omega) \cdot P(y \gt c)$</span>, which simplifies to <span>$P(y \gt c) = \omega$</span>. So the best guess is the point that a fraction <span>$\omega$</span> of trips exceed. That point is the <strong>quantile</strong> at level <span>$1-\omega$</span>. With a large <span>$\delta$</span> the loss turns into an asymmetric squared error, whose best guess is a close cousin called an <strong>expectile</strong>. In its introduction the paper names both, saying that user-facing ETAs "may call for a set of ETA quantiles or expectiles", while fare estimation "requires a mean ETA".</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">One trip has actual durations that vary from day to day around a median of 10 minutes, with a long tail on the slow side. We train a single prediction for it with the asymmetric Huber loss and <span>$\omega = 0.3$</span>, with a small <span>$\delta$</span>. Will the best prediction be below the median, at the median, or above it? And on what fraction of days will the trip run later than the prediction?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p><strong>Above the median, and about 30% of days.</strong> Lateness costs 0.7 and earliness 0.3, so the prediction moves up until trips that exceed it are the fraction <span>$\omega$</span>. Below, an experiment measures it on a lognormal spread of durations.</p>
+      </details>
+    </div>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Find the best single prediction under different loss settings</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(3)
+y = rng.lognormal(np.log(600), 0.35, 200_000)  # one trip, many days
+
+def huber(e, d):
+    a = np.abs(e)
+    return np.where(a &lt; d, 0.5 * e**2, d * a - 0.5 * d**2)
+
+def loss(c, w, d):
+    weight = np.where(y &lt; c, w, 1 - w)   # y &lt; c: arrived early
+    return weight * huber(y - c, d)
+
+grid = np.linspace(300, 1200, 901)
+print(f"{'omega':&gt;5} {'delta':&gt;6} {'best c':&gt;7} {'late':&gt;6}")
+for w, d in [(0.5, 1e6), (0.5, 30), (0.3, 30), (0.2, 30), (0.2, 1e6)]:
+    c = grid[np.argmin([loss(g, w, d).mean() for g in grid])]
+    print(f"{w:&gt;5} {d:&gt;6.0f} {c:&gt;7.0f} {100*(y &gt; c).mean():&gt;5.1f}%")
+print("mean", round(y.mean()), " median", round(np.median(y)),
+      " p80", round(np.quantile(y, 0.8)))</code></pre>
+      <div class="tryit-out">With <code>omega = 0.5</code> the best prediction is the median, <code>600</code>, for a small delta and the mean, <code>638</code>, for a huge one, and about half the trips run late. With <code>omega = 0.3</code> it rises to <code>715</code> and <code>30.8%</code> of trips are later than it. With <code>omega = 0.2</code> it reaches <code>798</code>, near the 80th percentile of <code>806</code>, and <code>20.8%</code> are late. A huge delta with <code>omega = 0.2</code> gives <code>772</code>, the expectile.</div>
+    </details>
+
+    <p>This trip's durations have a median of 600 seconds and a mean of 638, since the long tail pulls the mean up. With <span>$\omega = 0.5$</span> the best prediction is the median, 600, when <span>$\delta$</span> is small, so half of the trips run late, and it moves to the mean, 638, when <span>$\delta$</span> is huge. With <span>$\omega = 0.3$</span> and a small <span>$\delta$</span> the prediction rises to 715 and 30.8% of trips are later than it, the 70th percentile, as the formula says. At <span>$\omega = 0.2$</span> it rises to 798, close to the 80th percentile at 806, and the share of late trips drops to 20.8%. With a large <span>$\delta$</span> and <span>$\omega = 0.2$</span>, the best prediction lands at 772, the expectile, a little lower than the quantile. One model and one dataset produce answers from 600 to 798 seconds depending on two numbers in the loss, so choosing them is a product decision as much as a statistical one.</p>
+
+    <p>Pushing the number up costs something too. If every ETA shown to a rider is padded to the 80th percentile, riders see longer waits than they'll experience, and some of them will pick another option. Which quantile a rider-facing screen should show is a question for experiments, and the sources we read don't say where Uber landed. What they do say is that the loss is how the choice gets encoded in the model.</p>
+
+    <p>Uber's paper adds two small devices around the loss. A ReLU, which returns zero for any negative input, is applied to the final output, so the predicted ETA can never be negative. And the output is clamped, to limit the damage from extreme predictions. It also explains why Uber didn't take the textbook route for skewed data, a log transform. Predicting the logarithm of the time tames the skew, but turning the prediction back into minutes means exponentiating, and that "usually results in some extreme values, which may affect user experience". A loss that is robust in minutes avoids the round trip.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Loss</th><th>Best guess for one trip is</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Squared error</td><td>the mean</td><td>Smooth; right target for fares</td><td>Dominated by rare huge errors; early and late equal</td></tr>
+        <tr><td>Absolute error</td><td>the median</td><td>Robust to outliers</td><td>Constant gradient size makes late training noisy; early and late equal</td></tr>
+        <tr><td>Huber</td><td>between the two, set by <span>$\delta$</span></td><td>Smooth near zero, robust in the tails</td><td>Still symmetric</td></tr>
+        <tr><td>Quantile loss</td><td>a chosen quantile</td><td>Direct control of how often the ETA is late</td><td>Non-smooth; no robustness knob</td></tr>
+        <tr><td>Asymmetric Huber</td><td>between a quantile and an expectile, set by <span>$\omega$</span> and <span>$\delta$</span></td><td>Robust, smooth, and tunable per consumer</td><td>Two parameters to choose and to explain</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Uber chose the last row for DeeprETA, which its 2022 blog post and paper describe as launched for all four-wheel ETA prediction, and the paper gives the reason in one line: the loss "is robust to outliers and can balance a range of commonly used point estimates metrics". Google's graph model, which we reach in section 07, takes the symmetric route instead, a Huber loss on travel times with weights that shrink the influence of long segments. Each company is tuning something different. Uber's model is consumed in different forms by different callers, while Google's feeds a route ranker that picks among candidate routes.</p>
+
+    <p>This trade-off shows up whenever a wrong guess costs more in one direction. Retailers deciding how much stock to hold face the newsvendor problem, whose best answer is a quantile of demand set by the ratio of the cost of running out to the cost of holding extra. Forecasting systems that must avoid under-provisioning train with quantile losses, and robust regression leans on Huber for the same reason as here.</p>
+
+    <p>We've now fixed the target and the cost. Next, how to get a messy request, a pair of coordinates and a timestamp, into a model that must answer in a few milliseconds.</p>
+  </section>
+
+  <section id="embeddings">
+    <h2><span class="num">05</span>Fix 3: turn every feature into a table lookup</h2>
+
+    <p>The standard way to feed numbers to a neural network is to scale them to a sensible range and pass them through dense layers. Try it on Farah's request. Time of day is a number between 0 and 1440 minutes, the origin is two floating-point numbers, and the speed on the main road is another. Two problems appear at once. How these numbers relate to travel time isn't smooth or monotone. Eight in the morning is bad, nine at night is fine, and 8:05 and 8:06 behave alike while 8:05 and 8:35 may not. Place is no different: the junction by the metro station is slow, the one 300 metres on is fast, and two floating-point numbers give the network no easy way to represent a neighbourhood with its own quirks. A stack of dense layers can learn such shapes, but only by spending parameters and depth on carving up the input range, and depth costs milliseconds.</p>
+
+    <p>Uber's team reports a fix: discretise everything, then embed. An <strong>embedding</strong> is a table of learned short vectors, one row per possible value of a feature, and looking up a feature's row is a memory read whatever the size of the table. Uber's 2022 blog post says that "discretizing and embedding all inputs" gave "a significant lift over alternatives", and the paper adds the speed argument. Embeddings make up 99% of the model's hundreds of millions of parameters, "they contribute minimally to latency, because embedding look-up table takes <span>$O(1)$</span> time". Uber's blog post adds that a single prediction touches roughly 0.25% of the parameters. Capacity is huge and the cost per request is small, because most of the model is a lookup that reads only the rows the request needs.</p>
+
+    <h3 id="5-1-three-kinds-of-feature">5.1 Three kinds of feature</h3>
+
+    <p>A <strong>categorical</strong> feature already has a finite set of values, and its embedding is a row lookup, <span>$e = E[x]$</span>, where <span>$E$</span> is a matrix with one row per value. Uber's example is the minute of the week: 7 days of 24 hours of 60 minutes is 10,080 values, each with a vector of 8 numbers. After training, a plot of those vectors shows "local continuity" and forms a one-dimensional curve. So the model has learned that neighbouring minutes are similar without anyone telling it. A raw number would have forced it to rediscover that structure.</p>
+
+    <p>A <strong>continuous</strong> feature such as speed is first cut into bins and then looked up as <span>$e = E[Q(x)]$</span>, where <span>$Q$</span> assigns each value to its bin. Its example is speed split into 256 quantile bins, which gave better accuracy than feeding the raw number. They are <strong>quantile</strong> bins: each holds the same share of the training data, so the first bin might be the slowest 1/256 of all observations and the last the fastest. Uber found quantile bins beat equal-width bins and offers one explanation, that for any fixed number of bins, quantile bins keep the most information about the original value, measured in bits. A practical reading is that real distributions are skewed. Equal-width bins would put nearly every trip in a handful of bins and leave the rest empty.</p>
+
+    <p>A <strong>geospatial</strong> feature, a latitude and longitude, needs more care, because the number of distinct places is vast and uneven, with a dense old town and an empty ring road. Uber uses <strong>geohashes</strong>. A geohash names a rectangle on the map by repeatedly halving: is the point in the western or eastern half of the world, then the northern or southern half of that, and so on, writing one bit for each answer. Uber's paper gives the recipe: scale latitude and longitude into 32-bit integers, interleave their bits into one 64-bit integer, encode it in base 32, and keep the first <span>$u$</span> characters. Each character contributes 5 bits, so a longer string names a smaller rectangle. Cells are roughly 40 by 20 kilometres at length 4 and roughly 150 metres on a side at length 7. Uber uses lengths 4, 5, 6 and 7 together. Fine cells locate a pickup precisely but each has few training trips, and coarse cells have plenty of trips but blur the location, so giving the model all four lets it lean on whichever has enough data. Origin, destination and the origin-destination pair each get their own features.</p>
+
+    <h3 id="5-2-collisions-and-two-hash-functions">5.2 Too many cells, and two hash functions</h3>
+
+    <p>The pair is where the numbers explode. If a city has a million fine cells, there are up to a million squared origin-destination pairs. Giving every cell its own embedding row, which the paper calls <strong>exact indexing</strong>, would make the tables enormous. A common way out is the <strong>hashing trick</strong>: pass the geohash string through a hash function, a deterministic scrambler that turns any string into a number, and take the result modulo <span>$m$</span> to get one of <span>$m$</span> rows. Now the table has a fixed size whatever the number of cells. What it costs is <strong>collisions</strong>, where two unrelated places land on the same row and share one vector.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">A million geohash cells are hashed into 500,000 rows (illustrative sizes). With one hash function, roughly what fraction of cells share their row with at least one other cell? Now give each cell two rows, chosen by two independent hash functions, and call it a collision only if another cell matches on both. Roughly what fraction now collide?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>With one hash, each cell finds another cell in its row with probability <span>$1 - e^{-N/m}$</span>, which for <span>$N = 10^6$</span> and <span>$m = 5\times10^5$</span> is about 86.5%. A simulation with these sizes gives the same figure. With two independent hashes, another cell has to match in both, and the chance is about <span>$N/m^2$</span>, which is 4 in a million, or 0.0004%. A cell's vector is built from two table rows, and for the pair to be confused with another cell's, both rows have to coincide.</p>
+      </details>
+    </div>
+
+    <p>That is the idea in the paper's Algorithm 1. It uses two independent instances of MurmurHash3, a fast general-purpose hash, with different seeds, and it applies them to the origin cell, the destination cell and the pair at each of the four resolutions. Each location feature is thus represented by two embedding rows, and the network can combine them, so a collision in one table is outvoted by the other. Uber's blog post says this multiple feature hashing gave the best accuracy and latency of the three schemes it compared, while still saving space over exact indexing, and that a single hash was "the same or slightly worse" depending on resolution.</p>
+
+    <p>In the paper's ablation, removing the hashing scheme and indexing the exact geohash string instead cut the improvement in mean absolute error from 7.83% to 7.41% and the improvement in median error from 6.25% to 5.10%, while the 95th-percentile figure stayed at 7.99%. Its authors read this as richer geospatial embeddings helping in typical cases but not in extreme ones. A likely reason for exact indexing doing worse, though the paper doesn't say so, is probably that a rarely visited fine cell gets its own row trained on very few trips, while hashed rows are shared and get more data.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Encoding location</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Raw latitude and longitude as two numbers</td><td>Tiny, no tables</td><td>The network must carve up the map itself with depth, which costs latency</td></tr>
+        <tr><td>One embedding row per geohash cell (exact)</td><td>No collisions</td><td>Table size grows with the number of cells; rare cells have under-trained rows</td></tr>
+        <tr><td>One hash function, fixed number of rows</td><td>Fixed memory</td><td>Unrelated places share rows; the paper found it the same or slightly worse</td></tr>
+        <tr><td>Two hash functions, per resolution</td><td>Fixed memory; collisions need to coincide twice</td><td>Two lookups per feature, and more bookkeeping</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Uber chose the last row and published it in 2022. Because the whole encoding is lookups, it was the part that improved accuracy without adding latency, and the paper counts it as its second contribution after the post-processing formulation itself.</p>
+
+    <p>Hashing features came from large-scale linear models, where it was used to keep feature spaces a fixed size, and the paper cites that line of work. Recommendation models use embedding tables for user and item IDs, as chapter 16 describes, and large systems often hash the IDs into a fixed number of rows for the same reasons of memory and speed.</p>
+
+    <h4 class="why">Why not just give the network the real numbers and let it learn the shape?</h4>
+
+    <p>It can, but it pays in depth. A dense network has to build up a lookup-like response from smooth pieces, layer by layer, and each layer costs time on every request. Binning pushes that work into training: the table already stores the shape. For a model that has to answer in milliseconds, a wide table and a shallow network is a better use of the budget than a narrow table and a deep one.</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">06</span>Fix 4: letting features talk to each other, cheaply</h2>
+
+    <p>After embedding, Farah's request is a list of short vectors, one for each feature: the minute of the week, the origin at four resolutions, the destination, the pair, the speed bin, the routing ETA bin and so on. Call the list <span>$X$</span>, with <span>$L$</span> vectors of <span>$d$</span> numbers each. Next comes the question of how to combine them, because the effect of one feature depends on the others. A long routing distance means one thing on a quiet Sunday and another in the Friday rush, and a destination near a stadium matters only when the match ends. A plain concatenation fed into a dense layer can learn some of this, but the interactions have to be discovered one weight at a time.</p>
+
+    <p>Uber's answer is <strong>self-attention</strong>, the operation at the centre of the transformer architecture (chapter 8). Each vector produces a query, a key and a value by multiplying with learned matrices: <span>$Q = XW_q$</span>, <span>$K = XW_k$</span>, <span>$V = XW_v$</span>. A feature's query is compared with every other feature's key, and the comparison scores, passed through a softmax so they add up to one, say how much attention to pay to each one. Each feature's output is a weighted sum of all the values, added back onto its own input:</p>
+
+    <div class="eq-block"><span>$$A = \operatorname{softmax}\!\Big(\frac{QK^{\top}}{\sqrt{d}}\Big), \qquad f(X) = A\,V + X$$</span></div>
+
+    <p>Here <span>$A$</span> is an <span>$L \times L$</span> table of attention weights, <span>$\sqrt{d}$</span> keeps the scores in a stable range, and adding <span>$X$</span> is a residual connection. In a language model each vector is a word and their order matters, so a position is added. Here each vector is a feature and the order of features means nothing, so the paper includes no positional encoding. Uber's paper gives an example close to Farah's. Inputs are vectors for time, location, traffic and the A-to-B distance, and the layer "scales the importance of the distance given the time, the location and the traffic condition".</p>
+
+    <p>Standard attention has a cost problem. That table <span>$A$</span> has <span>$L^2$</span> entries, each a dot product of length <span>$d$</span>, so the work is of the order <span>$L^2 d$</span>. Uber's setting is the reverse of a language model: many features, and a tiny vector for each. Uber puts the query, key and value size at 4, so <span>$L \gg d$</span>, and the quadratic term is the expensive one. Uber's blog gives a sample calculation with 40 features and vectors of size 8: <span>$40^2 \times 8 = 12{,}800$</span> operations for standard attention, against <span>$40 \times 8^2 = 2{,}560$</span> for the version Uber picked. It reports that the original "provided good accuracy" but "was too slow to meet the latency requirements".</p>
+
+    <p>A faster version is the <strong>linear transformer</strong>. Softmax attention can't be rearranged because the softmax needs every score before it can normalise. It replaces the exponential with a feature map <span>$\phi(x) = \operatorname{elu}(x) + 1$</span>, a function that keeps everything positive, and defines the output row for feature <span>$i$</span> as</p>
+
+    <div class="eq-block"><span>$$V'_i \;=\; \frac{\phi(Q_i)^{\top}\sum_{j=1}^{L}\phi(K_j)\,V_j^{\top}}{\phi(Q_i)^{\top}\sum_{j=1}^{L}\phi(K_j)}$$</span></div>
+
+    <p>The sums over <span>$j$</span> don't involve <span>$i$</span> at all. They can be computed once, as a small <span>$d \times d$</span> matrix, and each feature then reads that matrix with its own query. No <span>$L \times L$</span> table is ever built, and the cost falls to the order of <span>$L d^2$</span>. Only the order of multiplication changes: <span>$(\phi(Q)\phi(K)^{\top})V$</span> becomes <span>$\phi(Q)(\phi(K)^{\top}V)$</span>, the same product grouped differently. An experiment checks that grouping changes nothing and measures what it saves.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Softmax attention against the reordered linear form, as the feature count grows</span>
+      </summary>
+<pre><code>import numpy as np, time
+rng = np.random.default_rng(0)
+d = 8                                       # embedding size per feature
+phi = lambda z: np.where(z &gt; 0, z + 1, np.exp(z))      # elu(z) + 1
+
+def softmax_attn(Q, K, V):                  # builds the L x L matrix
+    S = np.exp(Q @ K.T / np.sqrt(d))
+    return (S / S.sum(1, keepdims=True)) @ V
+
+def linear_attn(Q, K, V):                   # builds a d x d matrix
+    q, k = phi(Q), phi(K)
+    return (q @ (k.T @ V)) / (q @ k.sum(0))[:, None]
+
+def explicit_linear(Q, K, V):               # same maths, L x L matrix
+    W = phi(Q) @ phi(K).T
+    return (W / W.sum(1, keepdims=True)) @ V
+
+def us(f, *a, reps=30):
+    t = time.perf_counter()
+    for _ in range(reps):
+        f(*a)
+    return (time.perf_counter() - t) / reps * 1e6
+
+Q, K, V = (rng.normal(size=(40, d)) for _ in range(3))
+gap = np.abs(linear_attn(Q, K, V) - explicit_linear(Q, K, V)).max()
+print(f"reordering changes the output by at most {gap:.1e}")
+for L in (16, 64, 256, 1024):
+    Q, K, V = (rng.normal(size=(L, d)) for _ in range(3))
+    print(f"L={L:5d}  softmax {us(softmax_attn, Q, K, V):9.1f} us"
+          f"   linear {us(linear_attn, Q, K, V):8.1f} us")</code></pre>
+      <div class="tryit-out">The reordered form matches the explicit one to <code>9.7e-17</code>, which is rounding error. At 16 features the softmax form is faster (<code>7.0 us</code> against <code>10.1 us</code>). At 64 the linear form is about twice as fast, at 256 about <code>12</code> times (<code>366.5 us</code> against <code>29.4 us</code>), and at 1,024 about <code>61</code> times (<code>6607.2 us</code> against <code>108.6 us</code>). Timings vary from run to run.</div>
+    </details>
+
+    <p>Line one confirms that building the full table and normalising it gives the same answer as the reordered form, to within rounding error. Timings show the cost curves crossing. At 16 features the table is tiny and the reordered form is slower, because it does more small steps. By 64 features the linear form is about twice as fast, at 256 about twelve times, and at 1,024 about sixty, since one grows with the square of <span>$L$</span> and the other grows with <span>$L$</span> itself. Exact numbers vary between machines. Uber's blog example uses 40 features, where the saving is modest per layer and matters when multiplied by the traffic.</p>
+
+    <p>A softmax attention and its linear form aren't the same function, though. Only the grouping of the linear version's own matrices is exact. Linear attention is a different mechanism, whose accuracy has to be checked. Uber also considered two other speed-ups from the literature, Linformer and Performer, and picked the linear transformer after experiments.</p>
+
+    <h3 id="6-1-one-bias-per-kind-of-trip">6.1 One bias per kind of trip</h3>
+
+    <p>After the interaction layer comes a fully connected layer with 2,048 units, and then a last problem. A ride and a food delivery have different distributions, and so do pickups and drop-offs, short and long trips, and different parts of the world. Uber's paper offers two ways to cope. One embeds the request type as one more feature, so that the transformer layer can learn how it interacts with the rest. Another is a <strong>calibration layer</strong>, which adds a learned bias for each request type to the output:</p>
+
+    <div class="eq-block"><span>$$\hat{r}_{ij} \;=\; f_2\big(f(X_i)\big) + b_j(\text{type}_i)$$</span></div>
+
+    <p>The residual for request <span>$i$</span> of type <span>$j$</span> is the shared network's output plus a bias that depends only on the type. It shifts the whole prediction for deliveries up or down relative to rides. That fixes the average error without needing the shared layers to carry it. Its authors say this adds "minimal latency". They also tried multi-head and mixture-of-experts structures, which would let each type have its own sub-network, "however the latency does not meet the requirement". Their ablation shows the calibration layer is worth a little: without it the mean-error improvement drops from 7.83% to 7.73%.</p>
+
+    <p>Put together, DeeprETA is the stack in the picture below: bins, embedding tables, one interaction layer and one dense layer with a bias.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">DeeprETA: a wide, shallow network
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 430" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="30" width="156" height="78" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="30" width="156" height="78" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="98.0" y="53" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CONTINUOUS</text>
+<text x="98.0" y="68" text-anchor="middle" font-size="10" class="dim">speed, distance,</text>
+<text x="98.0" y="82" text-anchor="middle" font-size="10" class="dim">routing ETA</text>
+<text x="98.0" y="96" text-anchor="middle" font-size="10" class="dim">into 256 quantile bins</text>
+<rect x="188" y="30" width="156" height="78" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="188" y="30" width="156" height="78" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="266.0" y="53" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CATEGORICAL</text>
+<text x="266.0" y="68" text-anchor="middle" font-size="10" class="dim">minute of week</text>
+<text x="266.0" y="82" text-anchor="middle" font-size="10" class="dim">(10,080 values),</text>
+<text x="266.0" y="96" text-anchor="middle" font-size="10" class="dim">region and city IDs</text>
+<rect x="356" y="30" width="164" height="78" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="356" y="30" width="164" height="78" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="438.0" y="53" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">GEOSPATIAL</text>
+<text x="438.0" y="68" text-anchor="middle" font-size="10" class="dim">origin, destination,</text>
+<text x="438.0" y="82" text-anchor="middle" font-size="10" class="dim">pair; geohash 4 to 7;</text>
+<text x="438.0" y="96" text-anchor="middle" font-size="10" class="dim">two hashes each</text>
+<rect x="532" y="30" width="148" height="78" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="532" y="30" width="148" height="78" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="606.0" y="53" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">REQUEST TYPE</text>
+<text x="606.0" y="68" text-anchor="middle" font-size="10" class="dim">pickup or drop-off,</text>
+<text x="606.0" y="82" text-anchor="middle" font-size="10" class="dim">rides or delivery</text>
+<text x="606.0" y="96" text-anchor="middle" font-size="10" class="dim">(calibration)</text>
+<path d="M98,110 L98,136" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M266,110 L266,136" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M438,110 L438,136" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="138" width="500" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="138" width="500" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="270.0" y="158" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">EMBEDDING LOOKUPS</text>
+<text x="270.0" y="173" text-anchor="middle" font-size="10" class="dim">99% of ~141 million parameters, yet an O(1) table read each</text>
+<path d="M270,184 L270,206" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="208" width="500" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="208" width="500" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="270.0" y="228" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">ONE LINEAR-TRANSFORMER LAYER</text>
+<text x="270.0" y="243" text-anchor="middle" font-size="10" class="dim">every feature looks at every other; cost grows linearly in feature count</text>
+<path d="M270,254 L270,276" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="278" width="500" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="278" width="500" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="270.0" y="298" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">FULLY CONNECTED LAYER + PER-TYPE BIAS</text>
+<text x="270.0" y="313" text-anchor="middle" font-size="10" class="dim">calibration: shifts the residual for each request type</text>
+<path d="M580,110 L580,300 L524,300" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M270,324 L270,346" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="348" width="500" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="348" width="500" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="270.0" y="368" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">RESIDUAL r</text>
+<text x="270.0" y="383" text-anchor="middle" font-size="10" class="dim">ETA = ReLU(routing ETA + r), then clamped</text>
+<text x="20" y="416" text-anchor="start" font-size="10.5" class="dim">Trained with the asymmetric Huber loss and retrained weekly.</text>
+      </svg>
+      <div class="diagram-caption">Read top to bottom. Every input becomes a discrete bin and then a short vector, one transformer layer mixes the vectors, and one dense layer with a per-request-type bias produces the residual. On the right, the request-type path skips the mixing layer and goes straight to the bias.</div>
+    </div>
+
+    <h3 id="6-2-the-comparison">6.2 How it compared</h3>
+
+    <p>Uber's blog post says the team tested seven architectures, a plain multi-layer network, NODE, TabNet, a sparsely gated mixture of experts, hypernetworks, a transformer and a linear transformer, and that an encoder-decoder with self-attention won. Table 2 of the paper compares DeeprETA with the models Uber used as baselines, each trained on the same 14 days of global data and tested on the next 7. Each number is the improvement over the routing engine's own ETA, so higher is better.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model (2022 paper, Table 2)</th><th>Mean error improvement</th><th>Median error</th><th>95th-percentile error</th></tr></thead>
+      <tbody>
+        <tr><td>XGBoost (per-region ensembles)</td><td>5.07%</td><td>1.79%</td><td>5.98%</td></tr>
+        <tr><td>ResNet, 4 blocks of 512</td><td>7.39%</td><td>6.19%</td><td>7.27%</td></tr>
+        <tr><td>HammockNet</td><td>7.58%</td><td>6.12%</td><td>7.56%</td></tr>
+        <tr><td>DeeprETANet</td><td>7.83%</td><td>6.25%</td><td>7.99%</td></tr>
+        <tr><td>&nbsp;&nbsp;without calibration layer</td><td>7.73%</td><td>6.12%</td><td>7.85%</td></tr>
+        <tr><td>&nbsp;&nbsp;without feature hashing</td><td>7.41%</td><td>5.10%</td><td>7.99%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Two things stand out. First, the median is where the neural models gain most over XGBoost: the tree ensemble improves the typical trip by only 1.79%, and every network improves it by about 6%. Second, the differences among the neural models are small, from 7.39 to 7.83 in mean error. Parameter counts explain part of this. All three networks have about 141 million parameters and more than 99% of them sit in embedding tables, with only 0.5 to 1.2 million elsewhere. Most of the gain over XGBoost seems to come from the discrete embeddings and the loss, and the choice of what sits on top of them matters at the margin. DeeprETA won because it was both slightly more accurate and, with a single shallow layer, fast enough.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Interaction layer</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Concatenate and use dense layers</td><td>Cheapest to run</td><td>Interactions found only through weights; the ResNet baseline sits here</td></tr>
+        <tr><td>Standard self-attention</td><td>Explicit pairwise interactions, "good accuracy" in Uber's tests</td><td>Quadratic in the number of features; too slow for the latency budget</td></tr>
+        <tr><td>Linear transformer</td><td>Same idea, cost linear in features</td><td>A different attention mechanism, so it has to be validated</td></tr>
+        <tr><td>Mixture of experts or multi-head decoders</td><td>Separate capacity per request type</td><td>Latency did not meet the requirement</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Uber picked the linear transformer plus a bias layer, and says the decision came from measuring both accuracy and latency. Uber's blog adds that the plan is to keep improving the dataset, features, transformations, architectures, training algorithms and loss functions. Reordering matrix products is also what linear-attention language models use to avoid the <span>$L \times L$</span> table on very long inputs. Here it's applied in the opposite regime, a short sequence of wide features.</p>
+
+    <p>So far a trip is a bag of features about its two ends, plus a routing ETA that already summarises the road in between. Google took the other route and put the road itself inside the model.</p>
+  </section>
+
+  <section id="graph">
+    <h2><span class="num">07</span>Fix 5: let traffic flow along the road graph</h2>
+
+    <p>Uber's model looks at the two ends of Farah's trip and takes the routing engine's word for what lies between them. Google's mapping team faced a different version of the problem: estimate the time along a given route as accurately as possible, and its engineers had a reason to put the road network inside the model. Google's CIKM 2021 paper gives the reason in two sentences. Travel times on a segment "may be affected by traffic conditions that are further away, or not immediately on the user track", and conditions "may have changed by the time a user traverses to a road segment further along their route". A jam that spills back from a side street slows the main road before anyone on the main road can see the cause. Rush hour starts while Farah is still on the elevated expressway.</p>
+
+    <p>Its previous design is the obvious one. It treats each road piece alone, predicts its time and adds the pieces up. Per the paper, Google's prior production models were of this kind, "segment-level linear regression models". Each prediction sees only its own segment's speeds. It can't know that the junction three pieces ahead has just filled up, because that information sits in a segment it isn't looking at.</p>
+
+    <h3 id="7-1-supersegments">7.1 Supersegments</h3>
+
+    <p>The fix is to give the model the neighbourhood. Google calls a unit of it a <strong>supersegment</strong>: a sequence of connected road segments that follow a typical traffic route. In the paper a supersegment is a graph, with each road segment a node and an edge wherever two segments connect. Road segments average 50 to 100 metres, and a supersegment averages about 20 of them, so a typical one is roughly a kilometre or two of road. DeepMind's post of September 2020 explains the choice of unit. A separate network for each supersegment would mean training millions of models, and sequence models like recurrent networks struggled to take in the structure of the road network, but sampling subgraphs lets a single model handle everything from two nodes to hundreds. Models are trained per region, so each region's model has its own vocabulary, and the paper says about 1 million predefined supersegments cover the most common routes: most freeways, major arterials and some popular shortcuts. Less busy surface streets outside those get simpler per-segment models.</p>
+
+    <p>Inputs describe both the present and the past. Each segment carries its real-time average speed and travel time for each of the 17 two-minute windows before the prediction, its historical speed and time for five eight-minute windows before the prediction moment and seven after it (averaged over the past 17 weeks), its length, and a priority, its road class such as highway. A supersegment as a whole carries its real-time travel time. Segment IDs and supersegment IDs also get learned embeddings of sizes 16 and 64. Those embeddings let the model remember habits of particular places, and the vocabulary covers 99.5% of the IDs, with the remainder spread over 200 and 20 shared out-of-vocabulary buckets.</p>
+
+    <p>Google's model also predicts into the future. A separate model is trained for each <strong>horizon</strong> <span>$h$</span>, the number of seconds from now at which the traversal begins, with horizons of 0, 600, 1,200, 1,800 and 3,600 seconds. At serving time a route is a chain of supersegments. Supersegment one is queried at horizon 0, and its predicted travel time tells you when the traveller reaches the second, and that picks the horizons to use for that one, and so on, interpolating between the two nearest horizons. Farah's airport trip, say, passes through dozens of supersegments, and the one she'll reach after 40 minutes is read from a blend of the 30-minute and 60-minute models. That is how the system anticipates the evening traffic building ahead of her.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">A supersegment as a graph, and what message passing does to it
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 288" xmlns="http://www.w3.org/2000/svg">
+<line x1="80" y1="86" x2="132" y2="86" stroke="#8a8a99" stroke-width="1.6"/>
+<line x1="172" y1="86" x2="224" y2="86" stroke="#8a8a99" stroke-width="1.6"/>
+<line x1="264" y1="86" x2="316" y2="86" stroke="#8a8a99" stroke-width="1.6"/>
+<line x1="356" y1="86" x2="408" y2="86" stroke="#8a8a99" stroke-width="1.6"/>
+<line x1="448" y1="86" x2="500" y2="86" stroke="#8a8a99" stroke-width="1.6"/>
+<line x1="540" y1="86" x2="592" y2="86" stroke="#8a8a99" stroke-width="1.6"/>
+<circle cx="60" cy="86" r="20" fill="#818cf8" opacity="0.14"/>
+<circle cx="60" cy="86" r="20" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="60" y="90" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">s1</text>
+<circle cx="152" cy="86" r="20" fill="#818cf8" opacity="0.14"/>
+<circle cx="152" cy="86" r="20" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="152" y="90" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">s2</text>
+<circle cx="244" cy="86" r="20" fill="#818cf8" opacity="0.14"/>
+<circle cx="244" cy="86" r="20" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="244" y="90" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">s3</text>
+<circle cx="336" cy="86" r="20" fill="#818cf8" opacity="0.14"/>
+<circle cx="336" cy="86" r="20" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="336" y="90" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">s4</text>
+<circle cx="428" cy="86" r="20" fill="#f472b6" opacity="0.30"/>
+<circle cx="428" cy="86" r="20" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="428" y="90" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">s5</text>
+<circle cx="520" cy="86" r="20" fill="#818cf8" opacity="0.14"/>
+<circle cx="520" cy="86" r="20" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="520" y="90" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">s6</text>
+<circle cx="612" cy="86" r="20" fill="#818cf8" opacity="0.14"/>
+<circle cx="612" cy="86" r="20" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="612" y="90" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">s7</text>
+<text x="428" y="124" text-anchor="middle" font-size="10.5" class="" fill="#f472b6">jam</text>
+<path d="M410,62 Q382.0,32 350,62" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M446,62 Q474.0,32 506,62" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="336" y="28" text-anchor="middle" font-size="10" class="dim">round 1</text>
+<text x="520" y="28" text-anchor="middle" font-size="10" class="dim">round 1</text>
+<text x="20" y="150" text-anchor="start" font-size="10.5" class="dim">Each node, every round, mixes its own state with messages from its neighbours.</text>
+<text x="20" y="166" text-anchor="start" font-size="10.5" class="dim">After two rounds s3 and s7 know about the jam.</text>
+<rect x="20" y="178" width="200" height="62" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="178" width="200" height="62" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="120.0" y="200" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">ENCODER</text>
+<text x="120.0" y="215" text-anchor="middle" font-size="10" class="dim">raw speeds and times,</text>
+<text x="120.0" y="229" text-anchor="middle" font-size="10" class="dim">segment IDs embedded</text>
+<path d="M224,209 L246,209" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="250" y="178" width="200" height="62" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="250" y="178" width="200" height="62" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="200" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">PROCESSOR, 2 ROUNDS</text>
+<text x="350.0" y="215" text-anchor="middle" font-size="10" class="dim">same weights each round</text>
+<text x="350.0" y="229" text-anchor="middle" font-size="10" class="dim">node, edge, whole route</text>
+<path d="M454,209 L476,209" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="480" y="178" width="200" height="62" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="480" y="178" width="200" height="62" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="580.0" y="200" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">DECODER</text>
+<text x="580.0" y="215" text-anchor="middle" font-size="10" class="dim">time for the whole</text>
+<text x="580.0" y="229" text-anchor="middle" font-size="10" class="dim">supersegment</text>
+<text x="20" y="270" text-anchor="start" font-size="10.5" class="dim">One model per horizon: now, +10, +20, +30 and +60 minutes. About 20 segments, 50 to 100 m each, make a supersegment.</text>
+      </svg>
+      <div class="diagram-caption">Top row: seven road segments in a line, with congestion on s5. Arrows show how that fact travels to its neighbours in each round. Bottom row: the encode, process and decode steps the Google Maps model uses.</div>
+    </div>
+
+    <h3 id="7-2-message-passing">7.2 Message passing, step by step</h3>
+
+    <p>The network that reads a supersegment is a <strong>graph neural network</strong> (GNN), built from what the paper calls Graph Network blocks. Chapter 18 introduced the central idea, <strong>message passing</strong>: every node updates its own state from messages sent by its neighbours, and doing it repeatedly lets information travel. A block has three update functions, one each for edges, nodes and the whole supersegment, and three aggregation functions that sum things up:</p>
+
+    <div class="eq-block"><span>$$e'_k=\phi_e(e_k, v_{s_k}, v_{t_k}, u),\qquad v'_i=\phi_v(\bar{e}'_i, v_i, u),\qquad u'=\phi_u(\bar{e}', \bar{v}', u)$$</span></div>
+
+    <p>Read the three updates in order. An edge <span>$k$</span> joins a source node <span>$s_k$</span> to a target node <span>$t_k$</span>, and its new state <span>$e'_k$</span> is computed from its old state, its two end nodes and the supersegment's global state <span>$u$</span>. A node's new state <span>$v'_i$</span> comes from <span>$\bar{e}'_i$</span>, the sum of the new states of all edges touching it, plus its own old state and <span>$u$</span>. Last of all, the global state is updated from the sums of all new edge and node states. In the paper the three <span>$\phi$</span> functions are small multilayer perceptrons and the aggregations <span>$\rho$</span> are plain sums.</p>
+
+    <p>Google's model chains three of these blocks in an <strong>encode, process, decode</strong> pattern. First, the encoder turns raw speeds and IDs into latent states for every node, edge and the supersegment. Then the processor, a block applied twice with the same weights, lets neighbours exchange messages. Finally the decoder turns the final states into predictions: a travel time for the whole supersegment, a time for each segment, and a cumulative time up to each segment. In production the paper uses only the supersegment-level output, because "summing the individual segment predictions … can lead to an accumulation of error". Segment-level outputs still earn their keep as extra training signals, as section 08 shows.</p>
+
+    <p>How far can a fact travel? Take a toy chain of seven segments with a jam on the fifth, and let each round add half of every neighbour's state to a segment's own. After one round the two neighbours carry 50% of the jam's strength. After two rounds the segments two steps away carry about 17%, after three rounds about 5%, and the signal shrinks with every step. In the real model the global state <span>$u$</span> shortens the distances, because it collects every node and edge and hands the summary back to all of them in the next round, so after one block every segment of a 20-segment supersegment has heard something about every other. Toy numbers are only an illustration of the mechanism.</p>
+
+    <p>Google also tried feeding the model more neighbours. An <strong>extended supersegment</strong> adds off-route segments that connect to the route, so the average graph grows from about 20 segments to between roughly 96 and 237 in the paper's four cities. With an added binary feature marking which segments are on the route, offline error fell by 0.01 to 0.29 RMSE, at the cost of more storage, slower training and slower inference. Google presents this as an extension that suits cases where those costs aren't a concern, and not as part of the launched model.</p>
+
+    <h3 id="7-3-what-it-bought">7.3 What it bought</h3>
+
+    <p>The paper evaluates on four regions, New York, Los Angeles, Tokyo and Singapore, using training data from January 2020 and reporting root mean squared error in seconds. Its Table 2 shows how the pieces trade off. For New York, with the prediction made for now (horizon 0) and for an hour ahead (horizon 3,600), the errors were:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>New York, offline RMSE in seconds (2021 paper, Table 2)</th><th>Horizon 0</th><th>Horizon 3,600</th></tr></thead>
+      <tbody>
+        <tr><td>Sum of real-time speeds</td><td>42.31</td><td>69.60</td></tr>
+        <tr><td>Sum of historical speeds</td><td>48.03</td><td>51.80</td></tr>
+        <tr><td>DeepSets (a bag of segments, no graph)</td><td>37.33</td><td>46.68</td></tr>
+        <tr><td>Graph network</td><td>36.84</td><td>46.55</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The table holds three lessons. Live speeds win now and history wins an hour out, exactly as in section 02, and any learned model that sees both beats either. Moving from the two data-only baselines to a learned bag of segments is a large step, about 5 seconds at horizon 0 and 5 to 23 seconds at the hour horizon. Moving from the bag of segments to the graph is a small step: the paper reports that the graph network beat DeepSets by between 0.12 and 0.77 RMSE across regions and horizons, a significant margin by a t-test over five seeds but modest in size. Its authors note that these are errors over single supersegments, and that they accumulate over a whole route.</p>
+
+    <p>In production, the comparison that Google reports is against its previous system, which didn't use the graph at all. Google's paper defines a <strong>negative ETA outcome</strong> as a case where the error against the observed duration is over some threshold, and doesn't publish the threshold. Deployed worldwide, the graph model cut negative outcomes by more than 40% in cities such as Sydney. DeepMind's September 2020 post gives improvements of up to 50% in Berlin, Jakarta, São Paulo, Sydney, Tokyo and Washington, with a range from 16% in London and Copenhagen to 51% in Taichung City. Google's online experiment, which measures the error of whole-route travel times over a week in January 2021, shows the same ordering as the offline one: for New York the graph network scored 118.63 seconds against 119.76 for DeepSets, 130.05 for real-time sums and 154.83 for historical sums.</p>
+
+    <p>These numbers look inconsistent until you notice what each compares. That small gap to DeepSets is against a strong, already-learned baseline. Meanwhile the big reduction in negative outcomes is against what was in production, a segment-level linear model, and it counts a different quantity, bad errors beyond a threshold, and that can fall steeply when typical error falls modestly. The paper's 40-plus figure for Sydney and the blog's "up to 50%" probably come from different measurement windows or thresholds, and neither source says which. Both are real, and they answer different questions.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to model the road between the ends</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Sum of per-segment models</td><td>Simple, cheap, easy to explain</td><td>Each piece is blind to its neighbours; errors add up</td></tr>
+        <tr><td>Bag of segments (DeepSets)</td><td>Learns from many segments at once</td><td>Ignores how segments connect</td></tr>
+        <tr><td>Graph network on supersegments</td><td>Traffic on neighbours reaches each segment; one model for all route shapes</td><td>Training instability, need to cache outputs, only ~1 million supersegments covered</td></tr>
+        <tr><td>Graph network on extended supersegments</td><td>Sees congestion on connecting roads</td><td>Graphs 5 to 10 times larger; more storage and slower inference</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Google chose the third row and reports it as deployed: its blog gave the gains in September 2020 and its paper describes online tests in late 2020 and January 2021. Uber and Google solve complementary problems. Uber's model post-processes a route estimate and has no road graph inside it, while Google's model is the graph and produces road times. Nothing in the sources says either company combines them. In principle, times from a graph model could supply a routing engine's edge weights, with a learned correction on top. That is design reasoning, not a published system.</p>
+
+    <p>Graph networks have been deployed at scale elsewhere. Google's paper lists Pinterest and Amazon for recommendations, Alibaba for e-commerce, Snapchat for friend ranking and Baidu Maps for traffic predictions. In each case the data is a graph, and the useful signal comes from what neighbours know.</p>
+
+    <h4 class="why">Why not predict each segment and add them up?</h4>
+
+    <p>Each prediction has an error, and the errors of consecutive segments add up along the route. Google's paper says as much when it explains why production uses the supersegment's own output and not the sum of its segments. A model that predicts the whole stretch at once can be wrong by one number, not twenty.</p>
+  </section>
+
+  <section id="training-gnn">
+    <h2><span class="num">08</span>Making the graph model safe to ship</h2>
+
+    <p>The architecture was only half of Google's work. Google's paper is direct about the other half: "The primary bottleneck to deploying was the high variability of models during training." A model saved at one point in training could give noticeably different ETAs from a model saved a few thousand steps later, and "models saved at different points of training will result in different end user experiences". One day's model might be a little worse in Sydney than the day before's. DeepMind's post adds a cause. Training batches mix tiny graphs of two nodes with graphs of over a hundred, so the size of the gradient swings from step to step and the model is "highly sensitive to the training curriculum".</p>
+
+    <h3 id="8-1-a-loss-with-three-parts">8.1 A loss with three parts</h3>
+
+    <p>The first stabiliser is the loss, which combines three terms for each horizon:</p>
+
+    <div class="eq-block"><span>$$L = \ell_{ss} + \lambda_s\,\ell_s + \lambda_{sc}\,\ell_{sc}, \qquad \ell_{ss} = \sum_{i}\frac{1}{\max\{f^{(i)},1\}^{0.75}}\;\mathcal{L}_{\delta}\big(y^{(i)},\hat{y}^{(i)}\big)$$</span></div>
+
+    <p>Here <span>$\ell_{ss}$</span> is the supersegment-level error, <span>$\ell_s$</span> is the same kind of error summed over every segment, and <span>$\ell_{sc}$</span> is the error of the cumulative time up to each segment, with weights <span>$\lambda_s = 1$</span> and <span>$\lambda_{sc} = 0.15$</span>. Each term uses a Huber loss <span>$\mathcal{L}_\delta$</span> with <span>$\delta = 400$</span>, the same robust shape as in section 04 and this time symmetric. Each example is divided by its free-flow time <span>$f$</span> raised to the power 0.75, where free-flow time is how long the stretch would take with little or no traffic. A long stretch has large raw errors, and the division keeps long supersegments from dominating the sum while still giving them some extra influence. Google notes that the per-segment term is much less affected by length than the per-supersegment term, and that is why both are kept. Extra segment-level terms are there because, in the authors' words, "good segment-level travel time prediction helps the final performance", even though only the supersegment output is served.</p>
+
+    <h3 id="8-2-a-learning-rate-that-tunes-itself">8.2 A learning rate that tunes itself</h3>
+
+    <p>The learning rate, the size of each update step, is the second. A fixed rate that is right early in training is too big late, and a decay schedule has to be chosen by hand. DeepMind's post says exponential decay and ensembling were tried first and that the best result came from <strong>MetaGradients</strong>, which let the system learn its own schedule. Borrowed from reinforcement learning, the idea is to treat the learning rate <span>$\eta$</span> as a parameter and improve it by gradient descent too. Take a step with the current <span>$\eta$</span>, look at the loss on a fresh example after the step, and nudge <span>$\eta$</span> in the direction that would have made that loss lower. Google writes the update as</p>
+
+    <div class="eq-block"><span>$$\frac{\partial L(\tau',\theta',\eta')}{\partial \eta} \;=\; \frac{\partial L(\tau',\theta',\eta')}{\partial \theta'}\;\frac{\partial \theta'}{\partial \eta}$$</span></div>
+
+    <p>where <span>$\tau'$</span> is the new example, <span>$\theta'$</span> the parameters after the step, and the second factor says how much the parameters moved because of <span>$\eta$</span>. It uses a meta learning rate of 0.01, updates every 100 iterations, and combines the method with Adam. What it reports is that MetaGradients "consistently decays the learning rate over time, which ensures stable training", and the paper's figure shows lower variance across seeds with it.</p>
+
+    <p>A third stabiliser is an <strong>exponential moving average</strong> (EMA) of the weights, used for evaluation and serving: <span>$\theta_{\text{EMA}} \leftarrow \alpha\,\theta_{\text{EMA}} + (1-\alpha)\,\theta$</span> with <span>$\alpha = 0.99$</span>. This is a running average that weights recent parameters most, with an effective window of about <span>$1/(1-\alpha) = 100$</span> steps, so jitter between neighbouring checkpoints cancels. Google's figure shows that both EMA and MetaGradients lower variance within a run and across runs, which it calls "critical for inference in production".</p>
+
+    <h3 id="8-3-extras-that-were-not-shipped">8.3 What was tried and not shipped</h3>
+
+    <p>The paper is open about experiments that helped offline and weren't launched. Two unsupervised auxiliary losses, deep graph infomax and a graph auto-encoder, lowered RMSE by 0.05 to 0.23, but the best variant differed per region and horizon, so tuning it everywhere would be expensive, and "the potential performance improvements were not deemed significant enough for the additional costs". Replacing the sum aggregation with other combinations, such as min, max, mean and a square-root-normalised sum, gained up to 0.34 RMSE depending on region and horizon, again with no single winner, so using all of them at once is suggested as "a reasonable preference" for future work. Learnable segment and supersegment embeddings helped a little, for example a New York horizon-0 error of 36.87 with both against 37.55 without.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Stabilising training</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Fixed learning rate</td><td>Nothing to tune</td><td>Saved models differ run to run and step to step</td></tr>
+        <tr><td>Hand-set exponential decay, ensembles</td><td>Standard and predictable</td><td>Schedule chosen by hand; ensembles cost serving compute. Tried first, according to the DeepMind post</td></tr>
+        <tr><td>MetaGradients plus an EMA of the weights</td><td>The schedule is learned; variance across seeds and checkpoints drops</td><td>Extra machinery and hyperparameters (meta learning rate, update frequency)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Google chose the third row, and the paper calls both devices "a necessary addition to make the GNNs production-ready". Averaging weights in time appears widely, from classical Polyak averaging to image-generation models that serve an EMA copy of their weights, and the meta-gradient idea came from a reinforcement learning paper, Xu et al., as the GNN paper cites it. Any model that millions of people feel directly teaches the same lesson: how stable it is across retraining matters nearly as much as how accurate it is on average.</p>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">09</span>Serving: a few milliseconds, billions of times</h2>
+
+    <p>A model that wins on a test set still has to answer while Farah's screen is waiting. Each company published a different answer to the same constraint, and the difference is instructive. Uber runs its model inside the request. Google runs its model ahead of time and lets the request read the result.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">Two ways to meet a millisecond budget
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 294" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="26" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">UBER-STYLE: post-process a routing ETA, per request</text>
+<rect x="20" y="38" width="110" height="66" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="38" width="110" height="66" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="75.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">APP</text>
+<text x="75.0" y="77" text-anchor="middle" font-size="10" class="dim">Farah taps</text>
+<text x="75.0" y="91" text-anchor="middle" font-size="10" class="dim">Request</text>
+<path d="M134,71 L152,71" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="156" y="38" width="120" height="66" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="156" y="38" width="120" height="66" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="216.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">ROUTE SERVICE</text>
+<text x="216.0" y="77" text-anchor="middle" font-size="10" class="dim">asks the</text>
+<text x="216.0" y="91" text-anchor="middle" font-size="10" class="dim">routing engine</text>
+<path d="M280,71 L298,71" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="302" y="38" width="130" height="66" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="302" y="38" width="130" height="66" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="367.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">ROUTING ENGINE</text>
+<text x="367.0" y="77" text-anchor="middle" font-size="10" class="dim">graph + traffic</text>
+<text x="367.0" y="91" text-anchor="middle" font-size="10" class="dim">single-digit ms (2015)</text>
+<path d="M436,71 L454,71" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="458" y="38" width="222" height="66" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="458" y="38" width="222" height="66" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="569.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">ONLINE PREDICTION</text>
+<text x="569.0" y="77" text-anchor="middle" font-size="10" class="dim">feature bins, embeddings, 1 layer</text>
+<text x="569.0" y="91" text-anchor="middle" font-size="10" class="dim">median 3.25 ms, p95 4 ms</text>
+<text x="20" y="132" text-anchor="start" font-size="10.5" class="dim">Hosts with 4 cores each. That latency figure is for the model's step; end-to-end latency is unpublished.</text>
+<text x="20" y="172" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">GOOGLE-STYLE: predict ahead of time, look up per request</text>
+<rect x="20" y="184" width="190" height="66" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="184" width="190" height="66" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="115.0" y="208" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">GNN, OFFLINE LOOP</text>
+<text x="115.0" y="223" text-anchor="middle" font-size="10" class="dim">~1 million supersegments</text>
+<text x="115.0" y="237" text-anchor="middle" font-size="10" class="dim">x 5 horizons, refreshed</text>
+<path d="M214,217 L236,217" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="240" y="184" width="200" height="66" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="240" y="184" width="200" height="66" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="340.0" y="208" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">SHARED LOOKUP TABLE</text>
+<text x="340.0" y="223" text-anchor="middle" font-size="10" class="dim">fresh time per supersegment</text>
+<text x="340.0" y="237" text-anchor="middle" font-size="10" class="dim">per horizon</text>
+<path d="M444,217 L466,217" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="470" y="184" width="210" height="66" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="470" y="184" width="210" height="66" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="575.0" y="208" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">PER REQUEST</text>
+<text x="575.0" y="223" text-anchor="middle" font-size="10" class="dim">fetch, then interpolate</text>
+<text x="575.0" y="237" text-anchor="middle" font-size="10" class="dim">between horizons</text>
+<text x="20" y="278" text-anchor="start" font-size="10.5" class="dim">Refresh every 15 s was tested; no measurable loss in quality up to every 2 minutes.</text>
+      </svg>
+      <div class="diagram-caption">Top: the model runs inside the request, so it has to be shallow and its tables have to be fast to read. Bottom: the expensive model runs ahead of time and each request only reads its output.</div>
+    </div>
+
+    <p>Uber's 2022 blog post describes the path of one request. A consumer's request reaches a service called uRoute, which asks the routing engine for the route and its ETA. uRoute then sends that ETA, with the other features, to the Michelangelo online prediction service, Uber's platform for serving models, which returns the DeepETA prediction. In the paper's online test the model's step ran in production with a median latency of 3.25 milliseconds and a 95th percentile of 4 milliseconds, stable as the request rate rose, on a fleet of hosts with four cores each. Uber's blog says the prediction is made to complete in "a few milliseconds at most". End-to-end latency of the whole ETA request isn't published.</p>
+
+    <p>Here is Farah's pickup estimate walked through, with what is known about each step.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Request</span><span>Her app sends the pickup point, the airport and the time. Latency of the network hop and the front-end services isn't published.</span></li>
+      <li><span class="st-lane">Route</span><span>The routing engine finds the best path on the road graph with current speeds and returns its time, the RE-ETA. Uber's 2015 post said its routing engine answered in single-digit milliseconds at hundreds of thousands of requests a second. That figure is for the engine, seven years before the 2022 system.</span></li>
+      <li><span class="st-lane">Features</span><span>The request is turned into bins: minute of week, speed quantile, geohash cells at four resolutions each hashed twice, trip and request type. Uber's paper treats bin lookups as constant time and doesn't publish the cost of feature assembly.</span></li>
+      <li><span class="st-lane">Predict</span><span>The model reads its embedding rows, runs one linear transformer layer and one dense layer, and adds the bias for the request type. Measured latency is 3.25 ms median and 4 ms at the 95th percentile.</span></li>
+      <li><span class="st-lane">Add</span><span>The residual is added to the routing ETA, passed through the ReLU and clamped. Farah's 9.0 plus 2.5 becomes the 11.5 minutes the app could show. Numbers are illustrative.</span></li>
+      <li><span class="st-lane">Use</span><span>The same prediction machinery can produce several ETAs for different callers. Uber's blog says DeepETA can output multiple ETAs tailored to each consumer, for instance a mean for fares and a lateness-averse figure for a rider screen, and the paper makes the same case for per-consumer estimates.</span></li>
+      <li><span class="st-lane">Log</span><span>The features and the routing ETA are logged, and when the trip finishes its real duration is attached. That pair is a training example.</span></li>
+    </ol>
+
+    <p>Why did Uber make the model so shallow? A look at the latency budget gives the answer. Time per request is the sum of everything above, the budget is a few milliseconds, and the only part under the model team's control is the model. Embedding lookups cost almost nothing, so most parameters go there. One attention layer is affordable only in its linear form. Mixture-of-experts and multi-head decoders would have added capacity, and they were rejected because "the latency does not meet the requirement". Every design choice in sections 05 and 06 is a way of buying accuracy without spending milliseconds.</p>
+
+    <h3 id="9-1-the-google-way-predict-ahead">9.1 The Google way: predict ahead and cache</h3>
+
+    <p>A graph network is too heavy to run per request. A route crosses many supersegments, and the paper says that "making predictions for these supersegments on the fly is not practical nor scalable". Google's answer is a <strong>shared lookup table</strong> that holds fresh predictions for each predefined supersegment at each of the fixed horizons, updated periodically by running the models in a loop. When a request arrives, the server fetches the numbers for the supersegments on the route and interpolates between adjacent horizons. Google tested refreshing every 15 seconds and found "no measurable regression up to a frequency of 2 minutes, indicating staleness is not an issue".</p>
+
+    <p>That tolerance saves real compute. About 1 million supersegments at 5 horizons is 5 million table entries. Refreshing every entry each 15 seconds would mean about 333,000 predictions a second, and refreshing every 2 minutes would mean about 42,000, an eight-fold reduction. This is our arithmetic from the published figures, since the paper doesn't state how many model runs a refresh needs. There are other details in the paper, such as separate real-time and historical speeds for the exact turn a supersegment follows, for busy segments where the speed distribution splits at a junction, and fallback models for segments with no supersegment or no recent data.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Where the model runs</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Heavy model per request</td><td>Freshest inputs, any route</td><td>Latency and cost scale with route length and request rate</td></tr>
+        <tr><td>Small model per request on top of a routing ETA (Uber, 2022)</td><td>Handles any origin and destination; 3 to 4 ms</td><td>Model capacity limited by the budget; needs a routing engine in the loop</td></tr>
+        <tr><td>Heavy model offline, lookup per request (Google, 2020)</td><td>Cost independent of request rate; can afford a graph network</td><td>Only predefined supersegments; staleness up to the refresh interval</td></tr>
+        <tr><td>Learned route representations queried by a small model</td><td>Fast queries</td><td>Google considered this kind of approach, CompactETA, and chose the table instead</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Each company picked the option that fit its constraint. Uber handles arbitrary pickup points with no fixed road pieces, so it runs a small model per request. Google's ETAs are built from a fixed set of common routes, so it can afford to precompute. A similar split between per-request and precomputed scoring appears in recommendation systems as the difference between ranking at request time and serving a cached candidate list, and in search as the difference between a query-time model and a precomputed index.</p>
+
+    <h4 class="why">Why is a stale supersegment prediction acceptable?</h4>
+
+    <p>Because the inputs are themselves averages over minutes. Real-time speeds come in two-minute windows and the model already predicts for horizons spaced 10 minutes or more apart. A table that is a minute out of date shifts the answer by less than the model's own noise, and the paper's test found no measurable loss up to a two-minute refresh.</p>
+  </section>
+
+  <section id="data">
+    <h2><span class="num">10</span>Training data, labels and the feedback loop</h2>
+
+    <p>A model of this kind is only as honest as its training set, and an ETA training set has some traps. Its label is the actual time of arrival, and the paper defines it by request type. For a pickup it is the time from the driver accepting the request to beginning the ride or delivery trip, and for a drop-off it is the time from the start of the trip to its end. Reading the definition for Farah's pickup, it includes the minutes the driver spends finding her by the kerb and any time she takes to get into the car. That is what the rider cares about, and it is also why handover time is part of what the model learns.</p>
+
+    <p>Uber's 2022 paper describes the data directly. It covers global ETA requests, rides and delivery, collected from September 13 to October 1, 2021. Trips with a travel time over two hours were removed as outliers. It is split sequentially, in time. Its first 14 days are the training and validation data, divided 90% and 10% in order, and the following 7 days are the test set. Training data holds about 1.4 billion requests. Splitting in time and not at random is the discipline from chapter 17: a model that will be used on tomorrow's trips must be tested on trips from after its training data, otherwise it is graded on questions it has effectively seen. Uber's paper says the models are retrained and validated weekly by an automated workflow, on two Nvidia Quadro RTX 5000 GPUs for the experiments.</p>
+
+    <p>Google's training examples come from traversal events: each example is one traversal of a supersegment, labelled with the actual time in seconds along the supersegment and each of its segments. Features for it are collected backwards in time from the traversal by the length of the horizon. A single supersegment appears in many examples. Offline numbers use January 2020 data, and the online test uses November 2020. Google notes that November 2020 could be affected by pandemic traffic patterns, so the authors chose regions where the deviation from regular traffic was smallest.</p>
+
+    <h3 id="10-1-changing-traffic">10.1 When traffic changes under the model</h3>
+
+    <p>Roads are not stationary. Both designs get the present from real-time speeds and the regular rhythm from history, and what neither can see directly is the unusual. Google's historical average runs over 17 weeks. That handles weekly rhythms and smooths away one-off events, and also means a recurring change, like a new bridge or a school term, takes weeks to be fully reflected. Uber's model retrains weekly on recent data, and that keeps up with slow drift but lags behind a sudden regime change. Uber's blog says continuous, incremental training is planned so that ETAs "use fresher data". How either company handles an event such as a stadium emptying isn't published. What the designs imply is that a stadium crowd shows up in the model only through real-time speeds, once the cars have already slowed, and through the time and place features if the same event recurs often enough to be learned.</p>
+
+    <h3 id="10-2-a-loop-in-the-labels">10.2 A loop in the labels</h3>
+
+    <p>One more problem is built into how ETA data are collected, and neither company has published on it, so what follows is our reasoning from the structure of the system. Labels exist only for trips that happened. When a rider requests a car, the matching step computes ETAs for several candidate drivers and, roughly speaking, favours the ones with short predicted arrival times. Only the chosen driver's real arrival time is ever observed. If the model's predictions have some random error, then choosing the driver with the lowest predictions picks, more often than chance, a driver whose ETA was too optimistic. Logged trips are therefore probably a slightly biased sample, with the model's optimistic mistakes over-represented, and a model trained on them is trained on a world its predecessors helped shape. A similar pattern appears in section 10 of the YouTube case study as a feedback loop in recommendations.</p>
+
+    <p>Nothing in the sources says how Uber or Google counters this. Standard remedies, which the papers don't claim, include logging the ETAs of unchosen candidates, adding randomness to which driver is chosen so that some trips are unselected-by-ETA, and weighting examples by the probability they were chosen. An ETA model is also part of its own environment in a milder way: the minutes a rider sees influence whether she requests the car and which option she picks, and so shape the future requests the model is asked about.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How the model is refreshed</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Retrain from scratch weekly (Uber, 2022)</td><td>Simple to validate and roll back; a clean test every time</td><td>Up to a week behind a sudden change</td></tr>
+        <tr><td>Continuous incremental training (planned, per the 2022 blog)</td><td>Fresher data in the model</td><td>Harder to validate and to keep stable; every checkpoint is live</td></tr>
+        <tr><td>Separate models per region, with their own vocabularies (Google, 2021)</td><td>Local driving behaviour; regions retrain independently</td><td>Many models to run; small regions have little data</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Uber's published practice in 2022 was the first row, with the second named as future work. Google's choice of per-region models appears in both its blog and its paper. Whichever way the model is refreshed, the habit that protects it is the one the whole chapter has leaned on: judge every change against held-out trips from after the training window, and against live traffic, which is the subject of the next section.</p>
+  </section>
+
+  <section id="evaluation">
+    <h2><span class="num">11</span>How anyone knows an ETA got better</h2>
+
+    <p>Every change in the last seven sections was a bet that Farah's estimate would improve, and the bet has to be checked with numbers that mean something. Published practice has two layers. Offline, you replay held-out trips and measure error. Online, you run the new model against real traffic before it is trusted.</p>
+
+    <h3 id="11-1-the-offline-metrics">11.1 The offline metrics</h3>
+
+    <p>Uber's paper measures three things on trips from after the training window. First is the <strong>mean absolute error</strong> (MAE), the average of <span>$|y-\hat{y}|$</span> over trips, and it describes the typical miss. Second is the <strong>median absolute error</strong>, also called p50, which is the miss that half the trips beat. Third is the <strong>95th-percentile absolute error</strong>, p95, the size of the miss that only 5% of trips exceed, and it describes the <strong>tail</strong>. All three are reported as a relative improvement over the routing engine's own error:</p>
+
+    <div class="eq-block"><span>$$\text{improvement}_{\text{MAE}} \;=\; \frac{\tfrac1n\sum_i |y_i-\hat{y}^{0}_i| \;-\; \tfrac1n\sum_i |y_i-\hat{y}_i|}{\tfrac1n\sum_i |y_i-\hat{y}^{0}_i|}$$</span></div>
+
+    <p>The numerator is how many seconds of average error the model removed, and the denominator is the routing engine's average error, so a result of 7.83% means the model removed that share of the routing engine's error. P50 and p95 versions are computed the same way. Google's paper reports root mean squared error, <span>$\sqrt{\tfrac1N\sum_i (y_i-\hat{y}_i)^2}$</span>, in seconds, and says MAE shows similar results. It uses RMSE for its decisions about which architectures go to online tests. Squaring makes large misses count more, and that matches Google's interest in avoiding badly wrong routes.</p>
+
+    <p>Neither paper reports a metric that is popular in other ETA write-ups, <strong>MAPE</strong>, the mean absolute percentage error, which divides each miss by the true time. It has a trap for ETA. A pickup that takes 2 minutes and is predicted at 1 minute is a 50% error, while a 60-minute trip predicted at 54 is a 10% error, although the second is a bigger problem for the person waiting. Short trips have small denominators and dominate the average. That's a reason to report absolute errors and to report them by trip length, and a reason to treat a percentage as a summary and never as the target.</p>
+
+    <h3 id="11-2-slices-and-the-tail">11.2 Slices and the tail</h3>
+
+    <p>An average over all trips can hide a lot, so both papers report by slice. Uber splits by request type. Its Table 3 reports the improvement in mean error, median error and 95th-percentile error for each kind of trip:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>DeeprETANet, offline (2022 paper, Table 3)</th><th>Mean error</th><th>Median error</th><th>95th percentile</th></tr></thead>
+      <tbody>
+        <tr><td>Delivery requests</td><td>7.46%</td><td>2.26%</td><td>11.05%</td></tr>
+        <tr><td>Ride requests</td><td>7.86%</td><td>6.25%</td><td>7.62%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The slices differ in an informative way. For rides, the typical trip improved much more than for deliveries (6.25% against 2.26%), and for deliveries the tail improved most (11.05%). In the paper's phrasing, rides have "significantly lower p50 error" and deliveries "significantly lower p95 error". Split by city, in the paper's Table 6, the numbers show where the gains were and weren't. DeeprETANet's mean-error improvement over the routing ETA was 7.20% in New York, 6.80% in Los Angeles, 6.60% in Mexico City and 4.80% in London, where the XGBoost ensembles managed only 1.39%. Training counts differ: London had 102.8 million ride and 18.3 million delivery requests in the data, Mexico City 180.4 million and 16.1 million. Without slices, none of these differences would show.</p>
+
+    <p>Two cautions follow from earlier sections. First, our asymmetric loss pushes predictions later on purpose, so absolute-error metrics, which treat early and late alike, can't tell whether the model is doing what it was asked. A complete check would also report the signed error and the share of trips that run later than the ETA. Neither paper prints that share, so we can't say what Uber's value is. Second, the hashing result in section 05 showed that a change can improve the median and leave the 95th percentile alone, so the tail has to be watched on its own.</p>
+
+    <h3 id="11-3-the-online-test">11.3 The online test</h3>
+
+    <p>The offline split has a limit that section 10 explained. It judges the model on trips that happened under the old system. Uber's paper therefore ran <strong>online shadow experiments</strong>: for two weeks the new model ran on live requests across the world, its predictions were recorded, and they were compared with the actual arrival times alongside the production model's, with nothing shown to riders or drivers. A shadow test keeps the matching loop from section 10.2 out of the measurement. Launch required beating the online XGBoost on mean, median and 95th-percentile error across mega-regions, Uber's term for its large geographic regions. Aggregated over several launches, Table 7 of the paper reports these improvements over production XGBoost:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>DeeprETANet vs production XGBoost, online (2022 paper, Table 7)</th><th>Mean error</th><th>Median error</th><th>95th percentile</th></tr></thead>
+      <tbody>
+        <tr><td>Delivery requests</td><td>2.91%</td><td>4.74%</td><td>3.92%</td></tr>
+        <tr><td>Ride requests</td><td>2.66%</td><td>4.15%</td><td>3.23%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Offline, DeeprETANet beat the routing ETA by 7.83% and XGBoost by 5.07%, a gap of about 2.8 percentage points. Online, the improvement over XGBoost was 2.7 to 2.9% in mean error. Units differ, since one is relative to the routing engine's error and the other to XGBoost's, so we shouldn't equate them, but the two are roughly the same size and the same sign, and that is what a good offline test should deliver. Google's online comparison, in the same spirit, measured whole-route travel times over a week in January 2021 and found the graph model ahead of every baseline in all four regions. Experiments on the marketplace itself, such as whether better ETAs change cancellations or matching quality, aren't published in the sources we read. Uber's only statement of value is that low single-digit percentage gains in ETA error "unlock tens of millions of dollars" a year.</p>
+
+    <h4 class="why">Why report improvement over the routing engine and not seconds of error?</h4>
+
+    <p>Absolute errors depend on what trips are in the sample, since a market of airport runs has bigger misses than one of three-minute hops, so seconds can't be compared across cities or months. A ratio against a fixed baseline can. Uber's absolute errors aren't printed at all, and the relative form is what the papers share.</p>
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">12</span>What went wrong, and what it cost</h2>
+
+    <p>Neither company has published a post-mortem of an ETA failure, so we can't tell a story of an outage. Each probably has internal incident reviews, but none appear in the sources. What the sources do contain is a series of dead ends and compromises, and each one shaped the final design.</p>
+
+    <p>Earliest is Goldeta's cold start. Uber's first ETA system, which adjusted open-source routing with the company's own trips, did worse in new cities than in old ones, because a city with no history had nothing to learn from. Uber's 2015 post says the response was its own routing engine and a historical traffic system fed by driver phones, launched in April 2015, and it reports that rush-hour commutes were the least predictable trips even afterwards. Uber's 2022 design answers cold start in another way, by training one global model on global data, with country, region and city identifiers as features, so a small city shares what the model learned elsewhere.</p>
+
+    <p>Next was the scaling wall of the tree ensembles. Uber's blog says the team contributed improvements to the open-source XGBoost library so that its trees could grow deeper, creating one of the largest ensembles in the world at the time, and then found that scaling it further was "untenable". That cost a rebuild on a different model family, with the loss, the embeddings and the serving path all redone.</p>
+
+    <p>DeepETA's own paper lists compromises that the numbers make visible. Log-transforming the target tames skew but "results in some extreme values" on the way back, so the team designed a new loss in place of the standard fix. Mixture-of-experts and multi-head decoders would have captured the differences between ride and delivery better, and they "did not meet the latency requirement", so a single bias per request type stayed. Hashing improved the median and left the 95th-percentile error unchanged. And the whole approach was tested only on Uber's own routing engine, which the authors name as a limitation.</p>
+
+    <p>Google's list is similar in spirit. Training variance was the main obstacle to deploying, and it took MetaGradients and the weight average to fix. Several offline improvements, such as extended supersegments, unsupervised auxiliary losses and richer aggregators, were not launched, because they depended on region and horizon or cost more than they returned. Coverage is partial: about a million predefined supersegments cover freeways, arterials and popular shortcuts, and quieter streets fall back to simpler per-segment models. Gains were also uneven, from 16% in London and Copenhagen to 51% in Taichung City according to the DeepMind post. It doesn't say what explains the spread.</p>
+
+    <p>Only one cost figure appears in either source, Uber's: error reduced by low single-digit percentages is worth tens of millions of dollars a year. At that price, a rebuild that shaves a few percent off the error is worth years of work, and it explains why so much of the engineering effort in the papers goes into avoiding small regressions.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What happens</th><th>What Farah sees</th><th>What the design does</th><th>Source</th></tr></thead>
+      <tbody>
+        <tr><td>A road segment has no recent speeds</td><td>Nothing unusual</td><td>Fallback models cover segments without real-time or historical inputs</td><td>Google paper (published)</td></tr>
+        <tr><td>An accident or closure appears in live speeds</td><td>A longer, honest ETA</td><td>Real-time speed features and the routing engine's traffic weights carry it</td><td>Both papers (published)</td></tr>
+        <tr><td>An event no feature has seen</td><td>An ETA that is too short and then wrong</td><td>Only real-time speeds help once cars slow; weekly retraining is slower than the event</td><td>Our reasoning from the design</td></tr>
+        <tr><td>A very long trip over two hours</td><td>An unreliable ETA</td><td>Such trips were removed from Uber's training data</td><td>Uber paper (published)</td></tr>
+        <tr><td>A saved model differs from the last one</td><td>An ETA that shifts for no reason</td><td>MetaGradients and EMA reduce variance across checkpoints</td><td>Google paper (published)</td></tr>
+        <tr><td>A cached supersegment table is stale</td><td>Usually nothing</td><td>Tested up to a two-minute refresh with no measurable loss</td><td>Google paper (published)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h4 class="why">Why not add a safety margin to the ETA afterwards instead of changing the loss?</h4>
+
+    <p>A fixed margin shifts every ETA by the same amount, but the right shift varies. A short pickup in a quiet street has a tight spread and needs almost no padding, and a long trip through a bottleneck has a wide spread and needs a lot. A lopsided loss lets the model learn how much padding each situation wants, because the best prediction under that loss is a quantile of that situation's own distribution.</p>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">13</span>The whole system</h2>
+
+    <p>We can now draw the full design. Down the left side runs Farah's request on the online path, where the routing engine produces a baseline, the residual model corrects it and a lookup of graph-model predictions supplies segment-level times. Down the right side runs the offline loop: the trip's real duration is logged, assembled into a time-ordered training set, used to train and validate the next model, and tested against live traffic before it replaces the old one. This picture merges what the two companies published, so no single company runs exactly this diagram.</p>
+
+            <div class="diagram">
+      <div class="diagram-title">The whole design, online and offline
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 388" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">ONLINE: Farah's request, a few milliseconds of model time</text>
+<text x="440" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">OFFLINE: keeping the models current</text>
+<rect x="20" y="40" width="260" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="260" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="150.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">APP</text>
+<text x="150.0" y="73" text-anchor="middle" font-size="10" class="dim">pickup ETA, trip ETA, fare</text>
+<path d="M150,82 L150,98" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="100" width="260" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="100" width="260" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="150.0" y="120" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">ROUTING ENGINE</text>
+<text x="150.0" y="135" text-anchor="middle" font-size="10" class="dim">road graph, live and historical speeds</text>
+<path d="M150,146 L150,162" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="164" width="260" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="164" width="260" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="150.0" y="180" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">RESIDUAL MODEL</text>
+<text x="150.0" y="195" text-anchor="middle" font-size="10" class="dim">bins, embeddings, linear transformer,</text>
+<text x="150.0" y="209" text-anchor="middle" font-size="10" class="dim">calibration bias, asymmetric Huber</text>
+<path d="M150,216 L150,232" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="234" width="260" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="234" width="260" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="150.0" y="254" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SEGMENT-LEVEL LOOKUP</text>
+<text x="150.0" y="269" text-anchor="middle" font-size="10" class="dim">GNN supersegment times from a cache</text>
+<path d="M150,280 L150,296" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="298" width="260" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="298" width="260" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="150.0" y="318" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">CONSUMERS</text>
+<text x="150.0" y="333" text-anchor="middle" font-size="10" class="dim">fare: a mean; rider screen: a quantile</text>
+<rect x="440" y="40" width="240" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="440" y="40" width="240" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="560.0" y="59" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">TRIP LOGS</text>
+<text x="560.0" y="74" text-anchor="middle" font-size="10" class="dim">request features, routing ETA,</text>
+<text x="560.0" y="88" text-anchor="middle" font-size="10" class="dim">actual arrival time (ATA)</text>
+<path d="M560,98 L560,114" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="440" y="116" width="240" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="440" y="116" width="240" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="560.0" y="132" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">TRAINING SET</text>
+<text x="560.0" y="147" text-anchor="middle" font-size="10" class="dim">recent weeks, outliers over 2 h removed,</text>
+<text x="560.0" y="161" text-anchor="middle" font-size="10" class="dim">sequential train / validation / test</text>
+<path d="M560,168 L560,184" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="440" y="186" width="240" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="440" y="186" width="240" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="560.0" y="202" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAIN + VALIDATE</text>
+<text x="560.0" y="217" text-anchor="middle" font-size="10" class="dim">residual model weekly; GNN with</text>
+<text x="560.0" y="231" text-anchor="middle" font-size="10" class="dim">MetaGradients and EMA of weights</text>
+<path d="M560,238 L560,254" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="440" y="256" width="240" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="440" y="256" width="240" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="560.0" y="272" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SHADOW + ONLINE TEST</text>
+<text x="560.0" y="287" text-anchor="middle" font-size="10" class="dim">MAE, p50, p95 per region and</text>
+<text x="560.0" y="301" text-anchor="middle" font-size="10" class="dim">request type, against production</text>
+<path d="M438,284 L300,284 L300,190 L282,190" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="304" y="250" text-anchor="start" font-size="10" class="dim">promote</text>
+<path d="M282,320 L420,320 L420,68 L438,68" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="416" y="214" text-anchor="end" font-size="10" class="dim">what happened</text>
+<text x="416" y="228" text-anchor="end" font-size="10" class="dim">on the trip</text>
+<text x="20" y="372" text-anchor="start" font-size="10.5" class="dim">A trip's real duration becomes tomorrow's label, but the ETA also shaped which driver was matched.</text>
+      </svg>
+      <div class="diagram-caption">Follow the request down the left side. Then follow the trip log across the top right and down through training and testing, back into the residual model. Both companies' published parts are combined here.</div>
+    </div>
+
+    <p>That loop closes when a promoted model changes the ETA that Farah sees tomorrow, and that changes which drivers are matched and which trips are logged. Several parts of this picture are unpublished: the production values of the loss parameters, absolute error levels, how the downstream consumers use the model's outputs, how often each lookup table is refreshed in current systems, and what has changed since 2021 and 2022, the years of the two papers.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Component</th><th>What it does</th><th>Added because</th></tr></thead>
+      <tbody>
+        <tr><td>Routing engine</td><td>Shortest path on the road graph, sum of segment times</td><td>Geography is exact and free; no model should have to rediscover it (§02)</td></tr>
+        <tr><td>Residual model</td><td>Predicts how wrong the routing ETA will be</td><td>Systematic errors the graph can't see (§03)</td></tr>
+        <tr><td>Asymmetric Huber loss</td><td>Sets which number the model reports</td><td>Late costs more than early, and the tail is long (§04)</td></tr>
+        <tr><td>Bins, embeddings and double hashing</td><td>Turn features into table lookups</td><td>Shape of the response without depth, memory without collisions (§05)</td></tr>
+        <tr><td>Linear transformer and bias layer</td><td>Mix features, calibrate per request type</td><td>Interactions at linear cost; heterogeneity at almost no cost (§06)</td></tr>
+        <tr><td>Graph network on supersegments</td><td>Predicts segment-route times from neighbours' state</td><td>Traffic spills along roads; summing segments adds error (§07)</td></tr>
+        <tr><td>MetaGradients and EMA</td><td>Stabilise training</td><td>Models saved at different times gave different ETAs (§08)</td></tr>
+        <tr><td>Lookup table of predictions</td><td>Serves the graph model's outputs per request</td><td>The model is too heavy to run per request (§09)</td></tr>
+        <tr><td>Time-ordered data, weekly retraining</td><td>Keeps the models current and honestly tested</td><td>Traffic drifts; random splits leak the future (§10)</td></tr>
+        <tr><td>Shadow and online tests, sliced metrics</td><td>Judge changes on slices and the tail</td><td>Averages hide regressions in regions and request types (§11)</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">14</span>Summary</h2>
+    <ol>
+      <li><strong>An ETA is a prediction with a spread,</strong> used by fares, matching and delivery planning, and it has to be accurate, fast, general and stable at billion-requests-a-week scale.</li>
+      <li><strong>A routing engine alone is a sum of road-piece times.</strong> It can't see which route a driver takes, the minutes spent at the kerb, differences between task types, or the difference between mean and safe-side estimates.</li>
+      <li><strong>Learn the residual, not the answer.</strong> Predicting the gap between the routing ETA and the actual time (Uber, 2022) keeps the model small, because the graph already supplies the geography. In a toy test the same cells reached 87 seconds of error as a residual table and 145 from scratch.</li>
+      <li><strong>Asymmetric Huber loss encodes lateness.</strong> Huber is quadratic near zero and linear in the tails, and the weight <span>$\omega$</span> sets the best prediction to a quantile or expectile at level <span>$1-\omega$</span>, so one model can be tuned to a consumer's needs.</li>
+      <li><strong>Discretise and embed every feature.</strong> Quantile bins for continuous values, tables for categories, and geohashes at four resolutions with two independent hashes make the model wide, shallow and fast, with 99% of its parameters in lookups.</li>
+      <li><strong>Two hash functions make collisions rare.</strong> A million cells in half a million rows collide for 86.5% of cells with one hash and about 0.0004% when both must match.</li>
+      <li><strong>Linear attention fits the many-features, small-vectors case.</strong> Reordering the matrix products turns an <span>$L \times L$</span> table into a <span>$d \times d$</span> summary, and a per-type bias layer handles ride and delivery differences without a latency hit.</li>
+      <li><strong>Google puts the road graph into the model.</strong> Supersegments of about 20 connected segments, message passing, and a model per horizon let traffic on neighbours reach each segment, and the deployed model reduced negative ETA outcomes by 40% or more in cities like Sydney.</li>
+      <li><strong>Stability is a requirement.</strong> A three-part loss, MetaGradients for the learning rate and an average of the weights stopped saved models from giving different ETAs.</li>
+      <li><strong>Serving shapes the model.</strong> Uber runs a shallow model inside the request at a 3.25 ms median and 4 ms p95, and Google precomputes graph predictions and tolerates a refresh of up to two minutes.</li>
+      <li><strong>Judge by slices, the tail and live traffic.</strong> Report MAE, p50 and p95 against a routing baseline by request type and city, use shadow tests that keep the matching loop out of the measurement, and remember that labels exist only for trips that happened.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">15</span>Build this</h2>
+    <p class="lede">Each idea in this chapter is easy to nod along to and easy to get wrong. You can rebuild the whole stack at toy scale in a day with synthetic data, and watch every fix change what the model reports.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A toy ETA stack: routing, residual, asymmetric loss, graph and cache</span>
+        <span class="proj-meta">~8 hours &middot; numpy and torch</span>
+      </div>
+      <p>Build a small world where you control the truth: a 30 by 30 grid city whose edges have free-flow speeds, a congestion field that varies by area and hour, a few closures, drivers who choose slightly different routes, a handover time that differs for pickups and drop-offs, and noise. Your truth is what no real system can see, so every model can be judged against it.</p>
+      <ol class="proj-steps">
+        <li>Simulate 200,000 trips. For each, log the features, a routing ETA computed by Dijkstra on speeds that are ten minutes old, and the actual time. Report MAE, p50 and p95 of the routing ETA, overall and by trip length.</li>
+        <li>Train two models on the same binned features: one predicting the actual time, one predicting the residual with a Huber loss. Compare errors at 1,000, 10,000 and 100,000 training trips.</li>
+        <li>Add the asymmetric weight. Sweep <span>$\omega$</span> over 0.5, 0.35 and 0.2, and plot the share of trips that run late against mean error. Check that the late share lands near <span>$\omega$</span> for a small <span>$\delta$</span>.</li>
+        <li>Encode origin and destination cells with a single hash, then with two, into tables smaller than the number of cells. Measure collisions and error, and compare with exact indexing.</li>
+        <li>Add one attention layer over the feature embeddings, first softmax and then linear, and time both at batch size 1 as you add features.</li>
+        <li>Give the model the road graph: two rounds of message passing over the segments of a route, against a sum over the same segments with no edges. Make a slice where a jam sits just off the route and see which model notices it.</li>
+        <li>Cache predictions per route piece, refreshed every 15 seconds, 2 minutes and 10 minutes, and plot error against staleness.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the residual model reaches a much lower error than the from-scratch model on small data, the late share follows <span>$\omega$</span> while the median rises, two hashes collide far less than one without growing the table, linear attention overtakes softmax as features are added, message passing beats the bag of segments only on the off-route jam slice, and the staleness curve is flat for a couple of minutes before it climbs.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Add a matching step that offers each request to the three nearest drivers by predicted ETA and records only the chosen driver's real time. Train on the logged data and measure the bias section 10.2 predicts. Then try randomising 5% of the choices and see whether the bias shrinks.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">16</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why not use the routing engine's ETA directly?</summary>
+      <div class="qa-body"><p>A routing engine sums the times of road segments along one best path. It doesn't know which route the driver will take, how long finding the kerb takes, that a pickup and a restaurant drop-off behave differently on the same path, or that the fare needs a mean while a rider screen may need a safer figure. Uber's 2022 paper lists route uncertainty, human error, distribution shift and uncertainty estimation. A routing ETA is a strong starting point, and its errors are systematic enough to learn.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What does it mean to predict the residual?</summary>
+      <div class="qa-body"><p>Instead of predicting the actual time from scratch, the model predicts the difference between the actual time and the routing ETA, and the system adds it back: ETA = routing ETA + residual. Routing supplies the part that road geometry determines, and the model learns only the systematic gap for this hour, place and request type. In a toy test, tables with identical cells reached 87 seconds of error as a residual model and 145 seconds, no better than the routing ETA, from scratch. Boosting and residual networks use the same idea.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Explain the asymmetric Huber loss and what its two parameters do.</summary>
+      <div class="qa-body"><p>Huber loss is squared error for errors below <span>$\delta$</span> and linear above it, so it's smooth near zero and robust to outliers. Its asymmetric version multiplies it by <span>$\omega$</span> when the actual time is below the prediction (arrived early) and by <span>$1-\omega$</span> when it's above (arrived late). With a small <span>$\delta$</span> the best single prediction is the quantile at level <span>$1-\omega$</span>, since the fraction of trips later than it settles at <span>$\omega$</span>; with a large <span>$\delta$</span> it's an expectile. So <span>$\omega < 0.5$</span> pushes ETAs later, and <span>$\delta$</span> controls outlier robustness. Uber's 2022 paper introduced it for DeeprETA and doesn't publish production values.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why bucketize continuous features and embed them?</summary>
+      <div class="qa-body"><p>Responses to features like time of day or speed aren't smooth or monotone, and a dense network would need depth to carve the input range into regions. Uber's paper found that quantile-binning continuous features (256 bins for speed) and embedding them beat raw values, and that quantile bins beat equal-width ones, because each holds equal data and keeps the most information. An embedding lookup is constant time, so the table can be huge (99% of about 141 million parameters) without costing latency, which stays in a shallow network.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How does multiple feature hashing help with geospatial features?</summary>
+      <div class="qa-body"><p>Geohash cells, and especially origin-destination pairs, are too many for one embedding row each. A single hash into a fixed table makes unrelated cells collide: with <span>$N$</span> cells and <span>$m$</span> rows, the chance a cell shares a row is about <span>$1-e^{-N/m}$</span>, which is 86.5% for a million cells in half a million rows. Two independent hashes give each cell two rows, and a confusion needs both to match, with probability about <span>$N/m^2$</span>. Uber's network combines the two vectors, so one collision is outvoted. Uber uses MurmurHash3 with two seeds at geohash lengths 4 to 7, for origin, destination and the pair.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why did Uber use a linear transformer?</summary>
+      <div class="qa-body"><p>Self-attention over the features gives explicit pairwise interactions, but the standard form builds an <span>$L \times L$</span> table at cost of the order <span>$L^2 d$</span>. With many features and tiny vectors (size 4), that's too slow for a few-millisecond budget. A linear transformer replaces the softmax with a feature map <span>$\phi(x) = \operatorname{elu}(x)+1$</span> and regroups the products so a <span>$d \times d$</span> summary is computed once, giving cost of the order <span>$L d^2$</span>. It's a different attention mechanism, so Uber validated its accuracy, and it compared Linformer and Performer too.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Which metrics would you report for an ETA model, and how would you slice them?</summary>
+      <div class="qa-body"><p>Mean absolute error for the typical miss, median for the central trip, and a high percentile such as p95 for the tail, each as an improvement over the routing ETA so they compare across places. Add the signed error and the share of trips that run late, since absolute error can't see the asymmetry the loss was built for. Slice by request type, trip length, region and hour. Uber's paper shows why: deliveries gained 11.05% at p95 but 2.26% at the median, and London's gain was 4.8% against New York's 7.2%. Treat MAPE with suspicion, since short trips with small denominators dominate it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How does Google's supersegment GNN work, and why precompute its outputs?</summary>
+      <div class="qa-body"><p>A supersegment is a graph of about 20 connected road segments (50 to 100 m each), with per-segment real-time and historical speeds. A Graph Network encodes it, runs two rounds of message passing with shared weights, and decodes a travel time for the whole supersegment, with segment-level outputs as training aids. There is one model per horizon (0, 10, 20, 30 and 60 minutes), and a route queries supersegments in order, interpolating horizons by the predicted arrival time. A route crosses many supersegments, so running the model per request isn't scalable. Google keeps a shared table of fresh predictions for about a million supersegments and found no measurable loss with refreshes up to every two minutes.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>What would go wrong when you train an ETA model on logged trips, and how would you check?</summary>
+      <div class="qa-body"><p>Labels exist only for trips that happened, and the matching step favours drivers with short predicted ETAs, so the logged trips over-represent cases where the model was optimistic, and the model learns from a sample its predecessors shaped. Neither company's papers discuss this, so it's reasoning from the system's structure. To check, log the predicted ETAs of unchosen candidates, randomise a small share of assignments, compare the model's error on randomised and non-randomised trips, and weight training examples by the probability they were chosen. A shadow experiment avoids the loop for evaluation, since nothing the model outputs is acted on.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>The model ships next month. What stability and rollout checks do you want?</summary>
+      <div class="qa-body"><p>Google's paper says its main deployment obstacle was variance across saved models, fixed with MetaGradients for the learning rate and an EMA of the weights, so I'd compare predictions of consecutive checkpoints on a fixed trip set and require small disagreement. I'd evaluate sliced by request type, city and trip length, against the production model and the routing baseline, on a time-ordered test set. Then a multi-week shadow run, as Uber did with a two-week global shadow, with launch criteria on mean, median and p95 error, and a fallback path for missing inputs, as Google has for segments without speeds. Only then would I move to a live experiment on marketplace metrics.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">17</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://www.uber.com/blog/deepeta-how-uber-predicts-arrival-times/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">DeepETA: How Uber Predicts Arrival Times Using Deep Learning</div><div class="r-sub">Binaykiya, Hu and Cirit, February 10, 2022. Post-processing as a framing, the seven architectures tested, discretise-and-embed, linear transformers and the asymmetric Huber loss.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2206.02127" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">DeeprETA: An ETA Post-processing System at Scale</div><div class="r-sub">Hu, Binaykiya, Frank and Cirit, 2022. Loss, multiple feature hashing, the tables of results by request type and city, and the online test. arXiv:2206.02127</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2108.11482" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">ETA Prediction with Graph Neural Networks in Google Maps</div><div class="r-sub">Derrow-Pinion et al., CIKM 2021. Supersegments, the Graph Network blocks, MetaGradients, EMA, offline and online results, and the caching design. arXiv:2108.11482</div></div>
+      </a>
+      <a class="resource-card" href="https://deepmind.google/discover/blog/traffic-prediction-with-advanced-graph-neural-networks/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Traffic Prediction with Advanced Graph Neural Networks</div><div class="r-sub">Lange and Perez, DeepMind, September 3, 2020. How supersegments are built, why a GNN, training stability, and the per-city accuracy gains.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.uber.com/blog/engineering-routing-engine" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">ETA Phone Home: How Uber Engineers an Efficient Route</div><div class="r-sub">Thi Nguyen, November 3, 2015. Goldeta, the Gurafu routing engine, and the first accuracy tooling.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1806.01261" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Relational Inductive Biases, Deep Learning, and Graph Networks</div><div class="r-sub">Battaglia et al., 2018. Graph Network blocks, which Google's ETA model is built from. arXiv:1806.01261</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2006.16236" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention</div><div class="r-sub">Katharopoulos et al., ICML 2020. Linear transformer, as used by DeeprETA for its interaction layer. arXiv:2006.16236</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1805.09801" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Meta-Gradient Reinforcement Learning</div><div class="r-sub">Xu, van Hasselt and Silver, NeurIPS 2018. Online cross-validation, which Google adapted to tune the ETA model's learning rate. arXiv:1805.09801</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">18</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/18-graph-ml"><div class="rc-sec" style="color:var(--c-graph)">18 · The graph half</div><div class="rc-title">Graph ML</div><div class="rc-hook">Message passing as the one primitive, the idea behind the supersegment network in section 07.</div></a>
+      <a class="related-card" href="/topics/17-time-series-forecasting"><div class="rc-sec" style="color:var(--c-ts)">17 · Honest backtests</div><div class="rc-title">Time Series &amp; Forecasting</div><div class="rc-hook">Baselines first, and splitting by time, as sections 02 and 10 do.</div></a>
+      <a class="related-card" href="/topics/16-recommenders-ranking-search"><div class="rc-sec" style="color:var(--c-rec)">16 · Embeddings and funnels</div><div class="rc-title">Recommenders, Ranking &amp; Search</div><div class="rc-hook">Embedding tables, feature interactions and selection bias, in general form.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · Case study</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">Another system that learns from logs of its own past choices, and how it breaks the loop.</div></a>
+      <a class="related-card" href="/topics/23-efficient-ai-systems"><div class="rc-sec" style="color:var(--c-efficient)">23 · Latency budgets</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Why model cost is a design variable and what lookups, caching and linear attention buy.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">Weekly retraining, shadow deployments and drift, the machinery of sections 10 and 11.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Metrics, slices and why an average can hide a regression.</div></a>
+    </div>
+  </section>

@@ -1,0 +1,1491 @@
+---
+title: "Designing a Wake Word Detector"
+dek: "Follow Anika, hands deep in dough, as she says 'Hey Siri' across a noisy kitchen, down to the two-stage detector that hears her on a tiny power budget. We build it from the obvious version, fix each failure in turn, and use Apple's and Google's published work to show the tradeoffs."
+readingTime: "~70 min"
+prereqs: "speech and audio (13), efficient AI (23), evaluation (25)"
+group: "ML System Design"
+label: "Case study 49"
+description: "From a 16 kHz microphone to a two-stage on-device detector: frame posteriors, cascade power arithmetic, false-accept budgets, speaker embeddings and negative-hour evaluation, built on Apple's published papers."
+---
+<section id="tldr">
+    <p>Anika is up to her wrists in dough in a Bengaluru kitchen. Her phone is propped against a steel canister on the far side of the counter, about two metres away, and the exhaust fan above the stove is running. A pan is hissing. Her hands are too wet and sticky to touch the screen, so she says, in the voice you use to talk across a room, "Hey Siri, set a timer for twelve minutes." The phone lights up, a small chime plays, and a timer appears.</p>
+
+    <p>That looks like a phone that heard a sentence. It isn't. For the whole hour before she spoke, the phone was also listening, to the fan, to the radio in the next room, to her husband on a call, and it did nothing with any of it. Somewhere in the device a program was asking, about a hundred times every second, whether the last fraction of a second of sound looked like the start of two particular words. Such a program is a <strong>wake word detector</strong> (Apple calls it a <strong>voice trigger</strong>), and its job is awkward in three ways at once. It has to run all day on a battery, so it can't use much power. It has to say yes to Anika's wet-handed, far-away, fan-drowned voice nearly every time. And it has to say no to nearly everything else it will ever hear, including people talking about Siri on television and a stranger in the room saying the same two words.</p>
+
+    <p>So the question this chapter answers is: <strong>how does a phone listen all day for two words, on a battery, and still wake up for Anika across a noisy kitchen while ignoring almost everything else?</strong></p>
+
+    <p>We'll build the design the way an engineer would, starting from the most obvious version, a speech recogniser that never stops, and fix each failure in turn. That takes us to a tiny neural network that only knows one phrase, to the two-stage cascade in which a tiny model on a low-power chip decides when to wake a bigger one, and to the arithmetic of false accepts per hour against false rejects that sets the threshold. Then we cover speaker verification with embeddings, the shrinking of the network to a few kilobytes, the checks that run after the trigger, and how the data was collected and the system evaluated. We rely on Apple's published papers and posts and on Google's earlier work on the same problem, and we say plainly where Apple's internals are unpublished.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>The detector sits between a microphone and the rest of the assistant. When the phrase is spoken it hands over control, and the rest of Siri, which in Apple's description runs mostly on servers for recognition and language understanding, handles whatever Anika says next. Everything the detector does has to be judged against four requirements that pull against each other.</p>
+
+    <p>First, it must be <strong>accurate in the right direction</strong>. Two different mistakes are possible. A <strong>false reject</strong> is Anika saying the phrase and nothing happening, which costs her a repeated sentence and a little trust. A <strong>false accept</strong> (or false alarm) is the phone waking up when nobody asked, which costs battery, and, worse, may send a stranger's audio to a server. Apple's 2017 post says it is trying to estimate false-alarm rates "as low as one per week", while a person who says the phrase on purpose expects it to work almost every time.</p>
+
+    <p>Second, it must <strong>run in a tiny power budget</strong>, because the microphone never stops. Third, it must be <strong>fast</strong>: the chime has to arrive close to when she finishes the phrase, and the detector also decides where the recording of her request begins. Fourth, it should work for <strong>her</strong>. In a house with several people it shouldn't wake for everybody who says the phrase. It also has to cope with devices as different as an iPhone on a counter, a watch on a wrist and a pair of earbuds.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>Apple hasn't published how many devices run the detector or how often it triggers, so we won't invent either. What the sources do give us are the parameters of the problem. In the 2017 post the microphone is sampled at 16,000 values a second, and spectrum analysis turns that stream into <strong>frames</strong>, each describing about one hundredth of a second of sound. That makes 100 frames a second, 8.6 million a day. About twenty consecutive frames, a fifth of a second of audio, go into the network at a time.</p>
+
+    <p>On the other side is the battery. Google described the same constraint in a 2017 paper on its own cascade detector (Gruenstein et al., NIPS 2017). Typical mobile batteries hold between 1,000 and 2,400 milliamp-hours, and "in the best case our entire system must consume less than 1mA to consume less than 1% of the battery per day". Check it: 1 mA for 24 hours is 24 mAh, or 1% of 2,400 mAh. So the always-listening system gets about one milliamp, averaged over the day.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose a model good enough to detect the phrase reliably costs, running on the phone's main processor, an illustrative 20 mA (neither Apple nor Google publishes such a figure). Run it continuously on a 2,400 mAh battery. What share of the battery does it use in a day, and how much cheaper does the always-on part need to be to meet a 1% budget?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>20 mA for 24 hours is 480 mAh, which is 20% of the battery, just for listening. A 1% budget is 24 mAh a day, an average of 1 mA, so we have to cut the average by a factor of 20 at least. Making the model 20 times smaller would hurt its accuracy badly, so something else has to give: most of the time the big model should not be running at all.</p>
+        <p>That conclusion gives the whole design its shape. Something very small and very cheap must watch the audio continuously, and the large model should wake only when the small one has a reason to ask it.</p>
+      </details>
+    </div>
+
+    <p>Apple's papers give no power figures for its chips, only the structure of the solution, so we'll start from that. First, though, notice what the accuracy requirement implies for measurement. A false-alarm target of one per week is a statement about 168 hours of ordinary audio, so testing it takes weeks of recordings that don't contain the phrase. We come back to that in section 05, because it decides how the threshold is set.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: a speech recogniser that never stops</h2>
+
+    <p>The obvious first design uses what already exists. A phone can transcribe speech, so keep transcribing. Turn the microphone on, feed the audio to the speech recogniser, and every time the transcript contains "hey siri", start the assistant. It needs almost no new code and it handles any accent the recogniser handles.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Version 1: transcribe everything, look for the words
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 236" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="130" height="80" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="130" height="80" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="85.0" y="70.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">MICROPHONE</text>
+<text x="85.0" y="84.0" text-anchor="middle" font-size="10" class="dim">on all day</text>
+<text x="85.0" y="98.0" text-anchor="middle" font-size="10" class="dim">16,000 samples/s</text>
+<path d="M156,80 L190,80" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="196" y="40" width="150" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="196" y="40" width="150" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="271.0" y="70.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">FULL RECOGNISER</text>
+<text x="271.0" y="84.0" text-anchor="middle" font-size="10" class="dim">large vocabulary</text>
+<text x="271.0" y="98.0" text-anchor="middle" font-size="10" class="dim">any sentence</text>
+<path d="M352,80 L386,80" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="392" y="40" width="130" height="80" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="392" y="40" width="130" height="80" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="457.0" y="70.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">TRANSCRIPT</text>
+<text x="457.0" y="84.0" text-anchor="middle" font-size="10" class="dim">is "hey siri"</text>
+<text x="457.0" y="98.0" text-anchor="middle" font-size="10" class="dim">in the text?</text>
+<path d="M528,80 L562,80" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="568" y="40" width="112" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="568" y="40" width="112" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="624.0" y="70.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">START SIRI</text>
+<text x="624.0" y="84.0" text-anchor="middle" font-size="10" class="dim">yes: assistant</text>
+<text x="624.0" y="98.0" text-anchor="middle" font-size="10" class="dim">takes over</text>
+<text x="20" y="156" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Power: a 50-million-parameter recogniser used once per frame is about 5 billion</text>
+<text x="20" y="171" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">multiply-adds a second, roughly 4,000 times a 13,979-parameter detector (an estimate).</text>
+<text x="20" y="194" text-anchor="start" font-size="10.5" class="" fill="#f472b6">Privacy: the alternative, streaming the audio to a server, sends every sound in the kitchen off the device.</text>
+<text x="20" y="217" text-anchor="start" font-size="10.5" class="dim">Both fail for the same reason: the detector answers one yes-or-no question and needs no language model.</text>
+</svg>
+      <div class="diagram-caption">Follow the arrows left to right. Every box is familiar, and the amber and pink lines underneath are what go wrong when the first box never turns off.</div>
+    </div>
+
+    <p>It fails on power first. A large-vocabulary recogniser exists to turn any sentence in a language into text, so it's big. In the Google paper that introduced neural-network keyword spotting (Chen, Parada and Heigold, ICASSP 2014), the recogniser used to label training data had 50 million parameters. If each of those parameters were used once per frame, that is about 5 billion multiply-adds a second, roughly 4,000 times the work of the 13,979-parameter detector Apple's engineers later describe. That's an estimate from parameter counts, and it ignores everything a real recogniser does besides its network, so if anything it understates the gap. That paper also points out that keyword spotters built on full recognisers were designed for offline processing of recorded audio, since running one with no delay on a phone wasn't realistic.</p>
+
+    <p>Sending the audio to a server instead fixes the processing and breaks two other things. A phone that streams everything it hears to a server all day is a privacy problem that no amount of engineering makes comfortable, and a radio that stays on is a battery problem of its own. Apple's 2017 post describes the opposite design: the detector lives on the device, and Siri's servers only hear audio after the phrase has been detected.</p>
+
+    <p>Even with unlimited power, recognising whole sentences is more than the job needs. Our detector only has to answer one yes-or-no question, "did the last second contain these two words?", and a model that knows only that question can be thousands of times smaller than one that knows a language. The next few sections make that idea concrete.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Where the listening happens</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Full recogniser on the phone, always on</td><td>No new model; handles any wording</td><td>Far too much computation to run continuously on a battery</td></tr>
+        <tr><td>Stream audio to a server, always on</td><td>Phone does almost nothing</td><td>Radio and privacy costs; every sound leaves the device</td></tr>
+        <tr><td>A small model that knows one phrase, on the device</td><td>Cheap enough to run all day; audio stays local until it triggers</td><td>Needs its own training data; must be tuned for false alarms</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Apple chose the third row, and so did Google in the 2014 paper, which describes the goal as a system that "listens continuously for specific keywords" with a "small memory footprint, low computational cost, and high precision". Siri's detector still leans on the server in one way, which we meet in section 08: after the phone starts a request, the server's full recogniser can reject a false trigger and tell the phone to go back to sleep.</p>
+  </section>
+  <section id="frames">
+    <h2><span class="num">03</span>Version 2: a small model that knows one phrase</h2>
+
+    <p>We want a model that does nothing but recognise "Hey Siri", cheaply and continuously, and the way to get there is to chop the problem into the smallest repeated question we can. Every hundredth of a second, look at the last fifth of a second of sound and say which part of the phrase, if any, it sounds like. Doing that again and again produces a stream of answers, and a second, much simpler step watches the stream for the right answers arriving in the right order.</p>
+
+    <h3 id="3-1-from-sound-to-frame-posteriors">3.1 From sound to frame posteriors</h3>
+
+    <p>Raw audio is 16,000 numbers a second, far too much detail and far too little structure. A signal-processing front end summarises each short stretch of sound as a vector describing how much energy it has in each of a few dozen frequency bands, roughly the way the ear separates pitch. Google's paper uses 40 such numbers (log filterbank energies) every 10 milliseconds over a 25 millisecond window. Apple's papers describe frames of about 0.01 seconds, and one of them uses 13 mel-frequency cepstral coefficients, a related summary. Either way we end up with a short vector per frame, 100 times a second.</p>
+
+    <p>One frame can't be recognised on its own, since a hundredth of a second is shorter than any speech sound. So the network sees a window of neighbouring frames glued together, about twenty of them (0.2 seconds) in Apple's 2017 post. That choice has a latency cost that's easy to miss. If the window includes frames after the current one, the system has to wait for them before it can answer about the current moment. Google's paper says so directly, "each additional frame of future context adds 10 ms of latency to the system", and so it used 30 frames of the past and only 10 of the future.</p>
+
+    <p>The network is a plain fully connected one. In Apple's account it has five hidden layers of identical size, 32, 128 or 192 units depending on the device's memory and power limits, and its output layer gives a probability for each of about 20 <strong>sound classes</strong>. Those classes come from the phrase itself. Each speech sound in "Hey Siri" is split into three states, a beginning, a middle and an end, so that the network learns separately what the start of a sound looks like and what its tail looks like. One more class stands for silence and one large class stands for every other speech sound. A later Apple paper (Higuchi et al., 2020) makes this concrete with a reference network of five layers of 32 units and 20 classes: one for silence, one for general speech and 18 for the phrase, from six sound units with three states each. It has 13,979 parameters.</p>
+
+    <p>At each frame the network outputs 20 probabilities that sum to one, the frame's <strong>posteriors</strong>: the probability of each class given the sound around that frame. Training needs the correct class for every frame, and this is where the big recogniser gets used, once. Apple's post says the frame-level labels come from the main speech recogniser, which aligns the transcript of each training recording with its audio, and Google's paper does the same with its 50-million-parameter recogniser. We then train the network to maximise the log probability of the right label at every frame, the standard cross-entropy criterion. In Chen's notation, with <span>$p_{ij}$</span> the network's posterior for label <span>$i$</span> at frame <span>$j$</span> and <span>$i_j$</span> the label that alignment gave to frame <span>$j$</span>:</p>
+
+    <div class="eq-block"><span>$$F(\theta) \;=\; \sum_{j} \log p_{\,i_j\, j}$$</span></div>
+
+    <p>Training moves the weights <span>$\theta$</span> to make <span>$F$</span> as large as possible. Each term is the log of the probability the network gave the correct answer for one frame, so a network that's confidently right everywhere scores near zero and every confident mistake costs a lot.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Anika's phrase, from microphone to score
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 268" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="36" width="96" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="36" width="96" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="68.0" y="61.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">MICROPHONE</text>
+<text x="68.0" y="75.0" text-anchor="middle" font-size="10" class="dim">16,000</text>
+<text x="68.0" y="89.0" text-anchor="middle" font-size="10" class="dim">samples/s</text>
+<path d="M118,71 L128,71" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="130" y="36" width="96" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="130" y="36" width="96" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="178.0" y="61.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">FRAMES</text>
+<text x="178.0" y="75.0" text-anchor="middle" font-size="10" class="dim">one every 10 ms</text>
+<text x="178.0" y="89.0" text-anchor="middle" font-size="10" class="dim">filterbank numbers</text>
+<path d="M228,71 L238,71" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="240" y="36" width="96" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="240" y="36" width="96" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="288.0" y="61.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">WINDOW</text>
+<text x="288.0" y="75.0" text-anchor="middle" font-size="10" class="dim">about 20 frames</text>
+<text x="288.0" y="89.0" text-anchor="middle" font-size="10" class="dim">= 0.2 s</text>
+<path d="M338,71 L348,71" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="350" y="36" width="96" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="350" y="36" width="96" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="398.0" y="61.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">NETWORK</text>
+<text x="398.0" y="75.0" text-anchor="middle" font-size="10" class="dim">5 layers of</text>
+<text x="398.0" y="89.0" text-anchor="middle" font-size="10" class="dim">32 to 192 units</text>
+<path d="M448,71 L458,71" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="460" y="36" width="96" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="460" y="36" width="96" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="508.0" y="61.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">POSTERIORS</text>
+<text x="508.0" y="75.0" text-anchor="middle" font-size="10" class="dim">about 20 sound</text>
+<text x="508.0" y="89.0" text-anchor="middle" font-size="10" class="dim">classes per frame</text>
+<path d="M558,71 L568,71" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="570" y="36" width="96" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="570" y="36" width="96" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="618.0" y="61.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">SCORE</text>
+<text x="618.0" y="75.0" text-anchor="middle" font-size="10" class="dim">best ordered path</text>
+<text x="618.0" y="89.0" text-anchor="middle" font-size="10" class="dim">vs threshold</text>
+<text x="20" y="138" text-anchor="start" font-size="10.5" class="dim">Posteriors over time for "Hey Siri" (rows are the phrase's sound states, columns are frames, stronger colour is more probable)</text>
+<text x="52" y="160" text-anchor="end" font-size="9" class="dim">s1</text>
+<rect x="60" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.14"/>
+<rect x="75" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.36"/>
+<rect x="90" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.58"/>
+<rect x="105" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.80"/>
+<rect x="120" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.58"/>
+<rect x="135" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.36"/>
+<rect x="150" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.14"/>
+<rect x="165" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="180" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="195" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="210" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="225" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="240" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="255" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="270" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="285" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="300" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="315" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="330" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="345" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="360" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="375" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="390" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="405" y="150" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<text x="52" y="173" text-anchor="end" font-size="9" class="dim">s2</text>
+<rect x="60" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="75" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="90" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="105" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.10"/>
+<rect x="120" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.32"/>
+<rect x="135" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.54"/>
+<rect x="150" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.76"/>
+<rect x="165" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.62"/>
+<rect x="180" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.40"/>
+<rect x="195" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.18"/>
+<rect x="210" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="225" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="240" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="255" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="270" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="285" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="300" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="315" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="330" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="345" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="360" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="375" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="390" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="405" y="163" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<text x="52" y="186" text-anchor="end" font-size="9" class="dim">s3</text>
+<rect x="60" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="75" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="90" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="105" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="120" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="135" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="150" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.05"/>
+<rect x="165" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.27"/>
+<rect x="180" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.49"/>
+<rect x="195" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.71"/>
+<rect x="210" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.67"/>
+<rect x="225" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.45"/>
+<rect x="240" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.23"/>
+<rect x="255" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="270" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="285" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="300" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="315" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="330" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="345" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="360" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="375" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="390" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="405" y="176" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<text x="52" y="199" text-anchor="end" font-size="9" class="dim">s4</text>
+<rect x="60" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="75" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="90" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="105" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="120" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="135" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="150" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="165" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="180" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="195" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="210" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.23"/>
+<rect x="225" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.45"/>
+<rect x="240" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.67"/>
+<rect x="255" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.71"/>
+<rect x="270" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.49"/>
+<rect x="285" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.27"/>
+<rect x="300" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.05"/>
+<rect x="315" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="330" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="345" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="360" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="375" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="390" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="405" y="189" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<text x="52" y="212" text-anchor="end" font-size="9" class="dim">s5</text>
+<rect x="60" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="75" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="90" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="105" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="120" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="135" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="150" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="165" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="180" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="195" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="210" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="225" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="240" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="255" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.18"/>
+<rect x="270" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.40"/>
+<rect x="285" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.62"/>
+<rect x="300" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.76"/>
+<rect x="315" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.54"/>
+<rect x="330" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.32"/>
+<rect x="345" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.10"/>
+<rect x="360" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="375" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="390" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="405" y="202" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<text x="52" y="225" text-anchor="end" font-size="9" class="dim">s6</text>
+<rect x="60" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="75" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="90" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="105" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="120" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="135" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="150" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="165" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="180" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="195" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="210" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="225" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="240" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="255" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="270" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="285" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<rect x="300" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.14"/>
+<rect x="315" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.36"/>
+<rect x="330" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.58"/>
+<rect x="345" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.80"/>
+<rect x="360" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.58"/>
+<rect x="375" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.36"/>
+<rect x="390" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.14"/>
+<rect x="405" y="215" width="14" height="12" rx="2" fill="#34d399" opacity="0.04"/>
+<text x="440" y="170" text-anchor="start" font-size="10.5" class="" fill="#34d399">The score step follows the staircase</text>
+<text x="440" y="186" text-anchor="start" font-size="10.5" class="dim">from the first state to the last:</text>
+<text x="440" y="202" text-anchor="start" font-size="10.5" class="dim">each state must peak after the one</text>
+<text x="440" y="218" text-anchor="start" font-size="10.5" class="dim">before it, so the order is enforced.</text>
+<text x="20" y="252" text-anchor="start" font-size="10.5" class="dim">The network runs 100 times a second. The score step keeps only a few dozen running values.</text>
+</svg>
+      <div class="diagram-caption">Read top to bottom. A frame is produced every 10 ms and about 20 of them make one network input, so the right-hand side repeats 100 times a second while the score step stays tiny.</div>
+    </div>
+
+    <h3 id="3-2-from-posteriors-to-one-score">3.2 From posteriors to one score</h3>
+
+    <p>We now have a stream of 20 probabilities every hundredth of a second and need one number that says how much the last second looks like the whole phrase. Google's recipe has two steps. First <strong>smooth</strong> each class's posterior by averaging it over the most recent 30 frames, since single-frame values are noisy. Then, over a longer window of 100 frames, take the largest smoothed value each phrase class reached and combine them as a geometric mean. In symbols, with <span>$p'_{ik}$</span> the smoothed posterior of class <span>$i$</span> at frame <span>$k$</span>, <span>$n-1$</span> the number of phrase classes, and <span>$j$</span> the current frame:</p>
+
+    <div class="eq-block"><span>$$p'_{ij} \;=\; \frac{1}{j-h_{\text{smooth}}+1}\sum_{k=h_{\text{smooth}}}^{j} p_{ik}, \qquad \text{confidence} \;=\; \Bigg(\prod_{i=1}^{n-1}\; \max_{h_{\max}\le k\le j}\; p'_{ik}\Bigg)^{\frac{1}{n-1}}$$</span></div>
+
+    <p>With a geometric mean, one phrase class that never fired drags the product down, and we want that: every piece of the phrase must have been heard. That gives a number between zero and one, and the detector fires when it passes a threshold. Google chose the two window sizes on a development set, and "the performance was not very sensitive to the window sizes".</p>
+
+    <p>Notice what this formula doesn't check, as the paper itself says: it "does not enforce the order of the label sequence". Each class gets its best moment independently, so the pieces could arrive in any order. Stacked frames inside the network carry some context, but nothing in the score insists that "hey" comes before "siri". A later Google paper (Gruenstein et al., 2017) fixes this by taking the largest product of smoothed posteriors subject to the constraint that the units fire in the same order as in the keyword:</p>
+
+    <div class="eq-block"><span>$$h(y) \;=\; \Bigg[\max_{1\le t_1\le\cdots\le t_M\le T}\; \prod_{i=1}^{M} s_{t_i}(y_i)\Bigg]^{\frac1M}, \qquad s_t(y_i)=\frac1L\sum_{j=t-L+1}^{t} y_{i,j}$$</span></div>
+
+    <p>Here <span>$M$</span> is the number of units in the keyword, <span>$y_i$</span> is the posterior track for unit <span>$i$</span>, <span>$L$</span> is the smoothing window, and the times <span>$t_1\le\dots\le t_M$</span> are the moments at which each unit is judged to have fired, forced into the right order. Searching all possible orderings sounds expensive, but it isn't. It's a <strong>dynamic programme</strong>: to find the best way to place the first <span>$i$</span> units by time <span>$t$</span>, extend the best way to place the first <span>$i-1$</span> units by some earlier time. Apple's 2017 post describes its own version of the same idea, derived from hidden Markov models (HMMs). A recurrent top layer keeps, for each state <span>$i$</span> of the phrase, the best accumulated score <span>$F(i,t)$</span> of any path through the states so far:</p>
+
+    <div class="eq-block"><span>$$F(i,t) \;=\; \max\big\{\, s_i + F(i,t-1),\;\; m_{i-1} + F(i-1,t-1) \,\big\} \;+\; q(i,t)$$</span></div>
+
+    <p>Here <span>$q(i,t)$</span> is the network's log probability that frame <span>$t$</span> belongs to the sound class of state <span>$i$</span>. One option in the maximum stays in state <span>$i$</span> for another frame at a cost <span>$s_i$</span>, and the second moves forward from state <span>$i-1$</span> at a cost <span>$m_{i-1}$</span>. Apple's post says the stay and move costs come from segment durations in the training data, so a phrase spoken with absurd rhythm scores worse. A frame's score is <span>$F$</span> at the last state, and "the score peaks just after the full phrase has entered the system". Log probabilities turn products into sums, which is cheaper and more stable, and the post says the output layer is arranged to give log probabilities directly.</p>
+
+    <p>The experiment below makes the ordering point visible. It builds fake posterior streams for a six-unit phrase, with the units firing in the right order, in reverse and in random order, and scores each with both formulas.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Score fake posteriors with and without the order constraint</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(3)
+M, T = 6, 150            # 6 phrase units, 150 frames of 10 ms
+
+def frames(order):
+    # fake posteriors: 6 phrase units + background, one unit per 14 frames
+    z = rng.normal(0, 1, (T, M + 1))
+    z[:, M] += 2.0
+    for k, u in enumerate(order):
+        a = 30 + 14 * k
+        z[a:a + 14, u] += 5.0
+        z[a:a + 14, M] -= 4.0
+    p = np.exp(z)
+    return (p / p.sum(1, keepdims=True))[:, :M]
+
+def smooth(p, w=30):
+    out = np.empty_like(p)
+    for j in range(T):
+        out[j] = p[max(0, j - w + 1):j + 1].mean(0)
+    return out
+
+def any_order(p):                  # Chen et al. 2014, eq. (3)
+    return np.prod(smooth(p)[-100:].max(0)) ** (1 / M)
+
+def in_order(p):                   # Gruenstein et al. 2017, eq. (1)
+    s = np.log(smooth(p)[-100:] + 1e-9)
+    best = s[:, 0]
+    for i in range(1, M):
+        best = np.maximum.accumulate(best) + s[:, i]
+    return np.exp(best.max() / M)
+
+cases = {"phrase in order": list(range(M)),
+         "same units reversed": list(range(M))[::-1],
+         "units in random order": list(rng.permutation(M))}
+print(f"{'':22}{'any order':&gt;10}{'in order':&gt;10}")
+for name, order in cases.items():
+    r = np.mean([(any_order(p), in_order(p))
+                 for p in (frames(order) for _ in range(200))], 0)
+    print(f"{name:22}{r[0]:10.2f}{r[1]:10.2f}")
+p = rng.dirichlet(np.ones(M + 1) * .3, T)[:, :M]
+print(f"{'background only':22}{any_order(p):10.2f}{in_order(p):10.2f}")</code></pre>
+      <div class="tryit-out">The any-order score is <code>0.45</code> for the phrase, for the reversed phrase and for a random shuffle, because each unit fires strongly somewhere in the window and the formula can't tell where. The in-order score drops from <code>0.45</code> to <code>0.17</code> for the reversal and to <code>0.14</code> for the shuffle, close to the <code>0.17</code> it gives to background alone.</div>
+    </details>
+
+    <p>Only the in-order score separates "hey siri" from the same sounds in a different arrangement, since every unit fires strongly somewhere in the window and the any-order formula can't tell where. That extra care is cheap: the dynamic programme needs one running value per phrase state per frame, a few dozen numbers.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Turning frame posteriors into a decision</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Keyword and filler HMM with Viterbi decoding</td><td>Needs no keyword-specific data at training time</td><td>Needs a decoder at run time; bigger network over thousands of states</td></tr>
+        <tr><td>Smooth, take the max, geometric mean (Google, 2014)</td><td>No decoder; one decision every 10 ms</td><td>Ignores the order of the sounds</td></tr>
+        <tr><td>Ordered score by dynamic programming (Apple 2017, Google 2017)</td><td>Rejects the right sounds in the wrong order; a few dozen running values</td><td>Needs sub-phrase labels and tuned stay and move costs</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Google's 2014 paper compared its direct approach with a keyword and filler HMM built on the same kind of network. At a false-alarm rate of 0.5% the direct approach had a 45% lower false-reject rate, and it kept a 39% advantage with babble noise added at 10 dB signal-to-noise ratio, without needing a decoder at all. Apple's 2017 post took the other route: its network estimates probabilities over sound classes and a dynamic programme over a left-to-right model of the phrase does the temporal integration, which the post calls "comparatively cheap" next to the network. Section 07 returns to networks that skip the separate scoring step.</p>
+
+    <p>Scoring a long stream as a sequence of small windows, then watching the small decisions for a pattern, is how almost every streaming detector works. Fraud systems score each event and then watch for a run of suspicious ones, and speech recognisers use the same dynamic programme over a much larger set of states.</p>
+  </section>
+
+  <section id="cascade">
+    <h2><span class="num">04</span>Two passes: a tiny model decides when to wake a bigger one</h2>
+
+    <p>Our small network is cheap, but cheap is not the same as accurate. At the false-alarm rate we need, a 32-unit network misses more of Anika's phrases than a 192-unit one does, and the bigger network costs several times as much per frame. On the numbers from the previous section, five layers of 32 units over a 247-value input is about 13 thousand weights, and five layers of 192 units over the same input is roughly 200 thousand, roughly 15 times as many. (The second figure is our arithmetic on the same input size; the papers don't state it.) We want the accuracy of the large one with the power draw of the small one, and a cascade gives us a way to have both.</p>
+
+    <p>The two models get different jobs. The small one runs all the time, and its one duty is to <em>not miss</em> the phrase. It may be wrong in the other direction, firing on things that merely sound a bit like the phrase, as long as it doesn't do so often. Whenever it fires, it wakes the large model, which studies the recent audio and makes the careful final call. Since the large one runs only when the small one fires, its cost gets spread over many hours of silence.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The two-pass detector and what each pass costs
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 256" xmlns="http://www.w3.org/2000/svg">
+<rect x="22" y="40" width="122" height="96" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="22" y="40" width="122" height="96" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="83.0" y="71.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">STAGE 1</text>
+<text x="83.0" y="85.0" text-anchor="middle" font-size="10" class="dim">low-power chip</text>
+<text x="83.0" y="99.0" text-anchor="middle" font-size="10" class="dim">5 layers x 32</text>
+<text x="83.0" y="113.0" text-anchor="middle" font-size="10" class="dim">lenient, runs all day</text>
+<rect x="200" y="40" width="122" height="96" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="200" y="40" width="122" height="96" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="261.0" y="71.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">STAGE 2</text>
+<text x="261.0" y="85.0" text-anchor="middle" font-size="10" class="dim">main processor</text>
+<text x="261.0" y="99.0" text-anchor="middle" font-size="10" class="dim">5 layers x 192</text>
+<text x="261.0" y="113.0" text-anchor="middle" font-size="10" class="dim">strict, wakes rarely</text>
+<rect x="378" y="40" width="122" height="96" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="378" y="40" width="122" height="96" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="439.0" y="71.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">SPEAKER</text>
+<text x="439.0" y="85.0" text-anchor="middle" font-size="10" class="dim">embedding vs</text>
+<text x="439.0" y="99.0" text-anchor="middle" font-size="10" class="dim">profile by cosine</text>
+<text x="439.0" y="113.0" text-anchor="middle" font-size="10" class="dim">owner only</text>
+<rect x="556" y="40" width="122" height="96" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="556" y="40" width="122" height="96" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="617.0" y="71.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">SERVER CHECK</text>
+<text x="617.0" y="85.0" text-anchor="middle" font-size="10" class="dim">full recogniser</text>
+<text x="617.0" y="99.0" text-anchor="middle" font-size="10" class="dim">can send a cancel</text>
+<text x="617.0" y="113.0" text-anchor="middle" font-size="10" class="dim">signal to the phone</text>
+<path d="M146,88 L198,88" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M324,88 L376,88" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M502,88 L554,88" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="83" y="158" text-anchor="middle" font-size="10.5" class="dim">sees every frame</text>
+<text x="261" y="158" text-anchor="middle" font-size="10.5" class="dim">sees a buffered clip</text>
+<text x="439" y="158" text-anchor="middle" font-size="10.5" class="dim">sees the phrase</text>
+<text x="617" y="158" text-anchor="middle" font-size="10.5" class="dim">sees the request</text>
+<text x="20" y="196" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">About 100 frames a second, all day  &gt;  a handful of wake-ups an hour (Google, 2017)  &gt;  a few seconds a day  &gt;  only real requests</text>
+<text x="20" y="218" text-anchor="start" font-size="10.5" class="dim">Each stage is more expensive per second of audio and sees far less of it than the stage before.</text>
+<text x="20" y="240" text-anchor="start" font-size="10.5" class="dim">Apple Watch runs one gated pass after a wrist raise instead of the two-pass cascade.</text>
+</svg>
+      <div class="diagram-caption">Follow the audio left to right. Almost everything is stopped by the first box, which costs little, and only the few segments that get through ever reach the box that costs a lot.</div>
+    </div>
+
+    <h3 id="4-1-the-hardware-half">4.1 The hardware half</h3>
+
+    <p>A cascade only saves power if the first stage is on a different, cheaper piece of hardware, and the 2017 post describes that. On iPhones from the 6s onward, the first detector runs on the <strong>Always On Processor</strong>, "a small, low-power auxiliary processor, that is, the embedded Motion Coprocessor". It runs a small version of the acoustic model, in the post's first configuration five layers of 32 units. When its score passes a threshold, it wakes the main processor, which runs a second detector with five layers of 192 units. Apple Watch, which has far less compute to spare, uses a single detector with a model of intermediate size, takes only about 5% of the limited compute budget, and runs only after the watch's motion coprocessor detects a wrist-raise gesture. A wrist raise is a different kind of first stage, a cheap sensor event that says someone might be about to talk.</p>
+
+    <p>Google's 2017 paper shows the same split with more of the engineering exposed. Its first stage runs on a DSP, a low-power signal-processing chip with typically 128 kB of memory, "buffering enough audio to safely fit the keyword (typically 2 seconds)". When it fires it hands that buffer to a larger model on the main processor and keeps streaming the audio that follows. Two points in the paper explain why this works. The stages must be trained on the same data and have similar false-reject rates, so the combined rate is "very close to that of the second stage alone" instead of the sum of the two. And the first stage's false-alarm rate matters for power, because each run of the second stage "will briefly draw 1 to 2 orders of magnitude more current"; the authors tune the first stage "to only wake up a handful of times per hour, even when exposed continuously to speech".</p>
+
+    <h3 id="4-2-the-power-arithmetic">4.2 The power arithmetic</h3>
+
+    <p>Let the first stage draw <span>$I_1$</span> milliamps all the time, and let each wake-up run the second stage, drawing <span>$I_2$</span>, for <span>$\tau$</span> seconds. If the first stage fires <span>$r$</span> times an hour, the average current is</p>
+
+    <div class="eq-block"><span>$$\bar I \;=\; I_1 \;+\; I_2 \cdot \frac{r\,\tau}{3600}$$</span></div>
+
+    <p>The second term is the fraction of the hour the big model is awake, times its current. With an illustrative <span>$I_1 = 0.2$</span> mA, <span>$I_2 = 20$</span> mA and <span>$\tau = 2$</span> seconds, the two terms are equal when <span>$r = 3600\cdot 0.2/(20\cdot 2) = 18$</span> wake-ups an hour. Below that rate the first stage dominates and above it the second does. That's why the first stage's false-alarm rate is a design parameter and not a detail.</p>
+
+    <p>Google's paper gives the matching accuracy side, in a table of real measurements. Google measured false alarms on 924 hours of television background noise and false rejects on 65,581 recordings of people saying a keyword.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Stage 1 false alarms per hour</th><th>Stage 1 false reject</th><th>Cascade false alarms per hour</th><th>Cascade false reject</th></tr></thead>
+      <tbody>
+        <tr><td>Stage 2 alone</td><td>n/a</td><td>0.03</td><td>3.1%</td></tr>
+        <tr><td>0.5</td><td>4.1%</td><td>0.006</td><td>5.6%</td></tr>
+        <tr><td>0.8</td><td>3.4%</td><td>0.006</td><td>5.1%</td></tr>
+        <tr><td>5.0</td><td>1.6%</td><td>0.02</td><td>3.8%</td></tr>
+        <tr><td>10.0</td><td>1.2%</td><td>0.02</td><td>3.5%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Read the table as a story with two ends. A strict first stage (0.5 false alarms an hour) wakes the second stage rarely, but it rejects 4.1% of real phrases by itself, and the cascade ends up rejecting 5.6%. A lenient one (10 an hour) costs more wake-ups but passes nearly everything, so the cascade's 3.5% comes close to the 3.1% of the second stage alone. Notice too that the cascade's false-alarm rate, 0.006 to 0.02, is lower than the 0.03 of the second stage alone, because the two stages don't make the same false alarms and a segment has to fool both.</p>
+
+    <p>Those false-reject numbers also tell us how the two stages' errors relate. If their mistakes were independent, the cascade at 0.8 an hour would reject 1 − (1 − 0.034)(1 − 0.031), about 6.4% of phrases, and it measured 5.1%. At 10 an hour independence predicts 4.3% against a measured 3.5%. Measured values come out lower because the two models tend to fail on the same recordings, the unclear and distant ones, so a phrase that gets past stage 1 is already more likely than average to get past stage 2.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">We move the first stage's threshold so it fires more often, from 0.5 to 200 times an hour on ordinary audio, with the second stage fixed. What happens to the cascade's false-reject rate, and what happens to average current? Does power fall, rise, or stay flat?</p>
+      <ol>
+        <li>False rejects fall and power rises, at an increasing rate</li>
+        <li>False rejects fall and power falls too</li>
+        <li>Both stay about the same</li>
+      </ol>
+      <details>
+        <summary>Show the answer</summary>
+        <p><strong>A.</strong> A more lenient first stage lets more real phrases through, so the cascade rejects fewer of them, but it wakes the big model more often, so power rises, slowly at first and then quickly. The experiment below measures both on simulated scores for the two stages, with a shared difficulty term so their errors overlap, and the same illustrative currents as before.</p>
+      </details>
+    </div>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Sweep the first stage's threshold and watch accuracy and power</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(7)
+N, P, W = 20_000_000, 200_000, 3600   # windows; one window per second
+rho = 0.7                             # shared errors
+
+def scores(n, y):
+    hard = rng.normal(0, 1, n)        # "sounds like the phrase" for both
+    own = lambda: (1 - rho)**.5 * rng.normal(0, 1, n)
+    s1 = 5.0 * y + rho**.5 * hard + own()
+    s2 = 6.2 * y + rho**.5 * hard + own()
+    return s1, s2
+
+n1, n2 = scores(N, 0)                 # negatives
+p1, p2 = scores(P, 1)                 # positives
+t2 = np.quantile(n2, 1 - 0.03 / W)    # stage 2 alone: 0.03 FA per hour
+I1, I2, SEC = 0.2, 20.0, 2.0          # mA stage 1, mA stage 2, s per wake
+print(f"stage 2 alone: FA {np.mean(n2 &gt; t2) * W:.3f}/hr, "
+      f"FRR {np.mean(p2 &lt;= t2):.1%}, always on = {I2:.2f} mA")
+print("stage-1 FA/hr  wakes/hr  cascade FA/hr  cascade FRR   avg mA")
+for fa in [0.5, 2, 10, 50, 200]:
+    t1 = np.quantile(n1, 1 - fa / W)
+    wake = np.mean(n1 &gt; t1) * W
+    cfa = np.mean((n1 &gt; t1) &amp; (n2 &gt; t2)) * W
+    frr = 1 - np.mean((p1 &gt; t1) &amp; (p2 &gt; t2))
+    mA = I1 + I2 * wake * SEC / 3600
+    print(f"{fa:12.1f}{wake:10.1f}{cfa:15.3f}{frr:12.1%}{mA:10.2f}")</code></pre>
+      <div class="tryit-out">The second stage alone has a false-reject rate of <code>2.9%</code> at <code>0.030</code> false alarms an hour and would draw <code>20.00 mA</code> all day. With a first stage firing <code>0.5</code> times an hour the cascade rejects <code>9.5%</code> of phrases at <code>0.21</code> mA. At <code>10.0</code> wake-ups an hour it rejects <code>3.6%</code> at <code>0.31</code> mA, nearly the big model's accuracy. At <code>200.0</code> accuracy is as good as it gets, <code>2.9%</code>, but the average has climbed to <code>2.42</code> mA, over twice the 1 mA budget.</div>
+    </details>
+
+    <p>The shape matches Google's table. A good operating point sits where the accuracy curve flattens and the power curve hasn't yet climbed, here a few to a few tens of wake-ups an hour, at roughly 1.5 times the first stage's own draw for 10 an hour. Notice also the third column: the cascade's false-alarm rate is lower than the second stage's alone, because a segment has to fool both models. (All of this is a simulation with illustrative currents, so only the shape carries over.)</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Where the wake-word model runs</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>One large model, main processor, always on</td><td>Best accuracy; simplest</td><td>Around 20 times over the always-on power budget in our example</td></tr>
+        <tr><td>One small model, low-power chip, alone</td><td>Fits the power budget</td><td>At a one-per-week false-alarm target it rejects many real phrases</td></tr>
+        <tr><td>Small model gates a large model (cascade)</td><td>Large-model accuracy at small-model power; two filters cut false alarms</td><td>Two models to train and keep aligned; audio must be buffered for the second look</td></tr>
+        <tr><td>A cheap sensor gates the model (wrist raise)</td><td>Zero listening cost until the sensor fires</td><td>Misses the phrase when the cue is absent</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h4 class="why">Why not make the first stage strict, to save as much power as possible?</h4>
+
+    <p>A strict first stage rejects real phrases before the second stage ever sees them, and the second stage can't bring them back. Google's table shows it: at 0.5 false alarms an hour the cascade rejects 5.6% of phrases against 3.1% for the second stage alone. Power saved by a strict first stage is paid for in repeated sentences, so the first stage is tuned to be lenient and the second stage supplies the strictness.</p>
+
+    <p>Apple used the cascade on iPhone and a single gated pass on Apple Watch, matching each design to the hardware, and its 2021 and 2023 write-ups still describe a high-recall first stage on the always-on processor followed by a high-precision second stage on the application processor. The same pattern shows up wherever something expensive has to be triggered by something rare: motion-activated cameras, anomaly detection that sends only suspicious events to a human, and search engines that retrieve cheaply and then rerank.</p>
+  </section>
+
+  <section id="threshold">
+    <h2><span class="num">05</span>Where to put the threshold</h2>
+
+    <p>Every stage so far ends with the same step: a number is compared with a threshold. The threshold is the knob that turns a score into a decision, and moving it trades one kind of mistake for the other. Apple's 2017 post gives the units of the two errors: the <strong>false-accept rate</strong> is false activations per hour of audio, and the <strong>false-reject rate</strong> is the proportion of genuine attempts that fail. Since the units differ, there's no natural equal error rate to aim for, as the post notes. We choose a threshold by deciding how many false alarms a user can tolerate, which is a different question from asking where the two curves cross.</p>
+
+    <h3 id="5-1-the-det-curve">5.1 The DET curve</h3>
+
+    <p>If we try every threshold and plot the false-reject rate against the false-alarm rate, we get a <strong>detection error tradeoff curve</strong> (DET curve). We usually draw the false-alarm axis on a log scale, because the range we care about spans several orders of magnitude, from one per hour down to one per week. A better model is a curve closer to the bottom left. Papers in this chapter compare models almost entirely by DET curves, and quote one number from each curve at a fixed operating point: Higuchi et al. report false rejects at 1 false alarm per hour, Garg et al. at one per 100 hours, and Gruenstein et al. in the table above.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Detection error tradeoff curves, drawn from a simple model
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<path d="M131.7,30 L131.7,250" stroke="#888" stroke-width="0.5" opacity="0.4" fill="none"/>
+<text x="131.7" y="264" text-anchor="middle" font-size="9.5" class="dim">0.01</text>
+<path d="M249.7,30 L249.7,250" stroke="#888" stroke-width="0.5" opacity="0.4" fill="none"/>
+<text x="249.7" y="264" text-anchor="middle" font-size="9.5" class="dim">0.1</text>
+<path d="M367.7,30 L367.7,250" stroke="#888" stroke-width="0.5" opacity="0.4" fill="none"/>
+<text x="367.7" y="264" text-anchor="middle" font-size="9.5" class="dim">1</text>
+<path d="M485.7,30 L485.7,250" stroke="#888" stroke-width="0.5" opacity="0.4" fill="none"/>
+<text x="485.7" y="264" text-anchor="middle" font-size="9.5" class="dim">10</text>
+<path d="M603.7,30 L603.7,250" stroke="#888" stroke-width="0.5" opacity="0.4" fill="none"/>
+<text x="603.7" y="264" text-anchor="middle" font-size="9.5" class="dim">100</text>
+<path d="M70,250.0 L660,250.0" stroke="#888" stroke-width="0.5" opacity="0.4" fill="none"/>
+<text x="62" y="253.0" text-anchor="end" font-size="9.5" class="dim">0%</text>
+<path d="M70,195.0 L660,195.0" stroke="#888" stroke-width="0.5" opacity="0.4" fill="none"/>
+<text x="62" y="198.0" text-anchor="end" font-size="9.5" class="dim">10%</text>
+<path d="M70,140.0 L660,140.0" stroke="#888" stroke-width="0.5" opacity="0.4" fill="none"/>
+<text x="62" y="143.0" text-anchor="end" font-size="9.5" class="dim">20%</text>
+<path d="M70,85.0 L660,85.0" stroke="#888" stroke-width="0.5" opacity="0.4" fill="none"/>
+<text x="62" y="88.0" text-anchor="end" font-size="9.5" class="dim">30%</text>
+<path d="M70,30.0 L660,30.0" stroke="#888" stroke-width="0.5" opacity="0.4" fill="none"/>
+<text x="62" y="33.0" text-anchor="end" font-size="9.5" class="dim">40%</text>
+<text x="365.0" y="282" text-anchor="middle" font-size="10.5" class="dim">false alarms per hour (log scale)</text>
+<text x="18" y="140.0" text-anchor="middle" font-size="10.5" class="dim" transform="rotate(-90 18 140.0)">false rejects</text>
+<path d="M70.0,30.0 L77.4,30.0 L84.8,33.1 L92.1,39.3 L99.5,45.4 L106.9,51.6 L114.2,57.7 L121.6,63.7 L129.0,69.8 L136.4,75.8 L143.8,81.7 L151.1,87.6 L158.5,93.4 L165.9,99.2 L173.2,104.8 L180.6,110.5 L188.0,116.0 L195.4,121.4 L202.8,126.8 L210.1,132.1 L217.5,137.2 L224.9,142.3 L232.2,147.3 L239.6,152.1 L247.0,156.9 L254.4,161.5 L261.8,166.0 L269.1,170.4 L276.5,174.6 L283.9,178.8 L291.2,182.8 L298.6,186.6 L306.0,190.4 L313.4,194.0 L320.8,197.5 L328.1,200.8 L335.5,204.0 L342.9,207.1 L350.2,210.1 L357.6,212.9 L365.0,215.6 L372.4,218.1 L379.8,220.6 L387.1,222.9 L394.5,225.0 L401.9,227.1 L409.2,229.0 L416.6,230.8 L424.0,232.6 L431.4,234.1 L438.8,235.6 L446.1,237.0 L453.5,238.3 L460.9,239.5 L468.2,240.6 L475.6,241.6 L483.0,242.5 L490.4,243.4 L497.8,244.2 L505.1,244.9 L512.5,245.5 L519.9,246.1 L527.2,246.6 L534.6,247.1 L542.0,247.5 L549.4,247.8 L556.8,248.2 L564.1,248.5 L571.5,248.7 L578.9,248.9 L586.2,249.1 L593.6,249.3 L601.0,249.4 L608.4,249.5 L615.8,249.6 L623.1,249.7 L630.5,249.8 L637.9,249.8 L645.2,249.9 L652.6,249.9 L660.0,249.9" stroke="#fbbf24" stroke-width="2.2" fill="none"/>
+<path d="M70.0,206.4 L77.4,208.7 L84.8,210.9 L92.1,213.1 L99.5,215.1 L106.9,217.1 L114.2,219.0 L121.6,220.8 L129.0,222.6 L136.4,224.3 L143.8,225.9 L151.1,227.4 L158.5,228.8 L165.9,230.2 L173.2,231.6 L180.6,232.8 L188.0,234.0 L195.4,235.1 L202.8,236.2 L210.1,237.2 L217.5,238.2 L224.9,239.1 L232.2,239.9 L239.6,240.7 L247.0,241.5 L254.4,242.2 L261.8,242.8 L269.1,243.4 L276.5,244.0 L283.9,244.5 L291.2,245.0 L298.6,245.5 L306.0,245.9 L313.4,246.3 L320.8,246.7 L328.1,247.0 L335.5,247.3 L342.9,247.6 L350.2,247.8 L357.6,248.1 L365.0,248.3 L372.4,248.5 L379.8,248.6 L387.1,248.8 L394.5,248.9 L401.9,249.1 L409.2,249.2 L416.6,249.3 L424.0,249.4 L431.4,249.5 L438.8,249.5 L446.1,249.6 L453.5,249.7 L460.9,249.7 L468.2,249.8 L475.6,249.8 L483.0,249.8 L490.4,249.8 L497.8,249.9 L505.1,249.9 L512.5,249.9 L519.9,249.9 L527.2,249.9 L534.6,250.0 L542.0,250.0 L549.4,250.0 L556.8,250.0 L564.1,250.0 L571.5,250.0 L578.9,250.0 L586.2,250.0 L593.6,250.0 L601.0,250.0 L608.4,250.0 L615.8,250.0 L623.1,250.0 L630.5,250.0 L637.9,250.0 L645.2,250.0 L652.6,250.0 L660.0,250.0" stroke="#34d399" stroke-width="2.2" fill="none"/>
+<path d="M367.7,30 L367.7,250" stroke="#f472b6" stroke-width="1.4" stroke-dasharray="5 4" fill="none"/>
+<text x="367.7" y="24" text-anchor="middle" font-size="10" class="" fill="#f472b6">1 per hour</text>
+<path d="M105.1,30 L105.1,250" stroke="#f472b6" stroke-width="1.4" stroke-dasharray="5 4" fill="none"/>
+<text x="105.1" y="24" text-anchor="middle" font-size="10" class="" fill="#f472b6">1 per week</text>
+<circle cx="367.7" cy="216.5" r="4" fill="#fbbf24"/>
+<text x="375.7" y="209.5" text-anchor="start" font-size="10" font-weight="700" class="" fill="#fbbf24">6.1%</text>
+<circle cx="105.1" cy="50.1" r="4" fill="#fbbf24"/>
+<text x="113.1" y="43.1" text-anchor="start" font-size="10" font-weight="700" class="" fill="#fbbf24">36%</text>
+<circle cx="367.7" cy="248.3" r="4" fill="#34d399"/>
+<text x="375.7" y="241.3" text-anchor="start" font-size="10" font-weight="700" class="" fill="#34d399">0.3%</text>
+<circle cx="105.1" cy="216.6" r="4" fill="#34d399"/>
+<text x="113.1" y="209.6" text-anchor="start" font-size="10" font-weight="700" class="" fill="#34d399">6.1%</text>
+<text x="395" y="70" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#fbbf24">small detector (5 x 32)</text>
+<text x="395" y="86" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#34d399">larger detector (5 x 192)</text>
+</svg>
+      <div class="diagram-caption">Each curve is one model swept across every threshold. Dashed vertical lines mark the operating points that two different goals would pick, and at each of them the larger model rejects far fewer real phrases.</div>
+    </div>
+
+    <p>The curves above come from a toy model with two Gaussian score distributions per detector (the same pair of detectors as in the section 04 experiment), and they show a general feature. Moving left along a curve, toward fewer false alarms, makes the false-reject rate rise slowly at first and then quickly. For the smaller detector, going from one false alarm an hour to one a week raises the false-reject rate from about 6% to about 36%. For the larger one the same move takes it from 0.3% to about 6%. Our larger detector's curve is lower everywhere, and the gap is widest at the strict end, exactly where the product has to operate.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Setting</th><th>Operating point</th><th>Source</th></tr></thead>
+      <tbody>
+        <tr><td>Stage 1 of a cascade</td><td>A handful of wake-ups an hour</td><td>Gruenstein et al., 2017</td></tr>
+        <tr><td>Stage 2 alone, TV background</td><td>0.03 false alarms an hour (about 1 per 33 hours)</td><td>Gruenstein et al., 2017</td></tr>
+        <tr><td>Research comparison point</td><td>1 false alarm per hour</td><td>Higuchi et al., 2020</td></tr>
+        <tr><td>Research comparison point</td><td>1 false alarm per 100 hours</td><td>Garg et al., 2021</td></tr>
+        <tr><td>Product target for the full system</td><td>As low as about one per week</td><td>Apple, 2017</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 id="5-2-how-many-hours">5.2 How many hours of audio does it take to know?</h3>
+
+    <p>Now the awkward part. To set a threshold for one false alarm per week, we have to measure the false-alarm rate at a candidate threshold, and a rate that low is measured by counting events in recordings that don't contain the phrase. Apple's 2017 post says as much about its test data: "We need such a lot of data because we are trying to estimate false-alarm rates as low as one per week." It describes thousands of hours of recordings, including podcasts and non-trigger Siri requests in many languages.</p>
+
+    <p>Counting rare events has a standard statistical shape. If false alarms occur at an average rate <span>$\lambda$</span> per hour, then over <span>$H$</span> hours the count follows a Poisson distribution with mean <span>$\lambda H$</span> and standard deviation <span>$\sqrt{\lambda H}$</span>, so the relative error of the estimate is</p>
+
+    <div class="eq-block"><span>$$\frac{\sigma}{\mu} \;=\; \frac{\sqrt{\lambda H}}{\lambda H} \;=\; \frac{1}{\sqrt{\lambda H}}$$</span></div>
+
+    <p>where <span>$\lambda H$</span> is the number of false alarms you expect to see. Relative error depends only on how many events you count, not on how long you listened: to know a rate within 10% you need to see about 100 events.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">The target is one false alarm per week (168 hours). How many hours of negative audio do you need to measure that rate to within about 10%? Compare it with the roughly 2,800 hours of negative audio in Apple's 2018 personalised-trigger evaluation.</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>About 100 events at one per 168 hours is 16,800 hours of audio, nearly two years of continuous recording. With 2,800 hours you expect about 17 events, and a count of 17 has a relative error of about 24%. So a published test at that scale can tell one false alarm per week from one per day or one per month, but not one per week from 1.3 per week. The experiment below sets the threshold from such a test, then asks what false-alarm rate that threshold gives.</p>
+      </details>
+    </div>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Pick a threshold for one false alarm a week from a finite test set</span>
+      </summary>
+<pre><code>import numpy as np
+from statistics import NormalDist
+rng = np.random.default_rng(11)
+nd, W, WEEK = NormalDist(), 3600, 168        # windows/hour, hours/week
+z0 = 3.0                                     # only simulate the tail
+sf0 = 1 - nd.cdf(z0)
+isf = np.vectorize(lambda u: nd.inv_cdf(1 - u))
+def true_fa_per_week(thr):
+    return (1 - nd.cdf(thr)) * W * WEEK
+print("FA per week at the threshold chosen for 1 per week")
+print("neg. hours  alarms allowed   10th  median   90th")
+for H in [100, 500, 2800, 17000]:
+    k = max(1, round(H / WEEK))              # alarms we allow in H hours
+    got = []
+    for _ in range(300):
+        n = rng.poisson(H * W * sf0)
+        x = isf(rng.uniform(0, sf0, n))
+        got.append(true_fa_per_week(np.sort(x)[-k]))
+    lo, med, hi = np.percentile(got, [10, 50, 90])
+    print(f"{H:10d}{k:16d}{lo:7.2f}{med:8.2f}{hi:7.2f}")</code></pre>
+      <div class="tryit-out">With 100 hours of negatives the achieved false-alarm rate ranges from <code>0.18</code> to <code>4.30</code> per week across the 10th to 90th percentile, with a median of <code>1.12</code>. With 2,800 hours it narrows to <code>0.73</code> to <code>1.34</code>, and with 17,000 hours to <code>0.87</code> to <code>1.12</code>.</div>
+    </details>
+
+    <p>Each row is one size of test set. The program picks the threshold that lets through exactly the target number of false alarms in that set (one per week of audio), computes the false-alarm rate that threshold has on unlimited fresh audio, and repeats this 300 times. With 100 hours the outcomes span more than twenty to one, so a team using such a set might ship a detector that fires four times as often as promised. So the amount of negative audio is part of the design, and Apple's thousands of hours reflect that. (The scores here are random normal numbers, so the experiment shows the statistics of the measurement and nothing about the real detector.)</p>
+
+    <h3 id="5-3-a-second-chance">5.3 A second chance for the borderline cases</h3>
+
+    <p>A strict threshold fails visibly on hard cases, like Anika's far-away voice over the fan, whose score may land just short. Apple's 2017 post describes a two-threshold scheme: "a primary, or normal threshold, and a lower threshold that does not normally trigger Siri". If a score falls between the two, the detector doesn't fire, but it enters a more sensitive state for a few seconds, and if the user says the phrase again, Siri responds. Apple says this improves usability without much harm to false activations, because the lenient state is brief.</p>
+
+    <p>It treats the user's repetition as extra evidence: one borderline score is weak, two a few seconds apart are much stronger, and a single threshold can't express that.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to choose the operating point</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Equal error rate</td><td>A single summary number; easy to compare models</td><td>The two errors have different units and costs; Apple says it is undefined here</td></tr>
+        <tr><td>Fixed false-alarm budget, read the false-reject rate</td><td>Matches what users and privacy care about</td><td>Needs thousands of hours of negative audio to verify</td></tr>
+        <tr><td>Fixed budget plus a lower second-chance threshold</td><td>Recovers borderline attempts; costs few false alarms</td><td>Adds state and a short window of extra sensitivity</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Apple chose a fixed false-alarm target, as the weekly goal in the 2017 post shows, and added the second-chance threshold in the same system. Fraud detection, medical screening and spam filters pick thresholds the same way.</p>
+  </section>
+  <section id="speaker">
+    <h2><span class="num">06</span>Is it Anika? Speaker verification</h2>
+
+    <p>Back in the kitchen, her husband Rohan is on a call in the next room, and halfway through a sentence he says "hey, Siri is so slow today, isn't it". Our cascade, however careful, was trained to detect a phrase. It has no idea whose voice said it. A two-pass detector, so far, would wake Anika's phone for Rohan's remark about Siri, for the voice on the television, and for a visitor who says it on purpose. Apple's April 2018 post on Personalized "Hey Siri" states the goal as reducing false accepts by making each device "mostly wake only for the primary user".</p>
+
+    <p>Recognising a speaker takes a different kind of model from recognising a phrase. The phrase detector has to ignore who is talking, while the speaker model has to ignore what is said, or here to compare the same phrase spoken by different people. The usual tool is an <strong>embedding</strong>: a function that maps any utterance, whatever its length, to a fixed-length vector of numbers, trained so that utterances by the same person land close together and different people land far apart. After that we compare vectors and nothing else.</p>
+
+    <h3 id="6-1-enrolment">6.1 Enrolment and the profile</h3>
+
+    <p>The device needs examples of Anika's voice, and in the 2018 post it gets them in two ways. In <strong>explicit enrolment</strong> she says a short script when she sets up Siri: "Hey Siri" three times, then "Hey Siri, how is the weather today?" and "Hey Siri, it's me". That gives an immediate profile, but it's recorded in a quiet moment close to the phone, so it lacks the variety of real use. In <strong>implicit enrolment</strong> the profile is updated over time with real triggers the device accepted. That's risky, since an early false accept could pollute the profile with the wrong voice, so Apple's approach starts from the explicit recordings and grows with accepted utterances up to 40 speaker vectors. A 2023 post describes enrolment with five sample phrases, such as "Hey Siri, get directions home".</p>
+
+    <p>Each device also keeps the waveform of the phrase portion of each enrolment, so when Apple ships an improved vector model in an update, the profile can be rebuilt without asking Anika to repeat the script.</p>
+
+    <h3 id="6-2-vector-and-score">6.2 From an utterance to a vector, and a vector to a decision</h3>
+
+    <p>Turning a variable-length utterance into a fixed-length vector is the awkward step, and Apple's first version reuses what the detector already computes. Its second-pass detector knows which frames belong to which state of the phrase model. Averaging the acoustic features of all the frames in each state, and joining those averages in order, gives one vector of fixed length. In the 2018 post, 13 mel-frequency cepstral coefficients over 28 states give a 364-number vector, called a <strong>supervector</strong>. A linear transform learned from many speakers then maps it to a shorter vector of 150 numbers, using <strong>linear discriminant analysis</strong> (LDA), which picks the directions that best separate speakers by maximising the ratio of between-speaker spread to within-speaker spread:</p>
+
+    <div class="eq-block"><span>$$J(W) \;=\; \frac{\det\!\big(W^{\top} S_B\, W\big)}{\det\!\big(W^{\top} S_W\, W\big)}, \quad S_W=\sum_{c}\sum_{x\in c}(x-\mu_c)(x-\mu_c)^{\top}, \quad S_B=\sum_{c} n_c(\mu_c-\mu)(\mu_c-\mu)^{\top}$$</span></div>
+
+    <p>Here <span>$c$</span> runs over speakers, <span>$\mu_c$</span> is the mean supervector of speaker <span>$c$</span>, <span>$\mu$</span> the mean of all of them, and <span>$n_c$</span> the number of utterances from speaker <span>$c$</span>. Within-speaker scatter <span>$S_W$</span> measures how much one person's vectors vary from utterance to utterance, and between-speaker scatter <span>$S_B$</span> measures how far apart different people's averages are. The columns of <span>$W$</span> that make <span>$J$</span> large are the directions where people differ more than any one person varies. Apple trained its 2018 transform on 800 users with more than 100 utterances each.</p>
+
+    <p>A neural network does the same job better. The improved design in the 2018 post trains a DNN as a speaker classifier: four layers of 256 sigmoid units, then a 100-unit linear layer, then a softmax over 16,000 training speakers (about 150 utterances each). After training the softmax is thrown away, and the 100-number output of the linear layer is the speaker vector. That classification task exists only to force that layer to carry what distinguishes speakers, and the same trick builds face and product embeddings. Weights are quantised to eight bits to fit in memory.</p>
+
+    <p>Scoring is then geometry. Anika's profile holds up to <span>$N$</span> speaker vectors <span>$p_1,\dots,p_N$</span>, and a new utterance produces a vector <span>$x$</span>. The device computes the <strong>cosine score</strong> of <span>$x$</span> against each profile vector, the dot product after dividing by both lengths, and averages the results:</p>
+
+    <div class="eq-block"><span>$$\text{score}(x) \;=\; \frac{1}{N}\sum_{n=1}^{N} \frac{x\cdot p_n}{\lVert x\rVert\,\lVert p_n\rVert} \;\ge\; \lambda$$</span></div>
+
+    <p>When the average cosine passes a threshold <span>$\lambda$</span>, the device accepts. A cosine of one means the vectors point the same way and zero means unrelated, so the score measures the angle between voices and ignores loudness, which varies with distance from the phone. Raising <span>$\lambda$</span> lowers false accepts and imposter accepts and raises false rejects, so the trade-off from section 05 comes back, now on speakers.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Cosine scoring against a profile
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 270" xmlns="http://www.w3.org/2000/svg">
+<path d="M230,215 L372.6,142.4" stroke="#888" stroke-width="1.2" stroke-dasharray="5 4" fill="none"/>
+<path d="M230,215 L199.5,57.9" stroke="#888" stroke-width="1.2" stroke-dasharray="5 4" fill="none"/>
+<path d="M230,215 L372.6,142.4 A160,160 0 0 0 199.5,57.9 Z" fill="#34d399" opacity="0.07"/>
+<path d="M210,215 L380,215" stroke="#888" stroke-width="0.6" opacity="0.5" fill="none"/>
+<path d="M230,215 L304.6,108.5" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M230,215 L295.0,102.4" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M230,215 L284.9,97.2" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M230,215 L270.2,91.4" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M230,215 L282.7,70.3" stroke="#34d399" stroke-width="3" fill="none" class="flow-line"/>
+<path d="M230,215 L131.0,116.0" stroke="#f472b6" stroke-width="3" fill="none" class="flow-line"/>
+<text x="288.7" y="68.3" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#34d399">Anika, new</text>
+<text x="125.0" y="112.0" text-anchor="end" font-size="10.5" font-weight="700" class="" fill="#f472b6">Rohan</text>
+<text x="312.6" y="122.5" text-anchor="start" font-size="10" class="" fill="#818cf8">profile vectors</text>
+<text x="230" y="237" text-anchor="middle" font-size="9" class="dim">origin</text>
+<text x="410" y="60" text-anchor="start" font-size="10.5" class="dim">Illustrative angles, 2 dimensions</text>
+<text x="410" y="92" text-anchor="start" font-size="10.5" class="dim">Profile vectors: 55, 60, 65 and 72 degrees.</text>
+<text x="410" y="118" text-anchor="start" font-size="10.5" class="dim">Anika, new utterance at 70 degrees:</text>
+<text x="410" y="134" text-anchor="start" font-size="10.5" class="" fill="#34d399">cosines 0.97, 0.98, 1.00, 1.00  -&gt;  mean 0.99</text>
+<text x="410" y="160" text-anchor="start" font-size="10.5" class="dim">Rohan at 135 degrees:</text>
+<text x="410" y="176" text-anchor="start" font-size="10.5" class="" fill="#f472b6">cosines 0.17, 0.26, 0.34, 0.45  -&gt;  mean 0.31</text>
+<text x="410" y="206" text-anchor="start" font-size="10.5" class="dim">Threshold lambda = 0.8 (a cone of about</text>
+<text x="410" y="222" text-anchor="start" font-size="10.5" class="dim">37 degrees around the profile direction)</text>
+<text x="410" y="246" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#fbbf24">Accept Anika, reject Rohan.</text>
+</svg>
+      <div class="diagram-caption">Each arrow is a speaker vector, shown in two dimensions for the picture (the real ones have 100). Anika's profile vectors point in nearly the same direction, her new utterance falls inside the accepted cone, and Rohan's falls outside it.</div>
+    </div>
+
+    <p>Apple measured what each improvement bought in two ways. One is the <strong>equal error rate</strong> (EER) of the speaker comparison alone, the point where false accepts and false rejects are equal, on 200 users. The other is end-to-end behaviour, with 2,800 hours of negative audio and positive audio from 150 users, where imposter accepts are how often a different speaker saying the phrase gets in.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Speaker transform</th><th>Speaker EER</th><th>False accepts</th><th>False rejects</th><th>Imposter accepts</th></tr></thead>
+      <tbody>
+        <tr><td>Retrained linear (LDA) transform</td><td>8.0%</td><td>2 per month</td><td>9.8%</td><td>11.9%</td></tr>
+        <tr><td>DNN, one 100-unit sigmoid layer</td><td>5.3%</td><td>1 per month</td><td>5.9%</td><td>3.1%</td></tr>
+        <tr><td>DNN, four 256-unit layers and a 100-unit output</td><td>4.3%</td><td>1 per month</td><td>5.2%</td><td>3.2%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Going from the linear transform to the larger DNN roughly halved false rejects and cut imposter accepts from 11.9% to 3.2%, the difference between Rohan's voice often waking Anika's phone and rarely doing so. The post also admits a limit: performance was "still weaker in reverberant rooms and noisy settings like cars", and a tiled kitchen with a fan on is probably not far from that. It points to 2018 follow-up work on training with many acoustic styles and on LSTM models (a kind of recurrent network) that use the whole "Hey Siri, …" utterance, not only the trigger. By 2023 Apple describes an LSTM speaker embedding that runs twice, early on the trigger alone and later on the trigger plus the request, and says training on data from all languages and locales improves accuracy.</p>
+
+    <p>Google's 2017 cascade paper gives an independent measure of what a speaker check is worth. It enrols on "N (typically 3) utterances" and compares LSTM speaker embeddings by cosine distance, and the authors report that the check "can reduce the overall FAR by a factor of 5 to 10 while adding less than 1% absolute additional FRR", since false alarms from other people, television and radio are almost always rejected.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How the device decides whose voice it is</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>No speaker check</td><td>Works for any user at once; nothing to enrol</td><td>Anyone's voice, and any television, can wake the device</td></tr>
+        <tr><td>Check the phrase only, vectors by LDA (2018)</td><td>Cheap; reuses the detector's alignment</td><td>Higher imposter-accept and false-reject rates</td></tr>
+        <tr><td>Embedding from a DNN (2018) or LSTM (2023), on the phrase and the request</td><td>More accurate, uses more of the audio</td><td>Needs enrolment, per-user profile storage and more compute</td></tr>
+        <tr><td>Profile that grows with real use (up to 40 vectors)</td><td>Adapts to noise, distance and illness</td><td>A false accept can corrupt the profile</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Apple's published design combines the last three rows: a DNN embedding in 2018, a profile seeded by explicit enrolment and extended by accepted use, and the later LSTM. Comparing embeddings by cosine similarity is also how face unlock, voice banking and duplicate-photo detection work, and it is a close cousin of the dot-product scoring in the two-tower retrieval of <a href="/topics/41-design-youtube-recommendations">chapter 41</a>.</p>
+
+    <h4 class="why">Why compare with cosine and not with the straight-line distance between vectors?</h4>
+
+    <p>Recording conditions change the length of a vector as readily as its direction. A quiet phrase, a distant speaker or a different microphone gain can shrink or stretch the numbers without changing who's talking. An angle between two vectors ignores length, so those changes barely move it, and a length-normalised dot product is the cheapest way to compute it.</p>
+  </section>
+
+  <section id="shrinking">
+    <h2><span class="num">07</span>Shrinking the model until it fits</h2>
+
+    <p>The first pass has to fit on a chip that Google's paper says typically has 128 kB of memory in all, shared by the audio buffer, the program and the model. Our pipeline so far, a network that outputs sound classes plus a separate dynamic programme, also has two parts that are trained and tuned separately. Both problems suggest the same move: train one small network to output the phrase score directly, and build it from layers that need very few weights.</p>
+
+    <h3 id="7-1-factorising-a-layer">7.1 Factorising a layer over time and frequency</h3>
+
+    <p>Suppose a layer looks at <span>$F$</span> features per frame over <span>$K$</span> consecutive frames. A standard fully connected unit has one weight for each of the <span>$F\times K$</span> inputs. A <strong>singular value decomposition filter</strong> (SVDF) replaces that grid with two short filters: one of length <span>$F$</span> that boils each frame's features down to a single number, and one of length <span>$K$</span> that mixes those numbers across time. For one unit:</p>
+
+    <div class="eq-block"><span>$$a_t \;=\; g\!\Big(\sum_{k=1}^{K}\alpha_k \sum_{f=1}^{F}\beta_f\, x_{f,\,t-K+k}\Big)$$</span></div>
+
+    <p>Here <span>$x_{f,t}$</span> is feature <span>$f$</span> at frame <span>$t$</span>, <span>$\beta$</span> is the filter over features, <span>$\alpha$</span> is the filter over time, and <span>$g$</span> is the activation. A unit's weights drop from <span>$F\times K$</span> to <span>$F+K$</span>. With the 13 coefficients over 11 stacked frames in Higuchi et al. (2020), <span>$F=143$</span>, and with a memory of <span>$K=9$</span> frames a plain unit would have 1,287 weights against 152 for the SVDF, roughly 8.5 times fewer. (The paper doesn't give this unit count; it's our arithmetic on its settings.) The SVDF also remembers the past <span>$K-1$</span> frames inside the layer, so a stack of <span>$D$</span> layers sees <span>$D\times(K-1)$</span> frames of the past and produces a decision at every frame with no recurrent connections.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">One filter over features and time, three ways
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 274" xmlns="http://www.w3.org/2000/svg">
+<text x="110" y="28" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">Full filter</text>
+<rect x="40" y="40" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="62" y="40" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="84" y="40" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="106" y="40" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="128" y="40" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="150" y="40" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="40" y="62" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="62" y="62" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="84" y="62" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="106" y="62" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="128" y="62" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="150" y="62" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="40" y="84" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="62" y="84" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="84" y="84" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="106" y="84" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="128" y="84" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="150" y="84" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="40" y="106" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="62" y="106" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="84" y="106" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="106" y="106" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="128" y="106" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="150" y="106" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="40" y="128" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="62" y="128" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="84" y="128" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="106" y="128" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="128" y="128" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="150" y="128" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="40" y="150" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="62" y="150" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="84" y="150" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="106" y="150" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="128" y="150" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="150" y="150" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="40" y="172" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="62" y="172" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="84" y="172" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="106" y="172" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="128" y="172" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="150" y="172" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="40" y="194" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="62" y="194" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="84" y="194" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="106" y="194" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="128" y="194" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<rect x="150" y="194" width="20" height="20" rx="2" fill="#818cf8" opacity="0.55"/>
+<text x="110" y="236" text-anchor="middle" font-size="10.5" class="dim">F x K = 8 x 6 = 48 weights</text>
+<text x="110" y="252" text-anchor="middle" font-size="10" class="dim">every cell learned</text>
+<text x="350" y="28" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">Factorised (SVDF, S1DCNN)</text>
+<rect x="250" y="62" width="20" height="20" rx="2" fill="#34d399" opacity="0.8"/>
+<rect x="250" y="84" width="20" height="20" rx="2" fill="#34d399" opacity="0.8"/>
+<rect x="250" y="106" width="20" height="20" rx="2" fill="#34d399" opacity="0.8"/>
+<rect x="250" y="128" width="20" height="20" rx="2" fill="#34d399" opacity="0.8"/>
+<rect x="250" y="150" width="20" height="20" rx="2" fill="#34d399" opacity="0.8"/>
+<rect x="250" y="172" width="20" height="20" rx="2" fill="#34d399" opacity="0.8"/>
+<rect x="250" y="194" width="20" height="20" rx="2" fill="#34d399" opacity="0.8"/>
+<rect x="250" y="216" width="20" height="20" rx="2" fill="#34d399" opacity="0.8"/>
+<rect x="290" y="40" width="20" height="20" rx="2" fill="#fbbf24" opacity="0.8"/>
+<rect x="312" y="40" width="20" height="20" rx="2" fill="#fbbf24" opacity="0.8"/>
+<rect x="334" y="40" width="20" height="20" rx="2" fill="#fbbf24" opacity="0.8"/>
+<rect x="356" y="40" width="20" height="20" rx="2" fill="#fbbf24" opacity="0.8"/>
+<rect x="378" y="40" width="20" height="20" rx="2" fill="#fbbf24" opacity="0.8"/>
+<rect x="400" y="40" width="20" height="20" rx="2" fill="#fbbf24" opacity="0.8"/>
+<rect x="290" y="62" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="312" y="62" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="334" y="62" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="356" y="62" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="378" y="62" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="400" y="62" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="290" y="84" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="312" y="84" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="334" y="84" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="356" y="84" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="378" y="84" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="400" y="84" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="290" y="106" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="312" y="106" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="334" y="106" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="356" y="106" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="378" y="106" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="400" y="106" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="290" y="128" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="312" y="128" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="334" y="128" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="356" y="128" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="378" y="128" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="400" y="128" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="290" y="150" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="312" y="150" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="334" y="150" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="356" y="150" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="378" y="150" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="400" y="150" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="290" y="172" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="312" y="172" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="334" y="172" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="356" y="172" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="378" y="172" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="400" y="172" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="290" y="194" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="312" y="194" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="334" y="194" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="356" y="194" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="378" y="194" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="400" y="194" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="290" y="216" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="312" y="216" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="334" y="216" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="356" y="216" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="378" y="216" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<rect x="400" y="216" width="20" height="20" rx="2" fill="#34d399" opacity="0.12"/>
+<text x="350" y="258" text-anchor="middle" font-size="10.5" class="dim">one column of 8 plus one row of 6 = 14 weights</text>
+<text x="238" y="50" text-anchor="end" font-size="9" class="dim">over</text>
+<text x="238" y="62" text-anchor="end" font-size="9" class="dim">features</text>
+<text x="570" y="28" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">With F = 143, K = 9</text>
+<rect x="490" y="60" width="180" height="26" rx="4" fill="#818cf8" opacity="0.55"/>
+<text x="580" y="77" text-anchor="middle" font-size="10.5" class="">plain unit: 1,287</text>
+<rect x="490" y="108" width="21.3" height="26" rx="4" fill="#34d399" opacity="0.8"/>
+<text x="519.2587412587413" y="125" text-anchor="start" font-size="10.5" class="">factorised: 152</text>
+<text x="580" y="170" text-anchor="middle" font-size="10.5" class="" fill="#34d399">about 8.5 times fewer weights</text>
+<text x="580" y="186" text-anchor="middle" font-size="10" class="dim">per unit (our arithmetic)</text>
+</svg>
+      <div class="diagram-caption">Compare the three panels left to right. The full filter learns every cell of the grid, and the factorised ones learn one column and one row, whose product fills the grid.</div>
+    </div>
+
+    <p>The stacked 1D convolution network (S1DCNN) that Apple's team proposed in 2020 builds the same factorisation from ordinary convolution layers: a one-dimensional convolution over the feature axis, then a depth-wise convolution over time with one filter per channel. The paper shows that the SVDF is a special case with zero biases and no future frames, and the extra freedom helps in two ways: the convolution form allows biases, and it allows some future context, <span>$L$</span> frames, at the price of delay. In the paper's seven-layer network with <span>$K=9$</span>, the receptive field is <span>$((8-L)\times 7+5)\times 10$</span> milliseconds into the past and <span>$(L\times 7+5)\times 10$</span> milliseconds into the future. At <span>$L=0$</span> that's 610 ms of past and 50 ms of future, enough to cover a phrase, and each step up in <span>$L$</span> moves 70 ms of context from past to future.</p>
+
+    <p>Training is end to end. The output is a two-way probability of "trigger" or "not trigger", with the positive label placed 30 frames before the end of the phrase, and at test time the outputs over the last 30 frames are averaged. Training data is about 500,000 English utterances that start with the phrase and run on into a request, with the phrase cut out of the audio half the time to make negative examples. Evaluation used 6,509 phrase recordings and about 2,700 hours of audio without the phrase. At one false alarm per hour:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model (about 14 thousand parameters each)</th><th>Future context</th><th>False-reject rate</th></tr></thead>
+      <tbody>
+        <tr><td>DNN with HMM-style scoring (baseline)</td><td>n/a</td><td>4.99%</td></tr>
+        <tr><td>SVDF, end to end</td><td>50 ms</td><td>3.95%</td></tr>
+        <tr><td>S1DCNN, L = 0</td><td>50 ms</td><td>3.20%</td></tr>
+        <tr><td>S1DCNN, L = 1</td><td>120 ms</td><td>2.81%</td></tr>
+        <tr><td>S1DCNN, L = 3</td><td>260 ms</td><td>3.77%</td></tr>
+        <tr><td>S1DCNN, L = 4</td><td>330 ms</td><td>4.33%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Three things stand out. Moving from separate classes plus scoring to one end-to-end network cut false rejects by 20.8% relative at the same size (4.99% to 3.95%). Convolutions then cut another 19.0% relative at the same latency (to 3.20%). And a little future context helped while too much hurt: at <span>$L=3$</span> the model has only 400 ms of past, too short to cover a phrase, so the extra delay buys less than the lost history costs. The best setting spent 70 ms of extra delay than the baseline for another 12.2% relative improvement. All models were evaluated in 32-bit floating point.</p>
+
+    <h3 id="7-2-quantisation">7.2 Fewer bits per weight</h3>
+
+    <p>The other lever is bits per weight. Google's paper describes a uniform linear quantiser: find the smallest and largest weight in a layer, divide the range into <span>$2^b$</span> equal steps, and store each weight as the number of its nearest step. With <span>$b$</span> bits and weights between <span>$w_{\min}$</span> and <span>$w_{\max}$</span>, a weight <span>$w$</span> is stored as</p>
+
+    <div class="eq-block"><span>$$q \;=\; \operatorname{round}\!\Big(\frac{w-w_{\min}}{\Delta}\Big), \qquad \Delta=\frac{w_{\max}-w_{\min}}{2^{b}-1}, \qquad \hat w = w_{\min}+q\,\Delta$$</span></div>
+
+    <p>where <span>$\hat w$</span> is the value used at inference time, within half a step <span>$\Delta/2$</span> of the original. Google used 8 bits, and Apple's 2023 post says the first-stage model is compressed to "4 bits per weight for inference". For the 13,979-parameter network the savings are easy to work out: about 56 kB at 32 bits, 14 kB at 8 bits and 7 kB at 4 bits. Google's DSP budget for its first-stage model was 13 kB (a different network), so 8 bits would slightly exceed that budget for this one and 4 bits would leave room. Integer arithmetic is also faster and cheaper on a signal-processing chip than floating point.</p>
+
+    <p>Quantisation has a catch, which Google's paper names: DSPs use 16, 24 or 32-bit arithmetic with "somewhat different results", so one model isn't bit-identical across chips. Google emulates each platform's arithmetic in C, so data-centre training matches each chip, and trains a model per platform.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Network for the first pass</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>DNN over sound classes, separate scoring</td><td>Simple; phone-level targets are easy to inspect</td><td>Two parts trained and tuned separately</td></tr>
+        <tr><td>SVDF layers, end to end</td><td>Streaming, no recurrence, few parameters</td><td>No biases or future context</td></tr>
+        <tr><td>Stacked 1D convolutions, end to end</td><td>19% fewer false rejects than SVDF at equal size; controllable delay</td><td>Quantised accuracy left for future work in the paper</td></tr>
+        <tr><td>Transformer encoder (second pass)</td><td>Best accuracy for the checker</td><td>Too big for the first pass</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Apple's 2023 post still describes a first-stage DNN-HMM keyword spotter, with 23 output states (21 for seven phonemes, one for silence, one for background) followed by a Conformer checker. So the always-on chip probably keeps the classic structure while the end-to-end models appear in papers, and which runs on which device generation is unpublished. Splitting a convolution into a per-feature part and a per-time part is also the idea behind depthwise-separable convolutions in mobile image models such as MobileNet, applied here to time and frequency. Google's earlier work points the same way: Sainath and Parada (2015) found that convolutional networks, built under fixed limits on multiplications or on parameters, cut the false-reject rate by 27 to 44% relative to a plain DNN at one false alarm an hour.</p>
+  </section>
+
+  <section id="after">
+    <h2><span class="num">08</span>Using what comes after the phrase</h2>
+
+    <p>The cascade, the speaker check and the better first-pass model all look at the phrase itself, and some false triggers sound so much like it that no model of those few hundred milliseconds can tell them apart. Apple's 2017 post gives the standard example: "Hey Seriously" starts the same way as "Hey Siri". When the phone passes that audio on, Siri's server runs the full speech recogniser, hears the whole sentence, sees it isn't a request, and "the server sends a cancellation signal to the phone to put it back to sleep".</p>
+
+    <p>That check is accurate, but by the time it runs, audio has already left the device, the very thing the design tried to avoid. The natural improvement is to use the audio after the trigger, on the device. A true request tends to continue as a sentence addressed to the assistant, while a false trigger tends to be a fragment of someone else's conversation, so the next second or two of audio carries a lot of information.</p>
+
+    <p>Apple's 2021 paper (Garg et al.) builds this into one model. It's a transformer encoder, a network in which every frame looks at the others through attention, running over the audio in blocks and keeping what it has already computed. It has two outputs. One checks the phrase, as the second pass always did, and the other, the phrase discrimination branch, keeps scoring the audio that follows and decides whether it was a real request. Three design choices make it work on a phone. Attention runs over blocks of about 1.9 seconds that overlap by half, so cost grows in proportion to the audio length where ordinary attention grows with its square. The phrase discrimination loss is a plain cross-entropy on every frame, because the connectionist temporal classification loss used before tends to give "highly peaky and overconfident distributions" that misclassify look-alike triggers. And a small recurrent layer smooths the output over time.</p>
+
+    <p>The model was trained on 2,700 hours of transcribed audio, expanded to 8,100 hours by simulating rooms and echo, plus 140,000 true-trigger and 40,000 false-trigger utterances for the discrimination task. On two evaluation sets the joint model lowered false rejects, from 3.6% to 2.8% on a structured set of 100 participants at one false alarm per 100 hours, and from 5.9% to 5.1% on an unstructured set from 80 households over two weeks. For false trigger mitigation, giving the model one more second of audio after the trigger, at a cost of 1% additional false rejects, it suppressed 95.8% of unintended false triggers. On a 2019 phone the streaming form used 32% less memory and 56% less inference time than reprocessing the extra second from scratch.</p>
+
+    <p>A 2023 post, published as iOS 17 added support for saying just "Siri", describes how these pieces fit together on the device. The first stage, on the always-on processor, discards audio without the keywords. A Conformer encoder (a transformer variant that adds convolutions) rescores the candidate on the application processor. A speaker model runs early and late. Finally a stage called Siri directed speech detection examines the full utterance and can override the trigger, using three different views: a recurrent network over the speech recogniser's lattice of alternative transcriptions, in which a real request has few competing hypotheses and a false trigger often has several; an acoustic transformer that doesn't depend on the recogniser; and a text classifier that decides whether the words were addressed to the assistant, including cases where "Siri" is used as an ordinary noun. Apple gives no accuracy, power or latency figures for any of them.</p>
+
+    <p>Why would dropping "Hey" make the layered design matter more? Apple's post lists the short phrase among its challenges, and the logic holds even without numbers. A phrase with fewer sounds gives the first stage less evidence, so more everyday speech probably resembles it at a given threshold, and weight shifts onto the later, better-informed stages. That's our inference from the design, not a figure Apple gives.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What checks a trigger after the phrase</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Nothing; trust the phrase detector</td><td>Fastest; no extra compute</td><td>Look-alike speech goes through</td></tr>
+        <tr><td>The server's full recogniser (2017)</td><td>Strong model and the full sentence</td><td>Audio has already left the device</td></tr>
+        <tr><td>On-device acoustic model on the following second (2021)</td><td>No audio leaves; 95.8% of false triggers suppressed at +1% false rejects</td><td>Extra second of audio, extra compute</td></tr>
+        <tr><td>Also lattice and text models (2023)</td><td>Different views catch different mistakes</td><td>More models to run and keep in step</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Apple layers all of them, and each later check runs only on audio that passed the earlier ones, so every added filter costs compute on a small and shrinking share of the audio. Spam filtering, content moderation and fraud screening have the same shape: a cheap broad filter first, then progressively more expensive and better-informed checks.</p>
+
+    <h4 class="why">Why not make the first pass itself accurate enough, and skip the later ones?</h4>
+
+    <p>Our first pass sees a few hundred milliseconds, on a chip with kilobytes of memory. Later checks see more audio and use larger models, and they run rarely, so they can afford to. Pushing that much accuracy into the first pass would make it too large to run all day.</p>
+  </section>
+
+  <section id="data">
+    <h2><span class="num">09</span>Collecting the data: noise, distance and rare errors</h2>
+
+    <p>All of this machinery learns from recordings, and the recordings have to look like Anika's kitchen. A model trained on clean speech near a microphone has never heard a fan, a pan and a voice two metres away at the same time, and it will reject her or fire on the fan. The sources describe four ways of getting data that looks like the real world, and some cheap ways of labelling it.</p>
+
+    <p>For <strong>positive examples</strong>, Apple's 2017 post says its initial training set was "Hey Siri" utterances from users who had pressed the button and said it, along with general speech used to train the main recogniser. For testing, it recorded native speakers in "kitchen (near and far), car, bedroom, and restaurant" settings. It did not use button-press recordings for testing, because the microphone is close and the user has already triggered Siri by hand, so they don't show the hard cases. Anika is the hard case: far away, noisy, speaking up.</p>
+
+    <p>Real far-field recordings are expensive, so most of the variety is synthesised. Garg et al. (2021) convolve clean recordings with room impulse responses, measurements of how a room smears a sound, and add echo residuals, what remains of the device's own speaker output after partial cancellation. Higuchi et al. add a third augmentation that changes the gain, scaling each utterance by 0, −20 or −32 dB. They say this closes the gap between the volume of server-side training audio and what the microphone receives on the device, and makes the model robust to volume. A quiet voice across a kitchen is a −20 dB case. In the Garg paper the room and echo augmentation turns 2,700 hours of clean audio into 8,100 hours.</p>
+
+    <p><strong>Labels</strong> come cheaply from the main recogniser. Apple's post says the transcriptions of the training audio were produced automatically, with a subset checked by the team, and the frame-level labels, which sound class each frame belongs to, come from aligning transcript and audio. That post says the labels use only about 20 sound classes, including one large "everything else" class.</p>
+
+    <p>The "everything else" class is large, and that causes an imbalance. In ordinary speech the phrase sounds are a tiny share of all frames, so a network trained on raw frequencies is pushed to predict "other". The standard correction in a network-plus-HMM system divides each class's posterior by the class's overall frequency in the training data, turning the network's "probability of the class given the sound" into something proportional to "probability of the sound given the class":</p>
+
+    <div class="eq-block"><span>$$\log p(x_t \mid s) \;=\; \log P(s \mid x_t) \;-\; \log P(s) \;+\; \text{const}$$</span></div>
+
+    <p>where <span>$x_t$</span> is the sound at frame <span>$t$</span>, <span>$s$</span> a sound class, and <span>$P(s)$</span> the class's share of the training frames. That constant is the same for every class at a given frame, so we can ignore it. If a phrase sound is one frame in 400 (an illustrative figure), subtracting its log prior adds about 6 to its log score, so rare classes aren't swamped. Apple's post says the outputs are adjusted "to compensate for uneven phone frequencies in the training data"; the formula above is the standard way to do it, and the post doesn't write it out. End-to-end models face the same imbalance differently: the streaming model of Alvarez and Park, which Higuchi et al. follow, repeats the positive label across many frames to avoid highly imbalanced targets.</p>
+
+    <p>The training set also has to cover the ways people say the phrase. For US English the post says two variants are trained, differing in the first vowel of "Siri" (as in "serious" and as in "Syria"), and a short pause in "Hey, Siri" is allowed. The phrase also changes by language, "Dis Siri" in French and "Siri 야" in Korean among them, so each language needs its own data. Each model takes about a day to train, and three come out together: a small one for the always-on processor, a larger one for the second pass and a medium one for the watch.</p>
+
+    <p>For the later checker, Garg et al. add 140,000 true-trigger and 40,000 false-trigger utterances for the discrimination task, and their paper doesn't say how the false triggers were gathered. Still, the principle is clear. Random negative audio contains few look-alikes, so the most useful negatives are the audio that fooled the previous model, which turns the data pipeline into a feedback loop: the failures of version <span>$n$</span> become training data for version <span>$n+1$</span>.</p>
+
+    <p>That loop has a privacy constraint, and Apple changed it publicly. In an August 2019 statement it said it would "no longer retain audio recordings of Siri interactions" by default, let users opt in to sharing audio samples, and "delete any recording which is determined to be an inadvertent trigger of Siri". How Apple gathers hard negatives today is unpublished. The 2017 post describes one monitoring mechanism, sampling production data each week on the latest iOS devices and Apple Watch to estimate false-alarm and imposter-accept rates, which section 11 returns to.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Where wake-word training audio comes from</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Button-press utterances from users</td><td>Plentiful, real voices and devices</td><td>Close to the microphone; no far-field or noise</td></tr>
+        <tr><td>Recorded sessions in kitchens, cars and bedrooms</td><td>The hard cases, with known labels</td><td>Costly; small compared with the need</td></tr>
+        <tr><td>Simulated rooms, echo and gain on clean audio</td><td>Multiplies data cheaply (2,700 to 8,100 hours)</td><td>Only as realistic as the simulation</td></tr>
+        <tr><td>Mined false triggers as negatives</td><td>Targets the model's actual look-alike mistakes</td><td>Depends on collecting audio users did not intend to send</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Apple's published practice is the combination: real recordings for the hard test conditions, simulation to multiply training data, automatic labels from the main recogniser and weekly production sampling. Simulated rooms and noise are standard in audio models, and mining the previous model's mistakes as the next one's negatives is the usual recipe wherever errors are rare, as in fraud, search ranking and content moderation.</p>
+
+    <h4 class="why">Why not test on the button-press recordings, since there are so many?</h4>
+
+    <p>Because they don't resemble the situations where the detector matters. A person who pressed the button is near the phone and has already started Siri, while the person who says "Hey Siri" is often across the room. An easy test set measures the wrong thing and reports accuracy the product doesn't have.</p>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">10</span>On the device: memory, latency and one request</h2>
+
+    <p>The model fits only if everything else on the chip fits too, and Google's paper shows the arithmetic. The first-stage DSP has about 128 kB. Program code takes about 25 kB, and another 12 kB goes on tables for the fast Fourier transform that makes the frequency summaries. The audio buffer has to hold the whole phrase: two seconds of 16-bit audio at 16,000 samples a second is 2 × 16,000 × 2 bytes, or 64 kB. That leaves 128 − 25 − 12 − 64 = 27 kB, of which the model takes 13 kB and the rest is working memory. Audio is roughly half the memory and the model a tenth.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Where 128 kB goes on a first-stage DSP
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="30.0" y="70" width="125.0" height="60" fill="#818cf8" opacity="0.22"/>
+<rect x="30.0" y="70" width="125.0" height="60" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="92.5" y="96" text-anchor="middle" font-size="10" class="">25 kB</text>
+<rect x="155.0" y="70" width="60.0" height="60" fill="#fbbf24" opacity="0.22"/>
+<rect x="155.0" y="70" width="60.0" height="60" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="185.0" y="96" text-anchor="middle" font-size="10" class="">12 kB</text>
+<rect x="215.0" y="70" width="320.0" height="60" fill="#f472b6" opacity="0.22"/>
+<rect x="215.0" y="70" width="320.0" height="60" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="375.0" y="96" text-anchor="middle" font-size="10.5" font-weight="700" class="" fill="#f472b6">audio buffer: 2 s of 16-bit audio at 16 kHz</text>
+<text x="375.0" y="114" text-anchor="middle" font-size="10.5" class="dim">64 kB</text>
+<rect x="535.0" y="70" width="65.0" height="60" fill="#34d399" opacity="0.22"/>
+<rect x="535.0" y="70" width="65.0" height="60" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="567.5" y="96" text-anchor="middle" font-size="10" class="">13 kB</text>
+<rect x="600.0" y="70" width="70.0" height="60" fill="#888" opacity="0.22"/>
+<rect x="600.0" y="70" width="70.0" height="60" fill="none" stroke="#888" stroke-width="1.6"/>
+<text x="635.0" y="96" text-anchor="middle" font-size="10" class="">14 kB</text>
+<text x="92.5" y="152" text-anchor="middle" font-size="10.5" font-weight="700" class="" fill="#818cf8">program</text>
+<text x="185.0" y="170" text-anchor="middle" font-size="10.5" font-weight="700" class="" fill="#fbbf24">FFT</text>
+<text x="567.5" y="152" text-anchor="middle" font-size="10.5" font-weight="700" class="" fill="#34d399">model</text>
+<text x="635.0" y="170" text-anchor="middle" font-size="10.5" font-weight="700" class="" fill="#888">free</text>
+<text x="30" y="40" text-anchor="start" font-size="10.5" class="dim">128 kB of memory on a first-stage DSP (Google, 2017), drawn to scale</text>
+<text x="30" y="210" text-anchor="start" font-size="10.5" class="dim">25 + 12 + 64 + 13 = 114 kB, leaving about 14 kB for working buffers.</text>
+<text x="30" y="230" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Cutting the audio buffer to 1 s would free 32 kB; halving the model would free under 7 kB.</text>
+</svg>
+      <div class="diagram-caption">The bar is drawn to scale. Here the two-second audio buffer is the largest block and the neural network is among the smallest, so shortening the buffer would free more room than shrinking the model.</div>
+    </div>
+
+    <p>Compute is just as tight. A network of about 13 thousand weights at 100 frames a second does about 1.3 million multiply-adds a second (Higuchi's table gives roughly 12.8 thousand per frame), a rounding error next to the billions the main processor does. The second stage is bigger but runs rarely, and it faces a different pressure: it works on audio that has already happened, so it has to run faster than real time. Google says it "must be able to process the buffered audio coming from the first stage as fast as possible to minimize detection latency".</p>
+
+    <p>Latency has several small contributions that add up. Each future frame in the input window adds 10 ms. Smoothing and the dynamic programme can't finish until the end of the phrase has been heard, and the score "peaks just after the full phrase has entered the system", in Apple's words. In the S1DCNN the delay is explicit: 50 ms of future context at the base setting and 120 ms at the best one. Then the second stage runs and, in the 2021 design, can use another second of audio to confirm. A detector has one more duty beyond yes or no: it must say where the phrase ended, so the recording of the request starts in the right place. Google's paper notes that the spotter's alignment "can improve start-of-speech detection", which shows up as better recognition of the request itself.</p>
+
+    <p>Here's Anika's request step by step, with published numbers where they exist and a flag where they don't. Apple publishes no end-to-end latency for "Hey Siri" and no power figure for its chips, so the steps carry none.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Always</span><span>The microphone samples 16,000 values a second and the front end makes a frame every 10 ms. The first-pass network on the always-on processor scores a window of about 20 frames (0.2 s) at every step. While Anika kneads it hears the fan, the pan and the radio, and nothing passes its threshold.</span></li>
+      <li><span class="st-lane">Phrase</span><span>She says "Hey Siri" from two metres. Smoothed scores for the phrase's sound states climb in order, and the running score peaks just after she finishes. A score between the two thresholds would only raise sensitivity for a few seconds; this one clears the main threshold.</span></li>
+      <li><span class="st-lane">Wake</span><span>The first stage wakes the main processor and hands it the buffered audio, about two seconds in Google's design, while the microphone keeps streaming the rest. Apple's post doesn't give the buffer length, though a 2023 overview mentions a ring buffer (a fixed-size store that keeps overwriting its oldest audio), so it probably holds a similar couple of seconds.</span></li>
+      <li><span class="st-lane">Check</span><span>The larger second-pass network, five layers of 192 units in the 2017 configuration, rescores the audio. In the same pass the device makes a speaker vector from the phrase and compares it with the stored profile by cosine score. Both must pass. Published timing for this step: none.</span></li>
+      <li><span class="st-lane">Listen</span><span>Siri starts and the device streams "set a timer for twelve minutes" to Siri's servers. In the 2021 design an extra second of post-trigger audio is scored on the device, and in the 2017 design the server's recogniser could still cancel the request. If the utterance isn't addressed to Siri, the phone is told to go back to sleep.</span></li>
+      <li><span class="st-lane">Act</span><span>The request is understood and a twelve-minute timer is set. So the detector's part ended at step 4. Everything from here is speech recognition and language understanding, covered in chapters <a href="/topics/13-speech-audio">13</a> and <a href="/topics/39-realtime-voice-ai">39</a>.</span></li>
+    </ol>
+
+    <p>Notice how little of this happens on the main processor. Most of a day's audio is handled by the cheapest part of the chip and never leaves the device, and the larger network sees only the few seconds around each wake-up.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What to spend the on-device budget on</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>A longer audio buffer</td><td>Second stage sees the whole phrase and some context</td><td>Memory the first-stage model could have used</td></tr>
+        <tr><td>More future frames</td><td>More accurate scores (best at 70 ms more in Higuchi)</td><td>Each frame adds 10 ms of delay</td></tr>
+        <tr><td>A larger first-stage model</td><td>Fewer wake-ups for the second stage</td><td>Memory and power on a chip with kilobytes</td></tr>
+        <tr><td>More bits per weight</td><td>Less quantisation error</td><td>Twice the memory at 8 bits instead of 4</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Every row trades one scarce thing for another, and the published designs sit at different points: Google's 13 kB model at 8 bits in 2017 and Apple's 4 bits per weight in 2023. Splitting a fixed memory and time allowance among competing parts is how any on-device model gets designed, from keyboard prediction to camera effects.</p>
+  </section>
+  <section id="evaluation">
+    <h2><span class="num">11</span>How anyone knows it works: offline sets and production sampling</h2>
+
+    <p>We have a detector with many dials: the two thresholds, the stage-1 operating point, the speaker threshold, the model sizes. Turning any of them changes both kinds of mistake, so we need a test that measures both honestly, and that's harder than it looks, because the two mistakes are measured on very different audio.</p>
+
+    <h3 id="11-1-offline">11.1 Offline: positives that are hard, negatives that are many</h3>
+
+    <p>False rejects are measured on recordings that contain the phrase, and those need to look like real use. False accepts are measured on recordings that don't, and there must be a great many hours of them. Published test sets show both pressures.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Source</th><th>Positive audio</th><th>Negative audio</th></tr></thead>
+      <tbody>
+        <tr><td>Chen et al., 2014</td><td>About 1,000 examples per keyword, plus babble noise at 10 dB SNR</td><td>70,000 examples, a 1.4% positive-to-negative ratio, chosen to match expected use</td></tr>
+        <tr><td>Gruenstein et al., 2017</td><td>65,581 recordings of US English speakers</td><td>924 hours of television background</td></tr>
+        <tr><td>Apple, 2017</td><td>Native speakers in kitchen (near and far), car, bedroom, restaurant</td><td>Thousands of hours: podcasts, non-trigger Siri requests, many languages</td></tr>
+        <tr><td>Apple, 2018 (personalised)</td><td>Phrases from 150 users</td><td>2,800 hours</td></tr>
+        <tr><td>Higuchi et al., 2020</td><td>6,509 phrase utterances</td><td>About 2,700 hours in a range of noise conditions</td></tr>
+        <tr><td>Garg et al., 2021</td><td>100 participants on a smart speaker, with noise and playback conditions; plus 80 households using a smart speaker daily for two weeks</td><td>2,000 hours of general speech</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Look at the ratios. In Chen's test set the phrase is 1.4% of the examples, and real audio is more lopsided still: the phrase is spoken a few times a day while the microphone hears hours of everything else. Plain accuracy is meaningless on such data, since a detector that never fires would be right more than 99.99% of the time. That's why every paper reports the pair of false-alarm and false-reject rates, or the DET curve of section 05.</p>
+
+    <p>The two Apple test sets in the 2021 paper show a trick for measuring realistic false alarms. One is a controlled recording session, the structured set. The other, the unstructured set, is 80 households that used a smart speaker daily for two weeks, with a first-pass system at a deliberately low threshold marking every segment that sounded at all like the phrase. Evaluators could then count both real phrases and everything the household produced that tripped the first pass, a way to get realistic false triggers without recording for years. The paper notes it reports a different operating point from before because the "unstructured evaluation set has increased in past year", which also shows that these sets keep growing.</p>
+
+    <p>One more habit matters for a cascade: measure it as a cascade. Section 04's table showed that the combined false-reject rate isn't the sum of the stages' rates and the combined false-alarm rate isn't either stage's, so each stage's own curve can't predict how the full system behaves. Published evaluations run the full pipeline on the full sets.</p>
+
+    <h3 id="11-2-production">11.2 In production: counting the misses you never heard</h3>
+
+    <p>After launch the system faces a measurement problem of an unusual shape. False accepts leave a trace, since Siri turned on, and a sample of those can be examined. False rejects leave none: Anika said the phrase, nothing happened, and nothing was recorded. Apple's 2017 post says how it handles the asymmetry. Each week the team estimates false-alarm and imposter-accept rates "by sampling from production data, on the latest iOS devices and Apple Watch". It says plainly that "this does not give us rejection rates", and describes two proxies: the proportion of activations just above the threshold that turn out to be valid, and "a sampling of just-below threshold events on devices carried by development staff".</p>
+
+    <p>The first proxy has a clean logic. Activations just above the threshold are the borderline ones. If most of them are real phrases, nudging the threshold up would have rejected many real phrases, so the share that are valid tells you how dense real attempts are at the edge. Together with the staff devices, whose borderline misses can be inspected, that gives an estimate of how many valid attempts sit just below the line.</p>
+
+    <p>Apple hasn't published how it runs live experiments on the trigger, so there's no A/B result to quote, but we can say what a test would need. A rare event is easier to count online than offline, because events multiply with every device. If each of a million devices false-alarms once a week, the fleet produces about 6,000 alarms an hour, and a few days of data hold thousands of events, the sample that took 17,000 hours of audio offline. Online, the bottleneck is labels: working out which alarms were real takes either retained audio, which Apple stopped keeping by default in 2019, or a proxy such as whether the user cancelled the request.</p>
+
+    <h4 class="why">Why not take the false-reject rate from users who repeat themselves?</h4>
+
+    <p>A repeated phrase signals a miss, but it's a biased sample. Users who give up after one try leave nothing behind, and a request that fails for another reason looks identical. Apple's rejection estimate uses activations the device did record, just above the threshold or on staff devices, because those can be checked against what was said.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Way to measure the detector</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Offline sets with recorded phrases and negative hours</td><td>Both error types measured directly, fully labelled</td><td>Thousands of hours needed; sets drift from real use</td></tr>
+        <tr><td>Take-home recordings from real households</td><td>Realistic noise, speakers and false triggers</td><td>Small number of homes; consent and storage needed</td></tr>
+        <tr><td>Weekly production sampling of activations</td><td>The real population; counts false alarms and imposter accepts</td><td>Cannot see rejections directly</td></tr>
+        <tr><td>Borderline activations plus staff devices</td><td>Estimates rejections from what was recorded</td><td>Indirect; the staff are not typical users</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Apple's 2017 and 2021 papers between them describe all four. Pairing a fully labelled offline set with a sampled, partly observed production stream is common wherever failures are silent, as in fraud screening, where blocked transactions can't be checked, or in search, where nobody records the results they didn't click.</p>
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">12</span>What went wrong, and what it cost</h2>
+
+    <p>The sources record several failures, in the papers' own words and, in one case, in a company statement. None is a dramatic outage. Each is a way a detector that scored well on a test set did something unwelcome in the world, and together they show where the design was strained.</p>
+
+    <p>The costliest failure was about privacy. In August 2019 Apple said it had "immediately suspended human grading of Siri requests" while it reviewed its practices. Its statement of August 28, 2019 said it would "no longer retain audio recordings of Siri interactions" by default, would make audio sharing opt-in, with only Apple employees allowed to listen, and would "delete any recording which is determined to be an inadvertent trigger of Siri". For a detector, the lesson is that a false accept is a privacy event as well as a battery one. What it cost was a change in how Apple collects improvement data, so the loop in section 09, where one model's errors feed the next, had to work under a new constraint. Apple hasn't said how it adjusted.</p>
+
+    <p>The design also stumbled in smaller, technical ways, each documented. Personalised "Hey Siri" was "still weaker in reverberant rooms and noisy settings like cars" in 2018. In 2021, the authors found that streaming attention trained with a CTC loss on the phrase discrimination branch gave "highly peaky and overconfident distributions" that misclassified look-alike audio. In the S1DCNN experiments, adding too much future context made the model worse, because the left receptive field shrank below the length of the phrase. Google's engineers noted that a first stage with too high a false-alarm rate would drain the battery, and that DSPs from different vendors gave slightly different numerical results from the same model.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What happens</th><th>What the user sees</th><th>What the design does</th></tr></thead>
+      <tbody>
+        <tr><td>Fan and pan noise, speaker two metres away</td><td>Anika repeats herself</td><td>Far-field training data, simulated rooms and gain; second chance threshold</td></tr>
+        <tr><td>Look-alike speech such as "Hey Seriously"</td><td>Siri starts and then goes back to sleep</td><td>Server check (2017), on-device post-trigger check (2021, 2023)</td></tr>
+        <tr><td>Rohan says the phrase</td><td>Anika's phone wakes for him</td><td>Speaker embedding compared with the profile by cosine score</td></tr>
+        <tr><td>Early false accept pollutes the profile</td><td>The profile drifts toward the wrong voice</td><td>Start from explicit enrolment; cap at 40 vectors; keep waveforms to rebuild</td></tr>
+        <tr><td>First stage fires too often</td><td>Battery drains faster</td><td>Tune stage 1 to a handful of wake-ups an hour</td></tr>
+        <tr><td>Different chip, slightly different arithmetic</td><td>Accuracy differs by device</td><td>Emulate each chip's arithmetic in training and evaluation</td></tr>
+        <tr><td>Inadvertent trigger audio retained</td><td>Recordings the user never intended to share</td><td>No retention by default, opt-in review, deletion of inadvertent triggers (2019)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Most of these costs aren't published. Apple gives no figures for how many false accepts occurred, what rework the 2019 change required, or what accuracy was given up. What the record does show is where the pressure fell: on the false-accept side, at every stage, from the Always On Processor to the privacy policy.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Decision</th><th>Chosen</th><th>Given up</th><th>Why it was worth it</th></tr></thead>
+      <tbody>
+        <tr><td>Where to listen</td><td>On the device, on a low-power chip</td><td>A larger model for the always-on part</td><td>Battery and privacy; audio stays local until a trigger</td></tr>
+        <tr><td>How many passes</td><td>Two on iPhone, one gated on Watch</td><td>Simplicity</td><td>Large-model accuracy at small-model power</td></tr>
+        <tr><td>Threshold</td><td>Fixed false-alarm target, plus a second-chance threshold</td><td>A single clean number such as equal error rate</td><td>The user cares about false alarms per week</td></tr>
+        <tr><td>Speaker check</td><td>Embedding and cosine score against a growing profile</td><td>Convenience for guests, some false rejects</td><td>Imposter accepts fell from 11.9% to about 3%</td></tr>
+        <tr><td>After the phrase</td><td>Check the following audio on the device</td><td>An extra second of audio and compute</td><td>95.8% of false triggers suppressed at +1% false rejects</td></tr>
+        <tr><td>Test data</td><td>Thousands of hours of negatives</td><td>Cost of collecting and storing them</td><td>A one-per-week rate cannot be measured with less</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">13</span>The whole system</h2>
+
+    <p>Now we can draw the full design. On the left is Anika's request, from the microphone through the two passes and the speaker check to the point where Siri starts, with the checks that continue afterwards. On the right is the offline loop that decides what each of those parts has learned and how its thresholds were chosen.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The whole design, online and offline
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 470" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">ONLINE: Anika's request</text>
+<text x="420" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">OFFLINE: how the models were made</text>
+<rect x="20" y="40" width="280" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="280" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="160.0" y="57.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">MICROPHONE</text>
+<text x="160.0" y="71.0" text-anchor="middle" font-size="10" class="dim">16 kHz, ring buffer</text>
+<path d="M160,82 L160,94" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="96" width="280" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="96" width="280" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="160.0" y="113.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">FRONT END</text>
+<text x="160.0" y="127.0" text-anchor="middle" font-size="10" class="dim">10 ms frames, 20-frame window</text>
+<path d="M160,138 L160,150" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="152" width="280" height="40" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="152" width="280" height="40" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="160.0" y="169.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">STAGE 1: low-power chip</text>
+<text x="160.0" y="183.0" text-anchor="middle" font-size="10" class="dim">small DNN or S1DCNN, lenient</text>
+<path d="M160,194 L160,206" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="208" width="280" height="40" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="208" width="280" height="40" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="160.0" y="225.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">STAGE 2: main processor</text>
+<text x="160.0" y="239.0" text-anchor="middle" font-size="10" class="dim">larger network, strict</text>
+<path d="M160,250 L160,262" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="264" width="280" height="40" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="264" width="280" height="40" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="160.0" y="281.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">SPEAKER CHECK</text>
+<text x="160.0" y="295.0" text-anchor="middle" font-size="10" class="dim">embedding, cosine vs profile</text>
+<path d="M160,306 L160,318" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="320" width="280" height="40" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="320" width="280" height="40" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="160.0" y="337.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">POST-TRIGGER CHECKS</text>
+<text x="160.0" y="351.0" text-anchor="middle" font-size="10" class="dim">following audio, server, lattice</text>
+<path d="M160,362 L160,374" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="376" width="280" height="40" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="376" width="280" height="40" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="160.0" y="393.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">SIRI STARTS</text>
+<text x="160.0" y="407.0" text-anchor="middle" font-size="10" class="dim">request goes to the assistant</text>
+<rect x="420" y="40" width="260" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="420" y="40" width="260" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="550.0" y="59.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">RECORDINGS</text>
+<text x="550.0" y="73.0" text-anchor="middle" font-size="10" class="dim">kitchens, cars, far and near</text>
+<path d="M550,86 L550,100" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="420" y="102" width="260" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="420" y="102" width="260" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="550.0" y="121.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">AUGMENT + LABEL</text>
+<text x="550.0" y="135.0" text-anchor="middle" font-size="10" class="dim">rooms, echo, gain; frame labels</text>
+<path d="M550,148 L550,162" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="420" y="164" width="260" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="420" y="164" width="260" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="550.0" y="183.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">TRAIN</text>
+<text x="550.0" y="197.0" text-anchor="middle" font-size="10" class="dim">small, large and watch models</text>
+<path d="M550,210 L550,224" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="420" y="226" width="260" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="420" y="226" width="260" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="550.0" y="245.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">EVALUATE</text>
+<text x="550.0" y="259.0" text-anchor="middle" font-size="10" class="dim">DET curves, thousands of negative hours</text>
+<path d="M550,272 L550,286" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="420" y="288" width="260" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="420" y="288" width="260" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="550.0" y="307.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">THRESHOLDS + UPDATE</text>
+<text x="550.0" y="321.0" text-anchor="middle" font-size="10" class="dim">set per stage, ship over the air</text>
+<rect x="420" y="354" width="260" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="420" y="354" width="260" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="550.0" y="373.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">PRODUCTION SAMPLING</text>
+<text x="550.0" y="387.0" text-anchor="middle" font-size="10" class="dim">weekly sampling of live activations feeds EVALUATE</text>
+<path d="M420,310 L350,310 L350,172 L302,172" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M350,310 L350,228 L302,228" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<text x="356" y="212" text-anchor="start" font-size="9.5" class="dim">models +</text>
+<text x="356" y="224" text-anchor="start" font-size="9.5" class="dim">thresholds</text>
+<text x="20" y="452" text-anchor="start" font-size="10.5" class="dim">The audio never leaves the device until the later stages agree. Every box on the left was tuned by the loop on the right.</text>
+</svg>
+      <div class="diagram-caption">Start at the microphone on the left and follow the audio down to Siri. Then follow the right-hand column, where recordings, augmentation, training and evaluation produce the models and thresholds that sit in the left-hand boxes.</div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Component</th><th>What it does</th><th>Added because</th></tr></thead>
+      <tbody>
+        <tr><td>Front end and frame window</td><td>Turns 16,000 samples a second into 100 frames a second, 20 at a time</td><td>The network needs a short, structured input (section 03)</td></tr>
+        <tr><td>First-pass network, low-power chip</td><td>Scores the phrase at every frame</td><td>The big model cannot run all day (sections 01, 02, 04)</td></tr>
+        <tr><td>Ordered scoring and two thresholds</td><td>Turns posteriors into one score; second chance for borderline cases</td><td>Order matters; strict thresholds miss hard cases (sections 03, 05)</td></tr>
+        <tr><td>Second-pass network</td><td>Rescores the buffered audio with a bigger model</td><td>First pass is lenient by design (section 04)</td></tr>
+        <tr><td>Speaker embedding and profile</td><td>Compares the voice with the owner's by cosine score</td><td>Other people say the phrase too (section 06)</td></tr>
+        <tr><td>Post-trigger checks</td><td>Server and on-device checks on what follows</td><td>Look-alike speech passes the phrase stages (section 08)</td></tr>
+        <tr><td>Augmented, labelled training data</td><td>Far-field, noisy examples with frame labels</td><td>Real kitchens are not studios (section 09)</td></tr>
+        <tr><td>Negative hours and production sampling</td><td>Set and verify thresholds</td><td>A weekly false-alarm rate needs thousands of hours (sections 05, 11)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Level</th><th>The choice</th><th>Algorithm or data structure</th></tr></thead>
+      <tbody>
+        <tr><td>System</td><td>Spend little all day and a lot rarely</td><td>Cascade across processors; gating by a cheap sensor</td></tr>
+        <tr><td>Model</td><td>One frame classifier, one score</td><td>Fully connected network (about 14 thousand weights); dynamic programme over phrase states</td></tr>
+        <tr><td>Smaller</td><td>Fewer weights and bits</td><td>SVDF and stacked 1D convolutions; 4 to 8 bits per weight</td></tr>
+        <tr><td>Threshold</td><td>Fix the false-alarm rate, read the miss rate</td><td>DET curves; Poisson counting over thousands of hours</td></tr>
+        <tr><td>Speaker</td><td>Compare embeddings</td><td>LDA or DNN bottleneck; mean cosine score against up to 40 vectors</td></tr>
+        <tr><td>After the phrase</td><td>Use the following audio</td><td>Streaming transformer encoder with block attention; lattice and text models</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Several parts of this picture are unpublished: end-to-end latency, the power draw of each pass, how often models are updated over the air, how Apple now mines hard negatives, and which end-to-end architecture runs on which device. Our sources describe the system as of 2017 (the first post), 2018 (personalisation), 2020 and 2021 (the papers) and 2023 (the voice trigger overview), and the current system will have moved on.</p>
+  </section>
+  <section id="summary">
+    <h2><span class="num">14</span>Summary</h2>
+    <ol>
+      <li><strong>Always-on listening is a power problem first.</strong> A budget of about 1 mA for 1% of a 2,400 mAh battery a day (Google, 2017) rules out running a speech recogniser or any large model continuously.</li>
+      <li><strong>A small frame classifier plus a score replaces transcription.</strong> Every 10 ms a network of about 14 thousand weights estimates which sound of the phrase the last 0.2 seconds resembles, and a second step turns the stream into one number.</li>
+      <li><strong>The score should respect order.</strong> Smoothing and taking maxima ignores order, while a dynamic programme over the phrase's states, as in Apple's 2017 recurrence, rejects the right sounds in the wrong order.</li>
+      <li><strong>A cascade buys large-model accuracy at small-model power.</strong> A lenient first pass on a low-power processor wakes a bigger second pass, and average current is <span>$I_1 + I_2\,r\tau/3600$</span>, so the first stage's false-alarm rate is a design parameter.</li>
+      <li><strong>The thresholds come from a false-alarm budget.</strong> With different units, the two errors have no equal error rate. You pick the false alarms per week you can tolerate and read the false-reject rate off the DET curve.</li>
+      <li><strong>Rare errors need many hours to measure.</strong> Relative error of a count is <span>$1/\sqrt{\lambda H}$</span>, so one false alarm per week to within 10% takes about 16,800 hours, and a 2,800-hour test gives about 24%.</li>
+      <li><strong>Speaker verification is embeddings and cosine scores.</strong> Apple's 2018 DNN embeddings cut imposter accepts from 11.9% to about 3%, using a profile of up to 40 vectors, and Google measured a 5 to 10 times lower false-alarm rate for under 1% extra false rejects.</li>
+      <li><strong>Small models come from factorising layers and cutting bits.</strong> SVDF and stacked 1D convolutions reduce a unit from <span>$F\times K$</span> to <span>$F+K$</span> weights, and 4 to 8 bits per weight fit the model in a few kilobytes beside a 64 kB audio buffer.</li>
+      <li><strong>Later stages use what comes after the phrase.</strong> A streaming transformer on the following second suppressed 95.8% of false triggers for 1% extra false rejects (Apple, 2021), and the 2023 system adds lattice and text checks.</li>
+      <li><strong>The data has to look like the kitchen.</strong> Far-field recordings, simulated rooms, echo and gain augmentation (2,700 to 8,100 hours) and automatic frame labels from the main recogniser do that job, with prior correction for the dominant background class.</li>
+      <li><strong>Misses are measured indirectly and false accepts are a privacy matter.</strong> Production sampling counts false alarms but not rejections, which Apple estimates from borderline activations, and the 2019 policy change shows that an inadvertent trigger has costs beyond battery.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">15</span>Build this</h2>
+    <p class="lede">The tradeoffs in this chapter are easy to nod along to and easy to get wrong. You can rebuild a miniature of the whole system in a day with a public dataset, a laptop and no GPU, and watch each design decision change the numbers.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A two-stage wake word detector with a speaker check</span>
+        <span class="proj-meta">~6 hours &middot; numpy and torch, Google Speech Commands</span>
+      </div>
+      <p>Pick one word from the Speech Commands dataset (Warden, 2018), such as "marvin", as your wake word. Everything else in the dataset, other words and the background noise recordings, is the negative class, and the file names carry speaker IDs, which you will use for the speaker check.</p>
+      <ol class="proj-steps">
+        <li>Compute log-mel features with 10 ms frames, stack 20 frames, and train a first-stage network of five layers of 32 units to output "phrase" or "other" per window. Train a second-stage network of five layers of 192 units on the same data.</li>
+        <li>Build a long negative stream: at least 20 hours made by joining non-wake words over the background noise at random levels. Sweep each model's threshold and draw both DET curves, with false alarms per hour on a log axis.</li>
+        <li>Connect the two as a cascade. Set stage 1 to fire a few times an hour, run stage 2 only on those windows, and compare the cascade's false-reject rate and false alarms with stage 2 alone. Count what share of windows stage 2 saw, and compute the average current with the formula in section 04 and numbers of your choice.</li>
+        <li>Pick the threshold for one false alarm per hour from 1 hour of negatives and then from 20 hours. Test both on a fresh stream and compare with the Poisson prediction from section 05.</li>
+        <li>Add the speaker check: for each speaker, average the features of three wake-word clips as a profile, score other clips by cosine, and measure how much it lowers false alarms from other speakers and how many of the speaker's own clips it rejects.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the cascade's false-reject rate lands within a point or so of stage 2 alone while stage 2 runs on a few percent of windows, the threshold picked on 1 hour of negatives misses its false-alarm target by a factor close to what the Poisson formula predicts and the 20-hour one doesn't, and the speaker check cuts false alarms from other speakers at a small cost in false rejects.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Quantise the first-stage weights to 8 bits and then 4 with the formula in section 07 and measure the false-reject rate at a fixed false-alarm rate, then add a post-trigger check that rescores one extra second of audio and measure how many false triggers it removes.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">16</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why can't a phone just run speech recognition all day and look for the wake word?</summary>
+      <div class="qa-body"><p>A full recogniser is far too large to run continuously on a battery. A detector only has to answer whether a short phrase was just said, and a model that knows one phrase can be thousands of times smaller. Google's 2017 paper puts the budget at about 1 mA for under 1% of battery a day, and in Chen et al.'s paper the recogniser used for labelling had 50 million parameters, against about 14 thousand weights for the small first-pass detector in Apple's later papers. Streaming everything to a server would also send every sound a person makes to the cloud, and that's why Apple's detector runs on the device.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What are a false accept and a false reject, and why is there no equal error rate in the product?</summary>
+      <div class="qa-body"><p>A false accept is the device waking without the phrase, measured per hour of audio, and a false reject is a real phrase that fails to trigger, measured as a share of attempts. Since the units differ, the crossing point where they're equal means nothing, as Apple's 2017 post notes. We choose a threshold by fixing a false-alarm budget, such as one a week, and reading off how many real phrases are rejected there.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why use two stages, and how do you choose the first stage's operating point?</summary>
+      <div class="qa-body"><p>Accurate models are too expensive to run all day and cheap models aren't accurate enough, so a small model on a low-power chip runs continuously and wakes a bigger one. Average current is <span>$I_1 + I_2 r\tau/3600$</span>, where <span>$r$</span> is wake-ups per hour. A strict first stage saves power but rejects real phrases that the second stage can never recover, and a lenient one passes nearly everything but wakes the big model too often. Google tuned the first stage to a handful of wake-ups an hour with similar false-reject rates in both stages, and its table shows cascade false rejects falling from 5.6% to 3.5% as the first stage's false alarms rose from 0.5 to 10 an hour, close to the second stage alone at 3.1%.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How do per-frame probabilities become a detection, and why does order matter?</summary>
+      <div class="qa-body"><p>The network gives posteriors over sound classes every 10 ms. Chen et al. smooth each over 30 frames and take the geometric mean of each phrase class's maximum over a 100-frame window, which ignores order. Apple's 2017 post and Gruenstein et al. use a dynamic programme that forces the units in sequence, with <span>$F(i,t)=\max\{s_i+F(i,t-1),\,m_{i-1}+F(i-1,t-1)\}+q(i,t)$</span> in Apple's case. In a simulation of a six-unit phrase, the any-order score is the same for the phrase and its reverse (0.45), while the ordered score falls from 0.45 to 0.17.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How many hours of negative audio do you need to verify one false alarm per week?</summary>
+      <div class="qa-body"><p>Counting rare events is a Poisson problem: the relative error is <span>$1/\sqrt{\lambda H}$</span>, so you need to see about 100 events for 10% accuracy. At one per 168 hours that is about 16,800 hours. A 2,800-hour set, like Apple's 2018 evaluation, expects about 17 events and has about 24% error. In a simulation of choosing the threshold from a finite set, 100 hours gave actual rates from 0.18 to 4.30 per week and 2,800 hours gave 0.73 to 1.34.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How does speaker verification for the trigger work, and what are its tradeoffs?</summary>
+      <div class="qa-body"><p>The device turns the phrase into a fixed-length speaker vector, in Apple's 2018 version a 100-number DNN bottleneck output, stored in a profile of up to 40 vectors seeded by five enrolment phrases. Each new utterance is scored by the mean cosine similarity to the profile vectors against a threshold <span>$\lambda$</span>. Raising <span>$\lambda$</span> lowers false and imposter accepts and raises false rejects. Apple's DNN cut imposter accepts from 11.9% to 3.2% and false rejects from 9.8% to 5.2% over an LDA transform, but the system was weaker in reverberant rooms and cars, and implicit enrolment risks learning a wrong voice.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Explain how an SVDF or stacked 1D convolution layer saves parameters, and what limits it.</summary>
+      <div class="qa-body"><p>A unit over <span>$F$</span> features and <span>$K$</span> frames normally has <span>$F\times K$</span> weights. The factorised layer applies a length-<span>$F$</span> filter across features to get one number per frame, then a length-<span>$K$</span> filter across time, so it has <span>$F+K$</span> weights, about 8.5 times fewer for <span>$F=143$</span> and <span>$K=9$</span>. Stacking <span>$D$</span> layers gives a receptive field of <span>$D(K-1)$</span> past frames with no recurrence. Higuchi et al. found the convolution form (with biases and optional future context <span>$L$</span>) cut false rejects 19% relative to the SVDF at one false alarm an hour, and that <span>$L$</span> above 1 hurt because the left receptive field fell below the phrase length, while every extra future frame adds delay.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How can audio after the trigger reduce false triggers on a device with tight memory?</summary>
+      <div class="qa-body"><p>A streaming transformer encoder processes audio in overlapping blocks of about 1.9 seconds, keeping the keys and values of the previous block, so cost grows linearly with audio length where full attention grows quadratically. A second output scores every frame with cross-entropy and a unidirectional LSTM smooths it, avoiding the peaky overconfident outputs that a CTC loss gives. Garg et al. report 95.8% of false triggers suppressed for 1% extra false rejects with one more second of audio, and 32% less memory and 56% less inference time than non-streaming processing on a 2019 phone.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Production false alarms per week go up after a model update though the offline DET curve improved. What do you check?</summary>
+      <div class="qa-body"><p>First, whether the offline negatives resemble current traffic, since test sets drift and the unstructured sets keep growing. Second, the size of the test: at 17 expected events, a 24% change is within noise. Third, a mismatch in the cascade, since the stages' errors are correlated and each stage's curve alone doesn't predict the whole. Fourth, quantisation and platform effects, as the S1DCNN results were in 32-bit floating point and Google saw per-chip differences. Fifth, new conditions in the field such as reverberant rooms or other languages. Finally, the speaker profile, if implicit enrolment has drifted. Production sampling of false alarms, as Apple describes, is the direct check.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why did supporting "Siri" without "Hey" need more than a new threshold?</summary>
+      <div class="qa-body"><p>Apple's 2023 post lists the short phrase among the challenges. With fewer sounds the first stage has less evidence, so more ordinary speech resembles it at a given threshold, an inference from the design and not a published figure. Apple's published response is more weight on later stages: a Conformer checker, speaker identification that runs early and late, and a directed-speech stage using lattices, acoustics and text, including a classifier for non-vocative uses of the word "Siri". It gives no accuracy numbers.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">17</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://machinelearning.apple.com/research/hey-siri" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company research</div><div class="r-title">Hey Siri: An On-device DNN-powered Voice Trigger for Apple's Personal Assistant</div><div class="r-sub">Siri Team, Apple Machine Learning Journal, October 2017. First and second pass, the Always On Processor, the scoring recurrence, thresholds and test data of sections 03 to 05.</div></div>
+      </a>
+      <a class="resource-card" href="https://machinelearning.apple.com/research/personalized-hey-siri" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company research</div><div class="r-title">Personalized Hey Siri</div><div class="r-sub">Apple Machine Learning Research, April 2018. Enrolment, speaker vectors, cosine scoring and the EER and imposter-accept tables of section 06.</div></div>
+      </a>
+      <a class="resource-card" href="https://machinelearning.apple.com/research/voice-trigger" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company research</div><div class="r-title">Voice Trigger System for Siri</div><div class="r-sub">Apple Machine Learning Research, August 2023. The multi-stage system behind "Hey Siri" and "Siri", from the always-on detector to directed speech detection.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2008.03405" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Stacked 1D convolutional networks for end-to-end small footprint voice trigger detection</div><div class="r-sub">Higuchi et al., Apple, Interspeech 2020. SVDF and S1DCNN, section 07. arXiv:2008.03405</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2105.06598" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Streaming Transformer for Hardware Efficient Voice Trigger Detection and False Trigger Mitigation</div><div class="r-sub">Garg et al., Apple, Interspeech 2021. Streaming second pass and post-trigger mitigation, section 08. arXiv:2105.06598</div></div>
+      </a>
+      <a class="resource-card" href="https://research.google/pubs/small-footprint-keyword-spotting-using-deep-neural-networks/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Small-Footprint Keyword Spotting Using Deep Neural Networks</div><div class="r-sub">Chen, Parada and Heigold, Google, ICASSP 2014. Frame posteriors, smoothing and the confidence score of section 03.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.isca-archive.org/interspeech_2015/sainath15_interspeech.html" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Convolutional Neural Networks for Small-Footprint Keyword Spotting</div><div class="r-sub">Sainath and Parada, Google, Interspeech 2015. CNNs under multiplication and parameter limits: a 27 to 44% relative false-reject improvement over a DNN.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1712.03603" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">A Cascade Architecture for Keyword Spotting on Mobile Devices</div><div class="r-sub">Gruenstein et al., Google, NIPS 2017 workshop. Power budget, DSP memory arithmetic and cascade operating-point table, sections 04 and 10. arXiv:1712.03603</div></div>
+      </a>
+      <a class="resource-card" href="https://www.apple.com/newsroom/2019/08/improving-siris-privacy-protections/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company statement</div><div class="r-title">Improving Siri's privacy protections</div><div class="r-sub">Apple Newsroom, August 28, 2019. Changes to audio retention and human review of Siri recordings.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1804.03209" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Dataset paper</div><div class="r-title">Speech Commands: A Dataset for Limited-Vocabulary Speech Recognition</div><div class="r-sub">Pete Warden, 2018. Public dataset for the build project. arXiv:1804.03209</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">18</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/13-speech-audio"><div class="rc-sec" style="color:var(--c-speech)">13 · The foundations</div><div class="rc-title">Speech &amp; Audio</div><div class="rc-hook">Frames, filterbanks, acoustic models and speaker embeddings in general form, before one company's wake word.</div></a>
+      <a class="related-card" href="/topics/39-realtime-voice-ai"><div class="rc-sec" style="color:var(--c-speech)">39 · What follows the trigger</div><div class="rc-title">Real-Time Voice AI</div><div class="rc-hook">The latency budget of the conversation that starts once the wake word has fired.</div></a>
+      <a class="related-card" href="/topics/23-efficient-ai-systems"><div class="rc-sec" style="color:var(--c-efficient)">23 · Small models</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Quantisation, factorised layers and power budgets, the tools of sections 04 and 07.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">Monitoring in production, drift and over-the-air model updates.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Rare-event metrics, thresholds and why one number rarely summarises a system.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · Another case study</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">The same shape of design, a cheap stage narrowing for an expensive one, with embeddings and a feedback loop.</div></a>
+    </div>
+  </section>

@@ -1,0 +1,1300 @@
+---
+title: "Designing Search Ranking"
+dek: "Follow Nadia's search for a December weekend in Lisbon down to the models that put a hundred thousand homes in an order for her. We build it from a hand-made score, fix each failure in turn, and look at what Airbnb published, including the ideas that failed."
+readingTime: "~79 min"
+prereqs: "recommenders, ranking and search (16), classical ML (02), evaluation (25)"
+group: "ML System Design"
+label: "Case study 43"
+description: "From a hundred thousand eligible homes to one ordered page: NDCG-weighted pairwise ranking, session embeddings, position as a control variable, host-aware multitask scoring, diversity and retrieval, from Airbnb's own papers."
+---
+<section id="tldr">
+    <p>Nadia opens the Airbnb app on a Tuesday evening in late October, types Lisbon, picks Friday 4 December to Sunday 6 December for two guests, and taps Search. A page of listings fills the screen: a tiled flat in Alfama with a small balcony, a bright studio in Baixa, a rooftop room in Graça. She scrolls, taps four of them to read the details, saves one, and twenty minutes later sends a reservation request for the flat with the balcony. By the next morning the host has said yes.</p>
+
+    <p>That first page's order decided most of what happened. A big city can have around a hundred thousand homes available for a given pair of dates, and Nadia looks hard at perhaps the first handful. Whatever sits in the first few positions gets the attention, and whatever sits at position sixty might as well not exist. What decides those positions knows very little about her: a city, two dates and a number of guests. It can't ask what she wants. It can't treat her as one guest among millions either, because a home can be booked by only one party for those nights, and a host who says no, or cancels later, wastes everyone's time. Its only teacher is the log of what earlier guests clicked and booked on pages that earlier models had arranged.</p>
+
+    <p>Putting the listings of a search into an order is <strong>search ranking</strong>, and training a model to produce that order from logged behaviour is <strong>learning to rank</strong>. The question this chapter answers is: <strong>how does Airbnb put a hundred thousand homes in an order that suits one guest it knows almost nothing about, when each home can be booked only once and the host has to agree?</strong></p>
+
+    <p>We'll build the design from its most obvious version, filter and sort, and fix each failure in turn: a learned score, a loss that cares about the top of the list, neural networks and the many ideas that didn't work, session embeddings, position bias, price, hosts, diversity, and the retrieval machinery around it all. We rely on Airbnb's own papers and posts, dated where they appear, and say where internals are unpublished.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>A guest gives the system a place (typed into a search box, or implied by the area of a map she has panned to), a range of dates and a number of guests. It returns the listings that are free on those dates and fit the party, in an order, as a list of cards or as price pins on a map. Airbnb's own description of the job, in a 2019 paper by Malay Haldar and colleagues, is to answer with "an ordered list of a handful of listings from the thousands available in the inventory".</p>
+
+    <p>This chapter's central model orders listings by the guest's likelihood of booking. It is one member of a family: the same 2019 paper says other models predict whether a host will accept the request and whether the guest will rate the stay five stars. So the requirements run wider than "predict a click". Its order should lead to bookings that hosts accept and nobody cancels, from stays guests rate well. New listings need a fair chance, the first page shouldn't be a dozen near-copies, and every change must be testable against real bookings, in an <strong>A/B test</strong> where some searchers get the new ranking and others the old one.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>These figures come from different years, so we'll date each one. In March 2018 an Airbnb post by Mihajlo Grbovic and colleagues described embeddings for 4.5 million active listings learned from more than 800 million click sessions, and said search ranking and the Similar Listings carousel together drove 99% of booking conversions. A June 2024 paper by Haldar and colleagues reported more than 7.7 million active listings in over 100 thousand cities and towns, and says only 20% of searches come from the search box; the rest come from a guest moving a map. A January 2026 paper on retrieval (Abdool and colleagues) says popular locations can have around a hundred thousand available homes, and that hosts change prices and availability roughly 10,000 times a second.</p>
+
+    <p>Two more facts shape the design. Booking a stay is a big purchase, so a guest explores: the 2023 Journey Ranker paper says a guest can spend multiple weeks and dozens of searches before sending a request. And positive labels are scarce, since even the most popular listing can be booked at most 365 times a year, as the 2019 paper points out.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose a search in a big city has 100,000 eligible homes, and a large ranking network costs 20 microseconds of one CPU core per home (an illustrative figure, since Airbnb doesn't publish its model costs). How many CPU-seconds does one search cost if we score every home, and how many cores would you need to finish in 100 milliseconds? Then think about flexible dates, where a guest who is open to plus or minus three days has 49 different check-in and check-out combinations.</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>One hundred thousand homes at 20 microseconds is 2 CPU-seconds. To finish in 0.1 seconds you would spread the work over 20 cores, for one guest's one search. At an illustrative 1,000 searches a second that is 2,000 cores kept busy for scoring alone. Flexible dates make it worse: if each of 49 date combinations were a separate search, the bill would be 49 times larger.</p>
+        <p>So scoring everything with the heavy model can't work at the size of a big city. Something much cheaper has to cut the candidates down first, and the heavy model, the one that costs real money per listing, has to meet only a fraction of the inventory. Airbnb's papers describe exactly that: several stages, each scoring about an order of magnitude fewer homes than the one before.</p>
+      </details>
+    </div>
+
+    <p>We also have no published figure for Airbnb's end-to-end latency budget, and we won't invent one. The papers do give relative changes, such as a 33% lower 99th-percentile scoring latency (the time that 99 of 100 searches beat) from a new architecture and an 8.4% higher 95th-percentile latency from the diversity ranker, and we'll reason about the rest from what a request has to do.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: filter, score by hand, sort</h2>
+
+    <p>The first design is the one anybody would build. A database knows which listings are free on Nadia's two nights and sleep at least two people, and that part is exact, with no learning involved. Among the survivors we need an order, so we write a formula that adds up things guests tend to like. Price counts against a listing, review rating counts for it, a good number of reviews counts for it, a central location counts for it, and we choose a weight for each term and sort. A 2019 paper says this is how Airbnb began: "The very first implementation of search ranking was a manually crafted scoring function." A 2022 paper by Haldar and colleagues adds that before 2015 listings were ranked by scoring functions designed by engineers, built on price, location and review ratings.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Version 1: filter, score by hand, sort
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="140" height="84" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="140" height="84" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="90.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">QUERY</text>
+<text x="90.0" y="73" text-anchor="middle" font-size="10" class="dim">Lisbon, 4-6 December</text>
+<text x="90.0" y="87" text-anchor="middle" font-size="10" class="dim">2 guests</text>
+<rect x="190" y="40" width="150" height="84" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="190" y="40" width="150" height="84" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="265.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">FILTER</text>
+<text x="265.0" y="73" text-anchor="middle" font-size="10" class="dim">free both nights</text>
+<text x="265.0" y="87" text-anchor="middle" font-size="10" class="dim">sleeps two or more</text>
+<rect x="370" y="40" width="150" height="84" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="370" y="40" width="150" height="84" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="445.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">HAND-MADE SCORE</text>
+<text x="445.0" y="73" text-anchor="middle" font-size="10" class="dim">weights on price,</text>
+<text x="445.0" y="87" text-anchor="middle" font-size="10" class="dim">rating, reviews</text>
+<rect x="550" y="40" width="130" height="84" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="550" y="40" width="130" height="84" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="615.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SORT + PAGE</text>
+<text x="615.0" y="73" text-anchor="middle" font-size="10" class="dim">highest score first</text>
+<text x="615.0" y="87" text-anchor="middle" font-size="10" class="dim">first page of cards</text>
+<path d="M162,82 L188,82" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M342,82 L368,82" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M522,82 L548,82" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="168" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Nothing checks that a higher score means more bookings. Weights are an engineer's guess.</text>
+<text x="20" y="192" text-anchor="start" font-size="10.5" class="dim">Every rule is easy to read and explain, which is why this style of ranking ran Airbnb search until 2015.</text>
+<text x="20" y="216" text-anchor="start" font-size="10.5" class="dim">Nadia's taste (a balcony, a quiet street) appears nowhere in the formula, and neither does anyone else's.</text>
+      </svg>
+      <div class="diagram-caption">Follow the arrows left to right. Its filter is exact (a listing is free or it isn't), but the score is a guess, and that is the part we replace.</div>
+    </div>
+
+
+    <p>Its strengths are real. Every term is readable, a bad result can be fixed by editing one weight, and nothing needs training data.</p>
+
+    <p>It breaks in ways that tell us what to build. Its weights are guesses, and nothing checks whether a higher score goes with a booking. Someone has to decide whether a ten percent lower price is worth one fewer review point, and the right answer depends on the city, the season, the number of guests and the guest herself. A formula with a few dozen hand-set terms can't hold all of that, and it can't improve as the inventory and the guests change, because nobody has told it what to learn from.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Way to order the listings</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Sort by one field (price, rating)</td><td>Trivial, predictable, easy to explain to hosts</td><td>Puts the cheapest or the best-reviewed first for everyone, with no sense of fit</td></tr>
+        <tr><td>Hand-weighted score (pre-2015)</td><td>Readable, editable, no data needed</td><td>Weights are guesses; cannot capture interactions; does not learn</td></tr>
+        <tr><td>Learned score from past bookings</td><td>Weights come from what guests did; improves with data</td><td>Needs logs, labels, an evaluation method and a serving system</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Our remedy follows from the failure: let the logged behaviour of earlier guests set the weights. That's what Airbnb did next.</p>
+  </section>
+
+  <section id="gbdt">
+    <h2><span class="num">03</span>Version 2: learn the score from past bookings</h2>
+
+    <p>For each search in the log we know which listings were shown and which one, if any, the guest booked. We can turn that into a number per listing, a <strong>utility</strong>, and train a model to predict it from the listing's features. A 2022 paper gives an example of such a scheme: a booking might be assigned a utility of 1.0, a click on the listing 0.2, an impression 0.0, and a cancellation a negative utility of &minus;0.5. A regression model is then trained to get those numbers right.</p>
+
+    <p>Airbnb launched a <strong>gradient boosted decision tree</strong> (GBDT) for this in 2015. A decision tree asks a series of yes-or-no questions about a listing ("is the price under 90 euros?") and ends in a leaf holding a number. Boosting builds hundreds of small trees one after another, each fitted to the mistakes of the ones before it, and the prediction is the sum of their leaves. Trees need no feature scaling, which made them a good first learner, but they lean on human-made features, and the 2019 paper says the pipeline's "extensive feature engineering" had accumulated over years.</p>
+
+    <p>Replacing the hand-made score with this model was a large step. Haldar and colleagues' 2019 paper calls it one of the largest step improvements in home bookings in Airbnb's history. That sentence goes on to tell the rest of the story: "The gains in online bookings eventually saturated with long spells of neutral experiments."</p>
+
+    <p>Three weaknesses explain the plateau, and each points to a section below. First, the target is a made-up utility, so the model's output relates to booking probability only indirectly, as the 2022 paper says. Second, the loss treats every listing as an independent regression row, though what matters to a guest is the order, especially at the top. Third, the strength of trees, hand-built features, had become the limit: nobody could tell whether those years of features were still the best ones for a marketplace that kept changing. How to ask the model for an order is where we go next.</p>
+  </section>
+
+  <section id="loss">
+    <h2><span class="num">04</span>Teaching the model to order: pairs, NDCG and LambdaRank</h2>
+
+    <p>Let's name what we want. For a search whose guest booked one listing, the best possible order puts the booked listing first. A booked listing nearer the top is better, and a model that puts it at position 2 has done much better than one that puts it at position 40. A metric that captures that is <strong>NDCG</strong>, normalized discounted cumulative gain. Airbnb uses it with binary relevance: the booked listing has relevance 1, everything else 0. With one booked listing per search, NDCG reduces to a discount applied to the booked listing's position. In the 2022 paper it reads, for <span>$N$</span> searches where the booked listing sat at position <span>$\text{pos}_i$</span> (counting from 0), as</p>
+
+    <div class="eq-block"><span>$$\text{NDCG} \;=\; \frac{1}{N}\sum_{i=1}^{N} \frac{\ln 2}{\ln(2+\text{pos}_i)}$$</span></div>
+
+    <p>Position 0 scores 1.00, position 1 scores 0.63, position 4 scores 0.39 and position 9 scores 0.29. This curve falls fast at the top and flattens, which matches how guests look at a page: the first positions get most of the attention. We'll see in section 13 why this makes the metric track bookings so well.</p>
+
+    <p>Our regression on utilities doesn't aim at this metric. We need a loss that does. A first step is to stop predicting an absolute number and compare listings. From one search we build <strong>pairs</strong>: take the listing the guest booked, <span>$l_x$</span>, and any listing that was shown alongside it but not booked, <span>$l_y$</span>. A model <span>$f_\theta(q,u,l)$</span> sees the query <span>$q$</span>, the user <span>$u$</span> and a listing, and returns a score called a logit. We train it so that the booked listing outscores the other one, with a cross-entropy loss (the standard loss for an outcome that should come out as a probability near 1) on the difference of the scores:</p>
+
+    <div class="eq-block"><span>$$\mathcal{L}_{\text{pair}} \;=\; -\log \frac{e^{\,f_\theta(q,u,l_x)}}{e^{\,f_\theta(q,u,l_x)} + e^{\,f_\theta(q,u,l_y)}} \;=\; \log\!\big(1 + e^{-(\text{logit}_x - \text{logit}_y)}\big)$$</span></div>
+
+    <p>The first form says "the probability that <span>$l_x$</span> wins the pair, under a softmax of two scores"; the second is the same thing rewritten as a function of the score gap. Its TensorFlow version takes four lines in the 2022 paper. What sits inside the log has a meaning that matters later. Minimising this loss over many pairs makes <span>$e^{\text{logit}_x}/(e^{\text{logit}_x}+e^{\text{logit}_y})$</span> an estimate of the pairwise booking probability, and the <strong>Bradley&ndash;Terry</strong> model connects it to the ordinary probability that a shown listing gets booked:</p>
+
+    <div class="eq-block"><span>$$P(l_x \succ l_y) \;=\; \frac{P_{\text{booking}}(l_x)}{P_{\text{booking}}(l_x) + P_{\text{booking}}(l_y)}$$</span></div>
+
+    <p>A small example from the same paper makes it concrete. If listings <span>$l_x$</span> and <span>$l_y$</span> were both shown in 100 searches, and <span>$l_x$</span> got 2 bookings while <span>$l_y$</span> got 6, their booking probabilities are 0.02 and 0.06, and the pairwise probability is 2/(2+6) = 0.25: for every booking of <span>$l_x$</span> we expect three of <span>$l_y$</span>. It follows that sorting by the pairwise logits is the same as sorting by the pointwise booking probabilities, since <span>$l_x$</span>'s logit beats <span>$l_y$</span>'s exactly when <span>$P(l_x \succ l_y) > 0.5$</span>, which happens exactly when <span>$P_{\text{booking}}(l_x) > P_{\text{booking}}(l_y)$</span>. The model never needs to output a probability. Any monotone score will do, and a sort by that score is the ranking.</p>
+
+    <p>Pairs treat all mistakes alike, though. Getting the booked listing above a listing at rank 1 matters a lot more than getting it above one at rank 30. A fix comes from LambdaRank, a method of Christopher Burges and colleagues at Microsoft that Airbnb adopted: weight each pair's loss by how much NDCG would change if the two listings swapped places. That 2019 paper calls this the first breakthrough of its neural network work, and gives the weight in code as the absolute difference of the two discounts at their current ranks in the model's own output, so the weights are recomputed as the model improves.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">One search becomes five weighted pairs
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 340" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="28" text-anchor="start" font-size="11" font-weight="700" class="" fill="#818cf8">ONE LOGGED SEARCH, SHOWN TO NADIA</text>
+<text x="330" y="28" text-anchor="start" font-size="11" font-weight="700" class="" fill="#fbbf24">WEIGHT OF EACH {BOOKED, OTHER} PAIR</text>
+<rect x="20" y="44" width="270" height="30" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="44" width="270" height="30" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="155.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8"></text>
+<text x="32" y="64" text-anchor="start" font-size="10.5" class="" fill="#818cf8">rank 0  ·  listing A  ·  discount 1.00</text>
+<rect x="340" y="48" width="184" height="22" rx="4" fill="#fbbf24" opacity="0.35"/>
+<text x="531.9300000000001" y="64" text-anchor="start" font-size="10.5" class="">0.61</text>
+<rect x="20" y="82" width="270" height="30" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="82" width="270" height="30" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="155.0" y="100" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8"></text>
+<text x="32" y="102" text-anchor="start" font-size="10.5" class="" fill="#818cf8">rank 1  ·  listing B  ·  discount 0.63</text>
+<rect x="340" y="86" width="73" height="22" rx="4" fill="#fbbf24" opacity="0.35"/>
+<text x="421.2" y="102" text-anchor="start" font-size="10.5" class="">0.24</text>
+<rect x="20" y="120" width="270" height="30" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="120" width="270" height="30" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="155.0" y="138" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8"></text>
+<text x="32" y="140" text-anchor="start" font-size="10.5" class="" fill="#818cf8">rank 2  ·  listing C  ·  discount 0.50</text>
+<rect x="340" y="124" width="34" height="22" rx="4" fill="#fbbf24" opacity="0.35"/>
+<text x="381.93" y="140" text-anchor="start" font-size="10.5" class="">0.11</text>
+<rect x="20" y="158" width="270" height="30" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="158" width="270" height="30" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="155.0" y="176" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8"></text>
+<text x="32" y="178" text-anchor="start" font-size="10.5" class="" fill="#818cf8">rank 3  ·  listing D  ·  discount 0.43</text>
+<rect x="340" y="162" width="13" height="22" rx="4" fill="#fbbf24" opacity="0.35"/>
+<text x="361.14" y="178" text-anchor="start" font-size="10.5" class="">0.04</text>
+<rect x="20" y="196" width="270" height="30" rx="8" fill="#34d399" opacity="0.24"/>
+<rect x="20" y="196" width="270" height="30" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="155.0" y="214" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399"></text>
+<text x="32" y="216" text-anchor="start" font-size="10.5" class="" fill="#34d399">rank 4  ·  listing E  ·  BOOKED</text>
+<text x="340" y="216" text-anchor="start" font-size="10.5" class="dim">the booked listing is the anchor of every pair</text>
+<rect x="20" y="234" width="270" height="30" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="234" width="270" height="30" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="155.0" y="252" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8"></text>
+<text x="32" y="254" text-anchor="start" font-size="10.5" class="" fill="#818cf8">rank 5  ·  listing F  ·  discount 0.36</text>
+<rect x="340" y="238" width="9" height="22" rx="4" fill="#fbbf24" opacity="0.35"/>
+<text x="357.21" y="254" text-anchor="start" font-size="10.5" class="">0.03</text>
+<text x="20" y="296" text-anchor="start" font-size="10.5" class="dim">discount d(x) = ln 2 / ln(2 + x) for rank x, so rank 0 counts 1.00 and rank 9 counts 0.29.</text>
+<text x="20" y="316" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">pair loss = weight x log(1 + exp(-(score of E - score of other))), summed over the pairs.</text>
+      </svg>
+      <div class="diagram-caption">Read the bars from top to bottom. Pairing the booked listing E with the listing in rank 0 matters roughly twenty times more than pairing it with rank 5, because swapping those two moves the booked listing across the biggest NDCG gap.</div>
+    </div>
+
+
+    <p>This picture shows the effect for Nadia's logged search. She booked listing E, which the old model had placed at rank 4, and the other five listings give five pairs. Pairing E with the listing at rank 0 gets weight 0.61, with rank 1 gets 0.24, and with rank 5 only 0.03. Training pressure on "move E above A" is twenty times the pressure on "move E above F", because that swap would shift E across the largest gap in the discount curve. That paper puts it in one sentence: improving the rank of a booked listing from position 2 to 1 gets priority over moving a booked listing from position 10 to 9.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Loss</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Pointwise regression on a utility (GBDT, 2015)</td><td>Simple, uses every impression, any regression library</td><td>Utilities are made up; ignores that only the order matters</td></tr>
+        <tr><td>Pairwise cross-entropy</td><td>Matches the goal of ranking the booked listing higher; logits order listings by booking probability</td><td>Every pair counts the same, so errors at rank 30 cost as much as errors at rank 1</td></tr>
+        <tr><td>Pairwise weighted by &Delta;NDCG (LambdaRank)</td><td>Spends effort where position matters; optimises the metric the team watches</td><td>Weights depend on current ranks, so they must be recomputed each step</td></tr>
+        <tr><td>Listwise softmax over the whole result</td><td>Looks at all listings of a search at once</td><td>Assumes each listing's booking chance is independent of the others, as the 2022 paper points out</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Airbnb moved from the first row to the third in its neural network work of 2017 and 2018 and kept NDCG as its main offline metric. Later papers describe a pairwise cross-entropy, and Journey Ranker allows pairwise or listwise losses per task. The last-row caveat comes back in section 10, where it turns out to be the key to diversity.</p>
+
+    
+
+    <p>LambdaMART, the tree-based sibling of LambdaRank, became a standard tool in web search research, and face recognition systems train on triplets with the same idea of pulling a positive closer than a negative.</p>
+
+    <h4 class="why">Why use only one booked listing per search as the positive?</h4>
+
+    <p>Because bookings are the outcome that pays for everything, and Airbnb's metric is built on them. A click means a guest was curious, and a long view can mean a listing is merely expensive or odd. In 2019 the team tried to add long views as a second label and found that bookings stayed neutral. Section 9 returns to using more labels, but with a design that keeps the booking at the centre.</p>
+  </section>
+
+  <section id="neural">
+    <h2><span class="num">05</span>Neural networks, and the ideas that didn't work</h2>
+
+    <p>With a loss that cares about the top of the list, the GBDT's hand-built features became the next limit, and the obvious replacement is a neural network that learns its own combinations. Airbnb's 2019 paper, <em>Applying Deep Learning to Airbnb Search</em>, tells that move as a series of small steps, and its most useful parts are the ones that went wrong, so we'll follow both.</p>
+
+    <h3 id="5-1-four-models-in-a-row">5.1 Four models in a row</h3>
+
+    <p>The first network was deliberately boring: one hidden layer of 32 ReLU units (the standard neuron, which outputs zero for negative inputs and the input itself otherwise), fed the same features as the GBDT and trained with the same L2 regression. It was booking neutral against the GBDT, which the paper counts as a success of a kind, because it proved the whole pipeline from logs to live scoring. Its authors had started with intricate custom architectures and got "overwhelmed by their complexity", and they adapted Andrej Karpathy's advice to "don't be a hero, in the beginning".</p>
+
+    <p>In the second model the loss became the weighted pairwise form of section 04, and that was the first real gain. A third tried to merge three models that ranked differently, a GBDT, a factorization machine and the network, by feeding the tree leaves and the factorization output into the network as features, and the paper calls the complexity "staggering". A fourth removed it: the team scaled the training data tenfold and moved to a plain network with two hidden layers. A typical configuration was 195 input features (after categorical features became embeddings), 127 ReLU units in the first hidden layer and 83 in the second. Over 1.7 billion training pairs, the gap between training and test NDCG closed. In retrospect, the lesson is that deep learning "is not a drop-in model replacement at all; rather it's about scaling the system".</p>
+
+    <h3 id="5-2-features-a-network-can-digest">5.2 Features a network can digest</h3>
+
+    <p>The first attempt to feed the GBDT's features to a network "went down very badly", and the loss stopped improving partway through training. Scale was the cause. Trees care only about the order of a feature's values, but a network multiplies features by weights, and a value far outside the usual range sends a huge gradient back that can permanently switch off a ReLU unit. Fixing it meant bringing every feature into a small range, with the bulk of values between &minus;1 and 1 and the median at 0: standardise a roughly normal feature with <span>$(x-\mu)/\sigma$</span>, and map a power-law feature through <span>$\log\frac{1+x}{1+\text{median}}$</span>.</p>
+
+    <p>Next the paper asks each feature's distribution to be smooth, for three reasons. Smooth plots expose bugs: spikes in price histograms revealed prices logged in the wrong currency for some regions, and a monthly price logged in place of the daily one for stays over 28 days. Smooth inputs help the network generalise, because the layers above can interpolate between combinations they have never seen. And an odd distribution can reveal a missing feature, such as average length of stay, which minimum-stay rules had been distorting in the share of future days a listing was booked. Latitude and longitude became the log of the offset from the centre of the map the guest was viewing, so the model learns "far from where she's looking" instead of memorising coordinates. The engineering around the model changed too: protocol buffers and TensorFlow's Dataset API gave a 17 times training speedup, and because no efficient way existed to score a TensorFlow model inside the Java search stack, the team wrote its own scoring library.</p>
+
+    <p>Specific places still matter, and a network can learn them cheaply. The paper hashes (turns into a number by a fixed recipe) the query's city together with the level-12 <strong>S2 cell</strong> of the listing (S2 is Google's grid over the Earth, and a level-12 cell is a few square kilometres) into one categorical feature that indexes an embedding. Backpropagation turns that embedding into a learned preference for that neighbourhood in that city, replacing a heavily engineered pipeline of neighbourhood statistics.</p>
+
+    <h3 id="5-3-two-ideas-that-failed">5.3 Two ideas that failed</h3>
+
+    <p>The paper picks out two failures because they show how a technique that works well elsewhere can fail at home. One is listing IDs. Networks for video and language got large gains from embedding high-cardinality IDs, so the team gave every listing a learned vector. Its learning curve showed a clear improvement in training NDCG and none on test data: the model memorised.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">A video on a big platform can be watched millions of times a year. A listing on Airbnb can be booked on at most 365 nights a year, and a typical stay is two or more nights. Roughly how many bookings could even the best-booked listing contribute as positive examples in a year, and what does that mean for a vector learned for that listing alone?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>At most a few hundred, and typical listings a handful. A vector with 32 or 64 numbers needs far more examples than that to settle on sensible values, so each listing's vector fits noise in its few bookings. In its own words, "even the most popular listing can be booked at most 365 times in an entire year", which makes data "very sparse at the listing level", and the overfitting is "a direct fallout of this limitation". Items in the physical world have a ceiling on interaction that a video or a word doesn't.</p>
+      </details>
+    </div>
+
+    <p>A second failure came from the obvious cure for sparse bookings. Views of a listing's page are plentiful, so the team trained a multi-task network that predicted bookings and long views from a shared hidden layer, with a shared listing-ID embedding, and weighted the booking loss up to compensate for the larger number of view labels. Online, long views rose by a large margin and bookings stayed neutral. When the team inspected listings with many long views and few bookings, it found expensive homes, listings with long descriptions that were hard to parse, and strange or funny ones. Its conclusion is that long views correlate with bookings but also have "a large orthogonal component".</p>
+
+    <p>Hyperparameter work went the same way. Time went into dropout (randomly blanking part of the network during training so it can't lean on any one piece), initialisation, learning rate and batch size, "mostly driven by anxiety akin to FOMO", and the paper says none of it produced meaningful improvements. Every flavour of dropout slightly hurt offline metrics, and hand-shaped noise gained roughly 1% offline NDCG and nothing significant online. It kept defaults: Xavier initialisation, a Lazy Adam optimizer and a fixed batch size of 200.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model family</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>GBDT on engineered features</td><td>Robust to feature scale; strong at medium size; easy to partially explain</td><td>Gains plateaued; accumulated feature engineering; hard to scale with data</td></tr>
+        <tr><td>Neural network, same features and loss</td><td>Proves the serving pipeline</td><td>Booking neutral against the GBDT</td></tr>
+        <tr><td>Neural network, pairwise loss, 10x data, two hidden layers</td><td>Learns feature interactions; gains scale with data; less feature engineering</td><td>Needs normalised, smooth inputs and a rebuilt training and serving system; feature importance harder to read</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Airbnb chose the third row. Asked whether it would recommend deep learning to others, the paper answers "a wholehearted Yes", mostly because it changed the roadmap: after the move, "trying to do better math on the features manually has lost its luster", and attention shifted to the optimisation objective. It keeps GBDT for "focused medium sized problems". That paper shows each model's online gain only as a chart, so we won't quote percentages.</p>
+
+    <h4 class="why">Why did the network lose the ability to explain which features matter?</h4>
+
+    <p>Because a network's output is a tangle of non-linear interactions, and every simple tool for reading it assumed something false. Splitting the score into per-input contributions has no clean answer across a ReLU. Ablating one feature and retraining gave differences within normal retraining noise, since correlated features cover for each other. Permuting one feature at a time made the number of rooms look like one of the most important features, because permuting rooms alone creates a studio with eight rooms that never occurs. What worked was a home-made tool, TopBot, which compares feature distributions of top-ranked and bottom-ranked listings in each test search without perturbing anything.</p>
+
+    <p></p>
+  </section>
+
+  <section id="embeddings">
+    <h2><span class="num">06</span>What Nadia just clicked: listing embeddings from sessions</h2>
+
+    <p>Nadia has now clicked two flats in Alfama and passed over a studio in Baixa that the model ranked above them. Section 05's network sees her query and a listing's features, so it ranks her next page the way it would rank anyone's. What it lacks is a way to say "she liked those two, show me more that look like them". To get one, we need a way to measure how similar two listings are that goes beyond price and bedroom counts: a tiled balcony, a quiet courtyard and a view are hard to write down as features.</p>
+
+    <p>An answer arrived in 2017 from the same idea that makes word vectors work. A <strong>skip-gram</strong> model, from natural language processing, learns a vector for each word so that words appearing in the same sentences end up close together. Treat a guest's session of clicked listings as a sentence and each listing as a word, and the same recipe gives each listing a vector. Mihajlo Grbovic and Haibin Cheng published the system at KDD 2018 and described it in an Airbnb engineering post on 13 March 2018. A session is "an uninterrupted sequence of n listing ids that were clicked by the user", and a new session starts after a gap of more than 30 minutes. Each vector has 32 dimensions, a size chosen as a trade-off between offline quality and the RAM needed on the search machines to compute similarities live.</p>
+
+    <h3 id="6-1-the-training-objective">6.1 The training objective</h3>
+
+    <p>Training slides a window of length <span>$m = 5$</span> across a session. At each step the vector of the <em>central listing</em> is pushed toward the vectors of the <em>positive context listings</em> that the same guest clicked just before and after it, and pushed away from <em>negative</em> listings sampled at random, since random listings are rarely related. Two changes adapt this to a marketplace.</p>
+
+    <p>One is to use the booking. Some sessions end with a booking, and that booked listing tells us more than any click. Airbnb adds it as <strong>global context</strong>: at every step of the window, however far the booked listing is from the centre, it stays in the positive set. A listing clicked at the start of a session is thereby pulled toward the listing the guest eventually chose, even when ten other clicks lie between them. Another change comes from how people search. A guest searches inside one market (a city or an area), so for any central listing the positives are mostly from the same market while randomly sampled negatives are mostly from other cities. A model can learn to tell cities apart and still know nothing about taste inside a city. So Airbnb adds a set of <strong>market negatives</strong>, random listings sampled from the central listing's own market. Written out with context vectors <span>$v'$</span>, the objective the post describes is</p>
+
+    <div class="eq-block"><span>$$\max_{v,\,v'} \sum_{(l,c)\in D_p}\!\log\sigma(v_c'^{\top}v_l) \;+\; \sum_{(l,c)\in D_n}\!\log\sigma(-v_c'^{\top}v_l) \;+\; \log\sigma(v_{l_b}'^{\top}v_l) \;+\; \sum_{(l,m)\in D_{mn}}\!\log\sigma(-v_m'^{\top}v_l)$$</span></div>
+
+    <p>Here <span>$\sigma$</span> is the sigmoid, which squashes a score into a probability between 0 and 1, <span>$D_p$</span> holds (central, context) pairs from the window, <span>$D_n$</span> holds (central, random listing) pairs, <span>$l_b$</span> is the booked listing, and <span>$D_{mn}$</span> holds (central, random listing from the same market) pairs. Its first two terms are ordinary skip-gram with negative sampling, the third is the booking pulled in as global context, and the fourth is the market negatives. Airbnb learned vectors for 4.5 million active listings from more than 800 million click sessions, and to give a new listing a vector on the day it appears, it averages the vectors of the three geographically closest listings with the same listing type and price range.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Listing embeddings from sessions
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="76" width="80" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="76" width="80" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="60.0" y="102.0" text-anchor="middle" font-size="10" font-weight="700" fill="#818cf8">clicked l1</text>
+<rect x="132" y="76" width="80" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="132" y="76" width="80" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="172.0" y="102.0" text-anchor="middle" font-size="10" font-weight="700" fill="#818cf8">clicked l2</text>
+<rect x="244" y="76" width="80" height="44" rx="8" fill="#fbbf24" opacity="0.24"/>
+<rect x="244" y="76" width="80" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="284.0" y="94" text-anchor="middle" font-size="10" font-weight="700" fill="#fbbf24">clicked l3</text>
+<text x="284.0" y="109" text-anchor="middle" font-size="10" class="dim">centre</text>
+<rect x="356" y="76" width="80" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="356" y="76" width="80" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="396.0" y="102.0" text-anchor="middle" font-size="10" font-weight="700" fill="#818cf8">clicked l4</text>
+<rect x="468" y="76" width="80" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="468" y="76" width="80" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="508.0" y="102.0" text-anchor="middle" font-size="10" font-weight="700" fill="#818cf8">clicked l5</text>
+<rect x="580" y="76" width="80" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="580" y="76" width="80" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="620.0" y="94" text-anchor="middle" font-size="10" font-weight="700" fill="#34d399">booked lb</text>
+<text x="620.0" y="109" text-anchor="middle" font-size="10" class="dim">end</text>
+<text x="20" y="18" text-anchor="start" font-size="10.5" class="dim">one guest's session in click order; a gap of 30 minutes starts a new session</text>
+<path d="M214,98 L242,98" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M354,98 L326,98" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M620,74 C620,40 284,40 284,74" stroke="#34d399" stroke-width="2" fill="none" class="flow-line" stroke-dasharray="4 4"/>
+<text x="452" y="36" text-anchor="middle" font-size="10" class="" fill="#34d399">booked listing stays in the context for every centre</text>
+<rect x="40" y="200" width="280" height="52" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="40" y="200" width="280" height="52" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="180.0" y="218" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RANDOM LISTINGS, ANY MARKET</text>
+<text x="180.0" y="233" text-anchor="middle" font-size="10" class="dim">pushed away from l3</text>
+<rect x="380" y="200" width="300" height="52" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="380" y="200" width="300" height="52" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="530.0" y="218" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RANDOM LISTINGS, SAME MARKET AS l3</text>
+<text x="530.0" y="233" text-anchor="middle" font-size="10" class="dim">pushed away from l3</text>
+<path d="M268,122 L268,160 L180,160 L180,198" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line" stroke-dasharray="4 4"/>
+<path d="M300,122 L300,160 L520,160 L520,198" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line" stroke-dasharray="4 4"/>
+<text x="20" y="142" text-anchor="start" font-size="10" class="" fill="#34d399">green: pulled together (window of 5 each side)</text>
+<text x="20" y="282" text-anchor="start" font-size="10.5" class="dim">Each listing ends up as 32 numbers. Listings that share a session, a booking and a market drift together.</text>
+<text x="20" y="304" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Without the second pink box, almost every negative is from another city, which is too easy to teach within-city taste.</text>
+      </svg>
+      <div class="diagram-caption">Start with the amber centre listing l3. Green arrows pull in its window neighbours and the booked listing, and pink arrows push away random listings, half of them from l3's own market.</div>
+    </div>
+
+
+    <p>That post's offline test was about ordering: rank the listings a guest was choosing among by cosine similarity (the angle between two vectors) to a listing she clicked, and see where the eventually booked one lands, averaged over clicks as far back as 17 before the booking. Three trainings were compared, ordinary skip-gram, with booking as global context, and with both modifications, and the last gave a consistently lower average rank of the booked listing. Our experiment below isolates the same two modifications on a toy marketplace where we know the truth.</p>
+
+            <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Skip-gram listing embeddings: plain, booked as global context, and with market negatives</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+M, P, S, D = 8, 40, 4, 16     # markets, listings per market, styles, dims
+L = M * P
+market = np.repeat(np.arange(M), P)
+style = np.tile(np.arange(S), L // S)
+
+def session():                # 5 clicks in one market, then a booking
+    m, fav = rng.integers(M), rng.integers(S)
+    pool = np.where(market == m)[0]
+    w = np.where(style[pool] == fav, 2.0, 1.0)
+    clicks = rng.choice(pool, 5, p=w / w.sum())
+    return list(clicks), rng.choice(pool[style[pool] == fav])
+
+train = [session() for _ in range(30000)]
+
+def fit(book_ctx, mkt_neg, epochs=4, lr=0.1, win=1, neg=5):
+    V = (rng.random((L, D)) - .5) / D       # listing vectors
+    C = np.zeros((L, D))                    # context vectors
+    sig = lambda x: 1 / (1 + np.exp(-x))
+    for _ in range(epochs):
+        for clicks, book in train:
+            seq = clicks + [book]
+            for i, c in enumerate(clicks):
+                ctx = [seq[j] for j in range(max(0, i - win),
+                       min(len(seq), i + win + 1)) if j != i]
+                if book_ctx and book not in ctx:
+                    ctx.append(book)            # booked = global context
+                for t in ctx:
+                    ts = [t] + list(rng.integers(0, L, neg))
+                    lab = [1.0] + [0.0] * neg
+                    if mkt_neg:                 # same-market negatives
+                        pool = np.where(market == market[c])[0]
+                        ts += list(rng.choice(pool, neg))
+                        lab += [0.0] * neg
+                    ts, lab = np.array(ts), np.array(lab)
+                    g = (sig(C[ts] @ V[c]) - lab)[:, None]
+                    dv = (g * C[ts]).sum(0)
+                    np.subtract.at(C, ts, lr * g * V[c])
+                    V[c] -= lr * dv
+    return V
+
+def style_p5(V):              # do nearest neighbours share a style?
+    Vn = V / np.linalg.norm(V, axis=1, keepdims=True)
+    hits = []
+    for a in range(L):
+        pool = np.where((market == market[a]) &amp; (np.arange(L) != a))[0]
+        top = pool[np.argsort(-(Vn[pool] @ Vn[a]))[:5]]
+        hits.append(np.mean(style[top] == style[a]))
+    return np.mean(hits)
+
+runs = [(&quot;plain skip-gram&quot;, 0, 0), (&quot;+ booked as global&quot;, 1, 0),
+        (&quot;+ same-market negatives&quot;, 1, 1)]
+for name, b, m in runs:
+    share = style_p5(fit(b, m))
+    print(f&quot;{name:25} same-style share of top 5: {share:.2f}&quot;)</code></pre>
+      <div class="tryit-out">Chance is <code>0.25</code>. Plain skip-gram scores <code>0.29</code>, adding the booked listing as global context lifts it to <code>0.38</code>, and adding same-market negatives lifts it to <code>0.49</code>. Only the training pairs changed between the three runs.</div>
+    </details>
+
+
+    <p>Eight markets of 40 listings each have four hidden styles, and a guest in a session clicks five listings in her market, favouring one style, then books a listing of that style. The test then asks, for each listing, whether its five nearest neighbours in the same market share its style (25% by chance). Plain skip-gram barely beats chance. Booking as global context lifts it, because every click gets pulled toward a listing of the guest's real taste. Adding market negatives lifts it further, because without them almost all negatives are from other markets and teach nothing about taste inside one. (This is one run with a fixed seed. It is built to make the mechanism visible, and the sizes of the gaps are not Airbnb's.)</p>
+
+    <h3 id="6-2-from-vectors-to-personalisation">6.2 From vectors to real-time personalisation</h3>
+
+    <p>Vectors by themselves don't re-rank anything. Airbnb's 2018 post describes how they enter the ranking model. For each guest the system keeps, in real time through Kafka, a message queue, two sets of recent events: the listings she clicked in the last two weeks, and the listings she <em>skipped</em>, defined as ones ranked high that she passed over in favour of a click on a lower-ranked listing. At each search, two features are computed for every candidate. <strong>EmbClickSim</strong> is its similarity to the listings she clicked (specifically, the maximum similarity to market-level centroids of her clicked listings), and <strong>EmbSkipSim</strong> is its similarity to the ones she skipped. Both go into the ranking model as extra features.</p>
+
+    <p>That post checks that the model uses them as intended with partial dependence plots, which fix all features but one and watch the score: higher EmbClickSim raises the score, and higher EmbSkipSim lowers it. Offline metrics improved, the online experiment succeeded, and real-time personalisation launched in the summer of 2017. Those vectors also powered the Similar Listings carousel, where the post reports a 21% increase in click-through rate and 4.9% more guests discovering the listing they ended up booking there. A 2019 paper later lists "similarity of the listing to the past views of the user, computed based on co-view embeddings" among the few features that come from another model.</p>
+
+    <p>Airbnb kept developing the approach. A 2026 post on guest journeys, with a companion paper called JourneyFormer at KDD 2026, replaces hand-crafted aggregates of a guest's history with a Transformer over the sequence of events itself: bookings, reviews and cancellations from the past seven years (capped at 80 events) and listing views from the last 21 days (capped at 200). Online, the long-term sequence alone raised uncancelled bookers (guests whose booking stayed booked) by 0.31%, and adding the short-term sequence made it 0.55%. The embeddings are computed in a daily batch job and combined with the live search at query time.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to use the guest's recent behaviour</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Hand-built aggregates (past bookings, average price)</td><td>Interpretable, cheap</td><td>Hundreds of features to maintain; limited expressiveness (the 2026 post's words)</td></tr>
+        <tr><td>Listing embeddings with click and skip similarity (2017)</td><td>Captures taste no feature describes; works within a session; cheap at serving time</td><td>Embeddings are trained separately and refreshed on a schedule; a new listing starts with an average of neighbours</td></tr>
+        <tr><td>Transformer over the guest's event sequence (2025&ndash;2026)</td><td>Learns directly from raw event history; long-term and short-term views</td><td>Heavier training; embeddings computed in a daily batch job, so not instant</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Airbnb adopted the middle row in 2017 and the last row more recently, a steady move from features people design to representations the model learns. Airbnb's 2018 post cites earlier work that trained item vectors on clicked or purchased items and on queries and ads that were clicked, so the step is available wherever a product has sessions.</p>
+  </section>
+
+  <section id="two-tower">
+    <h2><span class="num">07</span>Price, two towers and new listings: letting users lead</h2>
+
+    <p>After a launch, a ranking team faces an uncomfortable question: what next? Per the 2020 paper, its first answer was to borrow from the literature, and the results were neutral. More layers, residual connections and batch normalisation left NDCG unmoved, and for fully connected networks like theirs two hidden layers were enough: "model capacity was not our problem". Deep-and-wide networks with query-listing crosses and attention-based networks also failed to move the needle. Its reflection is that an architecture's success is tied to the shortcoming it fixes in its own baseline, and with a network it is hard to tell whether that shortcoming is present at home. So the team replaced the loop of <em>download paper, implement, A/B test</em> with a principle it summarises as <strong>users lead, model follows</strong>: quantify a user problem first, then change the model in response.</p>
+
+    <h3 id="7-1-the-price-puzzle">7.1 The price puzzle</h3>
+
+    <p>Each successful ranking launch had brought more bookings and, with them, a lower average price in the results, which suggested guests preferred lower prices than earlier models assumed. To measure the gap, the team took for each booking the log of the booked listing's price minus the log of the median price in the results the guest saw. It expected a bell curve centred on zero and found a distribution leaning negative: guests booked cheaper than the middle of what they saw. One obvious reading is that cheaper listings should rank higher, and three attempts to push price down followed, each with a cost that appeared only online.</p>
+
+    
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Attempt (2019&ndash;2020)</th><th>What changed</th><th>Online result</th></tr></thead>
+      <tbody>
+        <tr><td>Price outside the network</td><td>Removed price from the inputs and subtracted <span>$\tanh(wP+b)$</span> from the output, with <span>$P=\log\frac{1+\text{price}}{1+\text{median}}$</span></td><td>Average price &minus;5.7%, bookings &minus;1.5%</td></tr>
+        <tr><td>Monotonic network</td><td>Squared weights and tanh activations so every path from price to the output decreases with price</td><td>Bookings &minus;1.6%</td></tr>
+        <tr><td>Soft hint</td><td>A second pairwise loss that labels the cheaper listing of each pair as the winner, mixed with weight alpha</td><td>Average price &minus;3.3%, bookings &minus;0.67% (offline NDCG had been matched)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The paper's explanation of the first two is that price interacts with everything else, so isolating it caused under-fitting, visible in training and test NDCG falling, and a strict monotonic constraint was still too much. Of the third, it says offline evaluation could only re-rank the top results in the logs, and "during the online test, applying the newly trained model to the entire inventory revealed" the cost. DNNs, it says, "behaved just like another star engineer on the team": left alone they find a reasonable solution, and forced in a direction, disaster follows.</p>
+
+    <p>To see what the existing network did with price, the team used individual conditional expectation (ICE) plots: take the listings of one search, sweep the price over its range with every other feature fixed, and plot the score. They showed that the original two-layer network already understood cheaper is better. Those failed architectures had been forcing something that was already there, at the cost of quality.</p>
+
+    <h3 id="7-2-the-right-price-for-this-trip">7.2 The right price for this trip</h3>
+
+    <p>Looking again at the price-gap plot by city, the team found that the gap was much larger in tail cities, often in developing markets, than in head cities. That network seemed to suffer "the tyranny of the majority": price-quality tradeoffs tuned for the popular locations that dominated bookings, generalised to everywhere. A second observation fitted. With a pairwise loss, a feature that is identical across the two listings of a pair can't separate them, and query features such as location are identical across the pair, so they had little influence on the scores and dropping them barely changed NDCG. The model understood cheaper-is-better and lacked a notion of the right price for a trip, which depends on where, for how many people and for how long.</p>
+
+    <p>That inspired the <strong>two-tower</strong> architecture of the 2020 paper. A query tower takes the query and user features and produces a 100-number vector that represents the ideal listing for this query and guest. A listing tower produces a 100-number vector from the listing's features. A listing's score is the negative Euclidean distance between the two vectors, so closeness to the ideal is the score. Training uses the same pairs as before: the booked listing should end up closer to the ideal than the unbooked one. The paper notes the similarity to triplet loss, except that only pairs are available, and the missing anchor in the triple is learned by the query tower.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The 2020 ranker: two towers and position as a control
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 340" xmlns="http://www.w3.org/2000/svg">
+<rect x="14" y="132" width="672" height="130" rx="10" fill="none" stroke="#818cf8" stroke-width="1.2" stroke-dasharray="5 4"/>
+<text x="26" y="254" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#818cf8">RANKING NETWORK (two towers, distance as the score)</text>
+<rect x="20" y="30" width="200" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="30" width="200" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="120.0" y="48" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">QUERY + USER FEATURES</text>
+<text x="120.0" y="63" text-anchor="middle" font-size="10" class="dim">city, dates, guests, trip length,</text>
+<text x="120.0" y="77" text-anchor="middle" font-size="10" class="dim">history of the guest</text>
+<rect x="480" y="30" width="200" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="480" y="30" width="200" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="580.0" y="48" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">LISTING FEATURES</text>
+<text x="580.0" y="63" text-anchor="middle" font-size="10" class="dim">price, amenities, location,</text>
+<text x="580.0" y="77" text-anchor="middle" font-size="10" class="dim">bookings, reviews</text>
+<rect x="20" y="164" width="200" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="164" width="200" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="120.0" y="182" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">QUERY TOWER</text>
+<text x="120.0" y="197" text-anchor="middle" font-size="10" class="dim">two tanh layers, 100 numbers</text>
+<rect x="480" y="164" width="200" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="480" y="164" width="200" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="580.0" y="182" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">LISTING TOWER</text>
+<text x="580.0" y="197" text-anchor="middle" font-size="10" class="dim">two tanh layers, 100 numbers</text>
+<path d="M120,102 L120,162" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M580,102 L580,162" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="250" y="190" width="200" height="56" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="250" y="190" width="200" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="208" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">SCORE</text>
+<text x="350.0" y="223" text-anchor="middle" font-size="10" class="dim">minus the distance between</text>
+<text x="350.0" y="237" text-anchor="middle" font-size="10" class="dim">ideal vector and listing vector</text>
+<path d="M222,196 L248,212" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M478,196 L452,212" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="250" y="30" width="200" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="250" y="30" width="200" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="350.0" y="48" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">POSITION k</text>
+<text x="350.0" y="63" text-anchor="middle" font-size="10" class="dim">training: set to 0 with</text>
+<text x="350.0" y="77" text-anchor="middle" font-size="10" class="dim">probability 0.15; scoring: 0</text>
+<path d="M350,102 L350,188" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line" stroke-dasharray="4 4"/>
+<text x="20" y="292" text-anchor="start" font-size="10.5" class="dim">Query tower: once per search. Listing tower: once per listing, and it never sees the query.</text>
+<text x="20" y="314" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">The 2020 paper adds position as an input of the network and does not say which layer receives it.</text>
+      </svg>
+      <div class="diagram-caption">Read the two towers on the left and right, and the score between them. In the pink box, position is switched off, set to 0, whenever the model ranks a real search.</div>
+    </div>
+
+
+    <p>Against the two-layer network, online results were bookings +0.6%, with the NDCG computed online up 0.7%, driven by guests finding what they wanted more easily. Average price fell 2.3% as a side effect of better relevance, not of any price rule, and the booking gain more than covered it, with revenue up 0.75%. There's also a latency gain from the shape. In a fully connected network the first hidden layer dominates scoring cost, at <span>$O(N\cdot H\cdot(Q+L))$</span> for <span>$N$</span> listings, <span>$H$</span> first-layer units, <span>$Q$</span> query and user features and <span>$L$</span> listing features. With two towers, the query tower runs once per search and only the listing tower runs per listing, which reduces the cost to <span>$O(N\cdot H_l\cdot L + H_q\cdot Q)$</span>. Online, this cut 99th-percentile scoring latency by 33%.</p>
+
+    <p>Next the team checked whether the network did what the story claimed. ICE plots of price now peaked around certain prices, though only for high-quality listings already near the top, and stayed monotonic for average ones. A t-SNE projection (a way to squash vectors to two dimensions for plotting) of the query tower's output showed clusters by guest count and trip length, and they were not price clusters: a booking in Moscow can cost more than one in Paris depending on party size and stay length. The paper says none of this is hard evidence, only enough to be confident the mechanism worked as intended.</p>
+
+    <h3 id="7-3-new-listings">7.3 New listings</h3>
+
+    <p>The same method, finding a user problem first, led to the host's side of the marketplace. Broken out by segment, NDCG for booked listings new to the platform was 6% lower than for established ones, and the paper notes that online booking differences have been statistically significant for models that differed by as little as 0.7% in NDCG. Removing every feature built from guest interactions, such as past bookings, cut NDCG by 4.5%: the network leaned on engagement features, and a new listing has none, so it was fitted to an average.</p>
+
+    <p>One framing is explore versus exploit: boost new listings so they collect feedback at a small cost to bookings. Tuned to be bookings neutral, the boost got 8.5% more first-page impressions for new listings. But the short-term loss of relevance could be measured and the long-term gain from inventory could not, which led to "vigorous internal debates, with no resolution that satisfied every team". And the right boost depended on supply and demand in each location, so a global exploration budget would need thousands of local parameters.</p>
+
+    <p>So the team reframed the problem. What makes a new listing different is the absence of engagement features, so instead of boosting, estimate those features. One estimator in the paper averages the engagement features of nearby listings with the same guest capacity over a sliding time window, and it is scored offline by swapping its estimates into listings whose real engagement has converged, re-scoring them, and measuring how far their discounted rank moves.</p>
+
+    <p>That estimator cut the error by 42% against default values. Online, bookings of newly created listings rose 14%, along with a 14% increase in their share of first-page impressions, and overall bookings rose 0.38%, so guests benefited too.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Treating new listings</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Default values for missing engagement</td><td>Trivial</td><td>New listings fit an average; NDCG 6% lower for them</td></tr>
+        <tr><td>Ranking boost (explore&ndash;exploit)</td><td>Gives new listings impressions and feedback</td><td>Hard to set, since the long-term benefit can't be measured; needs thousands of local parameters</td></tr>
+        <tr><td>Estimate the missing engagement (2020)</td><td>A clear offline objective; improves new listings and overall bookings</td><td>The estimator itself needs maintaining; averages hide an individual listing's quality</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Airbnb picked the last row in 2020. Predicting missing statistics from neighbours is a standard cold-start move in recommenders.</p>
+
+    <p>Another segment showed a similar shortfall: boutique hotels and traditional bed and breakfasts, a rapidly growing part of the inventory, had lower NDCG than expected. The paper's hypothesis was that inventory under-represented in the training data wasn't ranked well because of positional bias, though it admits position may not be the only cause. That's where the next section starts.</p>
+  </section>
+
+  <section id="position">
+    <h2><span class="num">08</span>Position bias: was it good, or was it first?</h2>
+
+    <p>Nadia clicked the first listing on her page. Was that because it was the best match, or because it was first? Every log line carries the same ambiguity, and our model trains on those lines. A guest looks at the top of the list more than the bottom, so a listing in position 0 collects clicks and bookings that the same listing in position 20 would not. If we train on raw bookings, the model learns that listings the previous model ranked high are good, which is the previous model's opinion handed back to it.</p>
+
+    <p>Haldar and colleagues formalise this in <em>Improving Deep Learning for Airbnb Search</em> (2020) with the <strong>position-based model</strong> of click behaviour. Booking probability is split into two factors: how relevant the listing is to her, and how likely she is to look at position <span>$k$</span> at all.</p>
+
+    <div class="eq-block"><span>$$P_{\text{booking}} \;=\; P(\text{relevant} \mid l,u,q)\;\cdot\; P(\text{examined} \mid k,u,q)$$</span></div>
+
+    <p>The second factor doesn't depend on the listing <span>$l$</span>, only on the position, the user (phone users look at the top more) and the query (a guest booking next week may pay less attention to the bottom). The paper cites the standard remedy from Joachims and colleagues in 2017: train a propensity model for the second factor and weight each example by the inverse of its propensity, which usually needs randomised experiments on the results. Airbnb chose another way.</p>
+
+    <h3 id="8-1-position-as-a-control-variable">8.1 Position as a control variable</h3>
+
+    <p>The team's solution has two parts. It's non-intrusive, so no randomisation of results is needed, because of two features of the marketplace. Listings are physical things that can be booked once for a date range, and as they get booked and vanish from search, the positions of the others shift. And each listing has its own calendar, so different listings appear at different positions for similar queries on different dates. Together these make listings appear at different positions even when their scores hardly change, which is what lets a model tell the effect of position apart from the effect of the listing. And the model has no explicit propensity network. Instead position <span>$k$</span> goes in as an ordinary input feature of the network, and at scoring time it is set to 0.</p>
+
+    <p>Why this works follows from the product form. Write the network's output as relevance times positional bias, <span>$\text{dnn}_\theta(q,u,l,k) = \text{rel}_\theta(q,u,l,k)\cdot\text{pbias}_\theta(q,u,l,k)$</span>. Since the true positional factor doesn't depend on the listing, any dependence of <span>$\text{pbias}$</span> on <span>$l$</span> is an error that training with enough data removes, leaving <span>$\text{pbias}_\theta(q,u,k)$</span>. At scoring time we set <span>$k=0$</span>. Within one search the query <span>$Q$</span> and the user <span>$U$</span> are the same for every listing, so</p>
+
+    <div class="eq-block"><span>$$\text{dnn}_\theta(Q,U,l,0) \;=\; \text{rel}_\theta(Q,U,l,0)\cdot\underbrace{\text{pbias}_\theta(Q,U,0)}_{\beta,\ \text{the same for every listing}}$$</span></div>
+
+    <p>The paper writes this as equation (6): comparing two listings' scores in one search now depends only on their relevance, because the positional factor <span>$\beta$</span> multiplies both scores. In the language of causal inference the team added position as a <em>control variable</em>: it is in the model so that its effect is accounted for in training, and it is held fixed when we use the model.</p>
+
+    <h3 id="8-2-position-dropout">8.2 Position dropout</h3>
+
+    <p>There is a cost. The relevance part now has position as an input, so in training it can lean on position to predict relevance, which it can't do at scoring time when position is 0. The paper measured this: a network with position as a feature and no other care scored roughly &minus;1.3% NDCG against a baseline without it. A remedy is <strong>dropout on the position feature</strong>: during training, set position to 0 with some probability, so the model learns what its predictions look like without it. A high rate protects relevance, and a low rate gives the bias estimate clean access to position. Next the team swept the rate and computed two NDCG numbers on a test set, one with position set to 0 (relevance only) and one with the real position kept (relevance plus bias). Their difference measures how much the model has learned about position, and plotting it against relevance-only NDCG gave a curve from which the team chose a balance point, a dropout rate of 0.15.</p>
+
+    <p>Online, the test used the two-tower network of the previous section as the control and the same network trained with position as a feature, dropout 0.15, as the treatment. Bookings rose 0.7%. Revenue rose 1.8%, a surprise, and the paper's explanation is that price is an easy signal to learn while quality and location tradeoffs are subtler, so early models leaned on low prices, and because they decided what was shown at the top, that bias was baked into the training data of every later model. Removing positional bias let the model strike a better balance. Boutique hotels and bed and breakfasts, the segment that had started the investigation, saw bookings rise 1.1%.</p>
+
+    <p>Our toy below uses the same logic. An old ranker orders listings by their true appeal plus quirks of its own, so slot and appeal are partly independent, exactly the condition the paper says Airbnb's calendars provide. Clicks follow appeal times attention. We train a listing-score table with and without a position term, and rank listings by their score alone. In the table's first column, the old ranker's quirks grow.</p>
+
+            <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Recover true appeal from bookings with and without a position term</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(3)
+N, K, n = 300, 8, 400_000
+r = rng.normal(0, 1, N)                 # true appeal of each listing
+exam = np.array([1, .8, .62, .5, .4, .32, .26, .2])   # P(seen | slot)
+quirk = rng.normal(0, 1, N)             # the old ranker&#x27;s own quirks
+
+def run(spread):
+    vid = rng.integers(0, N, n)         # which listing was shown
+    est = r[vid] + spread * quirk[vid] + rng.normal(0, .5, n)
+    rank = np.argsort(np.argsort(-est)) / n
+    pos = np.minimum((rank * K).astype(int), K - 1)
+    p = exam[pos] / (1 + np.exp(-(r[vid] - 2.0)))   # appeal x attention
+    y = rng.random(n) &lt; p
+    out = []
+    for use_pos in (False, True):
+        s, b = np.zeros(N), np.zeros(K)
+        for _ in range(1500):
+            z = s[vid] + (b[pos] if use_pos else 0)
+            g = 1 / (1 + np.exp(-z)) - y
+            s -= np.bincount(vid, g, N) / (n / N)
+            if use_pos:
+                b -= np.bincount(pos, g, K) / (n / K)
+        top = set(np.argsort(-s)[:30]) &amp; set(np.argsort(-r)[:30])
+        out.append(len(top))
+    return out
+
+print(&quot;quirk size | top-30 found: no position / with position&quot;)
+for sp in (0.0, 0.5, 1.0, 2.0):
+    a, b = run(sp)
+    print(f&quot;{sp:10.1f} | {a:&gt;20d}/30 {b:&gt;14d}/30&quot;)</code></pre>
+      <div class="tryit-out">With no quirks in the old ranker (<code>0.0</code>) both models find all 30 of the 30 best listings. As the quirks grow, the model without a position term finds fewer, <code>18</code> of 30 at size <code>2.0</code>, while the model with a position term finds <code>29</code> at every size from <code>0.5</code> up.</div>
+    </details>
+
+
+    <p>With no quirks, slot is a perfect function of appeal and the position term has nothing to separate. As the old ranker's own taste grows, the model without a position term learns to reward whatever the old ranker liked, and the model with one holds at 29. That also shows why the marketplace properties matter: separating position from relevance needs variation in position that isn't just a function of relevance.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Handling position bias</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Ignore it</td><td>Nothing to build</td><td>The model learns the old ranker's preferences; biases compound over model generations</td></tr>
+        <tr><td>Inverse propensity weighting (Joachims et al., 2017)</td><td>Principled; unbiased under its assumptions</td><td>Needs a propensity model, usually from randomised result perturbation, which costs bookings</td></tr>
+        <tr><td>Position as a feature, with dropout (Airbnb, 2020)</td><td>No randomisation; one extra input; learns the bias jointly</td><td>Needs position to vary independently of relevance; the dropout rate is a tuned compromise</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Airbnb chose the third in 2020, with a measured +0.7% bookings. YouTube, in chapter 41, solved the same problem with a separate shallow tower that sees only position and device, whose output is added to the main model's logit. Both designs differ in where the bias lives, in a side network or in the main network with a dropped feature, and they rest on the same position-based model of attention.</p>
+
+    <p>Search engines, ad auctions and app stores all train click models with a position term or a propensity weight, since they share the problem: what we observe is what the previous system chose to show.</p>
+
+    
+  </section>
+
+  <section id="hosts">
+    <h2><span class="num">09</span>The other side of the marketplace: hosts say no</h2>
+
+    <p>Nadia sends her request. Another person now decides. If the listing is Instant Book the booking is confirmed at once, and otherwise the host accepts or rejects it, and until check-in either side can still cancel. Everything in the ranking so far optimised the chance of a booking, so a listing whose host often refuses looks as good as any other, and a refusal sends Nadia back to the start of a search that may already have taken weeks. In the 2023 paper <em>Optimizing Airbnb Search Journey with Multi-task Learning</em>, Chun How Tan and colleagues show a guest whose first two requests are both rejected or cancelled before a later one works out.</p>
+
+    <p>The paper lists three weaknesses of a baseline that trained on the booked listing alone: searches where the booked listing never appeared were thrown away, every non-booked listing counted as an equal negative even if the guest clicked it, and searches from everyone who didn't book were ignored, though non-bookers and non-booking actions are one and two orders of magnitude more plentiful than bookers and bookings. Two earlier fixes had failed. A model that predicted bookings and long clicks together raised long clicks and left bookings flat. Several single-task models blended with grid-searched weights raised bookings at first, but the weights went stale and the gain had declined a few months after launch.</p>
+
+    <h3 id="9-1-journey-ranker">9.1 Journey Ranker</h3>
+
+    <p>The answer was one network with several heads, trained together, in four modules. Shared layers turn the listing features and the query and guest features into a listing embedding and a context embedding. A <strong>base module</strong> learns six positive milestones along the journey: click, long click, payment page, reservation request, host acceptance and uncancelled booking. They are chained by the rule of probability, each milestone conditional on the one before:</p>
+
+    <div class="eq-block"><span>$$P(\text{unc}) = P(\text{unc}\mid\text{book})\,P(\text{book}\mid\text{req})\,P(\text{req}\mid\text{pp})\,P(\text{pp}\mid\text{lc})\,P(\text{lc}\mid\text{c})\,P(\text{c})$$</span></div>
+
+    <p>Each factor is the output of a small head on the shared layers, and the loss for each task is a standard ranking loss weighted by the share of that milestone's positives that go on to an uncancelled booking, so frequent events like clicks don't drown the rare final one. A <strong>twiddler module</strong> has three separate heads for the bad outcomes: a rejection, a cancellation by the host and a cancellation by the guest. They are rarer (from under 1% to 10% of cases depending on the action), arrive late, and are modelled separately because the base chain is linear and can't fork. A <strong>combination module</strong> turns the nine outputs into one score:</p>
+
+    <div class="eq-block"><span>$$y \;=\; \alpha_{\text{base}}\,y_{\text{base}} \;+\; \sum_{t\,\in\,\text{twiddlers}} \alpha_t\,y_t$$</span></div>
+
+    <p>The coefficients <span>$\alpha$</span> aren't global constants. A small network computes them from the context embedding, so they change with the query and with how far the guest has got. The mix is linear because a non-linear one performed the same offline and the linear one can be explained, and no gradient flows from it back to the base or twiddler heads, so those keep their meaning. It is trained with a pairwise loss on a graded order: uncancelled booking is better than click, click better than impression, and all three bad outcomes are worse than an unclicked impression.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Journey Ranker: good milestones, bad milestones, and a mixer
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 350" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="150" height="190" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="150" height="190" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="68" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">SHARED LAYERS</text>
+<text x="95.0" y="83" text-anchor="middle" font-size="10" class="dim">listing features -&gt;</text>
+<text x="95.0" y="97" text-anchor="middle" font-size="10" class="dim">listing embedding</text>
+<text x="95.0" y="111" text-anchor="middle" font-size="10" class="dim"></text>
+<text x="95.0" y="125" text-anchor="middle" font-size="10" class="dim">query + guest -&gt;</text>
+<text x="95.0" y="139" text-anchor="middle" font-size="10" class="dim">context embedding</text>
+<rect x="210" y="30" width="200" height="128" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="210" y="30" width="200" height="128" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="310.0" y="48" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">BASE: GOOD MILESTONES</text>
+<text x="310.0" y="63" text-anchor="middle" font-size="10" class="dim">1 click   2 long click</text>
+<text x="310.0" y="77" text-anchor="middle" font-size="10" class="dim">3 payment page</text>
+<text x="310.0" y="91" text-anchor="middle" font-size="10" class="dim">4 reservation request</text>
+<text x="310.0" y="105" text-anchor="middle" font-size="10" class="dim">5 host accepts</text>
+<text x="310.0" y="119" text-anchor="middle" font-size="10" class="dim">6 uncancelled booking</text>
+<rect x="210" y="178" width="200" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="210" y="178" width="200" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="310.0" y="196" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">TWIDDLERS: BAD MILESTONES</text>
+<text x="310.0" y="211" text-anchor="middle" font-size="10" class="dim">host rejects</text>
+<text x="310.0" y="225" text-anchor="middle" font-size="10" class="dim">host cancels   guest cancels</text>
+<rect x="450" y="70" width="140" height="100" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="450" y="70" width="140" height="100" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="520.0" y="88" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">COMBINE</text>
+<text x="520.0" y="103" text-anchor="middle" font-size="10" class="dim">linear mix; weights</text>
+<text x="520.0" y="117" text-anchor="middle" font-size="10" class="dim">come from the</text>
+<text x="520.0" y="131" text-anchor="middle" font-size="10" class="dim">context embedding</text>
+<rect x="450" y="200" width="140" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="450" y="200" width="140" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="520.0" y="218" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">FINAL SCORE</text>
+<text x="520.0" y="233" text-anchor="middle" font-size="10" class="dim">one number per listing</text>
+<path d="M172,94 L208,94" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M172,218 L208,218" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M412,94 L448,110" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M412,218 L448,140" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M520,172 L520,198" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="286" text-anchor="start" font-size="10.5" class="dim">Combination loss orders the outcomes: uncancelled booking &gt; click &gt; impression &gt; rejection or cancellation.</text>
+<text x="20" y="308" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Ten tasks, 9.2% more parameters: each head is one small layer on top of the shared layers.</text>
+      </svg>
+      <div class="diagram-caption">Read left to right. Shared layers feed a chain of six positive tasks and three negative ones, and a small mixer turns all nine outputs into the score that orders Nadia's results.</div>
+    </div>
+
+
+    <p>Training data changed too. Every impression gets every label that applies, so the model can learn from clicks. Using all clickers would add two orders of magnitude more searches and plenty of noise, so the team kept only searches that led to a payment page view, roughly 50% more than before, and trained on about 500 million searches.</p>
+
+    <p>Offline, the full model's NDCG is 0.48% above the baseline with 9.2% more parameters. For context, the paper says that making the baseline 50% larger gains only 0.05 to 0.1% NDCG, and that an offline gain of 0.3% is considered promising for a significant online booking gain. An ablation shows where the gain comes from:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Base-module tasks (no twiddlers, no mixer)</th><th>Offline NDCG</th><th>Searches used</th></tr></thead>
+      <tbody>
+        <tr><td>Uncancelled booking only (baseline)</td><td>+0.00%</td><td>+0%</td></tr>
+        <tr><td>Request + accepted booking + uncancelled booking</td><td>+0.06%</td><td>+25%</td></tr>
+        <tr><td>Click + uncancelled booking</td><td>+0.22%</td><td>+50%</td></tr>
+        <tr><td>All six milestones</td><td>+0.31%</td><td>+50%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>More searches from clickers helped much more than more searches from rejected requesters, and the intermediate milestones gained 0.09% with the same searches. Online, Journey Ranker raised uncancelled bookers by 0.61% for Stays and clickers by 0.14%, and gained 2.0% in uncancelled bookers for in-person Experiences and 9.0% for Online Experiences. The mixer's weights can be read: host-initiated rejection and cancellation both follow a U shape against the days between search and check-in, since close to the trip a guest has no time to rebook and far from it a host has time to change their mind.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Hosts in the ranking</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Rank by booking probability only</td><td>Simple, one label</td><td>Listings that get rejected or cancelled rank as well as the others</td></tr>
+        <tr><td>Separate models blended by grid-searched weights</td><td>Gave a first booking gain</td><td>Weights went stale; the gain declined within months</td></tr>
+        <tr><td>One model with graded labels</td><td>Single task, single loss</td><td>More than 1% lower offline NDCG when tried naively, as frequent labels crowd out rare ones</td></tr>
+        <tr><td>Multi-task heads plus a learned mixer (2023)</td><td>Uses far more data; explainable weights; modest parameters</td><td>Ten tasks to maintain; mixer weights can't be checked against ground truth</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Airbnb chose the last row in 2023, building on earlier chained conversion models from e-commerce and customer acquisition.</p>
+  </section>
+
+  <section id="diversity">
+    <h2><span class="num">10</span>Diversity: the tyranny of the majority</h2>
+
+    <p>Suppose the model is excellent. Nadia's first page might still show eight versions of one flat in Baixa at nearly the same price, because the model's best guess for her is the same for the second, third and eighth listing. Haldar and colleagues' 2022 paper <em>Learning To Rank Diversely At Airbnb</em> starts from a stronger claim: the assumption that a listing's booking probability can be worked out independently of the other listings in the results "is false", and it limits every pairwise or pointwise ranker.</p>
+
+    <h3 id="10-1-why-ranking-by-probability-is-not-diverse">10.1 Why ranking by probability isn't diverse</h3>
+
+    <p>Take two listings with logits <span>$\text{logit}_x$</span> and <span>$\text{logit}_y$</span>. A model puts <span>$l_x$</span> first exactly when the pairwise booking probability exceeds one half, which means <span>$l_x$</span> is the one that more than half of past bookers with this query would pick. In effect every position is a majority vote among people who booked. The paper adds a second observation, a Pareto pattern in booking value: in most cities roughly 20% of bookings account for 50% of the aggregate booking value, and those quality-leaning bookers have an average booking value four times that of the other 80%. Put together, the first page is decided entirely by the 80% who lean toward affordability, and the minority that wants quality gets no positions at all. The paper calls this "the tyranny of the majority" in search ranking. It is a fact about ranking by a majority-preference probability, so a better estimate of that probability can't fix it.</p>
+
+    <p>History shows how hard this was to fix. Starting in 2017, category-based diversification spread results over price buckets, locations and amenities, and the paper says "all these efforts resulted in disappointment", because forcing diversity along one dimension degraded the others. Abdool and colleagues' 2020 KDD paper <em>Managing Diversity in Airbnb Search</em> defines a diversity metric, <em>mean listing relevance</em>, and reports that a greedy ranker maximising it was neutral or slightly negative online, because it over-diversified: guests used price filters and viewed more listings, signs they were working harder. Later designs matched a target distribution of locations by simulated annealing, added a loss on the Hellinger distance (a measure of the gap between two distributions), and finally embedded the listings above with an LSTM, a network that reads a sequence one item at a time. That last design improved the diversity metric by 1.97% and offline NDCG by 1.26%, and the lesson, as the 2022 paper puts it, was to give the model more information and the freedom to diversify.</p>
+
+    <h3 id="10-2-conditioning-on-what-is-above">10.2 Conditioning on what is above</h3>
+
+    <p>The 2022 paper takes the lesson as far as it goes. A guest scans down the page, and she considers the listing at position 1 only if the one at position 0 didn't suit her. So build the model for position 1 on the extra condition that the guest rejected position 0. Training data for that model comes from logs: drop the searches where the listing at position 0 was booked, call that listing the <em>antecedent</em>, and form {booked, not booked} pairs from the rest. A model trained there learns a pairwise preference among people who have already passed on the antecedent, a different crowd from the one that chose it, and its preferences are likely to differ, which is exactly diversity learned from data.</p>
+
+    <p>One model per position is impractical (hundreds of models, and a cubic-time loop), so the paper factors it. First comes the base model <span>$f_\theta(q,u,l)$</span>, the ordinary booking logit. A second model <span>$s_\phi(q,u,l,l_a)$</span> learns the similarity penalty between a candidate and an antecedent, trained on the rejected-antecedent pairs with the base logit held fixed. For position <span>$k+1$</span>, the logit subtracts a discounted sum over the listings already placed:</p>
+
+    <div class="eq-block"><span>$$f_{k+1}(q,u,l,l_{0\to k}) \;=\; f_\theta(q,u,l) \;-\; \sum_{i=0}^{k}\lambda_i\, s_\phi(q,u,l,l_i)$$</span></div>
+
+    <p>The coefficients <span>$\lambda_i$</span> shrink as the listing's penalties overlap: two near-duplicate antecedents shouldn't be penalised twice. The paper settles on <span>$\lambda = 1/3$</span> as the hyperparameter that maximises offline NDCG. Ranking then runs in rounds, as in Algorithm 2 of the paper: place the best listing, subtract each remaining listing's similarity penalty to what was just placed, place the best again, and repeat.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Ranking diversely: each position is chosen given what is above it
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 360" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="28" text-anchor="start" font-size="11" font-weight="700" class="" fill="#818cf8">ROUND 1: nothing placed yet, so pick the highest logit for position 0</text>
+<rect x="20" y="40" width="124" height="56" rx="8" fill="#34d399" opacity="0.24"/>
+<rect x="20" y="40" width="124" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="82.0" y="58" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">A</text>
+<text x="82.0" y="73" text-anchor="middle" font-size="10" class="dim">Baixa flat</text>
+<text x="82.0" y="87" text-anchor="middle" font-size="10" class="dim">logit 2.0</text>
+<rect x="152" y="40" width="124" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="152" y="40" width="124" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="214.0" y="58" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">B</text>
+<text x="214.0" y="73" text-anchor="middle" font-size="10" class="dim">Baixa flat, near A</text>
+<text x="214.0" y="87" text-anchor="middle" font-size="10" class="dim">logit 1.9</text>
+<rect x="284" y="40" width="124" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="284" y="40" width="124" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="346.0" y="58" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">C</text>
+<text x="346.0" y="73" text-anchor="middle" font-size="10" class="dim">Baixa studio</text>
+<text x="346.0" y="87" text-anchor="middle" font-size="10" class="dim">logit 1.7</text>
+<rect x="416" y="40" width="124" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="416" y="40" width="124" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="478.0" y="58" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">D</text>
+<text x="478.0" y="73" text-anchor="middle" font-size="10" class="dim">Alfama, balcony</text>
+<text x="478.0" y="87" text-anchor="middle" font-size="10" class="dim">logit 1.5</text>
+<rect x="548" y="40" width="124" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="548" y="40" width="124" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="610.0" y="58" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">E</text>
+<text x="610.0" y="73" text-anchor="middle" font-size="10" class="dim">Graca, rooftop</text>
+<text x="610.0" y="87" text-anchor="middle" font-size="10" class="dim">logit 1.4</text>
+<text x="20" y="132" text-anchor="start" font-size="11" font-weight="700" class="" fill="#fbbf24">ROUND 2: subtract a learned similarity to the listing already placed, then pick for position 1</text>
+<rect x="20" y="144" width="124" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="144" width="124" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="82.0" y="162" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">A</text>
+<text x="82.0" y="177" text-anchor="middle" font-size="10" class="dim">Baixa flat</text>
+<text x="82.0" y="191" text-anchor="middle" font-size="10" class="dim">placed at 0</text>
+<rect x="152" y="144" width="124" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="152" y="144" width="124" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="214.0" y="162" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">B</text>
+<text x="214.0" y="177" text-anchor="middle" font-size="10" class="dim">Baixa flat, near A</text>
+<text x="214.0" y="191" text-anchor="middle" font-size="10" class="dim">logit 1.9 - 0.9 = 1.0</text>
+<rect x="284" y="144" width="124" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="284" y="144" width="124" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="346.0" y="162" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">C</text>
+<text x="346.0" y="177" text-anchor="middle" font-size="10" class="dim">Baixa studio</text>
+<text x="346.0" y="191" text-anchor="middle" font-size="10" class="dim">logit 1.7 - 0.8 = 0.9</text>
+<rect x="416" y="144" width="124" height="56" rx="8" fill="#34d399" opacity="0.24"/>
+<rect x="416" y="144" width="124" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="478.0" y="162" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">D</text>
+<text x="478.0" y="177" text-anchor="middle" font-size="10" class="dim">Alfama, balcony</text>
+<text x="478.0" y="191" text-anchor="middle" font-size="10" class="dim">logit 1.5 - 0.1 = 1.4</text>
+<rect x="548" y="144" width="124" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="548" y="144" width="124" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="610.0" y="162" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">E</text>
+<text x="610.0" y="177" text-anchor="middle" font-size="10" class="dim">Graca, rooftop</text>
+<text x="610.0" y="191" text-anchor="middle" font-size="10" class="dim">logit 1.4 - 0.2 = 1.2</text>
+<text x="20" y="238" text-anchor="start" font-size="10.5" class="" fill="#34d399">D wins position 1 although B and C have higher logits, because they look too much like A.</text>
+<text x="20" y="262" text-anchor="start" font-size="10.5" class="dim">In production the penalty is lambda x s(l, antecedent), with s a small network learned from past searches.</text>
+<text x="20" y="286" text-anchor="start" font-size="10.5" class="dim">Numbers in the boxes are illustrative. The 2022 paper settled on lambda = 1/3 and repeats this step for each position.</text>
+<text x="20" y="310" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Cost: every remaining listing is scored again at every position, so the loop grows with the square of the list.</text>
+      </svg>
+      <div class="diagram-caption">Compare the two rows. In round two the three Baixa listings lose points for resembling A, and the Alfama listing with a balcony climbs to the top.</div>
+    </div>
+
+
+    <p>Two engineering choices keep this affordable: the similarity model is a pair of listing towers whose outputs can be cached, so each listing is encoded once, and the loop is quadratic in the number of listings, which is workable because roughly 100 are evaluated.</p>
+
+    <p>A toy below puts the idea in numbers. Six taste groups of guests have unequal sizes, and listings belong to the group they appeal to. Guests scan down the page with decaying attention, and a guest who has rejected a look-alike books a later listing of her taste less often. We rank by booking chance, then re-rank with a growing penalty for repeating a taste.</p>
+
+            <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Re-rank with a similarity penalty and count the bookings</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(5)
+pop = np.array([.45, .25, .14, .09, .05, .02])   # guests per taste group
+C, PER, K = len(pop), 12, 8
+taste = np.repeat(np.arange(C), PER)             # taste of each listing
+q = rng.uniform(.25, .6, C * PER)    # P(book | matching guest looks)
+look = 1 / np.log2(np.arange(K) + 2)             # attention by slot
+RHO = 0.2        # a guest who rejected a look-alike books it less often
+
+def bookings(slate, n=400_000):
+    g = rng.choice(C, n, p=pop)                  # each guest&#x27;s taste
+    done = np.zeros(n, bool)
+    rejected = np.zeros(n, bool)                 # rejected a look-alike
+    for k, l in enumerate(slate):
+        seen = (rng.random(n) &lt; look[k]) &amp; ~done
+        match = seen &amp; (g == taste[l])
+        p = np.where(rejected, RHO * q[l], q[l])
+        hit = match &amp; (rng.random(n) &lt; p)
+        rejected |= match &amp; ~hit
+        done |= hit
+    return done.mean()
+
+score = np.log(pop[taste] * q)         # ranking by booking chance alone
+def rerank(lam):
+    left, slate = list(range(C * PER)), []
+    while len(slate) &lt; K:
+        pen = [lam * sum(taste[l] == taste[s] for s in slate)
+               for l in left]
+        best = left[int(np.argmax(score[left] - np.array(pen)))]
+        slate.append(best)
+        left.remove(best)
+    return slate
+
+print(&quot;penalty | tastes in top 8 | bookings per 100 searches&quot;)
+for lam in (0, .25, .5, 1, 2):
+    s = rerank(lam)
+    n_tastes, b = len(set(taste[s])), 100 * bookings(s)
+    print(f&quot;{lam:7} | {n_tastes:15d} | {b:10.1f}&quot;)</code></pre>
+      <div class="tryit-out">Ranking by booking chance alone puts one taste group on the whole page and yields <code>31.3</code> bookings per 100 searches. A penalty of <code>0.5</code> spreads the page over three tastes for <code>44.9</code>, a penalty of <code>1</code> reaches five tastes for <code>46.3</code>, and a penalty of <code>2</code> covers all six for <code>46.4</code>.</div>
+    </details>
+
+
+    <p>The curve flattens above a penalty of 1 because nothing is left to diversify. The toy also knows the true taste groups, which a real model has to learn from data.</p>
+
+    <p>Launch results from an online experiment matched the theory's predictions. Online NDCG rose 1.5%, offline NDCG 0.45% on the position-1 test set and 0.2% on the base model's. Bookings rose 0.29% and gross booking value 0.8%, with almost all of the bookings gain from guests booking on Airbnb for the first time, which is the group the 80% majority serves worst. Listings viewed rose 0.46% and listings saved 1.1%. Price variance among the top eight results rose 3.4%, and the number of listings in the top eight within 0.5 km of each other fell 0.62%. Ninety days after the test, when the trips had happened, 5-star ratings were up 0.4%. Latency was the cost: the 95th percentile rose 8.4% and the median 5.3%.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Approach to diversity</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Category quotas (price, location buckets; 2017)</td><td>Simple, controllable</td><td>Pushes down good listings for belonging to the wrong bucket; ignores other dimensions</td></tr>
+        <tr><td>Greedy re-ranker on a relevance-plus-distance metric (2019)</td><td>Interpretable metric</td><td>Over-diversified; neutral to negative online</td></tr>
+        <tr><td>Distribution matching on location or price</td><td>Targets a specific visible property</td><td>Only the chosen dimension; the first version needed simulated annealing, since bucket membership gives no gradient</td></tr>
+        <tr><td>LSTM context over the top results (2019/2020)</td><td>The model sees the whole retrieval set</td><td>Aggregates the listings into one vector; cannot compare a candidate with what is directly above</td></tr>
+        <tr><td>Conditional pairwise model with similarity penalty (2022)</td><td>Learned from data; same NDCG metric; large online gain</td><td>Quadratic loop; higher latency; training data still biased toward the majority</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Airbnb chose the last row in 2022. The paper's own caution is that the training data comes from a system that wasn't diverse, and it expects later logs to give the model more to learn from. Maximal marginal relevance and determinantal point processes work along similar lines, picking each item given what has been picked.</p>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">11</span>Serving: one search through the funnel</h2>
+
+    <p>We now have a heavy model, and the arithmetic of section 01 says it can't see every listing. Airbnb's search runs as a <strong>sharded scatter-gather</strong> system, as the January 2026 retrieval paper describes it: a root service fans a request out in parallel to leaf services, each owning a slice of the inventory, and merges the best of what they return. Three models take part, in order. A <strong>retrieval</strong> model on each leaf scores tens of thousands of homes cheaply and passes on the top <span>$K$</span>. A heavyweight <strong>first-stage</strong> network passes on the top <span>$N$</span>. A <strong>setwise re-ranker</strong> at the root optimises the top <span>$T$</span> jointly, which is where the diversity logic of section 10 lives. In the paper's notation <span>$K > N > T$</span>, each stage scoring about an order of magnitude fewer homes than the one before, and only a few sizes are published: a <span>$T$</span> of roughly 1,000 in the 2020 diversity work and roughly 100 listings for the 2022 re-ranker.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">A search fans out to shards and comes back together
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="125" width="100" height="66" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="125" width="100" height="66" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="70.0" y="143" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">SEARCH</text>
+<text x="70.0" y="158" text-anchor="middle" font-size="10" class="dim">Lisbon,</text>
+<text x="70.0" y="172" text-anchor="middle" font-size="10" class="dim">4-6 Dec</text>
+<rect x="150" y="125" width="110" height="66" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="150" y="125" width="110" height="66" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="205.0" y="143" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">ROOT</text>
+<text x="205.0" y="158" text-anchor="middle" font-size="10" class="dim">fans out,</text>
+<text x="205.0" y="172" text-anchor="middle" font-size="10" class="dim">merges</text>
+<rect x="300" y="30" width="200" height="66" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="300" y="30" width="200" height="66" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="400.0" y="48" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">LEAF SHARD 1</text>
+<text x="400.0" y="63" text-anchor="middle" font-size="10" class="dim">retrieval: K candidates</text>
+<text x="400.0" y="77" text-anchor="middle" font-size="10" class="dim">first-stage DNN: top N</text>
+<path d="M262,158 L298,63" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M502,63 L538,158" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="300" y="125" width="200" height="66" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="300" y="125" width="200" height="66" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="400.0" y="143" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">LEAF SHARD 2</text>
+<text x="400.0" y="158" text-anchor="middle" font-size="10" class="dim">retrieval: K candidates</text>
+<text x="400.0" y="172" text-anchor="middle" font-size="10" class="dim">first-stage DNN: top N</text>
+<path d="M262,158 L298,158" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M502,158 L538,158" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="300" y="220" width="200" height="66" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="300" y="220" width="200" height="66" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="400.0" y="238" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">LEAF SHARD 3</text>
+<text x="400.0" y="253" text-anchor="middle" font-size="10" class="dim">retrieval: K candidates</text>
+<text x="400.0" y="267" text-anchor="middle" font-size="10" class="dim">first-stage DNN: top N</text>
+<path d="M262,158 L298,253" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M502,253 L538,158" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M122,158 L148,158" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="540" y="100" width="140" height="116" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="540" y="100" width="140" height="116" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="610.0" y="118" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">SECOND STAGE</text>
+<text x="610.0" y="133" text-anchor="middle" font-size="10" class="dim">top T from all</text>
+<text x="610.0" y="147" text-anchor="middle" font-size="10" class="dim">shards, re-ranked</text>
+<text x="610.0" y="161" text-anchor="middle" font-size="10" class="dim">together for</text>
+<text x="610.0" y="175" text-anchor="middle" font-size="10" class="dim">diversity</text>
+<path d="M610,218 L610,244" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="540" y="246" width="140" height="50" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="540" y="246" width="140" height="50" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="610.0" y="264" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">PAGE</text>
+<text x="610.0" y="279" text-anchor="middle" font-size="10" class="dim">cards or map pins</text>
+<text x="20" y="318" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">K &gt; N &gt; T. Only a T of roughly 1,000 (2020 paper) and about 100 listings for the 2022 re-ranker are published.</text>
+      </svg>
+      <div class="diagram-caption">Read left to right. Each shard retrieves and scores its own slice of the inventory, and the root service sends only the best of each slice on to the stage that looks at the whole page.</div>
+    </div>
+
+
+    <h3 id="11-1-retrieval">11.1 Retrieval for a hundred thousand homes</h3>
+
+    <p>Retrieval was the last stage to get the neural treatment, driven by growth: flexible date search and split stays multiplied the eligible homes per query. Its legacy model was a linear model giving each listing one query-independent score a day. A 2026 paper replaces it with <strong>embedding-based retrieval</strong>, a two-tower model whose vectors are compared by similarity, with three notable choices.</p>
+
+    <p>First, the listing tower runs in a daily offline batch job, so only the query tower runs at request time and retrieval cost stops growing with the number of eligible listings. The price is that retrieval sees the previous day's price and availability. Second, training data. Sampling by search, with the booked listing as the positive and other impressions as negatives, only works when the booked listing was shown, and the paper found it drew most listings from the last 30% of a journey. <strong>Trip-based sampling</strong> groups all of a user's searches that share location, number of guests and a bucketised length of stay, so early searches still contribute, and picks negatives by first choosing a category of action (impressed, viewed, wishlisted) and then a listing in it, which gives harder negatives. Third, the index. Airbnb benchmarked two kinds of approximate nearest-neighbour index with FAISS, inverted-file (IVF), which groups vectors into clusters and searches only the closest few, and HNSW, which links them in a navigable graph, and chose IVF, since nearly every search carries a filter and listings change roughly 10,000 times a second. HNSW's memory grew too large under those updates and filters were hard to apply, while IVF treats the cluster as one more filter in Apache Lucene. One more finding: with 128 clusters from a daily k-means job, dot-product similarity produced clusters holding roughly 20% of the data, and switching to Euclidean distance balanced them.</p>
+
+    <p>Retrieval models were judged on recall, the share of the booked listing found among the top results. On held-out logs, recall at 10 was 53.3% for the legacy model, 60.2% for the first embedding model and 93.4% for the final one. On replayed production traffic, recall at 100 was 40.5%, 74.6% and 87.0%. Three successive launches gave a combined 0.31% relative increase in booking conversion and cut compute by roughly 16% relative to the baseline, and promotional emails, which reuse the same retrieval, gained 2.3% in bookings.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Retrieval for large result sets</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Linear, query-independent daily score (legacy)</td><td>Trivial to serve</td><td>Same top listings for every query; recall 40.5% on replay</td></tr>
+        <tr><td>Two-tower embeddings with HNSW</td><td>Better recall than IVF on average</td><td>Large memory under frequent updates; hard to combine with filters</td></tr>
+        <tr><td>Two-tower embeddings with IVF (chosen)</td><td>Low memory; cluster ID works as a filter; cheap updates</td><td>Lower recall than HNSW; clustering quality depends on the similarity function</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 id="11-2-nadias-request">11.2 Nadia's request, step by step</h3>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Search</span><span>Nadia taps Search. Her query carries a place, her dates and a guest count, and the guest state (her clicks and skips of the last two weeks, past stays) is available as features. Airbnb has not published the end-to-end latency target.</span></li>
+      <li><span class="st-lane">Fan out</span><span>The root service sends the query to every leaf shard in parallel, and each shard owns part of the inventory.</span></li>
+      <li><span class="st-lane">Retrieve</span><span>Each leaf uses the query tower once, finds the nearest listings in its IVF clusters under the search's filters, and keeps the top K. Listings are scored with the previous day's price and availability, and the up-to-date values are brought in later in the search.</span></li>
+      <li><span class="st-lane">Score</span><span>The first-stage network scores each candidate with position set to 0 and returns the top N. Its query tower runs once per search and its listing tower once per listing.</span></li>
+      <li><span class="st-lane">Merge and re-rank</span><span>The root combines the shards' lists and the setwise re-ranker, which sees roughly a hundred listings, applies the diversity penalty position by position. Per the 2022 paper, the diversity stage raised median search latency by 5.3% and 95th-percentile latency by 8.4%.</span></li>
+      <li><span class="st-lane">Display</span><span>The page shows the results as cards or, on a map, as pins. Her search, the positions, her clicks and the request are logged.</span></li>
+    </ol>
+
+    <h3 id="11-3-the-same-ranking-on-a-map">11.3 The same ranking on a map</h3>
+
+    <p>Nadia, like most guests, is moving a map. A June 2024 paper, <em>Learning to Rank for Maps at Airbnb</em>, asks whether a ranking built for lists makes sense there. NDCG on map-driven searches was stubbornly 2% lower than on search-box queries, and engineers had added map-specific features for years without closing the gap.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Randomly shuffling the top results of a list-based search is known to cost roughly 8% of bookings. Airbnb ran the same shuffle on map searches on phones, where a guest sees only the map. Does the shuffle cost more, about the same, or nothing?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>Nothing. Metrics in the treatment group were almost identical to control, and bookings did not differ. On a map the pins appear all at once, so the order of the top listings carries no attention. Ranking still decides which listings get pins, but not their order among those chosen. NDCG, whose discount encodes how attention falls down a list, stops being the right metric.</p>
+      </details>
+    </div>
+
+    <p>If attention on a map is spread evenly over the <span>$N$</span> pins, the chance of a booking from a map result is the average of the pins' booking probabilities, so fewer, better pins raise it. The paper calls this <em>Less Is More</em> and builds a <strong>Bookability Filter</strong> that keeps a listing only when its logit is within a margin <span>$\alpha$</span> of the best one, which means its booking probability exceeds the top listing's divided by <span>$e^{\alpha}$</span>. Pin counts then vary with the search. Online, <span>$\alpha = 1.0$</span> raised uncancelled bookings 1.7% and 5-star trips 1.6%, and at 34 million searchers per arm uncancelled bookings rose 1.9% of Airbnb's global bookings, described as one of the largest gains in years. A further test ruled out urgency from seeing fewer pins: randomly choosing 14 of the 18 pins cost 1.5% of bookings, so the gain came from better pins, which the paper calls focus.</p>
+
+    <p>This lesson is not about maps. NDCG's theory, that attention decays down a list, was an assumption that the interface made true, and a different interface breaks it.</p>
+  </section>
+
+  <section id="feedback">
+    <h2><span class="num">12</span>Training data, labels and the feedback loop</h2>
+
+    <p>When Nadia books the Alfama flat, something has to turn that into a training example, and the choices about how matter as much as the architecture. Airbnb's default recipe is to look back from a booking over the guest's searches, take the impressions of the booked listing as positives and the other listings she saw as negatives, and build pairs, at a scale of 1.7 billion pairs in 2019 and about 500 million searches in 2023.</p>
+
+    <p>Each default hides a bias. Only searches where the booked listing was shown contribute, which pulls sampling toward the end of the journey. All non-booked listings are equal negatives, though she clicked some. Only bookers contribute, so the model learns the preferences of past bookers and serves everyone. And outcomes arrive at different times: negative milestones are delayed, and a rating comes only after the stay. Journey Ranker answers the one-label problem by labelling each impression with every outcome that applies, and the retrieval work answers the sampling problem with trip-based sampling and hard negatives.</p>
+
+    <p>A deeper issue is that the training data is the product of the last model. One example from the position paper shows it: early models preferred cheap listings, those listings were shown first and booked more, and the next model learned that guests prefer cheaper listings still, so a bias in what was shown became a bias in what was learned. Likewise, the diversity paper says that the training data is "biased against diversity" and expects a virtuous cycle once a diverse ranker produces more varied logs. A recommender can't escape the loop by modelling alone, and Airbnb's remedies are partial: position as a control variable, estimators that fill in what new listings lack, and richer labels.</p>
+
+    <h4 class="why">Why not log everything a guest saw, including pages she never scrolled to?</h4>
+
+    <p>Because it costs and because it misleads. Airbnb's retrieval paper notes that logging the entire eligible set for every request isn't practical from a scalability standpoint, and the inventory changes too quickly to reconstruct it offline: hosts update prices and availability all the time. Logs contain what was shown, so offline metrics on them describe the old system's choices, and the team's answer is a traffic replay cluster that re-scores real queries on the full eligible set.</p>
+  </section>
+
+  <section id="evaluation">
+    <h2><span class="num">13</span>How Airbnb knows a change helped</h2>
+
+    <p>Every section above ended in a claim of improvement, so how are the claims checked? Airbnb's papers describe two layers: NDCG offline for speed, and A/B tests online for the truth.</p>
+
+    <p>Offline, the metric earns its place by a neat argument in the 2022 paper, which compares ranking to roulette. In each of <span>$N$</span> searches with <span>$K$</span> listings, a listing at position <span>$j$</span> is booked with probability <span>$P_{\text{booking}}(l)\cdot P_{\text{attention}}(j)$</span>, a product of its own booking chance and the chance that the guest looks at position <span>$j$</span>. Expected bookings are the sum of those products, and if attention falls monotonically down the page, sorting by booking probability maximises it. Take any unsorted pair, with <span>$B_x \lt B_y$</span> and attention <span>$A_x > A_y$</span>. Swapping them changes the expected bookings by</p>
+
+    <div class="eq-block"><span>$$\Delta E[\text{bookings}] \;=\; (B_y - B_x)(A_x - A_y) \;>\; 0$$</span></div>
+
+    <p>so a sorted list can't be beaten. NDCG has the same shape: a booked listing at position <span>$j$</span> wins <span>$\ln 2/\ln(2+j)$</span>, and that discount curve is built to follow how attention decays, so it is proportional to <span>$P_{\text{attention}}(j)$</span>. A gain in NDCG is therefore a strong indicator of a gain in bookings. This is also why the metric breaks on maps, where attention doesn't decay with rank.</p>
+
+    <p>Airbnb's papers give rules of thumb for what an offline gain means. In 2020 the team notes that models whose NDCG differed by as little as 0.7% have shown statistically significant differences in online bookings, and in 2023 that an offline gain of 0.3% is considered promising. Journey Ranker's offline numbers are means of five training runs with a 95% confidence interval, because retraining noise would otherwise swamp differences this size.</p>
+
+    <h3 id="13-1-when-offline-and-online-disagree">13.1 When offline and online disagree</h3>
+
+    <p>The more interesting evidence is where they disagree. Section 07's price loss matched the baseline's NDCG offline and cost 0.67% of bookings online, because offline evaluation could only re-rank the top results that appear in logs, and online the model scored the whole inventory. Hand-crafted noise for dropout gained roughly 1% NDCG offline and had no significant online effect. For retrieval, metrics from logs "tend not to generalize well to a true online setting", since logs contain only shown results, so the team built the replay framework: fork a small share of production queries to an offline cluster, score every eligible listing with both the heavy first-stage model and the candidate retrieval model, and measure recall of the heavy model's top results. The paper reports that this metric predicted the A/B result for all of the roughly ten retrieval models it tried.</p>
+
+    <h3 id="13-2-the-ab-discipline">13.2 The A/B discipline</h3>
+
+    <p>The final word is an online experiment: new model for some searchers, old for others, compared on bookings that were not cancelled, the top-line metric. A 2026 guest-journey post says tests typically ran for three weeks with guardrail metrics watched throughout. Some effects take longer to arrive. The diversity paper waited 90 days after the test, until most booked trips had happened, to compare 5-star ratings, and the maps paper evaluates 5-star trips 120 days after the end of the experiment. Scale is used to detect small effects: the maps launch put 34 million searchers in each arm, which pushed p-values for key metrics below <span>$10^{-5}$</span>.</p>
+
+    <p>Experiments also settle questions of mechanism: the map shuffle, the urgency test and the diversity paper's predictions (an NDCG gain, a larger gross-booking-value gain, gains among first-time bookers) were each checked online. None of the sources say how experiments handle interference between arms in a marketplace where a listing can be booked only once, so we won't describe it.</p>
+
+    <h4 class="why">Why does an NDCG gain of a few tenths of a percent justify a launch?</h4>
+
+    <p>Because at this scale a few tenths of a percent is a very large number of stays, and because the metric is constructed to track bookings. A model that ranks the booked listing 0.3% better on average moves many of those listings up a few places across hundreds of millions of searches. An experiment then confirms it, since an offline number alone can't.</p>
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">14</span>What went wrong, and what it cost</h2>
+
+    <p>The papers are unusually frank about failures, and they cluster into patterns. This table lists the ones that came with a measured result.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What was tried</th><th>What happened</th><th>Why, according to the papers</th></tr></thead>
+      <tbody>
+        <tr><td>Neural network as a drop-in for GBDT</td><td>Booking neutral; offline regressions at first</td><td>Deep learning is about scaling the whole system, not swapping a model</td></tr>
+        <tr><td>Listing ID embeddings</td><td>Training NDCG up, test unchanged</td><td>A listing is booked at most 365 times a year, so data per ID is too sparse</td></tr>
+        <tr><td>Multi-task with long views</td><td>Long views up by a large margin; bookings neutral</td><td>Long views carry a large component unrelated to bookings</td></tr>
+        <tr><td>More layers, residual connections, batch norm, attention, deep-and-wide</td><td>NDCG unchanged</td><td>Two layers were enough; imported architectures fix other models' shortcomings</td></tr>
+        <tr><td>Price outside the network</td><td>Price &minus;5.7%, bookings &minus;1.5%</td><td>Price interacts with everything; under-fitting</td></tr>
+        <tr><td>Monotonic network in price</td><td>Bookings &minus;1.6%</td><td>Too strict a constraint</td></tr>
+        <tr><td>Price loss mixed in</td><td>Price &minus;3.3%, bookings &minus;0.67%</td><td>Offline evaluation only re-ranked logged results</td></tr>
+        <tr><td>Greedy diversity ranker</td><td>Neutral to slightly negative</td><td>Over-diversified; more filters and views</td></tr>
+        <tr><td>Blended single-task models</td><td>Gain faded within months</td><td>Grid-searched weights went stale</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Three themes recur. A literature-driven loop returned nothing, and the team replaced it with users lead, model follows. Constraints that fight the model, such as monotonic price or a price loss, destroyed more than they bought. And assumptions from one setting broke in another: IDs from video, NDCG from lists, independent booking probabilities from pairwise ranking. Each fix that worked started from a segment where the model was weak: tail cities, new listings, boutique hotels, map searches, first-time bookers.</p>
+
+    
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">15</span>The whole system</h2>
+
+    <p>We can now draw the full design. On the left, the online path is Nadia's search, a request that fans out to shards, retrieves, scores, re-ranks and returns. On the right, the offline path is the loop that keeps the models current: what she saw and did is logged, turned into labels with sampling that corrects for how the data was collected, used to train the next model, checked offline, and shipped only if an online experiment says so.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The whole design, online and offline
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 480" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">ONLINE: Nadia's search</text>
+<text x="380" y="22" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">OFFLINE: the loop that keeps the models current</text>
+<rect x="20" y="34" width="300" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="34" width="300" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="170.0" y="52" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">APP</text>
+<text x="170.0" y="67" text-anchor="middle" font-size="10" class="dim">search: Lisbon, 4-6 Dec, 2 guests</text>
+<path d="M170,76 L170,92" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="94" width="300" height="40" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="94" width="300" height="40" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="170.0" y="112" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">ROOT SERVICE</text>
+<text x="170.0" y="127" text-anchor="middle" font-size="10" class="dim">fans out to leaf shards, merges</text>
+<path d="M95,136 L95,152" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M245,136 L245,152" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="154" width="144" height="62" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="154" width="144" height="62" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="92.0" y="172" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">RETRIEVAL</text>
+<text x="92.0" y="187" text-anchor="middle" font-size="10" class="dim">two-tower, IVF index</text>
+<text x="92.0" y="201" text-anchor="middle" font-size="10" class="dim">K candidates</text>
+<rect x="176" y="154" width="144" height="62" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="176" y="154" width="144" height="62" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="248.0" y="172" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">FIRST STAGE</text>
+<text x="248.0" y="187" text-anchor="middle" font-size="10" class="dim">DNN, position = 0</text>
+<text x="248.0" y="201" text-anchor="middle" font-size="10" class="dim">top N</text>
+<path d="M95,218 L95,234 L170,234 L170,244" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M248,218 L248,234 L170,234" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="246" width="300" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="246" width="300" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="170.0" y="264" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SECOND STAGE</text>
+<text x="170.0" y="279" text-anchor="middle" font-size="10" class="dim">setwise re-rank for diversity, top T</text>
+<path d="M170,292 L170,308" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="310" width="300" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="310" width="300" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="170.0" y="328" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RESULTS</text>
+<text x="170.0" y="343" text-anchor="middle" font-size="10" class="dim">list of cards or map pins</text>
+<rect x="20" y="376" width="300" height="52" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="376" width="300" height="52" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="170.0" y="394" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">LIVE GUEST STATE</text>
+<text x="170.0" y="409" text-anchor="middle" font-size="10" class="dim">clicks and skips of the last two weeks,</text>
+<text x="170.0" y="423" text-anchor="middle" font-size="10" class="dim">past stays; feeds the scoring stages</text>
+<rect x="380" y="34" width="300" height="56" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="380" y="34" width="300" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="530.0" y="52" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">A/B TEST</text>
+<text x="530.0" y="67" text-anchor="middle" font-size="10" class="dim">weeks of traffic, guardrail metrics,</text>
+<text x="530.0" y="81" text-anchor="middle" font-size="10" class="dim">ratings read months later</text>
+<path d="M530,102 L530,92" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="102" width="300" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="380" y="102" width="300" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="530.0" y="120" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">OFFLINE CHECKS</text>
+<text x="530.0" y="135" text-anchor="middle" font-size="10" class="dim">NDCG, recall on replayed traffic</text>
+<path d="M530,158 L530,148" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="158" width="300" height="52" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="380" y="158" width="300" height="52" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="530.0" y="176" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAINING</text>
+<text x="530.0" y="191" text-anchor="middle" font-size="10" class="dim">pairwise + multi-task losses,</text>
+<text x="530.0" y="205" text-anchor="middle" font-size="10" class="dim">months of searches</text>
+<path d="M530,222 L530,212" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="222" width="300" height="52" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="380" y="222" width="300" height="52" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="530.0" y="240" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">LABELS</text>
+<text x="530.0" y="255" text-anchor="middle" font-size="10" class="dim">trip-based sampling, hard negatives,</text>
+<text x="530.0" y="269" text-anchor="middle" font-size="10" class="dim">labels that arrive weeks later</text>
+<path d="M530,286 L530,276" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="286" width="300" height="60" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="380" y="286" width="300" height="60" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="530.0" y="304" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">LOGS</text>
+<text x="530.0" y="319" text-anchor="middle" font-size="10" class="dim">impressions with positions, clicks,</text>
+<text x="530.0" y="333" text-anchor="middle" font-size="10" class="dim">requests, bookings, rejections, cancels</text>
+<path d="M322,332 L378,322" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<text x="336" y="304" text-anchor="end" font-size="10" class="dim">log</text>
+<path d="M378,62 L350,62 L350,114 L322,114" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="346" y="54" text-anchor="end" font-size="10" class="dim">ship</text>
+<text x="20" y="452" text-anchor="start" font-size="10.5" class="dim">What Nadia sees and does is logged, and the log becomes the next model's labels.</text>
+<text x="20" y="472" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A model learns from a page it helped to create, which is the feedback loop.</text>
+      </svg>
+      <div class="diagram-caption">Start at the app and follow the search down to the results. Then follow the log across to the bottom right, up through labels, training and the experiment, and back as a new model.</div>
+    </div>
+
+
+    <p>Nadia's search takes the path in the diagram. First the root service asks every shard for candidates, and each shard retrieves with the two-tower embedding index and scores with the first-stage network, using position 0. A setwise stage re-ranks the best of all shards together so the page isn't eight near-copies, and the result is shown as cards or pins. Her session feeds the live guest state, so her next search already reflects what she clicked and skipped, and her booking and the host's reply become labels weeks later.</p>
+
+    <p>Several parts remain unpublished: the end-to-end latency budget, the sizes of <span>$K$</span> and <span>$N$</span>, how often models are retrained, and how experiments deal with interference. Sources describe the system as of 2018 to 2026, and the current one has certainly moved on.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">16</span>Summary</h2>
+    <ol>
+      <li><strong>A big city's inventory can't be scored per search.</strong> With around a hundred thousand eligible homes and a heavy network, search runs as stages that each score an order of magnitude fewer listings: retrieval, a first-stage network, then a setwise re-ranker.</li>
+      <li><strong>Version 1 was a hand-made score.</strong> It was readable and needed no data, but its weights were guesses and it could not improve itself. A GBDT trained on booking utilities replaced it in 2015 and then plateaued.</li>
+      <li><strong>Ranking needs a ranking loss.</strong> Pair the booked listing with the others it was shown with, train with cross-entropy on the score difference, and weight each pair by the NDCG change of swapping the two. Sorting by the pairwise logits equals sorting by booking probability.</li>
+      <li><strong>Deep learning was not a drop-in replacement.</strong> Wins came from ten times the data, normalised and smooth features, a rebuilt training pipeline and two small hidden layers. Listing IDs, long-view labels, extra depth, wide-and-deep and attention all failed.</li>
+      <li><strong>Listing embeddings come from sessions.</strong> Skip-gram on click sequences, with the booked listing as global context and negatives drawn from the same market, gives 32-number vectors whose similarity to clicked and skipped listings feeds the ranker.</li>
+      <li><strong>Position is a control variable.</strong> It takes position as an input with dropout 0.15 and sets it to 0 when ranking, so the positional factor multiplies every listing's score equally. It gave +0.7% bookings and relied on listings appearing at different positions.</li>
+      <li><strong>Users lead, model follows.</strong> Forcing cheaper-is-better lost bookings. Tail cities, new listings and boutique hotels pointed to the two-tower design (+0.6% bookings, 33% lower p99 scoring latency) and to estimating missing engagement features for new listings (+14% on new-listing bookings).</li>
+      <li><strong>Hosts are part of the objective.</strong> Journey Ranker predicts six positive milestones and three negative ones with small heads on shared layers and mixes them with context-dependent weights, gaining +0.61% uncancelled bookers for Stays.</li>
+      <li><strong>Ranking by probability is not diverse.</strong> Every position is a majority vote of past bookers, so the quality-leaning minority is shut out. Conditioning each position on the listings above, through a learned similarity penalty, raised bookings 0.29% and gross booking value 0.8%.</li>
+      <li><strong>Assumptions belong to an interface.</strong> On maps, attention doesn't decay with rank, shuffling the top results cost nothing, and fewer, better pins (the Bookability Filter) raised uncancelled bookings 1.9%.</li>
+      <li><strong>Offline metrics filter and experiments decide.</strong> NDCG tracks bookings by construction, but price losses, noisy dropout and logged recall all looked fine offline and failed online, so Airbnb replays traffic, runs multi-week A/B tests and reads 5-star ratings months later.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">17</span>Build this</h2>
+    <p class="lede">The ideas in this chapter are easy to nod along to. You can rebuild the core of the ranking stack in a day on synthetic data, with a ground truth no real marketplace gives you, and watch each fix change the result.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A small marketplace with an honest A/B test</span>
+        <span class="proj-meta">~6 hours &middot; numpy and torch</span>
+      </div>
+      <p>Simulate 2,000 listings, each with a latent quality, a price and one of six taste groups, and 50,000 searches by guests of different taste groups, each seeing 500 eligible listings. A guest books a listing she looks at with probability that depends on its quality and on whether it matches her taste, and she looks at slot <span>$k$</span> with an attention that decays down the page. Let an old ranker order the results by quality plus a quirk of its own, and log what happens.</p>
+      <ol class="proj-steps">
+        <li>Train three rankers on the logs: a pointwise regression on booking (1) and non-booking (0), a pairwise cross-entropy model, and a pairwise model weighted by the NDCG change of each swap. Report NDCG for each on held-out searches.</li>
+        <li>Add position as an input, with dropout on it, and score with position set to 0. Sweep the dropout rate and plot NDCG without position against the gap between NDCG with and without it, as in section 08. Compare each model's ordering with the true quality.</li>
+        <li>Add a second stage that subtracts a similarity penalty to what is already placed. Sweep the penalty and measure expected bookings by simulating guests of all six taste groups.</li>
+        <li>Build a "price loss" model: add a second pairwise loss that prefers the cheaper listing, tuned until its offline NDCG matches the baseline's. Then evaluate it by simulating the whole inventory instead of the logged top results.</li>
+        <li>Run a simulated A/B test of every pair of models with 20,000 searches per arm. Report the booking difference with a confidence interval, and find how many searches per arm you need to detect a 0.3% change.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the weighted pairwise model beats the unweighted one on NDCG, the model with a position term recovers the true quality where the one without it inflates what the old ranker liked, the similarity penalty raises expected bookings and then flattens, the price-loss model shows an offline tie and an online loss, and your A/B arithmetic shows why a 0.3% effect needs far more traffic than a 3% one.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Give 10% of the listings no engagement history, as if they were new. Train the ranker with engagement features, measure NDCG for the new segment, then add the nearest-neighbour engagement estimator of section 07 and compare.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">18</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why not rank listings with a hand-written scoring formula?</summary>
+      <div class="qa-body"><p>A formula can't hold the interactions between price, location, quality and the guest's party, and its weights are guesses that nothing checks against bookings. Airbnb started with one and replaced it with a GBDT in 2015, which the 2019 paper calls one of the largest step improvements in bookings in the company's history. A learned model sets weights from what guests did and keeps improving as data and inventory change. A formula is still useful as a baseline and as a fallback.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is NDCG and why is it the main offline metric?</summary>
+      <div class="qa-body"><p>NDCG scores a ranked list by giving credit to relevant items discounted by position. Airbnb uses binary relevance (the booked listing is 1, everything else 0), so one search scores ln 2 / ln(2 + position), from 1.00 at the top to 0.29 at position 9. That discount follows how attention decays down a page, which makes expected NDCG proportional to expected bookings, and the 2022 paper shows that sorting by booking probability maximises both. That is why an NDCG gain predicts a bookings gain, and why it fails on maps, where attention doesn't decay.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Compare pointwise, pairwise and listwise losses for this problem.</summary>
+      <div class="qa-body"><p>Pointwise regression predicts a number per listing, and a made-up utility only relates indirectly to bookings. Pairwise training compares the booked listing with each other listing of the same search using cross-entropy on the score gap, so the logits order listings by booking probability under the Bradley&ndash;Terry model. LambdaRank weights each pair by the NDCG change of swapping the two, which focuses effort at the top, and it was Airbnb's first neural network breakthrough. Listwise losses such as a softmax over the result use the whole list, but common ones assume each listing's booking chance is independent of the others.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why did listing-ID embeddings overfit at Airbnb?</summary>
+      <div class="qa-body"><p>An ID embedding needs many examples per item. A listing is a physical home that can be booked at most 365 nights a year, and typical ones far fewer, so a vector per listing fits noise in a handful of bookings. A learning curve in the 2019 paper showed training NDCG rising and test NDCG flat. Adding a multi-task view label didn't help, because long views have a large component unrelated to bookings. What worked was learning embeddings from sessions, where many listings share many clicks, and using listing features instead of IDs.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How do the listing embeddings of the 2018 paper work, and what are the two modifications?</summary>
+      <div class="qa-body"><p>A guest's click session is treated as a sentence, and skip-gram with negative sampling learns a 32-number vector per listing so that listings clicked together are close. One modification keeps the eventually booked listing in the positive context of every window, so early clicks are pulled toward the choice. Another adds negatives sampled from the central listing's own market, because guests search inside one market and random negatives from other cities teach nothing about taste within a city. Similarity to recently clicked and skipped listings then becomes a feature in the ranker.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How does Airbnb deal with position bias without randomising results?</summary>
+      <div class="qa-body"><p>It models booking probability as relevance times the chance of examining the position, feeds position into the network as an input during training, and sets it to 0 when ranking, so the positional factor multiplies every listing in a search equally. Position dropout (0.15) stops the relevance part leaning on position, which would otherwise cost roughly 1.3% NDCG. It depends on listings appearing at different positions for similar queries, which calendars and bookings cause. Online it gave +0.7% bookings and +1.8% revenue, because it also removed an accumulated bias toward cheap listings.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How are hosts' decisions included in ranking?</summary>
+      <div class="qa-body"><p>Journey Ranker (2023) trains one network with a base module for six positive milestones (click through uncancelled booking, chained by conditional probabilities), a twiddler module with heads for host rejection, host cancellation and guest cancellation, and a combination module that mixes the outputs linearly with weights computed from the context. A pairwise loss orders uncancelled booking above click above impression above the bad outcomes. It gained +0.61% uncancelled bookers for Stays, and blending separate models by grid-searched weights had decayed within months.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why does ranking by booking probability produce similar results, and what did Airbnb do?</summary>
+      <div class="qa-body"><p>Each position goes to the listing that more than half of past bookers with that query would pick, a majority vote, and roughly 80% of bookers lean toward affordability, so the quality-leaning 20%, who carry half the booking value, get no representation. Airbnb's 2022 fix conditions each position on the listings above: a second model learns a similarity penalty from searches where the antecedent listing was rejected, and the ranker subtracts the discounted sum of penalties as it places each position (lambda = 1/3). Bookings rose 0.29% and gross booking value 0.8%, concentrated among first-time bookers, at the price of 5.3% higher median latency.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Offline NDCG improved but the A/B test is flat or negative. What do you check?</summary>
+      <div class="qa-body"><p>First, whether the offline set only contains results the old system showed. Airbnb's price loss matched baseline NDCG offline and lost 0.67% of bookings online because it only re-ranked logged top results. Second, position bias in the logs. Third, a mismatch between the label and the metric, such as clicks or long views against bookings. Fourth, retraining noise: Airbnb averages five initialisations and treats roughly 0.3% as the scale of a promising gain. Fifth, the interface: NDCG assumes attention decays by rank, which maps break. Finally, replay traffic through the full candidate set instead of logged results.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Design candidate retrieval for 100,000 eligible homes with 10,000 listing updates a second and filters on every search.</summary>
+      <div class="qa-body"><p>Use a two-tower model with the listing tower in a daily batch job and only the query tower at request time, so cost doesn't grow with eligible listings, and refresh price and availability after retrieval. Train on trips, not searches, so early searches count, with hard negatives from clicks and wishlists. For the index Airbnb chose IVF over HNSW, because HNSW's memory grew under frequent updates and was hard to combine with filters, while IVF cluster IDs act as one more filter. Evaluate with traffic replay, recall of the heavy model's top results, which predicted A/B outcomes for all roughly ten models tried.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">19</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/1810.09591" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Applying Deep Learning to Airbnb Search</div><div class="r-sub">Haldar et al., KDD 2019. How Airbnb went from GBDT to a deep network, the failed listing-ID and multi-task models, and feature engineering for networks. arXiv:1810.09591</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2002.05515" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Improving Deep Learning for Airbnb Search</div><div class="r-sub">Haldar et al., 2020. Two-tower ranker, price experiments, cold start, and position as a control variable with dropout. arXiv:2002.05515</div></div>
+      </a>
+      <a class="resource-card" href="https://dl.acm.org/doi/10.1145/3219819.3219885" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Real-time Personalization using Embeddings for Search Ranking at Airbnb</div><div class="r-sub">Grbovic and Cheng, KDD 2018. Listing embeddings from sessions, booking as global context and real-time click and skip similarity.</div></div>
+      </a>
+      <a class="resource-card" href="https://medium.com/airbnb-engineering/listing-embeddings-for-similar-listing-recommendations-and-real-time-personalization-in-search-601172f7603e" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Listing Embeddings in Search Ranking</div><div class="r-sub">Grbovic et al., Airbnb Engineering, 13 March 2018. Same method in plain language, with the offline and online results.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2004.02621" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Managing Diversity in Airbnb Search</div><div class="r-sub">Abdool et al., KDD 2020. Diversity metric, second-stage rankers that failed and the LSTM context model. arXiv:2004.02621</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2210.07774" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Learning To Rank Diversely At Airbnb</div><div class="r-sub">Haldar et al., 2022. Why pairwise ranking follows the majority, the conditional model with a similarity penalty and the NDCG and bookings argument. arXiv:2210.07774</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2305.18431" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Optimizing Airbnb Search Journey with Multi-task Learning</div><div class="r-sub">Tan et al., KDD 2023. Journey Ranker: base, twiddler and combination modules for guests and hosts. arXiv:2305.18431</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2407.00091" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Learning to Rank for Maps at Airbnb</div><div class="r-sub">Haldar et al., 2024. Why ranking does not matter among map pins, the Bookability Filter and the focus-versus-urgency experiment. arXiv:2407.00091</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2601.06873" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Applying Embedding-Based Retrieval to Airbnb Search</div><div class="r-sub">Abdool et al., January 2026. Trip-based sampling, IVF versus HNSW and replay-based evaluation. arXiv:2601.06873</div></div>
+      </a>
+      <a class="resource-card" href="https://airbnb.tech/ai-ml/personalizing-airbnb-search-by-learning-from-the-guest-journey/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Personalizing Airbnb search by learning from the guest journey</div><div class="r-sub">Zha et al., Airbnb Tech Blog, 2026. A Transformer over long-term and short-term guest events, and the online results.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.microsoft.com/en-us/research/publication/from-ranknet-to-lambdarank-to-lambdamart-an-overview/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">From RankNet to LambdaRank to LambdaMART: An Overview</div><div class="r-sub">Burges, Microsoft Research technical report, 2010. Source of the NDCG-weighted pairwise loss in section 04.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1608.04468" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Unbiased Learning-to-Rank with Biased Feedback</div><div class="r-sub">Joachims, Swaminathan and Schnabel, WSDM 2017. Propensity-weighting approach to position bias that Airbnb's 2020 paper contrasts itself with.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">20</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/16-recommenders-ranking-search"><div class="rc-sec" style="color:var(--c-rec)">16 · The foundations</div><div class="rc-title">Recommenders, Ranking &amp; Search</div><div class="rc-hook">The funnel, two towers and the feedback loop in general form. This case study is those ideas on one marketplace.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · Another case study</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">The same position-bias problem solved with a shallow tower, and the same two-tower retrieval, on a catalogue with billions of items.</div></a>
+      <a class="related-card" href="/topics/02-classical-ml"><div class="rc-sec" style="color:var(--c-classical)">02 · The first model</div><div class="rc-title">Classical Supervised ML</div><div class="rc-hook">Gradient boosted trees, the model Airbnb started with, and why they still win on many tabular problems.</div></a>
+      <a class="related-card" href="/topics/04-neural-network-fundamentals"><div class="rc-sec" style="color:var(--c-nn)">04 · The replacement</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">Why feature scale matters, what a dead ReLU is and how embeddings and dropout behave.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">A/B testing, guardrail metrics and train-serve skew, the machinery behind section 13.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Why offline metrics mislead and how a proxy drifts from the goal it stands for.</div></a>
+    </div>
+  </section>

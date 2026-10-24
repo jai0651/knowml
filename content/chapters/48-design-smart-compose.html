@@ -1,0 +1,1137 @@
+---
+title: "Designing Smart Compose"
+dek: "Follow Divya's reply to her manager on a Bengaluru bus down to the machinery that finishes her sentence between two keystrokes. We build it from a table of common phrases, fix each failure in turn, and look at the choices Gmail's team published, including the ones they traded away."
+readingTime: "~70 min"
+prereqs: "sequence models (07), NLP evolution (09), evaluation (25)"
+group: "ML System Design"
+label: "Case study 48"
+description: "How Gmail finishes a half-typed sentence in tens of milliseconds: a context-conditioned language model, beam search, a confidence threshold, a personal n-gram blend, TPU serving and a pronoun filter, from the 2019 paper."
+---
+<section id="tldr">
+    <p>Divya is standing on a crowded Bengaluru bus, one hand on the rail and the other holding her phone. Her manager Arun has emailed her under the subject "Thursday review" and asked whether she can share her notes beforehand. She taps Reply and types "Thursday works for me. I will s". Before her thumb reaches the next key, a few words of grey text have appeared after the cursor: "end the notes tonight." She hasn't finished the word she was typing, and the phone has already guessed the rest of the sentence. She accepts it with one gesture and moves on to the next line.</p>
+
+    <p>That small moment hides several problems. Her phone didn't wait for her to finish a sentence, so a fresh guess had to be produced after almost every letter, and a thumb on a bus types a letter every few hundred milliseconds. That guess depends on things she never typed, namely that the email is about a review on Thursday, that Arun asked for notes, and that she is the sort of person who writes "I will" and not "I'll". It also has to stay quiet most of the time, because a wrong suggestion on every keystroke would be worse than none. And it has to do all this over email written by more than a billion people, without any engineer reading what they wrote. Software that predicts the next few words of a half-typed sentence is a <strong>language model</strong>, and the finished feature is Gmail's <strong>Smart Compose</strong>.</p>
+
+    <p>So the question this chapter answers is: <strong>how does Gmail finish Divya's sentence in the gap between two keystrokes, using the email she is replying to, and keep quiet when it isn't sure?</strong></p>
+
+    <p>We'll build it the way an engineer would, from a table of common phrases, and fix each failure in turn. That takes us through a language model that reads the subject and the previous email, the choice between three ways of feeding it that context, beam search for generating the words, a confidence threshold for deciding when to show them, a second small model that adapts to Divya's own style, and the serving work that squeezed all of it into a latency budget measured in tens of milliseconds. We rely on the team's own 2019 KDD paper and Google's own posts throughout, and we say plainly where the internals are unpublished.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>Smart Compose has a narrower job than it first looks. Divya is writing the message herself, and the system's task is to extend the sentence she has begun by a few words, shown as a faint suggestion she can accept or ignore. It doesn't write the whole email, and it doesn't reply on her behalf. Google's earlier feature, <strong>Smart Reply</strong>, did the second of those, offering a few ready-made one-tap answers to an incoming message. Smart Compose is meant for the moment after Divya has decided to write something of her own, and the paper says so directly: Smart Reply's suggestions are "constrained to short phrases and appear only once in the composition process", where Smart Compose offers suggestions along the way.</p>
+
+    <p>From that job we can list what the system has to be. It has to be <strong>relevant to this email</strong>: the same typed words should lead to different suggestions depending on the subject, the message being answered, the time of day and the writer's locale (the paper's examples are "Good morning" against "Good evening", and the spelling "behaviour" for en-GB and "behavior" for en-US). It has to be <strong>fast</strong>, because the suggestion is useless if it arrives after Divya has already typed the next letter. It has to be <strong>quiet</strong>, showing a suggestion only when the system is confident, since an interruption on every keystroke would drive people to turn the feature off. It should be <strong>personal</strong>, matching how each person writes. It has to work across <strong>several languages</strong>. And it has to be <strong>private and fair</strong>: the paper says the system had to be built "without anyone on the project being able to look at the underlying data", and that the models must never expose a user's private information or reproduce the biases of the text they learned from.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>Published numbers come from different years, so we'll date them. In 2016, the Smart Reply paper by Anjuli Kannan and colleagues said the earlier feature was responsible for "assisting with 10% of all mobile responses" in Inbox by Gmail and was built to process several hundred million messages a day. Google announced Smart Compose in May 2018, and the Google Research blog post of May 16, 2018, by Yonghui Wu described Gmail as having "more than 1.4 billion diverse users". By the time of the May 2019 paper, that figure had grown to more than 1.5 billion, and the authors quoted a third-party estimate of 281 billion emails sent per day across all providers. They report that the system saves users "over one billion characters of typing" each week. On June 3, 2019, Google's Workspace Updates blog announced that Smart Compose, which was already available to G Suite users, was expanding to Gmail on Android and iOS, so Divya's bus ride is a case the paper, written a few weeks earlier, only hints at.</p>
+
+    <p>Training data is plentiful too. After preprocessing, the paper's English data set held roughly 8 billion messages, split 80% for training and 20% for testing. Spanish, French, Italian and Portuguese were added later, with roughly 4, 2, 1 and 2 billion messages respectively.</p>
+
+    <p>Time supplies the numbers that matter most for the design. Chen et al. require that "the 90th percentile latency" be "under 60ms", and it cites a classic usability result that roughly 0.1 second is the limit for a system to feel instantaneous. Google's 2018 blog post puts the target as "ideally within 100ms". Both are measured against how fast people type, which brings us to a back-of-envelope estimate.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Divya types at roughly 40 words a minute, counting five characters per word including the space. About how many milliseconds pass between two of her keystrokes, on average? Then suppose, purely as an illustration, that 100 million people compose email on a given day and each sends 800 keystrokes to the server. How many requests per second is that on average, and how many CPU cores would you need if each request took 300 milliseconds of CPU time, as it did in the first CPU-only version?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>Forty words a minute is 200 characters a minute, a little over three a second, so roughly 300 milliseconds between keystrokes on average. Typing comes in bursts, so the gaps are often shorter, and a suggestion that takes 300 ms is stale by the time it appears. That is why the team aims for tens of milliseconds, well inside one gap.</p>
+        <p>Our illustrative load is 100 million times 800, which is 80 billion requests a day, or roughly 925,000 a second on average (the real figure is unpublished). At 0.3 CPU-seconds each, that is roughly 277,000 cores busy all day just to answer them, before counting peaks. Google's blog post says the initial CPU serving averaged "hundreds of milliseconds" per request, and that moving most of the work to TPUs brought it down to "tens of milliseconds". Latency and cost both come out of the same arithmetic, and the whole design is shaped by it.</p>
+      </details>
+    </div>
+
+    <p>Several figures are not published, and we won't make them up: the real request volume, the size of the production model, how many machines serve it, and how often models are retrained. We'll flag each one as we reach it.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: a table of common phrases</h2>
+
+    <p>The obvious first design needs no machine learning. Take a large pile of sent emails, count how often each short run of words is followed by each next word, and store the counts in a lookup table. When Divya has typed "I will s", we look up the last couple of words, find the most common continuation, and show it. Chain a few lookups together and we can offer a whole phrase. A table of word-sequence counts used this way is an <strong>n-gram language model</strong>, where n is how many words the lookup is allowed to look at, and it's the traditional way to predict the next word. Chen et al. note why engineers liked it: the n-gram model "permits easy factorization in probability computation" and compress into compact finite state automata that are "amenable to large-scale distributed serving".</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Version 1: a table of common phrases
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="150" height="80" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="150" height="80" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="70.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">TYPED PREFIX</text>
+<text x="95.0" y="84.0" text-anchor="middle" font-size="10" class="dim">last few words:</text>
+<text x="95.0" y="98.0" text-anchor="middle" font-size="10" class="dim">“I will s”</text>
+<path d="M176,80 L212,80" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="218" y="40" width="170" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="218" y="40" width="170" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="303.0" y="70.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">PHRASE TABLE</text>
+<text x="303.0" y="84.0" text-anchor="middle" font-size="10" class="dim">frequent phrases from</text>
+<text x="303.0" y="98.0" text-anchor="middle" font-size="10" class="dim">email, counted offline</text>
+<path d="M394,80 L430,80" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="436" y="40" width="120" height="80" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="436" y="40" width="120" height="80" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="496.0" y="70.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">TOP MATCH</text>
+<text x="496.0" y="84.0" text-anchor="middle" font-size="10" class="dim">most common</text>
+<text x="496.0" y="98.0" text-anchor="middle" font-size="10" class="dim">continuation</text>
+<path d="M562,80 L598,80" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="604" y="40" width="76" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="604" y="40" width="76" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="642.0" y="70.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">GREY</text>
+<text x="642.0" y="84.0" text-anchor="middle" font-size="10" class="dim">text</text>
+<text x="642.0" y="98.0" text-anchor="middle" font-size="10" class="dim">shown</text>
+<text x="20" y="160" text-anchor="start" font-size="10.5" class="dim">A lookup on the last few words is nearly free, and it works with no neural network at all.</text>
+<text x="20" y="187" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">It sees only those few words, so it can't tell “work on T” + Thursday from “work on T” + Tuesday.</text>
+<text x="20" y="209" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Longer histories explode the table, and every user sees the same phrase for the same words.</text>
+<text x="20" y="231" text-anchor="start" font-size="10.5" class="dim">It never looks at the subject, the email being answered, the time of day or the locale.</text>
+      </svg>
+      <div class="diagram-caption">Read left to right, then the four lines underneath. The first line is why the design is tempting, and the amber lines are where it stops working.</div>
+    </div>
+
+    <p>This design has real strengths, and we'll come back to one of them later. Each lookup is nearly free, the table is easy to inspect, and for stock phrases such as "Thank you for your" it's right most of the time. It breaks in ways that tell us what to fix.</p>
+
+    <p>It breaks first because it can only see the last few words. Table 6 of the paper shows what that costs. Take two emails whose subjects are "Thursday" and "Tuesday", where the previous message says "Thursday is great!" or "Tuesday is great!", and the writer has typed "I will work on T". A table that looks at "will work on T" has no way to know which day to finish with, because the answer lives in a different message. Their model suggests "hursday" in the first case and "uesday" in the second. Time of day, the locale and the subject carry the same kind of information, and none of them are in the last three words.</p>
+
+    <p>Size is the second break. With a vocabulary of 50,000 words there are 50,000 cubed, roughly 125 trillion, possible three-word sequences, nearly all of which will never appear in any training set. A longer window sees more context but meets sequences it has never seen, so n-gram systems add rules for backing off to shorter histories. We'll meet that machinery again in section 07. Third, everyone gets the same table, so Divya's habit of writing "I will" instead of "I'll" never shows up.</p>
+
+    <p>There's a nearby design that avoids the sparsity problem, and it's the one Gmail had already shipped. Smart Reply reads the whole incoming message with an LSTM (a recurrent neural network that reads one word at a time and keeps a running summary) and picks from a fixed list of short replies written ahead of time. To avoid scoring every reply on the list, it stores them in a <strong>trie</strong>, a tree in which each path from the root spells out one reply, and runs a left-to-right beam search that keeps only hypotheses that stay inside the trie. Its authors report that this costs time proportional to the beam width times the reply length, with both typically between 10 and 30, and not to the size of the reply list. With a beam of 128 the top result matched exhaustive scoring 99% of the time.</p>
+
+    <p>That list is exactly what Smart Compose can't have. Smart Reply's authors found that in a sample of 10 million short responses, more than 40% occurred only once, so a fixed list of full sentences can't cover what people write. Our suggestion also has to extend a half-typed sentence from the middle, after almost every keystroke, with no list to look up. Chen et al. say this plainly: Smart Reply "only needs to generate responses once for each mail, whereas Smart Compose attempts to suggest possible extensions for every sentence prefix a user has typed in real time". Smart Compose has to generate words, one after another, from a model of language.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Where the suggestion comes from</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Fixed list of replies (Smart Reply, 2015-16)</td><td>Every suggestion is vetted ahead of time, search cost doesn't grow with the list, easy to keep diverse</td><td>Closed set that can't cover open writing, one set of suggestions per email, no completion of a half-typed sentence</td></tr>
+        <tr><td>N-gram phrase table</td><td>Nearly free to look up, compact, easy to inspect and retrain</td><td>Sees only a few words, huge and sparse for longer windows, blind to the subject and the previous email</td></tr>
+        <tr><td>Neural language model with context</td><td>Reads any context, generalises to word sequences it has never seen, generates open-ended text</td><td>Heavy to run on every keystroke, needs careful serving, can memorise and reflect bias</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Google chose the third for the main model, and it kept the second for a smaller job later, as the personal model of section 07. Our work now is to make the third affordable. We start with what a language model is and how context goes into it.</p>
+  </section>
+
+  <section id="lm">
+    <h2><span class="num">03</span>A language model that reads the context</h2>
+
+    <p>A table fails because it can only count what it has seen. Instead we want a function that takes everything relevant to Divya's sentence and returns, for every word in the vocabulary, the probability that it comes next. That function is a <strong>language model</strong>, and we can write down exactly what it computes. Say the email body so far is the words <span>$w_1, \dots, w_{t-1}$</span> and everything else we know about the situation is a bundle <span>$c$</span> that we'll call the <strong>context</strong>: the subject, the previous email, the date and time, the locale. That model gives a distribution over the next word, <span>$P(w_t \mid w_{<t}, c)$</span>. Multiplying these one-step probabilities gives the probability of a whole phrase, which is the chain rule of probability:</p>
+
+    <div class="eq-block"><span>$$P(y_1, \dots, y_T \mid \text{prefix}, c) \;=\; \prod_{j=1}^{T} P(y_j \mid \text{prefix}, y_{<j}, c)$$</span></div>
+
+    <p>Here the prefix is what Divya has typed, <span>$y_1, \dots, y_T$</span> is the suggestion we're proposing, and <span>$y_{<j}$</span> is the part of the suggestion before word <span>$j$</span>. That product is how we'll score candidate phrases in section 05. Their training objective is "to maximize the log probability of producing the correct target sequence given the input for all data samples in the training corpus". That is the same as minimising the average negative log probability the model gives to the word that was written. Every position in every training email supplies one example, because for each position we know the right answer. Nobody has to label anything by hand.</p>
+
+    <p>Model quality is reported as <strong>log perplexity</strong>, the average of <span>$-\log P(\text{true word})$</span> over the test positions. (The paper writes it in an entropy-style formula, and doesn't state the base of the logarithm.) Lower is better, because a lower value means the model gave more probability to what people wrote. If we read the logarithm as natural, a log perplexity of 3.26 is a perplexity of <span>$e^{3.26} \approx 26$</span>, as if the model were choosing among roughly 26 equally likely words at each position, out of a vocabulary of 50,000.</p>
+
+    <h3 id="3-1-what-goes-in">3.1 What goes into the training data</h3>
+
+    <p>The training data is email that people wrote themselves. Chen et al. list the context fields they attach to each message: the previous email if this one is a reply, the subject, the date and time (used as discrete features, so the model can learn "Good morning" and "Happy Thanksgiving"), and the writer's locale. Then it applies the same preprocessing as Smart Reply. Messages are checked for language and those in other languages are discarded, sentences are split into words and punctuation, and "infrequent words and entities like personal names, URLs, e-mail addresses, phone numbers etc. are replaced by special tokens". Quoted original messages and forwarded messages are removed, and so are salutations and closings such as "Hi John" and "Best regards, Mary".</p>
+
+    <p>The steps come without an explanation of each one, so what follows is our reading of what they protect against. Replacing names and numbers with placeholders keeps the model from learning, and later repeating, any particular person's details. Dropping quoted text keeps it from training on other people's words as if the sender had written them. Stripping salutations removes the most predictable lines in every email. Left in, they would take up a large share of the training signal for no benefit to the later sentences. After this the English data set has roughly 8 billion messages and a vocabulary of the 50,000 most frequent words, with a word-level model.</p>
+
+    <h3 id="3-2-where-the-compute-goes">3.2 Where the compute goes</h3>
+
+    <p>The vocabulary size matters more than it looks, and we can see why by counting. Its baseline is an LSTM with two layers of 1,024 units, a 256-number embedding for each word, and a 50,000-word output layer. For the version with context, the input to the first layer is 768 numbers: the 256-number embedding of the current word plus two averaged 256-number context vectors that we'll meet in the next section. An LSTM layer holds four weight matrices (three gates and a candidate), each taking the layer's input plus its previous 1,024 outputs, so the first layer has <span>$4 \times (768 + 1024) \times 1024 \approx 7.3$</span> million weights and the second has <span>$4 \times (1024 + 1024) \times 1024 \approx 8.4$</span> million. Word embeddings take <span>$50{,}000 \times 256 = 12.8$</span> million. Then the output layer, which turns 1,024 numbers into one score per word, takes <span>$1024 \times 50{,}000 = 51.2$</span> million.</p>
+
+    <p>Those add up to roughly 79.7 million, and Table 1 of the paper lists 79.8 million parameters for exactly this model, so the accounting is right. It also shows that the output layer is nearly two thirds of the model, and that for every word we generate, the arithmetic of one step is roughly 67 million multiply-adds, of which the output layer is more than three quarters. Recurrent layers, the part that reads the sentence, are the smaller cost. That's why section 08 treats the size of the vocabulary as a serving decision.</p>
+
+    <h3 id="3-3-does-context-help">3.3 Does the context help?</h3>
+
+    <p>Before building the real thing, we can check on a miniature that reading the context does what we want. This program generates a toy mailbox. Some emails are about a day of the week and reply with "i can do thursday . i will send the notes on thursday ." (or Monday, Tuesday, Friday), and the rest are about food and reply "yes i love some tea . see you at tea ." (or coffee, lunch, dinner). Each email's context is the subject word plus a few words of the previous message, averaged into one vector, the same trick the paper uses. Our model has two parts: a table that scores the next word from the previous word alone, and a second table that adds a score from the averaged context. We train it with softmax cross-entropy and compare it with the same model without the context table.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Does reading the context lower the loss? A miniature LM-A</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(3)
+days = [&quot;monday&quot;, &quot;tuesday&quot;, &quot;thursday&quot;, &quot;friday&quot;]
+foods = [&quot;tea&quot;, &quot;coffee&quot;, &quot;lunch&quot;, &quot;dinner&quot;]
+vocab = [&quot;&lt;s&gt;&quot;, &quot;yes&quot;, &quot;i&quot;, &quot;can&quot;, &quot;do&quot;, &quot;will&quot;, &quot;send&quot;, &quot;the&quot;, &quot;notes&quot;,
+         &quot;on&quot;, &quot;works&quot;, &quot;for&quot;, &quot;me&quot;, &quot;.&quot;, &quot;love&quot;, &quot;some&quot;, &quot;at&quot;, &quot;see&quot;,
+         &quot;you&quot;] + days + foods
+ix = {w: i for i, w in enumerate(vocab)}
+V = len(vocab)
+
+def email():
+    if rng.random() &lt; 0.5:
+        d = rng.choice(days)
+        body = [&quot;i&quot;, &quot;can&quot;, &quot;do&quot;, d, &quot;.&quot;, &quot;i&quot;, &quot;will&quot;, &quot;send&quot;, &quot;the&quot;,
+                &quot;notes&quot;, &quot;on&quot;, d, &quot;.&quot;]
+        ctx = [d, &quot;can&quot;, &quot;we&quot;, &quot;meet&quot;]
+    else:
+        f = rng.choice(foods)
+        body = [&quot;yes&quot;, &quot;i&quot;, &quot;love&quot;, &quot;some&quot;, f, &quot;.&quot;, &quot;see&quot;, &quot;you&quot;, &quot;at&quot;,
+                f, &quot;.&quot;]
+        ctx = [f, &quot;do&quot;, &quot;you&quot;, &quot;want&quot;]
+    return ctx, [&quot;&lt;s&gt;&quot;] + body
+
+def encode(n):
+    X, C, Y = [], [], []
+    for _ in range(n):
+        ctx, body = email()
+        c = np.zeros(V)
+        for w in ctx:
+            if w in ix: c[ix[w]] += 1 / len(ctx)   # averaged bag
+        for a, b in zip(body[:-1], body[1:]):
+            X.append(ix[a]); C.append(c); Y.append(ix[b])
+    return np.array(X), np.array(C), np.array(Y)
+
+def fit(X, C, Y, use_ctx, steps=1500, lr=3.0):
+    Wp = np.zeros((V, V)); Wc = np.zeros((V, V))
+    for _ in range(steps):
+        z = Wp[X] + (C @ Wc if use_ctx else 0)
+        p = np.exp(z - z.max(1, keepdims=True))
+        p /= p.sum(1, keepdims=True)
+        g = p.copy(); g[np.arange(len(Y)), Y] -= 1; g /= len(Y)
+        np.add.at(Wp, X, -lr * g)
+        if use_ctx: Wc -= lr * (C.T @ g)
+    return Wp, Wc
+
+def nll(m, X, C, Y, use_ctx):
+    Wp, Wc = m
+    z = Wp[X] + (C @ Wc if use_ctx else 0)
+    z = z - z.max(1, keepdims=True)
+    lp = z - np.log(np.exp(z).sum(1, keepdims=True))
+    return -lp[np.arange(len(Y)), Y]
+
+Xtr, Ctr, Ytr = encode(3000)
+Xte, Cte, Yte = encode(1000)
+hard = np.isin(Yte, [ix[w] for w in days + foods]) &amp; (Xte != ix[&quot;&lt;s&gt;&quot;])
+for use in (False, True):
+    m = fit(Xtr, Ctr, Ytr, use)
+    l = nll(m, Xte, Cte, Yte, use)
+    name = &quot;with context&quot; if use else &quot;no context  &quot;
+    print(f&quot;{name}: log-perplexity {l.mean():.3f}, &quot;
+          f&quot;on the day/food words {l[hard].mean():.3f}&quot;)
+    c = np.zeros(V)
+    for w in [&quot;thursday&quot;, &quot;can&quot;]:      # &quot;we&quot;, &quot;meet&quot; are not in vocab
+        c[ix[w]] += 0.25
+    z = m[0][ix[&quot;on&quot;]] + (c @ m[1] if use else 0)
+    p = np.exp(z - z.max()); p /= p.sum()
+    print(f&quot;   P(&#x27;thursday&#x27; | &#x27;notes on&#x27;, subject Thursday) = &quot;
+          f&quot;{p[ix[&#x27;thursday&#x27;]]:.2f}&quot;)</code></pre>
+      <div class="tryit-out">Without context the loss on the day and food words is <code>1.407</code> and the model puts only <code>0.25</code> on “thursday” after “notes on”. With the averaged context vector the loss on those words falls to <code>0.180</code> and the probability of “thursday” rises to <code>0.83</code>. Overall log-perplexity drops from <code>0.493</code> to <code>0.101</code>.</div>
+    </details>
+
+    <p>Context lowers the average log perplexity from 0.49 to 0.10, but the interesting number is the second one. On the day and food words, the positions where the answer lives in the context and nowhere else, the loss falls from 1.41 to 0.18. Each block's last line shows what that means for Divya's case: after "notes on", with the subject mentioning Thursday, the model with context puts 83% on "thursday", and the model without it spreads the probability across the four days and gives roughly 25%. The real result in the paper has the same shape, on a different scale. Adding the subject and previous email to an LSTM-2-1024 cut test log perplexity from 3.39 to 3.26, a drop of 0.13, and the gain is concentrated at the positions where context decides the word.</p>
+
+    <p>This arrangement shows up wherever text is generated under a condition: image captioning feeds a picture vector into every step of a language model, and a chat model reads its system prompt and the conversation before continuing it. A chat model is the extreme version of what we're about to build, with the context supplied as ordinary tokens in front of the text to be continued.</p>
+  </section>
+
+  <section id="context">
+    <h2><span class="num">04</span>Three ways to feed the model its context</h2>
+
+    <p>We know the model needs the subject and the previous email. What we haven't decided is how they enter. A subject is a few words, but a previous email can run to hundreds, and every choice we make about reading it gets paid for on every keystroke. Chen et al. compare three architectures and train each at several sizes, on English data with 32 NVIDIA P100 GPUs for each experiment.</p>
+
+    <p>In the first, <strong>LM-A</strong>, the language model reads only Divya's body text, one word per step. Each context field has a dedicated <strong>context encoder</strong>, and its output is joined to the word embedding at every step. That encoder is kept deliberately plain: "the averaged token embeddings as our context encoding for each field". Averaging means that each field becomes one fixed-length vector, the mean of its words' embeddings, no matter how long the field is.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">LM-A: a language model that reads the context at every step
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 420" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="150" height="60" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="150" height="60" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="60.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">SUBJECT</text>
+<text x="95.0" y="74.0" text-anchor="middle" font-size="10" class="dim">token embeddings,</text>
+<text x="95.0" y="88.0" text-anchor="middle" font-size="10" class="dim">averaged: 256 numbers</text>
+<rect x="184" y="40" width="160" height="60" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="184" y="40" width="160" height="60" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="264.0" y="60.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">PREVIOUS EMAIL</text>
+<text x="264.0" y="74.0" text-anchor="middle" font-size="10" class="dim">token embeddings,</text>
+<text x="264.0" y="88.0" text-anchor="middle" font-size="10" class="dim">averaged: 256 numbers</text>
+<rect x="358" y="40" width="150" height="60" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="358" y="40" width="150" height="60" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="433.0" y="60.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">DATE, TIME, LOCALE</text>
+<text x="433.0" y="74.0" text-anchor="middle" font-size="10" class="dim">discrete features,</text>
+<text x="433.0" y="88.0" text-anchor="middle" font-size="10" class="dim">each embedded</text>
+<rect x="522" y="40" width="158" height="60" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="522" y="40" width="158" height="60" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="601.0" y="60.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">WORD SO FAR</text>
+<text x="601.0" y="74.0" text-anchor="middle" font-size="10" class="dim">one embedding per step:</text>
+<text x="601.0" y="88.0" text-anchor="middle" font-size="10" class="dim">256 numbers</text>
+<path d="M95,102 L95,122" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M264,102 L264,122" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M433,102 L433,122" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M601,102 L601,122" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="124" width="660" height="34" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="124" width="660" height="34" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="145.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#34d399">CONCATENATE, AT EVERY TIME STEP</text>
+<text x="350" y="150" text-anchor="middle" font-size="10" class="dim"></text>
+<path d="M350,160 L350,178" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="150" y="180" width="400" height="32" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="150" y="180" width="400" height="32" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="200.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#34d399">LSTM layer 1: 1024 units</text>
+<rect x="150" y="216" width="400" height="32" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="150" y="216" width="400" height="32" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="236.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#34d399">LSTM layer 2: 1024 units</text>
+<path d="M350,250 L350,268" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="150" y="270" width="400" height="32" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="150" y="270" width="400" height="32" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="350.0" y="290.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#f472b6">SOFTMAX over a 50,000-word vocabulary</text>
+<path d="M350,304 L350,322" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="210" y="324" width="280" height="32" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="210" y="324" width="280" height="32" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="350.0" y="344.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#f472b6">P(next word | prefix, context)</text>
+<text x="20" y="384" text-anchor="start" font-size="10.5" class="dim">The context fields are looked up once per request and reused at every step.</text>
+<text x="20" y="404" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Averaging throws away word order inside a field, and buys a very cheap context encoder.</text>
+      </svg>
+      <div class="diagram-caption">Read top to bottom. Four inputs are joined into one vector per time step, two recurrent layers read the sequence, and the last layer scores every word in the vocabulary.</div>
+    </div>
+
+    <p>In the second, <strong>LM-B</strong>, there is no context encoder. We pack the subject, the previous email body and the current body into one long sequence with special separator tokens, and the language model reads the lot as ordinary text. This is simpler in structure, and, as the paper says, it "leads to much longer sequence length". A third design, a <strong>sequence-to-sequence model</strong> (seq2seq), works like the translation systems of that era. An encoder reads the subject and previous email, and a decoder, attending back over the encoder's states, writes the current body.</p>
+
+    <p>Here is how the three compare on test log perplexity at similar sizes, using Tables 1, 3 and 4 of the paper.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Architecture</th><th>Model</th><th>Parameters</th><th>Test log perplexity</th></tr></thead>
+      <tbody>
+        <tr><td>No context (baseline)</td><td>LSTM-2-1024</td><td>77.7M</td><td>3.39</td></tr>
+        <tr><td>LM-A</td><td>LSTM-2-1024</td><td>79.8M</td><td>3.26</td></tr>
+        <tr><td>LM-A</td><td>Transformer-768-2048</td><td>84.3M</td><td>3.08</td></tr>
+        <tr><td>LM-A</td><td>Transformer-1536-8192</td><td>310.2M</td><td>2.90</td></tr>
+        <tr><td>LM-B</td><td>LSTM-2-1024</td><td>77.7M</td><td>3.26</td></tr>
+        <tr><td>LM-B</td><td>Transformer-2048-8192</td><td>507.0M</td><td>2.86</td></tr>
+        <tr><td>Seq2seq</td><td>LSTM-2-1024</td><td>179.7M</td><td>3.09</td></tr>
+        <tr><td>Seq2seq</td><td>Transformer Big (1024-8192)</td><td>430.7M</td><td>2.96</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Three things stand out. LM-A and LM-B reach almost the same quality at the same model type and size, so the simple averaged context is no worse than reading the context as text. Seq2seq with LSTMs is clearly better than LM-A with LSTMs (3.09 against 3.26), and the authors read that as a sign that "an encoder-decoder architecture with attention is more effective in modeling the context information". And Transformers beat LSTMs of similar size: the 84-million-parameter Transformer is 0.18 below the 80-million-parameter LSTM.</p>
+
+    <p>On quality alone, the answer would be a big Transformer, in LM-B or seq2seq form. Google ends up elsewhere, and the 2018 blog post says why in a sentence about seq2seq: it "failed to meet our strict latency constraints by orders of magnitude." Section 09 puts numbers on the latency side. For now what matters is how the choice was framed. Per the paper, "due to the strict production latency constraint and very high request volume, we conclude that LM-A is the most production-appropriate model." The blog describes the final model as a hybrid in which the word embeddings of the subject and previous email are averaged, as in a bag-of-words model, and then fed into an RNN language model at every decoding step. That hybrid is "faster than the seq2seq models with only a slight sacrifice to model prediction quality". The size of the production model isn't given.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Option</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Seq2seq encoder-decoder</td><td>Best use of the previous email, good perplexity even with LSTMs</td><td>Two networks and attention to run per request, missed the latency target by orders of magnitude (2018 blog)</td></tr>
+        <tr><td>LM-B, one packed sequence</td><td>Simplest model, any architecture works unchanged</td><td>Much longer sequences, so more computation per request, with no quality gain over LM-A</td></tr>
+        <tr><td>LM-A, averaged context embeddings</td><td>Context encoded once and reused each step, cheap, matches LM-B quality</td><td>Averaging discards word order inside the subject and previous email</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>So Google picked LM-A, and it paid for the choice in a small amount of context understanding. Examples in the paper show what survives the averaging. In Table 6, a reply "Look f" under the subject "Meet" gets "orward to seeing you", and "Y" in answer to "Do you want tea?" gets "es please". It says the model captures context well "despite the simplistic approach of using averaged embeddings to encode each field".</p>
+
+    <h4 class="why">Why average the context instead of reading it with a proper encoder?</h4>
+
+    <p>Because the cost is paid on every keystroke and the benefit is small. Averaging is one lookup per word, done once per request. It can't tell "Arun asked Divya to send notes" from "Divya asked Arun to send notes", but it does retain which words are present, and in short business email the presence of "Thursday", "notes" and "review" carries most of what a suggestion needs. A Transformer encoder over a long previous email is the kind of cost the paper's future-work section says it would like to afford "at minimum latency cost", and doesn't claim to have.</p>
+
+    <p>Where else this shows up: a retrieval-augmented language model packs retrieved documents into the prompt, as LM-B does with a longer prefix, and a speech recogniser can feed the user's contact names into its language model as context, as LM-A does with a bag of names. That tradeoff between reading context as tokens and encoding it into a vector is one that every conditioned language model makes.</p>
+  </section>
+
+  <section id="beam">
+    <h2><span class="num">05</span>Turning probabilities into a phrase: beam search</h2>
+
+    <p>The language model gives Divya's phone one thing, the probability of each next word. A suggestion is several words long, so we have to chain those probabilities into a phrase and choose which phrase to show. One simple method is <strong>greedy decoding</strong>: take the single most likely next word, append it, ask again, and repeat. It costs one model step per word, as cheap as generation gets. It also fails in a predictable way. A word that looks best on its own can lead to a dead end. Suppose, as a constructed case, that the first word is "A" with probability 0.5 or "B" with 0.4, but after "A" the best continuation has probability only 0.3, and after "B" it is 0.95. Greedy takes "A" and ends with a phrase of probability 0.5 &times; 0.3 = 0.15, while "B" would have given 0.4 &times; 0.95 = 0.38.</p>
+
+    <p>We fix this by keeping several partial phrases alive at once and letting the later steps decide. Chen et al. use <strong>beam search</strong> and describe the procedure in a few sentences. We maintain a heap of the <span>$m$</span> best candidate sequences. At each step, every candidate is extended by each of its <span>$k$</span> most likely next tokens, the new sequences go into the heap, and the heap is pruned back to the best <span>$m$</span>. A candidate is complete when it generates a sentence-ending punctuation token or the special end-of-sequence token, or reaches a maximum length. Completed candidates are added to the set of suggestions, and the search ends "when no new candidate sequences are added". Values of <span>$m$</span>, <span>$k$</span> and the maximum length aren't published, though the evaluation covers suggestions of up to 15 words.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Beam search on Divya's prefix, with a beam of two
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="100" width="140" height="100" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="100" width="140" height="100" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="90.0" y="133.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">PREFIX</text>
+<text x="90.0" y="147.0" text-anchor="middle" font-size="10" class="dim">“Thursday works.</text>
+<text x="90.0" y="161.0" text-anchor="middle" font-size="10" class="dim">I will s”</text>
+<text x="90.0" y="175.0" text-anchor="middle" font-size="10" class="dim">(word starts with s)</text>
+<path d="M162,150 L202,75" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="205" y="50" width="85" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="205" y="50" width="85" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="247.5" y="72.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#34d399">send</text>
+<text x="247.5" y="86.0" text-anchor="middle" font-size="10" class="dim">p = 0.55</text>
+<rect x="310" y="50" width="85" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="310" y="50" width="85" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="352.5" y="72.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#34d399">the</text>
+<text x="352.5" y="86.0" text-anchor="middle" font-size="10" class="dim">p = 0.70</text>
+<path d="M292,75 L308,75" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="415" y="50" width="85" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="415" y="50" width="85" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="457.5" y="72.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#34d399">notes</text>
+<text x="457.5" y="86.0" text-anchor="middle" font-size="10" class="dim">p = 0.60</text>
+<path d="M397,75 L413,75" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="520" y="50" width="85" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="520" y="50" width="85" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="562.5" y="72.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#34d399">.</text>
+<text x="562.5" y="86.0" text-anchor="middle" font-size="10" class="dim">p = 0.90</text>
+<path d="M502,75 L518,75" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M162,150 L202,165" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="205" y="140" width="85" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="205" y="140" width="85" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="247.5" y="162.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#fbbf24">see</text>
+<text x="247.5" y="176.0" text-anchor="middle" font-size="10" class="dim">p = 0.20</text>
+<rect x="310" y="140" width="85" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="310" y="140" width="85" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="352.5" y="162.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#fbbf24">you</text>
+<text x="352.5" y="176.0" text-anchor="middle" font-size="10" class="dim">p = 0.60</text>
+<path d="M292,165 L308,165" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="415" y="140" width="85" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="415" y="140" width="85" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="457.5" y="162.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#fbbf24">there</text>
+<text x="457.5" y="176.0" text-anchor="middle" font-size="10" class="dim">p = 0.40</text>
+<path d="M397,165 L413,165" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="520" y="140" width="85" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="520" y="140" width="85" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="562.5" y="162.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#fbbf24">.</text>
+<text x="562.5" y="176.0" text-anchor="middle" font-size="10" class="dim">p = 0.85</text>
+<path d="M502,165 L518,165" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M162,170 L202,255" stroke="#888" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="205" y="230" width="85" height="50" rx="8" fill="#888" opacity="0.14"/>
+<rect x="205" y="230" width="85" height="50" rx="8" fill="none" stroke="#888" stroke-width="1.6"/>
+<text x="247.5" y="252.0" text-anchor="middle" font-size="11" font-weight="700" class="" fill="#888">start</text>
+<text x="247.5" y="266.0" text-anchor="middle" font-size="10" class="dim">p = 0.12</text>
+<text x="305" y="260" text-anchor="start" font-size="10" class="dim">dropped: beam keeps 2</text>
+<text x="652" y="70" text-anchor="middle" font-size="10" class="dim">mean log p</text>
+<text x="652" y="84" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#34d399">-0.39</text>
+<text x="652" y="112" text-anchor="middle" font-size="10" class="dim">above threshold</text>
+<text x="652" y="126" text-anchor="middle" font-size="10" font-weight="700" class="" fill="#34d399">shown</text>
+<text x="652" y="160" text-anchor="middle" font-size="10" class="dim">mean log p</text>
+<text x="652" y="174" text-anchor="middle" font-size="13" font-weight="700" class="" fill="#fbbf24">-0.80</text>
+<text x="652" y="202" text-anchor="middle" font-size="10" class="dim">below threshold</text>
+<text x="652" y="216" text-anchor="middle" font-size="10" font-weight="700" class="" fill="#fbbf24">hidden</text>
+<text x="20" y="304" text-anchor="start" font-size="10.5" class="dim">Illustrative probabilities and a made-up threshold of −0.50.</text>
+<text x="20" y="320" text-anchor="start" font-size="10.5" class="dim">Each box is one model step. The score is the average of log p over the steps.</text>
+      </svg>
+      <div class="diagram-caption">Follow each row left to right. Both rows reach the end of the sentence, the less confident one is held back, and the third candidate never gets past its first word.</div>
+    </div>
+
+    <p>In the figure, Divya's prefix ends in the middle of a word, "s". To handle this, the paper restricts the first step of the search: "if the prefix ends mid-word, the first step of beam search starts constrained by only feasible completions of the prefix". Since the model has a word-level vocabulary, the feasible completions are the words that start with "s", such as "send", "see" and "start". It never has to spell anything letter by letter. That keeps the vocabulary at 50,000 words and the step count at one per word. That same hook lets the application drop tokens "that are offensive or otherwise undesirable for product reasons" while the search runs, and it lets the application decide which tokens end a candidate, for instance a period, if the product shouldn't suggest beyond the end of a sentence.</p>
+
+    <p>Each row of the figure is scored by the product of its word probabilities, or equivalently by the sum of their logarithms. Take the row "send the notes .". Its probabilities are 0.55, 0.70, 0.60 and 0.90, and they multiply to roughly 0.21. Row two, "see you there .", gets 0.20, 0.60, 0.40 and 0.85, roughly 0.04. Comparison between candidates uses a refinement of that score, the subject of the next section.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Decoding method</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Greedy</td><td>One model step per word, the cheapest possible</td><td>Commits to the best first word and can't recover from it</td></tr>
+        <tr><td>Beam search</td><td>Finds high-probability phrases, returns several candidates with scores</td><td>Costs about <span>$m$</span> model steps per word generated; still approximate</td></tr>
+        <tr><td>Random sampling</td><td>Varied suggestions, no search machinery</td><td>The same prefix can give different phrases, and a single draw gives a weak confidence score</td></tr>
+        <tr><td>Beam over a fixed list (Smart Reply)</td><td>Only vetted replies are ever produced</td><td>Needs a closed list, which open completion doesn't have</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Google chose beam search for Smart Compose. A comparison against greedy decoding isn't reported, so we don't know how much it gained; what the text does say is that the candidates' scores serve a second purpose, ordering the heap during the search and deciding whether to show anything at all. A method that returns several scored phrases suits that job, and a method that returns one phrase doesn't.</p>
+
+    <p>Nearly every system that generates sequences uses a search like this one. Machine translation systems decode with a beam, speech recognisers keep a beam of word hypotheses, and large language models offer it as an alternative to sampling. Cost is the thing to watch here: beam search multiplies the work per generated word by the beam width, and the serving section spends much of its effort on that.</p>
+  </section>
+
+  <section id="trigger">
+    <h2><span class="num">06</span>Knowing when to stay quiet</h2>
+
+    <p>Beam search always returns something. After almost any prefix it will finish with a phrase, and most of those phrases would be wrong. If Divya sees a wrong guess after every other letter, she learns to ignore the grey text, or turns it off. A suggestion is good only if it's right often enough to be worth the glance. So the question after generating a phrase is whether to show it, and the system has to be allowed to say nothing.</p>
+
+    <p>Smart Reply had solved the same problem with a separate model: a feedforward network that looked at an incoming message and predicted whether the user would reply to it at all, so the LSTM ran only on messages that were likely to be answered. Smart Compose does it without a second model. Instead, the score that ranks candidates inside the beam also serves as the confidence. It is defined as "a length-normalized log conditional probability":</p>
+
+    <div class="eq-block"><span>$$\text{score}(y) \;=\; \frac{1}{T} \sum_{j=1}^{T} \log P(y_j \mid \text{prefix}, y_{<j}, c)$$</span></div>
+
+    <p>Here <span>$T$</span> is the number of words in the suggestion and the rest is the chain-rule product of section 03, in log form. Dividing by <span>$T$</span> gives the average log probability per word. Without it, every extra word multiplies in another number below one, so long phrases would always score worse than short ones and the system would almost never show a long suggestion. A suggestion is shown only if its score is above a <strong>triggering threshold</strong> <span>$\tau$</span>, and only the single best candidate is ever shown.</p>
+
+    <p>Nobody tunes the threshold by feel. Per the paper, it is set "based on a target triggering frequency/coverage". <strong>Coverage</strong> is the fraction of moments at which the system shows a suggestion, and it plays the role that recall plays in a classifier. If we want the system to show something on 20% of keystrokes, we collect scores from a held-out stream of typing and choose <span>$\tau$</span> as the value that 20% of them exceed. Everything else about the system then follows from coverage and from how often the shown suggestions turn out right. This is a precision-first design: the product owners choose how much to show, and the model has to make what it shows count.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose a model's top suggestion exactly matches what the writer would have typed 41% of the time when we show every suggestion. If we keep only the 20% of suggestions the model is most confident about, what share of those do you expect to be exactly right: about 41%, about 60%, or above 80%? And if the model's confidence score is noisy, so it can't tell its good guesses from its bad ones, what happens to that number?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>With a trustworthy confidence score the answer is above 80%, and the experiment below gets 80.8% on its synthetic data. With a noisy score it rises only to about 53%. All of the gain from staying quiet comes from the model's ability to know when it knows, so the quality of the confidence score matters as much as the quality of the model's guesses.</p>
+      </details>
+    </div>
+
+    <p>We can check this on synthetic data. This program builds 400,000 imaginary suggestions of up to 15 words. At each word the model's chosen word is right with probability <span>$p$</span>, which makes the model calibrated by construction, and the whole suggestion counts as an exact match only if every word is right. Confidence is the length-normalised log probability from the equation above. We sort the suggestions by confidence and report the exact-match rate among the top 100%, 50%, 20%, 10% and 5%. Then we repeat with noise added to the confidence, standing in for a model that is worse at judging its own guesses, and with a score that uses only the first word.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Trade coverage for accuracy with a length-normalised confidence score</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(7)
+N = 400_000
+L = np.minimum(rng.geometric(0.28, N), 15)        # words per suggestion
+# probability the model&#x27;s chosen word is right at each step (calibrated)
+p = rng.beta(2.5, 1.0, (N, 15))
+live = np.arange(15)[None, :] &lt; L[:, None]
+right = rng.random((N, 15)) &lt; p
+exact = np.all(right | ~live, axis=1)             # whole phrase matches
+mean_lp = (np.log(p) * live).sum(1) / L           # length-normalised
+
+def sweep(conf, label):
+    order = np.argsort(-conf)
+    print(label)
+    for cov in (1.0, 0.5, 0.2, 0.1, 0.05):
+        keep = order[: int(cov * N)]
+        print(f&quot;  show {cov:&gt;4.0%}: exact match {exact[keep].mean():6.1%}&quot;
+              f&quot;   avg words {L[keep].mean():.1f}&quot;)
+
+sweep(mean_lp, &quot;confidence = length-normalised log-prob (calibrated)&quot;)
+noisy = mean_lp + rng.normal(0, 0.5, N)
+sweep(noisy, &quot;confidence = same score plus noise (a worse model)&quot;)
+sweep(np.log(p[:, 0]), &quot;confidence = first word only&quot;)</code></pre>
+      <div class="tryit-out">Showing every suggestion gives <code>41.2%</code> exact match. With the calibrated score, keeping the top 20% gives <code>80.8%</code> and the top 5% gives <code>95.9%</code>. With a noisy score the same cut gives <code>52.9%</code> and <code>58.0%</code>, and a first-word-only score reaches <code>55.4%</code> and <code>57.3%</code>. Average suggestion length falls from <code>3.5</code> to <code>1.3</code> words as the threshold tightens.</div>
+    </details>
+
+    <div class="diagram">
+      <div class="diagram-title">Showing fewer suggestions makes the shown ones better
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<path d="M80,260 L660,260" stroke="#666" stroke-width="1" fill="none"/>
+<path d="M80,40 L80,260" stroke="#666" stroke-width="1" fill="none"/>
+<path d="M80,228.57142857142858 L660,228.57142857142858" stroke="#444" stroke-width="0.6" fill="none" stroke-dasharray="3 4"/>
+<text x="72" y="232.57142857142858" text-anchor="end" font-size="10" class="dim">40%</text>
+<path d="M80,165.71428571428572 L660,165.71428571428572" stroke="#444" stroke-width="0.6" fill="none" stroke-dasharray="3 4"/>
+<text x="72" y="169.71428571428572" text-anchor="end" font-size="10" class="dim">60%</text>
+<path d="M80,102.85714285714286 L660,102.85714285714286" stroke="#444" stroke-width="0.6" fill="none" stroke-dasharray="3 4"/>
+<text x="72" y="106.85714285714286" text-anchor="end" font-size="10" class="dim">80%</text>
+<path d="M80,40.0 L660,40.0" stroke="#444" stroke-width="0.6" fill="none" stroke-dasharray="3 4"/>
+<text x="72" y="44.0" text-anchor="end" font-size="10" class="dim">100%</text>
+<text x="120.0" y="278" text-anchor="middle" font-size="10" class="dim">100%</text>
+<text x="245.0" y="278" text-anchor="middle" font-size="10" class="dim">50%</text>
+<text x="370.0" y="278" text-anchor="middle" font-size="10" class="dim">20%</text>
+<text x="495.0" y="278" text-anchor="middle" font-size="10" class="dim">10%</text>
+<text x="620.0" y="278" text-anchor="middle" font-size="10" class="dim">5%</text>
+<text x="370.0" y="298" text-anchor="middle" font-size="10.5" class="dim">share of keystrokes that get a suggestion (coverage)</text>
+<polyline points="120.0,224.79999999999998 245.0,170.74285714285713 370.0,100.34285714285716 495.0,67.97142857142859 620.0,52.88571428571427" fill="none" stroke="#34d399" stroke-width="2.2"/>
+<polyline points="120.0,224.79999999999998 245.0,204.05714285714288 370.0,188.02857142857144 495.0,179.22857142857143 620.0,172.0" fill="none" stroke="#fbbf24" stroke-width="2.2"/>
+<circle cx="120.0" cy="224.79999999999998" r="3.5" fill="#34d399"/>
+<circle cx="245.0" cy="170.74285714285713" r="3.5" fill="#34d399"/>
+<circle cx="370.0" cy="100.34285714285716" r="3.5" fill="#34d399"/>
+<circle cx="495.0" cy="67.97142857142859" r="3.5" fill="#34d399"/>
+<circle cx="620.0" cy="52.88571428571427" r="3.5" fill="#34d399"/>
+<circle cx="120.0" cy="224.79999999999998" r="3.5" fill="#fbbf24"/>
+<circle cx="245.0" cy="204.05714285714288" r="3.5" fill="#fbbf24"/>
+<circle cx="370.0" cy="188.02857142857144" r="3.5" fill="#fbbf24"/>
+<circle cx="495.0" cy="179.22857142857143" r="3.5" fill="#fbbf24"/>
+<circle cx="620.0" cy="172.0" r="3.5" fill="#fbbf24"/>
+<text x="612.0" y="42.88571428571427" text-anchor="end" font-size="10" font-weight="700" class="" fill="#34d399">95.9%</text>
+<text x="612.0" y="192.0" text-anchor="end" font-size="10" font-weight="700" class="" fill="#fbbf24">58.0%</text>
+<text x="86" y="24" text-anchor="start" font-size="10.5" class="dim">exact match of the suggestions that are shown</text>
+<text x="110" y="66" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#34d399">good confidence score</text>
+<text x="110" y="82" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#fbbf24">noisy confidence score</text>
+<text x="20" y="322" text-anchor="start" font-size="10" class="dim">From the simulation in the experiment above: 400,000 synthetic suggestions of up to 15 words.</text>
+      </svg>
+      <div class="diagram-caption">Read right to left. Both models are equally accurate if they show everything. A trustworthy confidence score lets the system keep only the sure ones.</div>
+    </div>
+
+    <p>A calibrated score turns a 41% exact-match system into one that is right 81% of the time when it speaks on one keystroke in five, and 96% of the time on the most confident twentieth. A noisy version, with identical guesses, tops out at 58%. In the last block, looking only at the first word is nearly as poor as noise, because a suggestion's quality depends on every word in it. One more detail in the output is easy to miss. Average length of shown suggestions falls from 3.5 words to 1.3 as the threshold tightens, because a short phrase has fewer chances to include a weak word and so its average log probability is more extreme. That behaviour comes from the simulation, and the paper doesn't report the average length of shown suggestions. It's a reminder that a threshold shapes what gets shown as well as how much.</p>
+
+    <p>Real numbers from the paper point the same way. In Table 2, the model's exact-match rate for one-word suggestions is roughly 85%, and it falls to between 32% and 44% for five-word suggestions, so longer phrases are right less often and more of them get filtered out by the threshold. In the multilingual setting, the paper sets "language-specific triggering confidence threshold" values so that every language has coverage similar to English, since the same threshold applied to a model with different calibration would show a different amount.</p>
+
+    <h4 class="why">Why show only one suggestion?</h4>
+
+    <p>Chen et al. state the practice, "we provide only the top suggestion to users", and don't give a reason. One obvious reason is the interface: a line of grey text after the cursor has room for one phrase, and offering several would ask Divya to choose while she's typing. A second reason follows from the design itself. Showing one suggestion makes coverage easy to define and to control, and every extra option would be another chance to be wrong in front of her.</p>
+
+    <p>Selective prediction, answering only when confident, appears across applied machine learning. A fraud model alerts on the transactions above a score cutoff, a spam filter sets a threshold that trades missed spam against lost mail, and a medical triage model can be tuned to speak up only on cases it's sure about. In each, the threshold is a product decision made with a precision and coverage curve in hand, as in the figure above.</p>
+  </section>
+
+  <section id="personal">
+    <h2><span class="num">07</span>Writing like Divya: a personal model</h2>
+
+    <p>The model so far is trained on billions of messages and gives everyone the same answer for the same words and context. Divya's manager might write "I will send over the deck" and she writes "I'll shoot over the notes". Table 8 of the paper shows the effect on a test account. On that account the user has typed "Will this work for sm", and the global model suggests "all group?", a perfectly ordinary completion, while the user's own word is "artcompose". A model trained on everyone can't know a person's project names, her sign-offs or her habit of ending questions with a question mark.</p>
+
+    <p>An obvious fix is a model trained on Divya's own mail, and the obvious version is to fine-tune a copy of the neural network for each user. That would mean storing and serving a model of roughly a hundred million parameters for each of more than a billion accounts. Its authors state what the personal model has to be instead: "small, adaptive, easy for serving and periodical re-training". Google's choice is the one we dismissed in section 02. For each user they train "a light-weight language model", an <strong>n-gram model with Katz backoff</strong> on that user's own Sent folder. Per the paper, the personal data is "his or her 'Sent' e-mails in the past a few months", with a vocabulary extracted by frequency, a minimum occurrence threshold and a maximum size.</p>
+
+    <h3 id="7-1-katz">7.1 What a Katz n-gram model does</h3>
+
+    <p>An n-gram model estimates the next word from counts. For a three-word history it looks at how often that history was followed by each word, and uses the ratio. When the history was never seen, the ratio has nothing to work with, so <strong>Katz backoff</strong> steps down to a shorter history and tries again. For a word <span>$w$</span> after a history <span>$h$</span>, with <span>$h'$</span> the history shortened by one word:</p>
+
+    <div class="eq-block"><span>$$P_{\text{katz}}(w \mid h) \;=\; \begin{cases} d \cdot \dfrac{C(h, w)}{C(h)} & \text{if } C(h, w) > 0 \\[6pt] \beta(h)\, P_{\text{katz}}(w \mid h') & \text{otherwise} \end{cases}$$</span></div>
+
+    <p>Here <span>$C(\cdot)$</span> is a count in Divya's mail and <span>$d < 1$</span> is a discount that shaves a little probability off every seen event. That freed mass is what <span>$\beta(h)$</span> hands to the unseen words, in proportion to what the shorter history predicts. (We write the backoff weight as <span>$\beta$</span> to keep <span>$\alpha$</span> free for the blend below.) A model like this needs little data to reach reasonable quality, and that is the paper's reason for choosing it over a neural alternative. It's compact when stored as a weighted finite automaton, a graph whose paths are word sequences carrying probabilities. Words that appear in neither vocabulary are assigned "a tiny probability to ensure that the probability of all possible words sum up to one".</p>
+
+    <h3 id="7-2-blend">7.2 Blending the two</h3>
+
+    <p>A personal n-gram model on a few months of mail is weak at ordinary English and strong on quirks. A global model is the reverse. We want both, and the paper mixes their distributions "at each time step of the beam search procedure" by linear interpolation:</p>
+
+    <div class="eq-block"><span>$$P_{\text{final}}(w \mid h, c) \;=\; \alpha\, P_{\text{personal}}(w \mid h) \;+\; (1 - \alpha)\, P_{\text{global}}(w \mid h, c)$$</span></div>
+
+    <p>Both terms are probabilities over the same words and each sums to one, so the mixture does as well. Here the weight <span>$\alpha \in [0, 1]$</span> says how much to trust the personal model: zero is the global model alone and one is Divya's model alone. Note which model reads the context. On the global side, the term takes the subject and previous email, while an n-gram model has no slot for them, so the personal term depends only on the preceding words. Blending happens inside the beam, so a word Divya likes can enter the beam at the first step and then be extended by the global model, instead of being compared with finished global suggestions at the end.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Personalisation: two language models, one mixed distribution
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="100" width="130" height="80" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="100" width="130" height="80" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="85.0" y="130.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">PREFIX</text>
+<text x="85.0" y="144.0" text-anchor="middle" font-size="10" class="dim">+ subject, previous</text>
+<text x="85.0" y="158.0" text-anchor="middle" font-size="10" class="dim">email, time, locale</text>
+<path d="M154,125 L214,70" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M154,155 L214,230" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="218" y="30" width="210" height="80" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="218" y="30" width="210" height="80" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="323.0" y="60.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">GLOBAL NEURAL LM</text>
+<text x="323.0" y="74.0" text-anchor="middle" font-size="10" class="dim">one model for everyone,</text>
+<text x="323.0" y="88.0" text-anchor="middle" font-size="10" class="dim">trained on billions of emails</text>
+<rect x="218" y="190" width="210" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="218" y="190" width="210" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="323.0" y="220.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">PERSONAL N-GRAM</text>
+<text x="323.0" y="234.0" text-anchor="middle" font-size="10" class="dim">Katz backoff, per user,</text>
+<text x="323.0" y="248.0" text-anchor="middle" font-size="10" class="dim">trained on that user's Sent</text>
+<path d="M432,70 L490,130" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M432,230 L490,170" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="470" y="64" text-anchor="middle" font-size="10.5" font-weight="700" class="" fill="#34d399">P_global</text>
+<text x="470" y="262" text-anchor="middle" font-size="10.5" font-weight="700" class="" fill="#fbbf24">P_personal</text>
+<rect x="494" y="110" width="186" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="494" y="110" width="186" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="587.0" y="140.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">BLEND AT EVERY STEP</text>
+<text x="587.0" y="154.0" text-anchor="middle" font-size="10" class="dim">α · P_personal +</text>
+<text x="587.0" y="168.0" text-anchor="middle" font-size="10" class="dim">(1 − α) · P_global</text>
+<text x="587" y="222" text-anchor="middle" font-size="10" class="dim">then beam search, as before</text>
+<text x="587" y="238" text-anchor="middle" font-size="10" class="" fill="#f472b6">α is one constant for all users</text>
+      </svg>
+      <div class="diagram-caption">The two models run side by side. Their next-word probabilities are mixed at each step of beam search, so a word the personal model likes can rise into the beam.</div>
+    </div>
+
+    <p>Chen et al. keep the weight as simple as they can: "we keep the model as simple as possible and make use of a constant interpolation weight". It admits that an ideal system would estimate a different weight for each context with its own model, and it declines to pay that overhead. That constant is found offline and then checked in an online experiment.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">The paper evaluates the blend at 11 different values of the weight, from 0 (global only) to 1 (personal only), keeping coverage about the same each time. Where do you expect the exact-match rate to peak: near 0, near 0.4, or near 1?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>It rises as the weight increases, peaks at 0.4, and then drops. That's the paper's own wording in its description of Figure 4. A weight of 0 can't capture personal style, and a weight of 1 means a small n-gram model working alone, and, as the authors put it, "is not as powerful as the global neural language model in making generic predictions". After launch the team observed "around 6% relative gain in the Click-Through-Rate (CTR) of suggestions and 10% relative gain in ExactMatch".</p>
+      </details>
+    </div>
+
+    <p>Why should there be an interior peak at all? We can reproduce it in a toy world. This program gives every simulated user a strong shared model of next words in 30 contexts, plus six personal favourite words that they use in every context. Our personal model is deliberately weak: only counts of the user's own words, with no context at all. We sweep the blend weight and measure average log-likelihood on held-out text and the top-1 hit rate, for users with 30, 300 and 3,000 tokens of personal history.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Blend a weak personal model with a strong global one and sweep the weight</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(11)
+V, C, USERS = 60, 30, 300           # words, contexts, simulated users
+glob = rng.dirichlet(np.full(V, 0.15), C)   # shared model p(w | c)
+alphas = np.linspace(0, 1, 11)
+
+def run(n_sent):
+    ll = np.zeros(len(alphas)); acc = np.zeros(len(alphas))
+    for _ in range(USERS):
+        fav = rng.choice(V, 6, replace=False)
+        quirk = np.zeros(V); quirk[fav] = rng.dirichlet(np.ones(6))
+        true = 0.65 * glob + 0.35 * quirk[None, :]   # user&#x27;s real habits
+        cnt = np.zeros(V)               # personal model: counts only,
+        for c in rng.integers(0, C, n_sent):      # no context
+            cnt[rng.choice(V, p=true[c])] += 1
+        pers = 0.999 * cnt / n_sent + 0.001 / V
+        tc = rng.integers(0, C, 400)                 # held-out tokens
+        tw = np.array([rng.choice(V, p=true[c]) for c in tc])
+        for k, a in enumerate(alphas):
+            mix = a * pers[None, :] + (1 - a) * glob
+            ll[k] += np.log(mix[tc, tw]).mean()
+            acc[k] += (mix[tc].argmax(1) == tw).mean()
+    return ll / USERS, acc / USERS
+
+print(&quot;personal tokens | log-lik: a=0, best, a=1 | top-1: a=0, best, a=1&quot;)
+for n in (30, 300, 3000):
+    ll, acc = run(n)
+    print(f&quot;{n:&gt;9}       | {ll[0]:6.2f} {ll.max():6.2f} {ll[-1]:6.2f}&quot;
+          f&quot;       | {acc[0]:.3f} {acc.max():.3f} {acc[-1]:.3f}&quot;
+          f&quot;   best alpha {alphas[acc.argmax()]:.1f}&quot;)</code></pre>
+      <div class="tryit-out">With 30 personal tokens the personal model alone scores <code>-6.42</code> log-likelihood against <code>-4.90</code> for the global model, and the best blend reaches <code>-3.14</code>. With 3,000 tokens the personal model alone gets <code>-3.61</code>, and the best blend is still ahead at <code>-2.97</code>. Top-1 rises from <code>0.149</code> to <code>0.179</code> at a weight of <code>0.6</code>, and the weight of 1 is worse than the best blend in every row.</div>
+    </details>
+
+    <p>In every row, the best blend beats both extremes. With 30 tokens of history, the personal model alone is a disaster (log-likelihood &minus;6.42, far worse than the &minus;4.90 of the global model) but a blend still lifts the score to &minus;3.14, because even a small sample finds the pet words. With 3,000 tokens the personal model alone is much better (&minus;3.61), yet the best mixture is still clearly ahead of it at &minus;2.97, and the top-1 rate climbs from 0.149 to 0.179. In this toy the best weight doesn't move much between users, the situation a constant weight is designed for. Chen et al.'s own result, a peak at 0.4, is a statement about their data and not a constant of nature.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Personalisation option</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Global model only</td><td>Nothing per user to store or retrain, simplest to serve</td><td>Same suggestion for everyone; misses names, jargon and style (Table 8)</td></tr>
+        <tr><td>Fine-tune the neural model per user</td><td>Could adapt in context, not only in word choice</td><td>A large model per account, heavy to retrain and serve, needs far more data per user</td></tr>
+        <tr><td>Per-user n-gram blended with the global model</td><td>Small, trains on modest data, mixes at every beam step, cheap to serve</td><td>Sees only a few preceding words, no context, one fixed weight for everyone</td></tr>
+        <tr><td>Train on the device (federated learning)</td><td>Personal text never leaves the phone</td><td>Models must be tiny, and training needs idle charging devices</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Google chose the third. Google's 2018 blog post still described personal language models as something the team was "working on incorporating", and the May 2019 paper reports that it launched, with the gains above. Row four is a comparison, not something Smart Compose is documented to use. In the Gboard keyboard work by Andrew Hard and colleagues (2018), a recurrent language model with 1.4 million parameters, shipped as a 1.4-megabyte file, was trained across phones with federated averaging. It reached top-1 next-word recall of 16.4%, against 16.5% for the same model trained on the server, and 13.0% for the n-gram system it replaced. Their latency expectation is stricter than Gmail's: "Users typically expect a visible keyboard response within 20 milliseconds of an input event". Nothing in the Smart Compose paper says where Divya's personal model is trained or stored, so we don't know whether anything of hers runs on the phone.</p>
+
+    <h4 class="why">Why not fine-tune the neural network for each person?</h4>
+
+    <p>Section 03's numbers make the case. An 80-million-parameter model, mostly a vocabulary-sized output layer, would take roughly 300 megabytes at 32-bit precision, and storing one per account would multiply that by more than a billion accounts, with each copy needing retraining as Divya's habits changed. An n-gram model in compact automaton form needs far less data and far less space, can be rebuilt from a few months of sent mail on a schedule, and mixes into the beam with a single multiply-add per candidate word. Its price is that it can't understand context, and that's why it's a partner to the global model and not a replacement.</p>
+
+    <p>Mixing a small adapted model into a large general one at each step of decoding is an old idea in speech recognition, where a recogniser's language model is adapted to a speaker's vocabulary this way. Related work in the paper points to an earlier study that is "also a linear interpolation between an n-gram and recurrent neural network language model". Keyboards, search boxes and code editors with personal dictionaries and recently used names all do the same, in different clothes.</p>
+  </section>
+
+  <section id="languages">
+    <h2><span class="num">08</span>Other languages, and the cost of a big vocabulary</h2>
+
+    <p>Divya writes in English, but Gmail's users don't. Next the paper extends Smart Compose to Spanish, French, Italian and Portuguese, and the obvious design is one word-level model per language, each trained exactly as the English one was. That fails on cost. Section 03 showed that the output layer of a 50,000-word model is nearly two thirds of its parameters, and a language with many word forms needs a larger word vocabulary to avoid constant unknown words. Its verdict is that word-level multilingual models "require a large vocabulary size to account for rare words in each language", and that "would make the models prohibitively slow to serve within systems with strict latency requirements".</p>
+
+    <p>Its remedy, inspired by Johnson et al.'s multilingual translation system, is <strong>wordpieces</strong>. Instead of one vocabulary entry per word, a fixed list of frequent word fragments is learned from the data, and a rare word is spelled out as a sequence of fragments. A word such as "unfriendly" might become three pieces (this split is only an illustration), and a very rare word falls back on shorter ones. Vocabulary stays at 50,000 entries however many languages share it, and the unknown-word rate stays low, because any word can be built from pieces. With wordpieces, a single model can serve all four languages, and languages with little data can borrow strength from similar languages with more.</p>
+
+    <p>For each language, the paper compares three variants, all using the LM-A architecture with an LSTM of two 1,024-unit layers:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Language (messages)</th><th>Monolingual word</th><th>Monolingual wordpiece</th><th>Multilingual wordpiece</th></tr></thead>
+      <tbody>
+        <tr><td>Spanish (4 billion)</td><td>75.90%</td><td>72.59%</td><td>71.73%</td></tr>
+        <tr><td>French (2 billion)</td><td>70.75%</td><td>69.54%</td><td>69.64%</td></tr>
+        <tr><td>Italian (1 billion)</td><td>70.50%</td><td>67.44%</td><td>67.48%</td></tr>
+        <tr><td>Portuguese (2 billion)</td><td>69.04%</td><td>72.20%</td><td>72.65%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The numbers are ExactMatch from Table 9. For Spanish, French and Italian, the monolingual word model wins and the shared model gives up between about 1 and 4 points. Spanish, the largest of the four, loses the most, and the authors take that as a sign that a large language's quality is impaired the most by sharing a model. Portuguese goes the other way: the multilingual model beats both monolingual ones by 3.6 points over its word model, in line with the idea that it benefits from the closely related Spanish, French and Italian data. A caution applies to the perplexity column that sits beside these in the paper. Per-token perplexities for word models and wordpiece models measure different units, because a wordpiece model predicts fragments, so the two columns aren't strictly comparable, and ExactMatch on whole words is the cleaner comparison.</p>
+
+    <p>Google's decision was explicit: "based on an overall consideration of both quality and maintenance requirements, we deployed a multilingual wordpiece model in production" for the four languages, with a language-specific triggering threshold so that coverage matches English. English stays on its own word-level model. That is a clear tradeoff of a few points of exact match in some languages for one model to train, serve and monitor, and its cost shows in Table 9.</p>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">09</span>Serving: fitting a model into a keystroke</h2>
+
+    <p>We now have a model that is good enough, and the question is whether it can run fast enough, because the best design on paper is worthless if the grey text arrives after the next letter. Remember the requirement that the 90th percentile of latency stays under 60 milliseconds, with inference on "almost every keystroke". In the paper's words, neural language models are "stateful, heavy-weight and computationally expensive", and, as the paper puts it, they are "not easily parallelized".</p>
+
+    <h3 id="9-1-life-of-a-request">9.1 The life of one request</h3>
+
+    <p>Smart Compose runs inside a <strong>streaming RPC server</strong>, a service that keeps a connection open for the length of a writing session, instead of answering each request cold. A higher-level Gmail service decides whether a message is eligible and, if it is, opens the stream. After that, "with each new keystroke the user types, new requests are presented to the server". Each request is made of two kinds of steps, and each step is a single time-step of inference of the language model. <strong>Prefix encoding steps</strong> feed the words Divya has typed into the model to build up its hidden state, the model's running summary of everything so far. <strong>Beam search steps</strong> then explore extensions of that prefix, as in section 05. Context lookups for the subject, previous email and date are done once and concatenated at every step.</p>
+
+    <p>Two details keep the work small. A user has a "sticky assignment to a server", so the server can keep her model state between requests, and the paper says "much of this computation can typically be skipped by using cached results from previous requests", so "the cost of prefix encoding is typically proportional to how much the user has typed since the last request". And since the model works in words, the letters typed in the middle of a word add no complete token to the prefix.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Divya has typed 60 words and is partway through the 61st. Say the beam is 4 candidates wide and the suggestion runs 6 words. How many single time-step model evaluations does one request need if the server remembers nothing from her previous keystroke, and how many if it has cached her state from one keystroke ago, with no new complete word typed since? (These sizes are illustrative.)</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>With no memory, the server must encode all 60 prefix words, then run 6 beam steps for 4 candidates each, for 60 + 24 = 84 evaluations. With the cached state and no new complete word, the prefix cost is zero and only the 24 beam evaluations remain, and they can run as 6 batched steps of 4. Once the prefix is cached, the beam search is the cost. That matches the paper's Table 5, where producing one suggestion costs roughly 9.5 times a single LSTM step on average.</p>
+      </details>
+    </div>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Keystroke</span><span>Divya types the "s" of "I will s" on her phone. New text goes to the server over the open stream. Network time between her phone and Google's servers isn't published.</span></li>
+      <li><span class="st-lane">Gate</span><span>The Gmail service that opened the stream already decided that this message is eligible. No further detail is published on what makes a message ineligible.</span></li>
+      <li><span class="st-lane">Route</span><span>Her sticky assignment sends the request to the server holding her cached model state from her last keystroke, which removes most of the prefix work.</span></li>
+      <li><span class="st-lane">Prefix</span><span>The server encodes only the complete words typed since the last request, and looks up the subject, the previous email and the time features once.</span></li>
+      <li><span class="st-lane">Beam</span><span>The beam search runs. Its steps are batched across many users' requests and executed on a TPU, while the host CPU handles "application logic, caching and beam search book-keeping", and the personal model is blended in at each step. Its first step is restricted to words starting with "s".</span></li>
+      <li><span class="st-lane">Filter</span><span>The top candidate's score is compared with the threshold. Offensive tokens were dropped during the search, and suggestions with a gendered pronoun are removed (section 12). Where in the pipeline each filter sits is unpublished.</span></li>
+      <li><span class="st-lane">Render</span><span>If a suggestion survives, it goes back along the stream and the phone draws the grey text. Only one latency budget is published, the whole-request target: 90th percentile under 60 ms. How it divides among these steps is unpublished.</span></li>
+    </ol>
+
+    <h3 id="9-2-hardware">9.2 Quality against latency, and the hardware</h3>
+
+    <p>The paper's Table 5 reports how much each candidate model costs, with everything relative to one time-step of the smallest LSTM, measured on CPU. A single step of the two-layer 2,048-unit LSTM costs 2.29 times as much, and of the big Transformer, 5.42 times. A whole suggestion costs more, since it runs many steps: averaged over the test set, 9.51 times for the smallest LSTM, 20.87 for the wider LSTM, 19.71 for the small Transformer and 37.96 for the large one.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">What the latency tables say
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11" font-weight="700" class="" fill="#e9e9ef">Relative cost of producing one suggestion (LSTM-2-1024 single step = 1x)</text>
+<text x="20" y="54" text-anchor="start" font-size="10.5" class="dim">LSTM-2-1024</text>
+<rect x="195" y="40" width="90.09473684210525" height="20" rx="3" fill="#34d399" opacity="0.55"/>
+<text x="293.09473684210525" y="54" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#e9e9ef">9.51x</text>
+<text x="20" y="84" text-anchor="start" font-size="10.5" class="dim">LSTM-2-2048</text>
+<rect x="195" y="70" width="197.7157894736842" height="20" rx="3" fill="#34d399" opacity="0.55"/>
+<text x="400.7157894736842" y="84" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#e9e9ef">20.87x</text>
+<text x="20" y="114" text-anchor="start" font-size="10.5" class="dim">Transformer 768-2048</text>
+<rect x="195" y="100" width="186.7263157894737" height="20" rx="3" fill="#818cf8" opacity="0.55"/>
+<text x="389.7263157894737" y="114" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#e9e9ef">19.71x</text>
+<text x="20" y="144" text-anchor="start" font-size="10.5" class="dim">Transformer 1536-8192</text>
+<rect x="195" y="130" width="359.62105263157895" height="20" rx="3" fill="#818cf8" opacity="0.55"/>
+<text x="562.621052631579" y="144" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#e9e9ef">37.96x</text>
+<path d="M20,172 L680,172" stroke="#555" stroke-width="1" fill="none"/>
+<text x="20" y="196" text-anchor="start" font-size="11" font-weight="700" class="" fill="#e9e9ef">The same request on different hardware (CPU = 1x)</text>
+<text x="195" y="216" text-anchor="start" font-size="10" class="dim">90th percentile latency</text>
+<text x="450" y="216" text-anchor="start" font-size="10" class="dim">throughput</text>
+<text x="20" y="240" text-anchor="start" font-size="10.5" class="dim">CPU</text>
+<rect x="195" y="226" width="220.0" height="18" rx="3" fill="#fbbf24" opacity="0.6"/>
+<text x="423.0" y="239" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#e9e9ef">1x</text>
+<rect x="450" y="226" width="1.9292604501607717" height="18" rx="3" fill="#34d399" opacity="0.6"/>
+<text x="459.92926045016077" y="239" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#e9e9ef">1x</text>
+<text x="20" y="266" text-anchor="start" font-size="10.5" class="dim">TPUv1</text>
+<rect x="195" y="252" width="35.2" height="18" rx="3" fill="#fbbf24" opacity="0.6"/>
+<text x="238.2" y="265" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#e9e9ef">0.16x</text>
+<rect x="450" y="252" width="25.659163987138264" height="18" rx="3" fill="#34d399" opacity="0.6"/>
+<text x="483.65916398713824" y="265" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#e9e9ef">13.3x</text>
+<text x="20" y="292" text-anchor="start" font-size="10.5" class="dim">TPUv2</text>
+<rect x="195" y="278" width="22.0" height="18" rx="3" fill="#fbbf24" opacity="0.6"/>
+<text x="225.0" y="291" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#e9e9ef">0.1x</text>
+<rect x="450" y="278" width="180.0" height="18" rx="3" fill="#34d399" opacity="0.6"/>
+<text x="638.0" y="291" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#e9e9ef">93.3x</text>
+<text x="20" y="318" text-anchor="start" font-size="10" class="dim">Numbers from Tables 5 and 7 of Chen et al. (2019). Absolute milliseconds are not published.</text>
+      </svg>
+      <div class="diagram-caption">Top: why bigger models were left out, since cost per suggestion grows with width and depth. Bottom: why the accelerator was worth the engineering.</div>
+    </div>
+
+    <p>Here the paper explains why the Transformer's lead in quality turns into a loss in latency. During generation it must keep "self-attention keys and values from all previous decoding steps for all the layers of the model", so each new step reads more than the last and the cost grows with suggestion length. In the three length buckets of Table 5, the gap between the small Transformer and the smallest LSTM grows from 6.9 units (1 to 5 words: 10.78 against 3.91) to 9.1 (6 to 10 words) and 15.7 (11 to 15 words). An LSTM carries a fixed-size state, so each step costs the same however far along it is.</p>
+
+    <p>That leaves hardware. According to the blog post, the first CPU version averaged "hundreds of milliseconds", well over the budget, and the team moved the heavy arithmetic to accelerators in two stages. First-generation TPUs ran the matrix multiplications and activations but not operations such as softmax, which had to run on the host CPU. Then the second-generation Cloud TPU, which supports more of TensorFlow's operations, took over, with the XLA compiler fusing operations. Meanwhile the host kept the application logic, the caching and the beam-search bookkeeping. To use the accelerator well, the system batches the prefix steps and the beam steps of many requests together. Table 7 gives the effect, again relative to CPU: TPUv1 cut 90th percentile request latency to 0.16 times and raised throughput to 13.3 times, and TPUv2 reached 0.10 times and 93.3 times.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Serving hardware</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>CPU</td><td>No special hardware, simplest operations</td><td>Average latency in the hundreds of milliseconds at first, and the lowest throughput</td></tr>
+        <tr><td>TPUv1</td><td>0.16x latency, 13.3x throughput</td><td>Some operations such as softmax still ran on the host CPU</td></tr>
+        <tr><td>TPUv2 (Cloud TPU)</td><td>0.10x latency, 93.3x throughput, most operations on the accelerator</td><td>Requires batching across requests and ties the serving stack to one hardware family</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Google chose the second-generation TPU and, in the blog's words, improved the average latency "to tens of milliseconds". Cost is operational as much as technical: the model has to stay inside what the compiler and chip support, and batching means each request shares the chip with others. Hardware didn't change the model choice, though; it made the small, cheap model affordable at this volume. Its list of future directions still names "taking advantage of the latest hardware accelerators", along with a Transformer that applies self-attention only over a fixed-size window of recent steps, which would stop the cost per step from growing.</p>
+
+    <h4 class="why">If TPUs are so much faster, why not run the big Transformer on them?</h4>
+
+    <p>Table 7 of the paper shows a tenfold latency gain and a roughly ninety-fold throughput gain relative to CPU, but Table 5 shows the large Transformer costing about four times what the smallest LSTM does per suggestion. An accelerator closes the gap between the cheap model and the budget at Gmail's volume. It doesn't close the gap for a model that is four times heavier and still has to answer within the same tens of milliseconds, for every keystroke of a billion users. Written in 2019, the paper concludes that most of the advanced models "failed to meet our strict latency constraints" and leaves the question for future work.</p>
+
+    <p>This section's prefix cache is the same idea as the key-value cache that large language model servers keep between turns of a chat, and batching across users is what keeps a GPU or TPU busy in those systems as well. Chapter 31 covers both in detail.</p>
+  </section>
+
+  <section id="data">
+    <h2><span class="num">10</span>Training data, labels and the loop that feeds itself</h2>
+
+    <p>We've built the system around a trained model without saying much about what it learned from. Training examples are the emails people wrote, and the label for every position is the word that came next. Every position in billions of messages is a training example with no human annotation, so the data scale is possible. It also means that the labels carry whatever the writers did, good and bad.</p>
+
+    <h3 id="10-1-labels-and-mismatch">10.1 Where training and serving differ</h3>
+
+    <p>In training, the model sees the true previous words and predicts one word at a time. In serving, it sees Divya's typed prefix, which is true, and then its own generated words, and those aren't. The metrics are designed with that mismatch in mind. Log perplexity measures the one-step quality, and ExactMatch measures whole generated phrases against the real continuation, so a model that is good at one-step prediction but drifts when it feeds on its own output would show up in ExactMatch. A second difference is that people stop typing mid-word, while the training examples are whole words. A constrained first step in the beam search from section 05 handles that at serving time without changing how the model is trained.</p>
+
+    <p>Training details are reported down to the stabilisers. They use Adam, uniform label smoothing, and an adaptive gradient clipping rule: "a training step is discarded completely if the log of the gradient norm value exceeds four standard deviations of its moving average". Experiments ran on 32 NVIDIA P100 GPUs each. Production models are trained on Cloud TPUs in a "quarter-pod, 64-chip setup", and the paper points out a benefit of using the same hardware family to train and serve: there are "no longer training/serving skews such as training in floating-point but serving with quantization". Google's 2018 blog adds that the team used a full TPUv2 Pod for experiments. How often the global model is retrained is unpublished; the personal models are described as needing "periodical re-training".</p>
+
+    <h3 id="10-2-the-loop">10.2 The loop</h3>
+
+    <p>Here's a risk the published sources don't discuss, which we can reason about. Smart Compose trains on user-composed email. Once the feature is live, some of what people send is text they accepted from a suggestion. A future model trained on that mail learns from its own predecessor's words and sees them as ordinary writing. If accepted phrases are over-represented in the next corpus, the model grows more sure of them, they get shown more, and accepted more. Nothing in the paper says how, or whether, the team separates accepted suggestions from typed text in training. Teams in this position generally have two levers: keep an old, pre-launch slice of data in the mix, or tag accepted spans and treat them differently, and we don't know which the team uses. A related effect in recommendations, where a system trains on what it chose to show, is the loop that chapter 41 follows. At launch the effect is probably small, since few sent emails contain accepted text, and it would grow with adoption.</p>
+
+    <h3 id="10-3-privacy">10.3 Not leaking Divya's mail, or anyone's</h3>
+
+    <p>The most serious risk of training a language model on private email is that it memorises a sequence from one person's message and later emits it as a suggestion to someone else. Google's defence has two parts. One is the preprocessing of section 03, which replaces names, addresses and numbers with placeholder tokens and drops quoted text. Another is a test. Per the paper, "we have done extensive testing to make sure that only common phrases used by multiple users are memorized by our model, using findings from Carlini et al.", and the 2018 paper by Nicholas Carlini and colleagues, <em>The Secret Sharer</em>, applies its method to Smart Compose as its largest case study.</p>
+
+    <p>That method plants a <strong>canary</strong>, a random sequence that never occurs naturally, in the training data a chosen number of times, trains the model, and measures how much more likely the model finds the canary than other sequences of the same format. Take a set <span>$R$</span> of all possible random sequences of that format. Rank every sequence in <span>$R$</span> by the model's log perplexity on it, so the sequence the model finds most likely has rank 1. Then the canary's <strong>exposure</strong> is</p>
+
+    <div class="eq-block"><span>$$\text{exposure}(s) \;=\; \log_2 |R| \;-\; \log_2 \text{rank}(s)$$</span></div>
+
+    <p>An exposure of 0 means the canary ranks last, as if the model had never seen it. Its maximum, <span>$\log_2 |R|$</span>, means it ranks first. An exposure of 10 means the canary's rank is <span>$|R|/2^{10}$</span>, so it sits in the top thousandth of the candidates. For Smart Compose, the canaries were five or seven words long, with the first two and last two words fixed as context and the middle ones random. They were inserted between 1 and 10,000 times into training data of about a billion sequences. A secret that appeared once in a billion sequences showed no sign of being memorised. Even a canary inserted 10,000 times reached an exposure of only 10. The paper describes that as the model being 1,000 times more likely to generate it than another random phrase, "but it is still not a very likely output, let alone the most likely".</p>
+
+    <p>This test measures memorisation of rare, planted secrets, so it's evidence about the risk and not a proof. It also shows that what the model learns is shaped by repetition: a phrase used by many people, such as "Thank you for your help", is learned thoroughly, and a phrase that one person wrote once is not. Carlini et al. list stronger defences, including clipping gradients and adding noise to training (differential privacy), and the Smart Compose paper doesn't say whether it uses them. Engineers worked under the same constraint. No one on the project could look at the underlying data, the paper says, and the Smart Reply paper describes the practice that goes with it: all data encrypted, engineers inspecting only aggregate statistics.</p>
+
+    <p>Testing a model for what it has memorised before release is now common for language models. Later work by Carlini and colleagues (2021) extracted verbatim training sequences from GPT-2, which shows the worry is real for large models.</p>
+  </section>
+
+  <section id="evaluation">
+    <h2><span class="num">11</span>Measuring it: offline numbers and online ones</h2>
+
+    <p>Divya's suggestion is right or wrong in a moment, but the team has to compare models that differ by a fraction of a percent and decide which ships. Testing every candidate on live users is slow and expensive, and the paper says so as one of its challenges: "we therefore need to devise proper efficient offline evaluation strategy and metrics which correlate well with online metrics that are critical to the product." The paper uses two offline metrics.</p>
+
+    <p>One is the log perplexity of section 03, which needs no generation at all and measures the average quality of next-word probabilities over a test set. <strong>ExactMatch@N</strong>, the second, measures the generated phrases themselves. For a predicted phrase that is N words long, it's the percentage of the predicted phrases that "exactly matches the first N words in the ground truth text". A weighted average over all lengths up to 15 is reported as "Overall". In symbols, with <span>$S_N$</span> the set of shown suggestions that are N words long, <span>$\hat y$</span> the suggestion and <span>$y$</span> the words the writer typed:</p>
+
+    <div class="eq-block"><span>$$\text{ExactMatch@}N \;=\; \frac{1}{|S_N|} \sum_{s \in S_N} \mathbb{1}\big[\hat y_{1:N}(s) = y_{1:N}(s)\big]$$</span></div>
+
+    <p>One more rule keeps the comparison honest. To compare models fairly the authors "first select model-specific triggering confidence thresholds to make sure all models have the same coverage, and then compute the ExactMatch results out of triggered suggestions". That's the point of section 06: without matched coverage, a model that speaks only on easy cases would look better than one that speaks more often.</p>
+
+    <h4 class="why">Why compute ExactMatch only on the suggestions that were shown?</h4>
+
+    <p>Because the product only ever shows those. A model's accuracy on all the phrases it could have generated includes many it would never display, and counting them would punish a model for being honest about its uncertainty. Matching coverage across models closes the loophole from the other side, since a model could otherwise improve its score by showing only trivial suggestions.</p>
+
+    <h3 id="11-1-what-the-numbers-say">11.1 What the numbers say</h3>
+
+    <p>Table 2 of the paper lists ExactMatch for four of the LM-A models. Putting it next to the log perplexities from Table 1 shows how the two metrics relate:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model (LM-A)</th><th>Log perplexity</th><th>ExactMatch@1</th><th>@3</th><th>@5</th><th>Overall</th></tr></thead>
+      <tbody>
+        <tr><td>LSTM-2-1024</td><td>3.26</td><td>84.63%</td><td>40.25%</td><td>31.82%</td><td>66.99%</td></tr>
+        <tr><td>LSTM-2-2048</td><td>3.13</td><td>84.89%</td><td>43.79%</td><td>36.18%</td><td>68.31%</td></tr>
+        <tr><td>Transformer-768-2048</td><td>3.08</td><td>83.93%</td><td>43.37%</td><td>41.10%</td><td>66.94%</td></tr>
+        <tr><td>Transformer-1536-8192</td><td>2.90</td><td>85.33%</td><td>47.87%</td><td>43.92%</td><td>67.73%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Look at the two Transformer rows against the first LSTM. Log perplexity for the small Transformer is 0.18 lower than the LSTM's, and its five-word ExactMatch is nine points higher, yet its overall ExactMatch is 66.94%, a hair below the LSTM's 66.99%. Moving to the largest Transformer lowers log perplexity by 0.36 and gains 0.74 points overall. Overall ExactMatch barely moves because most suggestions are short, and on one-word suggestions every model scores between 84% and 85%. Chen et al. hypothesise that the improvement in perplexity "is mostly in places where the model is relatively low in confidence and Smart Compose is unlikely to be triggered". ExactMatch is "more important to production", the authors write, so the 0.36 improvement in the metric that doesn't decide what users see did not outweigh the latency bill.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Metric</th><th>Where measured</th><th>What it can't tell you</th></tr></thead>
+      <tbody>
+        <tr><td>Log perplexity</td><td>Offline, every position in the test set</td><td>Dominated by low-confidence positions the product never shows</td></tr>
+        <tr><td>ExactMatch@N, at matched coverage</td><td>Offline, shown suggestions only</td><td>Counts a near miss the same as nonsense, and uses only text people typed</td></tr>
+        <tr><td>Coverage</td><td>Offline, set by the threshold</td><td>Says nothing about whether the shown suggestions are right</td></tr>
+        <tr><td>Click-through rate of suggestions</td><td>Online</td><td>Needs a live experiment, and acceptance isn't the same as usefulness</td></tr>
+        <tr><td>Characters saved</td><td>Online, aggregate</td><td>The paper's headline figure, "over one billion characters" a week, but not a quality measure</td></tr>
+        <tr><td>90th percentile latency</td><td>Online and in load tests</td><td>A constraint more than a metric: a model that misses 60 ms doesn't ship, however good</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Online results are described briefly. After launch, personalisation brought around 6% relative gain in click-through rate of suggestions and 10% relative gain in ExactMatch, so both kinds of metric moved together. Its blend weight was "first estimated from offline experiments, then verified by online experiments to ensure suggestion quality improves compared with using global model alone". Nothing in the paper gives the design of those experiments, such as the share of traffic, the duration or the guardrails, so we'll treat the standard machinery of random user assignment and a guardrail on latency as how a team in this position would work, and not as documented detail.</p>
+
+    <p>Selecting a model on an offline metric that is cheap and a proxy for an online one is the standard arrangement in applied machine learning, and chapter 25 covers its failure modes. Table 2's pattern is one of them: two metrics can agree on direction and disagree on size, and the team has to know which one tracks what users see.</p>
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">12</span>What went wrong, and what it cost</h2>
+
+    <p>The sources describe a system that worked, so most of this section is about tradeoffs the team accepted, and one defect they found in testing. Neither the paper nor the blog reports a public incident or a retired feature, and we won't invent any.</p>
+
+    <h3 id="12-1-bias">12.1 Him and her</h3>
+
+    <p>The defect is in section 7 of the paper. Its authors write: "we found instances of gender-occupation bias when testing our models." One example takes two sentences. When a user typed "I am meeting an investor next week", the model suggested "Did you want to meet him", and for "I am meeting a nurse next week" it suggested "Did you want to meet her". Nobody had instructed the model to do this. No cause is given, but the usual explanation is that in the text a model learns from, investors are more often called "he" and nurses "she", so the model repeats the statistics as though they were facts about the meeting. Google's blog post, citing the 2017 study by Aylin Caliskan and colleagues on human-like biases in language corpora, says that these associations "are deeply entangled in natural language data, which presents a considerable challenge to building any language model".</p>
+
+    <p>Google's decision, in one sentence of the paper, was this: "To limit the impact, we removed any suggestions with a gender pronoun and continue to explore algorithmic approaches to handle bias."</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Response to the bias</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Ship the model as trained</td><td>No engineering cost, best raw ExactMatch</td><td>Repeats stereotypes to a billion people, in the user's own voice</td></tr>
+        <tr><td>Filter every suggestion containing a gendered pronoun</td><td>Cheap, certain and easy to audit; the failure the team found can no longer occur</td><td>Also removes correct, harmless suggestions, and does nothing about other biases that don't use pronouns</td></tr>
+        <tr><td>Rebalance the data or train the bias out of the model</td><td>Addresses the cause</td><td>The associations are entangled in language, there was no reliable method, and a debiased model still needs testing</td></tr>
+        <tr><td>Rebuild the product to suggest less</td><td>Less exposure of any kind of error</td><td>Removes the feature's value</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>In the 2019 paper, Google reports taking the second option, and it calls the step a way to "limit the impact". How many legitimate suggestions the filter removes isn't quantified, and whether it is still in place today is unpublished. What a filter can do is make one specific harm impossible. It can't prove the model is fair, and it only works for harms that someone has thought to look for. This is the usual shape of the choice in deployed language models: an exact rule for a known failure now, and an open research problem for the rest.</p>
+
+    <h4 class="why">Why filter the output instead of fixing the model?</h4>
+
+    <p>A rule on the output works the same day it's written, and its behaviour is easy to state and test: no suggestion contains these words. A change to the training data or the objective would have to be retrained, evaluated and shown not to harm quality, with no agreed method at the time, as the blog admits. Google did both, in order: the filter now, and continued exploration of "algorithmic approaches" for later.</p>
+
+    <h3 id="12-2-other-costs">12.2 The other bills</h3>
+
+    <p>The remaining costs came from choosing speed and maintainability over the best available model, and the paper's tables put numbers on each of them. Latency ruled out the Transformers and seq2seq models of section 04. Even the best of them lowered log perplexity from 3.26 to 2.90 and raised overall ExactMatch by 0.74 points, and this improvement was left unused. A multilingual model cost between 1 and 4 points of ExactMatch in three of the four languages, in return for one model instead of four. Privacy cost the team direct access to the data, and the paper accepts that the models might still memorise phrases, relying on tests to bound the risk. And the first version, on CPU, was far too slow, so the design depended on a hardware generation, with the first TPU leaving operations such as softmax on the host before the second generation fixed it.</p>
+
+    <p>One more cost isn't in any table. Smart Compose is a product where the person is the evaluator, and a suggestion that is subtly off in tone, or one that doesn't say what the writer meant, can be accepted by a hurried thumb on a bus. ExactMatch can't measure that, and the click-through rate counts the acceptance as a success. That risk isn't discussed in the paper, and we mention it because the logged metrics can't see it.</p>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">13</span>The whole system</h2>
+
+    <p>Putting the pieces together, one keystroke from Divya's phone passes through a stream to a server that keeps her session's state. That server encodes whatever she has just typed, looks up the context of the email, and runs a beam search in which a global neural language model and her personal n-gram model each contribute a probability at every step. A threshold chosen for a target coverage decides whether the best phrase is shown, and filters remove offensive words and gendered pronouns. All of this happens on a TPU shared with other users' requests, inside a 90th-percentile budget of 60 milliseconds. Offline, the global model is trained on a corpus of billions of cleaned messages on the same hardware family it's served on, the personal models are rebuilt from each person's Sent mail, and every candidate is judged on log perplexity and on ExactMatch at matched coverage before an online experiment decides.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The whole of Smart Compose, online and offline
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 470" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="30" width="120" height="64" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="30" width="120" height="64" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="80.0" y="59.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">DIVYA'S PHONE</text>
+<text x="80.0" y="73.0" text-anchor="middle" font-size="10" class="dim">types a letter</text>
+<path d="M144,62 L176,62" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="180" y="30" width="150" height="64" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="180" y="30" width="150" height="64" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="255.0" y="52.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">GMAIL SERVICE</text>
+<text x="255.0" y="66.0" text-anchor="middle" font-size="10" class="dim">eligible message?</text>
+<text x="255.0" y="80.0" text-anchor="middle" font-size="10" class="dim">opens the stream</text>
+<path d="M334,62 L366,62" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="370" y="30" width="160" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="370" y="30" width="160" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="450.0" y="52.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">SMART COMPOSE SERVER</text>
+<text x="450.0" y="66.0" text-anchor="middle" font-size="10" class="dim">sticky to her session,</text>
+<text x="450.0" y="80.0" text-anchor="middle" font-size="10" class="dim">keeps cached state</text>
+<path d="M534,62 L566,62" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="570" y="30" width="110" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="570" y="30" width="110" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="625.0" y="52.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">TPU</text>
+<text x="625.0" y="66.0" text-anchor="middle" font-size="10" class="dim">batches many</text>
+<text x="625.0" y="80.0" text-anchor="middle" font-size="10" class="dim">users' steps</text>
+<text x="450" y="120" text-anchor="middle" font-size="10.5" class="dim">each keystroke: encode prefix, then search</text>
+<path d="M450,126 L450,150" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="330" y="152" width="150" height="56" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="330" y="152" width="150" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="405.0" y="170.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">BEAM SEARCH</text>
+<text x="405.0" y="184.0" text-anchor="middle" font-size="10" class="dim">top suggestions,</text>
+<text x="405.0" y="198.0" text-anchor="middle" font-size="10" class="dim">offensive words dropped</text>
+<path d="M484,180 L516,180" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="520" y="152" width="160" height="56" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="520" y="152" width="160" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="600.0" y="170.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">TRIGGER + FILTERS</text>
+<text x="600.0" y="184.0" text-anchor="middle" font-size="10" class="dim">score above threshold?</text>
+<text x="600.0" y="198.0" text-anchor="middle" font-size="10" class="dim">no gendered pronouns</text>
+<rect x="20" y="152" width="150" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="152" width="150" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="170.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">PERSONAL N-GRAM</text>
+<text x="95.0" y="184.0" text-anchor="middle" font-size="10" class="dim">from her Sent mail,</text>
+<text x="95.0" y="198.0" text-anchor="middle" font-size="10" class="dim">blended at each step</text>
+<path d="M174,180 L326,180" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M600,212 L600,250" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="600" y="266" text-anchor="middle" font-size="10.5" font-weight="700" class="" fill="#f472b6">grey text on her phone</text>
+<path d="M20,296 L680,296" stroke="#555" stroke-width="1" fill="none"/>
+<text x="20" y="318" text-anchor="start" font-size="11" font-weight="700" class="" fill="#e9e9ef">Offline, on a schedule</text>
+<rect x="20" y="332" width="150" height="60" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="332" width="150" height="60" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="352.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#818cf8">EMAIL CORPUS</text>
+<text x="95.0" y="366.0" text-anchor="middle" font-size="10" class="dim">billions of messages,</text>
+<text x="95.0" y="380.0" text-anchor="middle" font-size="10" class="dim">cleaned and tokenised</text>
+<path d="M174,362 L206,362" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="210" y="332" width="150" height="60" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="210" y="332" width="150" height="60" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="285.0" y="352.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#34d399">TRAIN GLOBAL LM</text>
+<text x="285.0" y="366.0" text-anchor="middle" font-size="10" class="dim">TPU quarter-pod,</text>
+<text x="285.0" y="380.0" text-anchor="middle" font-size="10" class="dim">same chips as serving</text>
+<path d="M364,362 L396,362" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="332" width="140" height="60" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="400" y="332" width="140" height="60" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="470.0" y="352.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">EVALUATE</text>
+<text x="470.0" y="366.0" text-anchor="middle" font-size="10" class="dim">log perplexity,</text>
+<text x="470.0" y="380.0" text-anchor="middle" font-size="10" class="dim">ExactMatch at coverage</text>
+<path d="M544,362 L576,362" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="580" y="332" width="100" height="60" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="580" y="332" width="100" height="60" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="630.0" y="359.0" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#f472b6">A/B TEST</text>
+<text x="630.0" y="373.0" text-anchor="middle" font-size="10" class="dim">CTR, latency</text>
+<text x="20" y="418" text-anchor="start" font-size="10.5" class="dim">Per-user n-gram models are retrained from each person's own Sent mail; the global model is shared.</text>
+<text x="20" y="440" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Unpublished: request volume, production model size, retraining schedule, where the filters sit.</text>
+      </svg>
+      <div class="diagram-caption">Top half: one keystroke. Bottom half: how the models that serve it are built and checked before they reach Divya.</div>
+    </div>
+
+    <p>Several parts of this picture are unpublished: the request volume, the production model size and beam parameters, how many machines serve it, the retraining schedule, and where the filters sit in the pipeline. Sources describe the system as of 2018 and 2019, and we don't know what Gmail runs today. Future work in the paper lists Transformers with local attention and pre-trained language models as directions to try.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">14</span>Summary</h2>
+    <ol>
+      <li><strong>Smart Compose is a language model, not a list of replies.</strong> Smart Reply picked from vetted one-tap answers once per email. Smart Compose extends a half-typed sentence on almost every keystroke, so it has to generate words (Chen et al., 2019).</li>
+      <li><strong>Typing speed sets the time budget.</strong> Keystrokes arrive a few hundred milliseconds apart, so the paper requires the 90th percentile of latency to stay under 60 ms, and the 2018 blog says "ideally within 100ms".</li>
+      <li><strong>An n-gram table fails on context and size.</strong> It can't see the subject or the previous email, and its table explodes as the window grows. Its "Thursday" and "Tuesday" examples need information from another message.</li>
+      <li><strong>Context enters the model at every step.</strong> It predicts the next word from the typed prefix plus the subject, the previous email, the date, time and locale, and the loss is the average negative log probability of the word written.</li>
+      <li><strong>Averaged context embeddings beat the alternatives on latency.</strong> LM-A, LM-B and seq2seq were compared. LM-A matched LM-B's quality at lower cost, and seq2seq missed the latency target "by orders of magnitude".</li>
+      <li><strong>Beam search generates the phrase, and its score doubles as confidence.</strong> A heap of the best candidates is extended word by word, the first step is limited to completions of the half-typed word, and the length-normalised log probability orders the candidates.</li>
+      <li><strong>Staying quiet is a design requirement.</strong> A phrase is shown only if its score clears a threshold set for a target coverage, and only the top suggestion is shown. Showing fewer suggestions makes the shown ones more often right.</li>
+      <li><strong>Personalisation is a second, tiny model mixed in at every beam step.</strong> A Katz-backoff n-gram on the user's Sent mail is blended as <span>$\alpha P_{\text{personal}} + (1-\alpha) P_{\text{global}}$</span>, with a constant weight that peaked at 0.4 offline and gave about 6% more clicks online.</li>
+      <li><strong>Vocabulary size is a latency decision.</strong> Nearly two thirds of an LSTM-2-1024 model is its output layer, so four languages share one 50,000-wordpiece vocabulary even though word models scored higher for three of them.</li>
+      <li><strong>Serving is the hard engineering.</strong> A sticky server keeps cached state, requests are batched across users, and the move from CPU to TPUv2 cut latency to 0.10 times and raised throughput 93-fold.</li>
+      <li><strong>Privacy and fairness had to be handled in the design.</strong> Google's team tested for memorisation with canaries and removed all suggestions containing a gendered pronoun after finding a gender-occupation bias, and it said it was still exploring better fixes.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">15</span>Build this</h2>
+    <p class="lede">The ideas in this chapter fit in a weekend on a laptop. You can build a small Smart Compose for short text and watch each design choice change the numbers.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A miniature Smart Compose with a confidence threshold and a personal blend</span>
+        <span class="proj-meta">~6 hours &middot; numpy and torch, no GPU needed</span>
+      </div>
+      <p>Pick a public corpus of short messages with subjects and replies, for example the Enron email corpus, and hold out 20% as a test set. Everything you build will be judged on ExactMatch at matched coverage, the way the paper does it.</p>
+      <ol class="proj-steps">
+        <li>Preprocess as the paper does: drop quoted text and salutations, replace names, numbers and addresses with placeholder tokens, and keep a vocabulary of the 10,000 most frequent words.</li>
+        <li>Train a small LSTM language model twice, once on the body alone and once with the subject and previous message as averaged embeddings concatenated at every step. Compare test log perplexity, and look at the positions where the context should decide the word.</li>
+        <li>Write beam search with a beam of 4, a maximum of 8 words and a first step restricted to words that start with the typed letters. Score candidates by length-normalised log probability.</li>
+        <li>Choose thresholds that give coverage of 100%, 50%, 20% and 5% on a held-out stream, and report ExactMatch@1, @3 and overall at each coverage. Plot the curve and compare it with section 06.</li>
+        <li>Train a smoothed bigram model on a single author's messages and blend it with the neural model at every beam step. Sweep the weight from 0 to 1 and find the peak. Repeat for authors with 100 and 5,000 messages.</li>
+        <li>Time one request with and without a cache of the hidden state, for prefixes of 10 and 100 words, and plot 90th percentile latency against beam width.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the model with context has a visibly lower loss on the words that depend on the subject, ExactMatch rises steeply as coverage falls, the blend beats both the global model and the personal model alone with a peak between 0 and 1, and the cache removes nearly all of the prefix cost.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Add a filter that drops any suggestion containing a gendered pronoun and test it on the investor and nurse prompts. Then plant a made-up five-word canary in the training data between 1 and 1,000 times, rank it among 100,000 random alternatives by perplexity, and compute its exposure as the number of insertions grows.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">16</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why can't Smart Compose be built the way Smart Reply was?</summary>
+      <div class="qa-body"><p>Smart Reply reads an incoming message once and picks from a fixed list of vetted short replies, using an LSTM and a trie-constrained beam search so that the cost doesn't grow with the list. Smart Compose has to extend whatever the user has typed so far, from the middle of a sentence, after almost every keystroke, and what people write is too varied for a list: Smart Reply's authors found that over 40% of short responses in a sample of 10 million occurred only once. So Smart Compose is a language model that generates words, conditioned on the typed prefix and on the email's context.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What latency does Smart Compose need, and why?</summary>
+      <div class="qa-body"><p>In 2019 the paper required the 90th percentile of latency to be under 60 ms, citing the classic result that about 100 ms is the limit for a system to feel instantaneous. In 2018 the blog said "ideally within 100ms". Typing at roughly 40 words a minute gives about 300 ms between keystrokes on average, and the model runs on almost every keystroke, so a suggestion that arrives late is stale. A first CPU version averaged hundreds of milliseconds, and that pushed the team to TPUs.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is beam search, and why use it instead of picking the top word each step?</summary>
+      <div class="qa-body"><p>Beam search keeps the <span>$m$</span> best partial phrases at each step, extends each with its most likely next words, and prunes back to <span>$m$</span>, until phrases end at punctuation, an end token or a maximum length. Greedy decoding commits to the best first word and can't recover if that word leads to a poor continuation: 0.5 &times; 0.3 against 0.4 &times; 0.95 in a constructed case. Beam search costs about <span>$m$</span> model steps per word, but it returns several scored candidates, and the score is what the trigger uses.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How does the system decide whether to show a suggestion?</summary>
+      <div class="qa-body"><p>It scores the best beam candidate by its length-normalised log probability, <span>$\frac{1}{T}\sum_j \log P(y_j \mid \cdot)$</span>, and shows it only if the score is above a threshold. Its threshold is chosen to hit a target coverage, the fraction of keystrokes that show a suggestion: take scores from held-out typing and pick the quantile. Length normalisation stops long phrases being penalised just for having more words. Lower coverage raises the exact-match rate of what is shown, as long as the score is a good judge of the model's own accuracy, and each language gets its own threshold so coverage stays comparable.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Compare LM-A, LM-B and seq2seq for feeding in context. Which did Google choose?</summary>
+      <div class="qa-body"><p>LM-A is a language model over the body, with each context field encoded by averaging its token embeddings and concatenating the result to the word embedding at every step. LM-B packs subject, previous email and body into one sequence with separators. That is simpler but much longer. Seq2seq encodes the context and decodes the body with attention. At equal size LM-A and LM-B had similar log perplexity (3.26 for LSTM-2-1024 in both), seq2seq LSTM was better (3.09), and Transformers beat LSTMs. Google chose LM-A because the latency budget ruled out the others, and the blog describes the result as a bag-of-words context feeding an RNN-LM, with only a slight loss of quality.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How is personalisation done, and why interpolate probabilities?</summary>
+      <div class="qa-body"><p>Each user gets a small Katz-backoff n-gram model trained on their Sent mail from the past few months, stored as a weighted finite automaton. At every beam step the next-word probability is <span>$\alpha P_{\text{personal}} + (1-\alpha) P_{\text{global}}$</span>, with a constant <span>$\alpha$</span> chosen offline (the paper's peak is 0.4) and verified online. Mixing inside the beam lets a personal word enter the beam and be extended by the global model, instead of comparing finished phrases. Reported gains were roughly 6% in suggestion click-through rate and 10% in ExactMatch. A per-user neural model would be too large and too hungry for data, and a context-dependent weight would need its own model.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Perplexity improved by 0.36 but ExactMatch barely changed. Why, and which metric do you trust?</summary>
+      <div class="qa-body"><p>Log perplexity averages over every position, and most of the improvement from a bigger model lands where the model is unsure, and the system doesn't show a suggestion there. ExactMatch is measured only on shown suggestions at matched coverage, and most of those are short, where all models score about 84% to 85%. Between LSTM-2-1024 and Transformer-1536-8192 the paper gets 3.26 against 2.90 in perplexity, and 66.99% against 67.73% overall. For production, the paper says, ExactMatch matters more. Neither replaces an online experiment, and that's why click-through rate and a latency constraint come last.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you test whether a model like this leaks one user's email to another?</summary>
+      <div class="qa-body"><p>Use the canary method from <em>The Secret Sharer</em>, which the Smart Compose team applied. Insert random sequences that can't occur naturally into the training data a chosen number of times, train, then rank each canary among all random sequences of the same format by the model's perplexity. Exposure is <span>$\log_2|R| - \log_2 \text{rank}$</span>, so a canary the model ranks first has the maximum. For Smart Compose, a canary seen once in a billion sequences showed no memorisation, and one inserted 10,000 times reached exposure 10, roughly 1,000 times likelier than a random phrase and still not extractable. It bounds the risk for rare secrets and doesn't prove safety, so you pair it with preprocessing, and possibly with gradient clipping and noise.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Your model suggests "her" after "meeting a nurse". What do you do, and what does it cost?</summary>
+      <div class="qa-body"><p>Google's team found this and removed every suggestion containing a gendered pronoun while continuing research on algorithmic fixes. A filter is cheap, certain and auditable, and it makes that specific failure impossible. It also drops harmless suggestions, and it addresses nothing that doesn't use pronouns, so it isn't a fairness guarantee. Retraining on rebalanced data or adding a debiasing objective treats the cause but has no reliable method and needs retraining and re-evaluation, since the associations are entangled in the language. In practice you ship the filter now, build test prompts for other known biases, and keep investigating the model.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Walk through the cost of one request and where caching and batching help.</summary>
+      <div class="qa-body"><p>A request is prefix-encoding steps plus beam-search steps, each a single time-step of the model. Context lookups happen once. A sticky server keeps the hidden state from the last request, so prefix cost is proportional to the new complete words typed (often zero mid-word), and then the beam search dominates: about 9.5 times a single LSTM step per suggestion in Table 5. Batching prefix and beam steps across users keeps the accelerator busy. On a vocabulary of 50,000, the output layer is about three quarters of each step's arithmetic, so shrinking the vocabulary or fusing the softmax matters. On the phone itself, as in Gboard, you would shrink the model to about a million parameters and a 10,000-word vocabulary to meet a 20 ms expectation.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">17</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/1906.00080" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Gmail Smart Compose: Real-Time Assisted Writing</div><div class="r-sub">Chen et al., KDD 2019. Source of almost every number here: LM-A and LM-B, the latency and TPU tables, personalisation, multilingual models, ExactMatch, bias and privacy.</div></div>
+      </a>
+      <a class="resource-card" href="https://research.google/blog/smart-compose-using-neural-networks-to-help-write-emails/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Smart Compose: Using Neural Networks to Help Write Emails</div><div class="r-sub">Yonghui Wu, Google Research, May 16, 2018. Launch post, with the 100 ms target, the hybrid architecture and the CPU-to-TPU latency story.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1606.04870" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Smart Reply: Automated Response Suggestion for Email</div><div class="r-sub">Kannan et al., KDD 2016. Predecessor: a closed reply list, trie-constrained beam search, a triggering model and a diversity step.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1802.08232" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">The Secret Sharer: Evaluating and Testing Unintended Memorization in Neural Networks</div><div class="r-sub">Carlini et al., 2018. Exposure metric and its application to Smart Compose, as used in section 10.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1811.03604" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Federated Learning for Mobile Keyboard Prediction</div><div class="r-sub">Hard et al., 2018. A language model trained on phones for Gboard, as the on-device comparison in section 07.</div></div>
+      </a>
+      <a class="resource-card" href="https://workspaceupdates.googleblog.com/2019/06/smart-compose-available-on-gmail.html" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Smart Compose available on Gmail</div><div class="r-sub">Google Workspace Updates, June 3, 2019. Announcement that Smart Compose reached Gmail on Android and iOS.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1608.07187" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Semantics derived automatically from language corpora contain human-like biases</div><div class="r-sub">Caliskan, Bryson and Narayanan, Science 2017. Bias result that Google's 2018 blog cites.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1611.04558" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Google's Multilingual Neural Machine Translation System</div><div class="r-sub">Johnson et al., 2017. Shared wordpiece approach that Smart Compose's multilingual model follows.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">18</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/07-sequence-modeling-pre-transformer"><div class="rc-sec" style="color:var(--c-sequence)">07 · The language model</div><div class="rc-title">Sequence Modeling Pre-Transformer</div><div class="rc-hook">LSTMs, hidden state and seq2seq, the model family this case study chooses and the ones it rejects.</div></a>
+      <a class="related-card" href="/topics/08-attention-transformers"><div class="rc-sec" style="color:var(--c-attention)">08 · Why it lost</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">The mechanism whose growing key-value cost made it too slow for this latency budget.</div></a>
+      <a class="related-card" href="/topics/09-nlp-evolution"><div class="rc-sec" style="color:var(--c-nlp)">09 · The history</div><div class="rc-title">NLP Evolution</div><div class="rc-hook">From n-grams and bag of words to neural language models, the path section 02 compresses.</div></a>
+      <a class="related-card" href="/topics/10-llm-architecture-training"><div class="rc-sec" style="color:var(--c-llm)">10 · The same task, scaled</div><div class="rc-title">LLM Architecture &amp; Training</div><div class="rc-hook">Next-word prediction with context as a prompt, the idea behind LM-B at far greater scale.</div></a>
+      <a class="related-card" href="/topics/23-efficient-ai-systems"><div class="rc-sec" style="color:var(--c-efficient)">23 · Serving cost</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Quantization, accelerators and why model cost is a design variable.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">Training and serving skew, online experiments and retraining schedules.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Offline and online metrics, calibration and bias, the themes of sections 06, 11 and 12.</div></a>
+      <a class="related-card" href="/topics/31-llm-inference-serving"><div class="rc-sec" style="color:var(--c-practice)">31 · Serving at scale</div><div class="rc-title">LLM Inference &amp; Serving</div><div class="rc-hook">Prefix caching, batching and latency budgets, the same tools used in section 09.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · Another case study</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">A different system with the same shape: a cheap first stage, an expensive second stage and a feedback loop.</div></a>
+    </div>
+  </section>
+

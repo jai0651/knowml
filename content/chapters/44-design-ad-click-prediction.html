@@ -1,0 +1,1322 @@
+---
+title: "Designing Ad Click Prediction"
+dek: "Follow Zoya as she scrolls past a pair of running shoes on Instagram, and the bid Dev placed for them, down to the model that turns 'will she click?' into a probability an auction can price. We build it from the obvious version, fix each failure in turn, and look at what Meta and Google published along the way."
+readingTime: "~84 min"
+prereqs: "classical ML (02), recommenders (16), evaluation (25)"
+group: "ML System Design"
+label: "Case study 44"
+description: "From 'the highest bid wins' to calibrated click probabilities: auction math, normalized entropy, hashing, boosted trees, online learning, downsampling recalibration, DLRM and Meta's ads foundation models."
+---
+<section id="tldr">
+    <p>Zoya is standing in a coffee queue in Bengaluru on a Saturday morning, thumbing through Instagram. A friend's trek photos go by, then a cousin's engagement announcement, and then, between two posts, a photo of a pair of green running shoes from a small shop in Kochi. She slows down, because she has been meaning to replace her old pair. She taps. Dev, the shop's owner, is asleep at that hour, and he will see a single line on a dashboard tomorrow: one more click, charged at some price he agreed to in advance.</p>
+
+    <p>Behind that tap there was a decision made in well under a second. Tens of millions of ads were eligible to be shown to Zoya, and exactly one of them had to be chosen for that slot. The choice depended on one number per ad that nobody could observe: the chance that Zoya, in particular, would click it. There's a second problem hiding inside the first. In the simplest version of the story the platform doesn't charge for showing an ad but when someone clicks it, so the money Meta expects to make from a slot is the advertiser's bid multiplied by that unobservable probability. Every ad in the auction is therefore priced and ranked with a guess, and if the guesses are wrong in the wrong way, the wrong ads win and the advertisers who deserved the slot pay the price. A system that produces such a guess for an ad and a person is a <strong>click-through-rate (CTR) predictor</strong>, and the guess itself is the <strong>predicted CTR</strong>, often written pCTR.</p>
+
+    <p>So the question this chapter answers is: <strong>how does Meta turn "will this person click this ad?" into a probability that is accurate enough to run an auction on, for billions of people, using only what they did before?</strong></p>
+
+    <p>We'll build the design the way an engineer would, starting from the most obvious version, "the highest bid wins", and fixing each failure in turn. That takes us through why the auction needs calibrated probabilities and not merely good rankings, the metric that measures them, hashing billions of IDs into a model, boosted trees as a feature transform, online learning for freshness, the downsampling trick and the formula that undoes it, and the deep model Meta open-sourced in 2019. After that we follow the model into its 2023 to 2026 form as a very large foundation model, then through serving, labels and the feedback loop. We use Meta's and Google's own papers and posts, date every number, and say plainly where the internals are unpublished.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>The job has two sides. For the person, an ad should be something they're glad to see, which at minimum means it's relevant and not a repeat of what they scrolled past an hour ago. For the advertiser, the system should deliver the action they're paying for, such as a click, an app install or a purchase, at a price that makes sense. Between the two sits the platform, whose revenue comes from charging advertisers, so it needs a mechanism that decides which ad gets each slot and what it costs. That mechanism is an <strong>auction</strong>, and the part of the system this chapter is about is the part that feeds it: the model that predicts how likely each action is.</p>
+
+    <p>We'll concentrate on click prediction, because it's the cleanest case and the one the 2014 Facebook paper studies, and mention conversions (a purchase or sign-up after the click) where they change the design. Four requirements shape everything. Predictions must be <strong>calibrated</strong>, which means that among all the impressions where the model says 2%, about 2% get clicked. They must be fresh, because new ads appear every minute and tastes drift. They must be fast, because the user is waiting for the feed. And they must handle a feature space with billions of distinct values, because user IDs, ad IDs and page IDs are the most informative inputs and the sparsest.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>Meta has published scale numbers in several years, so we'll date each one. In 2014, the Facebook ads team wrote that the platform had over 750 million daily active users and over 1 million active advertisers (He et al., ADKDD 2014). By 2026, a Meta engineering post said the company's ads system serves 3.6 billion people who use at least one of its apps daily. Google's team described the same problem in 2013 as predicting on "billions of events per day" with a correspondingly large feature space (McMahan et al., KDD 2013). In December 2024, Meta wrote that its retrieval stage narrows "tens of millions" of candidate ads to "a few thousand" before ranking begins. A March 2026 post says ads must be returned with sub-second latency, with a bounded latency on the order of 100 milliseconds for the ranking model.</p>
+
+    <p>Meta doesn't publish its request rate or its impression volume, and neither does it say how many impressions are logged per day. That paper says only that a small fraction of one day's data "can have many hundreds of millions of instances" and that the actual number is confidential. We'll use clearly labelled illustrative numbers when we need volumes.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose a platform logs one billion ad impressions a day, and 1% of them are clicked (both figures illustrative). How many clicks is that, and how many non-clicks? If we kept every click but only 5% of the non-clicks for training, how many training rows would remain, and what fraction of them would be clicks?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>One billion impressions at 1% is 10 million clicks and 990 million non-clicks. Keeping 5% of the non-clicks leaves 49.5 million, so training would see 59.5 million rows, roughly 17 times fewer than the full day, and 10 million of them are clicks, a click rate of 16.8%.</p>
+        <p>Two consequences follow, and the rest of the chapter returns to both. Clicks are rare, so a model trained on this data sees 99 negatives for every positive, and most of the data carries little information. And the shortcut of throwing negatives away changes the click rate the model sees from 1% to 16.8%, so its raw output is no longer a probability we can use in an auction until we correct it.</p>
+      </details>
+    </div>
+
+    <p>These numbers also say something about labels. A click arrives seconds after an impression, a purchase can arrive days later, and the "no click" label doesn't arrive at all. There's no button a user presses to say they ignored an ad, so every non-click is the absence of a click for some period of time. We'll come back to how Facebook handled that, because it's one of the quieter hard problems in the whole system.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: the highest bid wins</h2>
+
+    <p>The obvious first design is a classic auction with no machine learning in it. Each advertiser states how much they will pay for a click. When Zoya's feed has a slot, the system collects the ads whose targeting matches her, sorts them by bid, shows the top one, and charges that advertiser when she clicks. Advertisers understand it, it's easy to build, and it's what a lot of early online advertising looked like.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Version 1: the highest bid wins
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="130" height="80" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="130" height="80" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="85.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">ADVERTISERS</text>
+<text x="85.0" y="94" text-anchor="middle" font-size="10" class="dim">Dev, Asha, Rohan</text>
+<text x="85.0" y="108" text-anchor="middle" font-size="10" class="dim">each state a bid</text>
+<path d="M156,90 L192,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="198" y="50" width="140" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="198" y="50" width="140" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="268.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">SORT BY BID</text>
+<text x="268.0" y="94" text-anchor="middle" font-size="10" class="dim">highest bid first</text>
+<text x="268.0" y="108" text-anchor="middle" font-size="10" class="dim">no model involved</text>
+<path d="M344,90 L380,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="386" y="50" width="130" height="80" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="386" y="50" width="130" height="80" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="451.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SHOW THE WINNER</text>
+<text x="451.0" y="94" text-anchor="middle" font-size="10" class="dim">Asha's Rs 50 ad</text>
+<text x="451.0" y="108" text-anchor="middle" font-size="10" class="dim">in Zoya's feed</text>
+<path d="M522,90 L558,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="564" y="50" width="116" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="564" y="50" width="116" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="622.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">MEERA</text>
+<text x="622.0" y="94" text-anchor="middle" font-size="10" class="dim">scrolls past</text>
+<text x="622.0" y="108" text-anchor="middle" font-size="10" class="dim">(no click)</text>
+<text x="20" y="170" text-anchor="start" font-size="10.5" class="dim">The platform is paid when someone clicks, and a bid is only a price per click.</text>
+<text x="20" y="195" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">An ad nobody clicks earns nothing, however high its bid, and it still took the slot.</text>
+<text x="20" y="220" text-anchor="start" font-size="10.5" class="dim">We need to know how likely Zoya is to click each ad before we can price a slot.</text>
+      </svg>
+      <div class="diagram-caption">Follow the arrows left to right. Every step is trivial to build, and the amber line under the boxes is where it loses money.</div>
+    </div>
+
+    <p>It breaks the moment you ask what the platform earns. Suppose Asha, who sells an online course, bids Rs 50 per click and Dev bids Rs 30. If Zoya's chance of clicking Asha's ad is 1% and her chance of clicking Dev's is 2%, then showing Asha earns the platform an expected 50 &times; 0.01 = Rs 0.50 per impression, and showing Dev earns 30 &times; 0.02 = Rs 0.60. Dev's lower bid is the better ad to show, for the platform and also for the viewer, who is twice as likely to care about it. Ranking by bid alone puts the weaker ad first, and it rewards advertisers who bid high on ads nobody wants.</p>
+
+    <p>A better rule ranks by the expected payment per impression, the bid times the probability of the action. That product is often called the <strong>expected value</strong> of the impression, or in the advertising literature the eCPM (expected revenue per thousand impressions, when scaled by 1,000). It needs one new ingredient, the probability, and for a first version we can estimate it from history without any model at all. Count how many times each ad was shown and how many times it was clicked, and divide.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to rank ads</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Highest bid</td><td>Trivial, transparent to advertisers</td><td>Ignores what the user wants and what the platform earns; rewards bidding on unclickable ads</td></tr>
+        <tr><td>Bid &times; historical CTR of the ad</td><td>Needs only counts; already aligns bidder, user and platform</td><td>A new ad has no history, a rarely shown ad has a noisy ratio, and the same ad has different CTRs for different people</td></tr>
+        <tr><td>Bid &times; predicted CTR from a model</td><td>Uses the person, the ad and the context together; can score a new ad from its features</td><td>Needs a training pipeline, and the auction now depends on the probabilities being accurate</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>History-based CTR is the right first step, and it fails in three predictable ways. An ad shown ten times with one click has a CTR of 10%, and that's mostly noise. A brand-new ad has no CTR at all. And the average CTR of an ad tells you nothing about Zoya in particular, who clicks on running shoes far more than on cryptocurrency. All three point at the same remedy: learn a function from the features of the ad, the person and the context to a click probability. Varian's 2007 paper, and the one by Edelman, Ostrovsky and Schwarz, analyse the pay-per-click auction, in which the click probability is a central input, and the Facebook team says in 2014 that the efficiency of an ads auction "depends on the accuracy and calibration of click prediction". Calibration is the word that decides the rest of the design, so we look at why next.</p>
+  </section>
+
+  <section id="calibration">
+    <h2><span class="num">03</span>Why the auction needs calibrated probabilities, not just good rankings</h2>
+
+    <p>A model that ranks ads well can still be useless to an auction. Suppose we sort Zoya's candidate ads by a score and the top-ranked one is the ad she's most likely to click. That's a ranking, and it can be perfect while the numbers attached are meaningless, for instance if every score is the true probability divided by ten. A recommender that only orders items doesn't care. An auction does, because it multiplies the score by a bid, and a bid is in rupees.</p>
+
+    <h3 id="3-1-the-auction-in-numbers">3.1 The auction in numbers</h3>
+
+    <p>Here's one auction with three ads, using the numbers from before plus a third advertiser, Rohan, who sells phones. Each advertiser has a bid per click and the model gives a predicted CTR. For each ad the system computes a score, bid times pCTR, meaning the expected payment per impression, and picks the highest.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">One auction, scored by bid x predicted click probability
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="34" text-anchor="start" font-size="10" class="dim">advertiser</text>
+<text x="150" y="34" text-anchor="start" font-size="10" class="dim">bid / click</text>
+<text x="240" y="34" text-anchor="start" font-size="10" class="dim">pCTR</text>
+<text x="310" y="34" text-anchor="start" font-size="10" class="dim">score = bid x pCTR (expected Rs per impression)</text>
+<text x="20" y="75" text-anchor="start" font-size="11" class="" fill="#e9e9ef">Dev (shoes)</text>
+<text x="150" y="75" text-anchor="start" font-size="11" class="dim">Rs 30</text>
+<text x="240" y="75" text-anchor="start" font-size="11" class="dim">2.0%</text>
+<rect x="310" y="56" width="330.0" height="30" rx="4" fill="#34d399" opacity="0.35"/>
+<rect x="310" y="56" width="330.0" height="30" rx="4" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="648.0" y="76" text-anchor="start" font-size="11" class="" fill="#e9e9ef">0.60</text>
+<text x="20" y="121" text-anchor="start" font-size="11" class="" fill="#e9e9ef">Asha (course)</text>
+<text x="150" y="121" text-anchor="start" font-size="11" class="dim">Rs 50</text>
+<text x="240" y="121" text-anchor="start" font-size="11" class="dim">1.0%</text>
+<rect x="310" y="102" width="275.0" height="30" rx="4" fill="#818cf8" opacity="0.35"/>
+<rect x="310" y="102" width="275.0" height="30" rx="4" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="593.0" y="122" text-anchor="start" font-size="11" class="" fill="#e9e9ef">0.50</text>
+<text x="20" y="167" text-anchor="start" font-size="11" class="" fill="#e9e9ef">Rohan (phones)</text>
+<text x="150" y="167" text-anchor="start" font-size="11" class="dim">Rs 25</text>
+<text x="240" y="167" text-anchor="start" font-size="11" class="dim">1.8%</text>
+<rect x="310" y="148" width="247.5" height="30" rx="4" fill="#818cf8" opacity="0.35"/>
+<rect x="310" y="148" width="247.5" height="30" rx="4" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="565.5" y="168" text-anchor="start" font-size="11" class="" fill="#e9e9ef">0.45</text>
+<text x="20" y="214" text-anchor="start" font-size="10.5" class="" fill="#e9e9ef">Dev's price per click if he wins:  runner-up score / own pCTR  =  0.50 / 0.02  =  Rs 25  (less than his Rs 30 bid).</text>
+<text x="20" y="240" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">If the model wrongly says Dev's pCTR is 4% (true value 2%): he still wins, but pays 0.50 / 0.04 = Rs 12.5 per click.</text>
+<text x="20" y="266" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">He now pays half the true price for each impression, because the price is built from the prediction.</text>
+<text x="20" y="292" text-anchor="start" font-size="10.5" class="dim">If every ad's pCTR were doubled, the ranking and the price per click would not change at all.</text>
+<text x="20" y="314" text-anchor="start" font-size="10.5" class="dim">Calibration errors that differ between ads are the dangerous ones.</text>
+      </svg>
+      <div class="diagram-caption">Read each row left to right. Bars show the score, the product of the first two columns. Dev wins with 0.60 and pays what he needs to stay ahead of Asha.</div>
+    </div>
+
+    <p>Dev wins with 0.60. What should he pay? In the classic design, the <strong>generalized second-price auction</strong> that Google and Yahoo used for sponsored search and that Edelman and colleagues and Varian analysed in 2007, the winner pays the smallest amount that would still have kept the top spot. Dev stays ahead of Asha as long as his score stays above hers, 0.50, so he must bid at least 0.50 divided by his pCTR of 0.02, giving Rs 25 per click. He bid Rs 30, and he pays Rs 25. If we write the winner's score as <span>$b_1 \hat{p}_1$</span> and the runner-up's as <span>$b_2 \hat{p}_2$</span>, the price per click is</p>
+
+    <div class="eq-block"><span>$$\text{price per click} \;=\; \frac{b_2\,\hat p_2}{\hat p_1}$$</span></div>
+
+    <p>where <span>$b$</span> is a bid, <span>$\hat p$</span> a predicted CTR, and the subscripts number the ranked ads. Notice the winner's own prediction in the denominator; that's where calibration enters. What the platform receives per impression is the true click probability times this price, <span>$p_1 \cdot b_2 \hat p_2 / \hat p_1$</span>. When the model is accurate about Dev, <span>$p_1 = \hat p_1$</span> and the platform receives exactly the runner-up's score, 0.50. If the model overestimates Dev's CTR, saying 4% when the truth is 2%, then Dev still wins, but his price per click drops to Rs 12.50 and the platform receives 0.02 &times; 12.50 = Rs 0.25 per impression, half of what it should. A mispredicted ad is under-charged because its price is built from the prediction.</p>
+
+    <p>Different auction designs price differently, and the choice is a real decision.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Auction rule</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>First price: pay your bid</td><td>Easy to explain</td><td>Advertisers must guess others' bids and shade their own; strategies get complicated</td></tr>
+        <tr><td>Generalized second price (GSP)</td><td>Pay the least that still wins your position; simple; pioneered by Google and Yahoo! for sponsored search</td><td>Not truthful with several slots, so advertisers can profit by bidding below their value</td></tr>
+        <tr><td>VCG (Vickrey-Clarke-Groves)</td><td>Truthful: bidding your real value is the best strategy; each winner pays the harm their presence does to the others</td><td>Harder to explain; revenue can be lower; pricing depends on predictions for every ad</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>For a single slot, which is the case in our example, GSP and VCG give the same price, the runner-up's score divided by the winner's pCTR. They diverge when there are several positions, as in a feed with many ad slots. Meta's advertiser documentation describes the winner as the ad with the highest "total value", built from the bid, the estimated action rate and an ad-quality term. How those three combine, and the pricing rule itself, aren't in the papers and posts we use, so we'll write about the structure and not about Meta's coefficients. Everything in this chapter holds for any rule of the form "score = a function of bid, predicted rate and quality".</p>
+
+    <h3 id="3-2-which-errors-hurt">3.2 Which calibration errors hurt</h3>
+
+    <p>There's a subtlety that the numbers above hide. If the model overestimated every ad's CTR by the same factor, nothing would change. Ranking by <span>$b\hat p$</span> comes out the same, and so does the price <span>$b_2\hat p_2/\hat p_1$</span>, because the factor cancels. Calibration matters because errors differ between ads. A model that's too optimistic about new ads, which have little data, hands them slots they haven't earned and charges them too little. A model that's noisy picks winners whose predictions happen to be too high. We can measure both with an experiment.</p>
+
+    <p>Here we simulate 100,000 auctions with six ads each. True CTRs and bids are random, and 30% of the ads are brand new. We compare five prediction rules by the true expected value of the ads they pick, as a fraction of the best possible choice. We also report two calibration ratios, the average predicted CTR divided by the average true CTR, once over all ads and once over the winners only.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Which prediction errors cost an auction money, and the winner's curse</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(3)
+A, K = 100_000, 6                         # auctions, ads per auction
+ctr = np.exp(rng.normal(np.log(0.01), 0.5, (A, K)))   # true CTRs
+bid = np.exp(rng.normal(np.log(1.0), 0.4, (A, K)))    # per-click bids
+new = rng.random((A, K)) &lt; 0.3            # 30% of ads are brand new
+
+def run(name, est):
+    win = np.argmax(bid*est, axis=1)      # rank by bid x estimate
+    i = np.arange(A)
+    value = (bid*ctr)[i, win].sum()       # true expected value won
+    calib_all = est.mean()/ctr.mean()
+    calib_win = est[i, win].sum()/ctr[i, win].sum()
+    print(f&quot;{name:26} value {value/best:5.3f}  calib all &quot;
+          f&quot;{calib_all:4.2f}  calib winners {calib_win:4.2f}&quot;)
+
+best = (bid*ctr).max(axis=1).sum()
+noise = np.exp(rng.normal(0, 0.4, (A, K)) - 0.4**2/2)  # mean 1
+run(&quot;perfect estimates&quot;, ctr)
+run(&quot;every estimate x2&quot;, ctr*2)
+run(&quot;noisy, unbiased&quot;, ctr*noise)
+run(&quot;new ads over-estimated x2&quot;, np.where(new, ctr*2, ctr))
+run(&quot;new ads under-estimated /2&quot;, np.where(new, ctr/2, ctr))</code></pre>
+      <div class="tryit-out">Perfect estimates win the full value (<code>1.000</code>). Doubling every estimate gives the same <code>1.000</code> and the same winners, with calibration <code>2.00</code>. Unbiased noise (<code>calib all 1.00</code>) wins only <code>0.912</code> of the value, and the winners' calibration is <code>1.24</code>. Overestimating new ads by two times wins <code>0.929</code> with calibration <code>1.30</code> over all ads and <code>1.55</code> over the winners, and underestimating them by half wins <code>0.951</code> with winners at <code>0.95</code>.</div>
+    </details>
+
+    <p>Doubling every estimate leaves the auction untouched, with a value of 1.000 and winners identical to the perfect model's. Noise that's unbiased on average, the second row, still costs 8.8% of the available value, because the model picks the wrong winner some of the time. Look at the calibration columns for something stranger. Over all ads the model is calibrated (1.00), yet among the winners the average prediction is 24% too high. This effect is the <strong>winner's curse</strong>: an ad wins an auction partly because its estimate was high by chance, so the winners are selected for positive errors. Overestimating new ads by a factor of two is worse still, 7.1% of value lost and winners 55% overestimated, and underestimating them costs less, because the model errs towards leaving the new ads out.</p>
+
+    <p>Winner's-curse calibration is the reason a calibration layer is applied to the slice of predictions that get used, and not only to the whole dataset. Google's 2013 paper describes exactly this: calibration is judged "on a slice of data", with correction functions applied per slice, and it adds that "the inherent feedback loop in the system makes it impossible to provide theoretical guarantees for the impact of calibration". We return to the feedback loop in section 12.</p>
+
+    <h4 class="why">Why not just rank by a good AUC and ignore the absolute probabilities?</h4>
+
+    <p>Ranking tells the auction which ad is better, and the auction also needs to know by how much. An ad with a 3% CTR and a bid of Rs 10 competes with an ad that has a 1% CTR and a bid of Rs 40 only if both probabilities are on the right scale. Price paid, how long an advertiser's budget lasts, and the choice between showing an ad and showing nothing all depend on the numbers and not only on their order.</p>
+
+    <p>Similar logic shows up wherever a model's output feeds a calculation: fraud scores that set a manual-review budget, ETA predictions that feed a price, and risk scores that set an interest rate all need probabilities that mean what they say.</p>
+  </section>
+
+<section id="metric">
+    <h2><span class="num">04</span>Measuring a probability</h2>
+
+    <p>Before we improve the predictor we need a way to tell whether it improved, and the usual choices fall short here. Accuracy is useless when 99% of impressions aren't clicked, because a model that always says "no click" scores 99%. AUC, the chance that a random clicked impression is scored higher than a random unclicked one, is better, and it measures only ranking, so it can't see the scale errors section 03 just showed us. We want a number that rewards probabilities that are right and not merely well ordered.</p>
+
+    <h3 id="4-1-log-loss">4.1 Log loss, and why it rewards honesty</h3>
+
+    <p>The standard answer is the <strong>log loss</strong>, also called cross-entropy. For one impression with label <span>$y \in \{0,1\}$</span> (1 for a click) and a predicted click probability <span>$p$</span>, the loss is</p>
+
+    <div class="eq-block"><span>$$\ell(y, p) \;=\; -\,y \log p \;-\; (1-y)\log(1-p)$$</span></div>
+
+    <p>If the impression was clicked, the loss is <span>$-\log p$</span>, which is small when we predicted a high probability and large when we predicted a low one. If it wasn't clicked, the loss is <span>$-\log(1-p)$</span>, small for a low prediction. Confident mistakes are punished severely, since <span>$-\log p$</span> grows without bound as <span>$p \to 0$</span>. Here's the property that matters for an auction. Suppose the true click probability of some kind of impression is <span>$p$</span> and we predict <span>$q$</span>. The expected loss is</p>
+
+    <div class="eq-block"><span>$$\mathbb{E}\,\ell \;=\; -p\log q - (1-p)\log(1-q) \;=\; H(p) \;+\; \mathrm{KL}(p \,\|\, q)$$</span></div>
+
+    <p>where <span>$H(p) = -p\log p-(1-p)\log(1-p)$</span> is the entropy of the true outcome, a quantity we can't reduce, and <span>$\mathrm{KL}(p\,\|\,q) \ge 0$</span> is the Kullback-Leibler divergence, a measure of how far apart the two probabilities are, zero only when <span>$q = p$</span>. So the expected log loss is lowest exactly when the prediction equals the truth. A loss with this property is called a <strong>proper scoring rule</strong>, and it's why training with log loss pushes a model towards calibrated probabilities, while a loss that only rewards ordering doesn't.</p>
+
+    <h3 id="4-2-normalized-entropy">4.2 Normalized entropy</h3>
+
+    <p>Log loss has a flaw as a report card: its value depends on how hard the problem is. If 1% of impressions are clicked, even a model that knows nothing but that fact has a small loss, because it can predict 1% every time. The Facebook team handled this by dividing by that baseline. Let <span>$\bar p$</span> be the <strong>background CTR</strong>, the average click rate in the training data. A model that predicts <span>$\bar p$</span> for every impression has log loss <span>$H(\bar p)$</span>, the entropy of the background rate. The 2014 paper defines <strong>normalized entropy</strong> (NE) as the model's average log loss per impression divided by that number:</p>
+
+    <div class="eq-block"><span>$$\mathrm{NE} \;=\; \frac{-\frac{1}{N}\sum_{i=1}^{N}\big[y_i \log p_i + (1-y_i)\log(1-p_i)\big]}{-\big[\bar p\log\bar p + (1-\bar p)\log(1-\bar p)\big]}$$</span></div>
+
+    <p>The numerator is the average log loss of the model and the denominator is the log loss of the know-nothing baseline. An NE of 1 means the model is no better than quoting the background rate, and lower is better. They also note that <span>$1-\mathrm{NE}$</span> is the relative information gain. Why divide at all? Compute the baseline for two click rates. At a background CTR of 1%, <span>$H = 0.0560$</span> nats. At 0.1%, <span>$H = 0.0079$</span>. A model with a log loss of 0.0079 would be excellent in the first case and barely better than nothing in the second, and the ratio puts them on one scale. It makes numbers comparable across ad surfaces whose click rates differ by a factor of ten.</p>
+
+    <p>Facebook pairs NE with a second metric, <strong>calibration</strong>, the ratio of the average predicted CTR to the empirical CTR, equivalently expected clicks divided by observed clicks. A calibration of 1 is perfect, and the authors call it "very important" because accurate CTR prediction is essential to bidding and auctions. They also make a point that explains why NE is the main number and not AUC: NE "implicitly reflects calibration". If a model overpredicts by 2 and we multiply every prediction by 0.5, NE improves while AUC stays exactly the same.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Offline metric</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Accuracy</td><td>Easy to explain</td><td>Meaningless at a 1% positive rate</td></tr>
+        <tr><td>AUC</td><td>Insensitive to the base rate; judges ranking quality</td><td>Blind to calibration; a model that's ten times too confident has the same AUC</td></tr>
+        <tr><td>Log loss</td><td>Proper scoring rule; rewards calibration</td><td>Depends on the base rate, so numbers aren't comparable across surfaces</td></tr>
+        <tr><td>Normalized entropy + calibration ratio</td><td>Proper, comparable across click rates, and the calibration ratio localises the problem</td><td>Averages over the whole dataset unless sliced by country, device, ad type</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Facebook chose NE and calibration in 2014 and used them to report every result in the paper, always as relative numbers, such as "96.58% of the trees-only model's NE". They also say why they didn't use revenue directly: it wanted to isolate "the impact of the factors to the machine learning model". Google's team in 2013 used the same family of loss, logistic loss, and reports it by slice, and they also computed it as an online loss on data before training on it, so they could use all the data for both training and testing.</p>
+
+    <p>A change of 0.1% in NE sounds negligible, and it matters because the traffic is enormous. That paper says a typical feature-engineering experiment "shaves off a couple of tens of a percent" of relative NE, and that even small improvements are important at scale. A prediction that's 0.1% better in log loss is a tiny improvement per impression and a large one summed over billions of auctions, so these teams run many experiments and look at such small effects.</p>
+
+  
+    <p>Proper scoring rules do the same job in weather forecasting, where the Brier score judges rain probabilities, and in language models, where perplexity is exponentiated log loss.</p>
+  </section>
+
+  <section id="sparse">
+    <h2><span class="num">05</span>Billions of IDs: hashing, inclusion, embeddings</h2>
+
+    <p>We can now measure a model, so let's build the first real one: logistic regression over the features of the person, the ad and the context. Its input for Zoya's impression is a long list of facts. Her user ID, the ad's ID, the advertiser's page ID, her city, her phone model, the hour, the ad's category. Most of these are <strong>categorical features</strong>, which take one of a huge set of values and have no natural number to represent them. A logistic regression turns each into a one-hot vector, a vector the length of the number of possible values with a single 1, and learns one weight per value. An impression's score is the sum of the weights of the values present.</p>
+
+    <p>Unfortunately the most informative categorical features are also the biggest. There are billions of user IDs, and millions of new ad IDs appear every day, so a weight table with one entry per ID is billions of entries, grows without limit, and is full of IDs seen once. Storing the table is a memory problem, and so is looking values up at serving time, and so is keeping it up to date as new IDs arrive. Google's 2013 paper put the size of its problem plainly, as a model "with billions of coefficients".</p>
+
+    <h3 id="5-1-the-hashing-trick">5.1 The hashing trick</h3>
+
+    <p>The first fix is to stop keeping a dictionary of IDs. Instead, choose a number of buckets <span>$m$</span>, say <span>$2^{24}$</span>, and give every feature value an index by hashing it: <span>$j = h(\text{feature name}, \text{value}) \bmod m$</span>. Then the model keeps one weight per bucket. A brand-new ad ID needs no registration, since it hashes to some bucket immediately, and the memory is fixed at <span>$m$</span> weights however many IDs exist. This is the <strong>hashing trick</strong>, or feature hashing.</p>
+
+    <p>Collisions are the cost: two IDs landing in the same bucket share a weight. With <span>$n$</span> distinct values hashed uniformly into <span>$m$</span> buckets, the chance that a given value shares its bucket with at least one other is <span>$1-(1-1/m)^{n-1} \approx 1-e^{-n/m}$</span>. So when the number of values is several times the number of buckets, almost every ID collides with some other ID.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Ten million distinct ad IDs are hashed into 2<sup>22</sup> = 4,194,304 buckets. What fraction of ad IDs share a bucket with at least one other ID? Would you expect the model to be much worse than with a private weight per ID?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>The ratio <span>$n/m$</span> is roughly 2.38, so <span>$1-e^{-2.38} \approx 91\%$</span> of IDs share a bucket. That sounds terrible, and it hurts far less than it sounds, because IDs aren't equally important. A few ads get most of the impressions and the rest are rarely seen. A popular ad's weight is dominated by its own data even when a rare ad shares its bucket, and the rare ad, which had too little data to learn a good weight anyway, mostly borrows the popular ad's value. Collisions between two heavy IDs are what hurt, and with a large <span>$m$</span> those are rare.</p>
+      </details>
+    </div>
+
+    <p>That's why hashing works on skewed data. Think of the weight table as a fixed-size resource you can trade against accuracy: more buckets, fewer collisions, more memory. Meta probably hashes or otherwise bounds its ID tables, since an unbounded dictionary can't fit, but its published papers don't say whether its production models hash IDs, how many buckets they use or what scheme they use to avoid collisions between important features, and we won't guess. What they do say is that sparse embedding tables are the main memory cost of these models, up to a terabyte in 2026, which we'll meet in section 09.</p>
+
+    <h3 id="5-2-dropping-rare-features">5.2 Dropping features, shrinking weights</h3>
+
+    <p>Hashing bounds the table size. Google's 2013 paper adds two techniques that cut memory further, and they're good examples of the engineering that surrounds the model. The first is <strong>probabilistic feature inclusion</strong>: most feature values appear only once or twice in the training data and teach the model little, so don't give them a weight until they've appeared a few times. Two methods were tested. Poisson inclusion adds a new feature to the model with some probability <span>$p$</span> each time it's seen, so a feature is admitted after about <span>$1/p$</span> sightings on average. Bloom-filter inclusion uses a rolling set of counting Bloom filters, compact structures that can report "seen at least <span>$n$</span> times" with occasional false positives, to admit a feature after its <span>$n$</span>th occurrence. Requiring two sightings through a Bloom filter saved 66% of the memory and cost 0.008% in AUC loss, and Poisson inclusion at <span>$p = 0.03$</span> saved 60% for 0.020%.</p>
+
+    <p>A second technique stores each weight in fewer bits. Nearly all the weights in these models lie between &minus;2 and +2, and fine precision isn't needed, so Google stored them in a 16-bit fixed-point format, q2.13, with randomised rounding to keep the rounding error unbiased. They report no measurable loss and a 75% saving on the memory for coefficients.</p>
+
+    <h3 id="5-3-embeddings">5.3 From one weight to one vector</h3>
+
+    <p>A single weight per ID can only say "this ID raises or lowers the click chance". A richer model gives each ID a short vector of numbers, an <strong>embedding</strong>, learned along with the rest of the model, so that IDs with similar behaviour end up with similar vectors and the model can compare them. A lookup in the embedding table for ID <span>$i$</span> returns row <span>$i$</span> of a matrix <span>$W \in \mathbb{R}^{m\times d}$</span>, the same as multiplying a one-hot vector by <span>$W$</span>. Our sparse model so far is the special case <span>$d = 1$</span>. Section 09 builds the model that combines embeddings at scale, and first we need a way to capture how features combine.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Handling an ID feature</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Dictionary, one weight per ID</td><td>No collisions; easy to inspect</td><td>Memory grows with the ID space; new IDs need registration</td></tr>
+        <tr><td>Hashing into <span>$m$</span> buckets</td><td>Fixed memory; new IDs work immediately</td><td>Collisions blur some IDs together; harder to debug</td></tr>
+        <tr><td>Probabilistic inclusion + fewer bits (Google, 2013)</td><td>Cuts memory by 55 to 75% at a tiny accuracy cost</td><td>A feature has no weight until it's admitted; extra moving parts</td></tr>
+        <tr><td>Learned embeddings (<span>$d &gt; 1$</span>)</td><td>Similar IDs share statistical strength; vectors can be compared and combined</td><td>Tables reach gigabytes to terabytes and need sharding across devices</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Hashing categorical features into fixed-size tables is how text classifiers handle vocabulary, how spam filters handle word pairs, and how most large-scale click models in the literature handle IDs; It's available off the shelf in libraries such as scikit-learn's FeatureHasher.</p>
+
+    <h4 id="why-hash-collisions" class="why">Why not give every user a private embedding?</h4>
+
+    <p>A table with a row for each of billions of users, at 16 to 64 numbers a row, is hundreds of gigabytes before counting the optimiser state, and most users have too little history to train their row. Hashing, probabilistic inclusion and shared low-dimensional vectors are all ways to spend the memory where the data is.</p>
+  </section>
+
+  <section id="trees">
+    <h2><span class="num">06</span>Capturing interactions: boosted trees as a feature transform</h2>
+
+    <p>A logistic regression adds up one contribution per feature, so it can't say that a young viewer who has clicked this advertiser before is far more likely to click than the sum of those two facts suggests. It needs the two features to be combined into one. By hand, the textbook ways to do that are binning a number into ranges (so the model can learn a step-shaped curve) and crossing two categorical features into one new one with the Cartesian product, then pruning the crosses that don't help. With hundreds of features that's a lot of hand work, and a lot of crosses that never get used.</p>
+
+    <p>The 2014 Facebook paper had a better idea. A boosted tree ensemble learns exactly these combinations automatically, so use the trees to build the features and let a linear model weigh them. Concretely, train a model of <strong>gradient-boosted decision trees</strong> (GBDT), a sequence of small trees where each one corrects the mistakes of the ones before. Then treat each tree as a categorical feature whose value is the index of the leaf an impression falls into. Each tree therefore contributes one active entry to a one-hot vector, and the linear classifier is trained on the concatenated vectors. In the paper's own example there are two trees, the first with three leaves and the second with two. An impression that lands in leaf 2 of the first and leaf 1 of the second becomes the vector [0, 1, 0, 1, 0].</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The 2014 hybrid: boosted trees turn features into rules, a linear model weighs them
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 350" xmlns="http://www.w3.org/2000/svg">
+<rect x="250" y="30" width="200" height="48" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="250" y="30" width="200" height="48" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="350.0" y="51" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">AD IMPRESSION</text>
+<text x="350.0" y="65" text-anchor="middle" font-size="10" class="dim">user, ad and context features</text>
+<path d="M350,82 L350,100 L180,100 L180,118" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M350,100 L520,100 L520,118" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="40" y="120" width="280" height="100" rx="4" fill="#fbbf24" opacity="0.14"/>
+<rect x="40" y="120" width="280" height="100" rx="4" fill="#fbbf24" opacity="0.0"/>
+<rect x="40" y="120" width="280" height="100" rx="4" fill="none" stroke="#fbbf24" stroke-width="1.2"/>
+<text x="180" y="140" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">TREE 1</text>
+<text x="180" y="156" text-anchor="middle" font-size="9.5" class="dim">age &lt; 25 and clicked this advertiser</text>
+<rect x="60" y="168" width="70" height="38" rx="4" fill="#818cf8" opacity="0.12"/>
+<rect x="60" y="168" width="70" height="38" rx="4" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="95.0" y="191" text-anchor="middle" font-size="10" class="dim">leaf 1</text>
+<rect x="140" y="168" width="70" height="38" rx="4" fill="#34d399" opacity="0.35"/>
+<rect x="140" y="168" width="70" height="38" rx="4" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="175.0" y="191" text-anchor="middle" font-size="10" class="" fill="#e9e9ef">leaf 2</text>
+<rect x="220" y="168" width="70" height="38" rx="4" fill="#818cf8" opacity="0.12"/>
+<rect x="220" y="168" width="70" height="38" rx="4" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="255.0" y="191" text-anchor="middle" font-size="10" class="dim">leaf 3</text>
+<rect x="380" y="120" width="280" height="100" rx="4" fill="#fbbf24" opacity="0.14"/>
+<rect x="380" y="120" width="280" height="100" rx="4" fill="#fbbf24" opacity="0.0"/>
+<rect x="380" y="120" width="280" height="100" rx="4" fill="none" stroke="#fbbf24" stroke-width="1.2"/>
+<text x="520" y="140" text-anchor="middle" font-size="11.5" font-weight="700" class="" fill="#fbbf24">TREE 2</text>
+<text x="520" y="156" text-anchor="middle" font-size="9.5" class="dim">ad CTR last week &gt; 2%</text>
+<rect x="440" y="168" width="80" height="38" rx="4" fill="#34d399" opacity="0.35"/>
+<rect x="440" y="168" width="80" height="38" rx="4" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="480.0" y="191" text-anchor="middle" font-size="10" class="" fill="#e9e9ef">leaf 1</text>
+<rect x="530" y="168" width="80" height="38" rx="4" fill="#818cf8" opacity="0.12"/>
+<rect x="530" y="168" width="80" height="38" rx="4" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="570.0" y="191" text-anchor="middle" font-size="10" class="dim">leaf 2</text>
+<rect x="224" y="246" width="44" height="28" rx="4" fill="#818cf8" opacity="0.1"/>
+<rect x="224" y="246" width="44" height="28" rx="4" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="246" y="265" text-anchor="middle" font-size="11" class="" fill="#e9e9ef">0</text>
+<rect x="276" y="246" width="44" height="28" rx="4" fill="#34d399" opacity="0.35"/>
+<rect x="276" y="246" width="44" height="28" rx="4" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="298" y="265" text-anchor="middle" font-size="11" class="" fill="#e9e9ef">1</text>
+<rect x="328" y="246" width="44" height="28" rx="4" fill="#818cf8" opacity="0.1"/>
+<rect x="328" y="246" width="44" height="28" rx="4" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="350" y="265" text-anchor="middle" font-size="11" class="" fill="#e9e9ef">0</text>
+<rect x="380" y="246" width="44" height="28" rx="4" fill="#34d399" opacity="0.35"/>
+<rect x="380" y="246" width="44" height="28" rx="4" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="402" y="265" text-anchor="middle" font-size="11" class="" fill="#e9e9ef">1</text>
+<rect x="432" y="246" width="44" height="28" rx="4" fill="#818cf8" opacity="0.1"/>
+<rect x="432" y="246" width="44" height="28" rx="4" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="454" y="265" text-anchor="middle" font-size="11" class="" fill="#e9e9ef">0</text>
+<path d="M180,224 L180,236 L298,236 L298,244" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M520,224 L520,236 L402,236 L402,244" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="256" text-anchor="start" font-size="10.5" font-weight="700" class="" fill="#34d399">ONE-HOT OF LEAVES</text>
+<text x="20" y="272" text-anchor="start" font-size="9.5" class="dim">3 entries + 2 entries</text>
+<path d="M350,278 L350,292" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="180" y="294" width="340" height="46" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="180" y="294" width="340" height="46" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="350.0" y="314" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SPARSE LOGISTIC REGRESSION</text>
+<text x="350.0" y="328" text-anchor="middle" font-size="10" class="dim">one weight per leaf, learned online</text>
+<text x="540" y="321" text-anchor="start" font-size="11" font-weight="700" class="" fill="#e9e9ef">-&gt; p(click)</text>
+      </svg>
+      <div class="diagram-caption">Follow one impression downward. In each tree it lands in exactly one leaf, so the linear model sees a short binary vector of fired rules.</div>
+    </div>
+
+    <h3 id="6-1-what-a-leaf-is">6.1 What a leaf is</h3>
+
+    <p>A path from the root of a tree to a leaf is a rule: "age below 25, and has clicked this advertiser before, and the ad's CTR last week above 2%". All the impressions that follow the same path share a leaf, so the leaf's one-hot entry says "this rule fired". Its weight in the linear model says how much the rule adds to the click log-odds, so fitting the linear model on the vector is learning weights for a set of rules the trees found. They describe it as "a supervised feature encoding that converts a real-valued vector into a compact binary-valued vector".</p>
+
+    <p>How are the trees themselves built? Each round, the boosting procedure computes for every training impression the gradient and the second derivative of the log loss with respect to the current model's raw score <span>$F_i$</span>. With <span>$p_i = \sigma(F_i)$</span> these are</p>
+
+    <div class="eq-block"><span>$$g_i = p_i - y_i, \qquad h_i = p_i\,(1-p_i)$$</span></div>
+
+    <p>where <span>$g_i$</span> says which way each prediction should move and <span>$h_i$</span> says how sure the loss is about that direction. A new small tree is grown to split the impressions so that the impressions in each leaf have gradients pointing the same way, and each leaf is given the Newton step <span>$-\sum g_i/(\sum h_i + \lambda)$</span> over its members, where <span>$\lambda$</span> is a small regulariser. Then the score becomes <span>$F \leftarrow F + \eta\cdot\text{tree}$</span> with a small learning rate <span>$\eta$</span>. Facebook uses the classic L2-TreeBoost form of gradient boosting, which fits each new tree to the residuals of the previous ones. Nothing in this procedure needs hand-built crosses, and the trees pick the features and thresholds that help.</p>
+
+    <p>We can see the effect on a small synthetic dataset where the label depends on feature interactions, a threshold on two features together and an exclusive-or of two others. Our experiment grows boosted trees by hand in numpy, then compares three models on held-out data, with NE reported relative to the trees-only model, as in the paper's table.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Boosted trees, then logistic regression on their leaves</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(5)
+
+def make(n):            # 6 features, labels hinge on interactions
+    X = rng.normal(size=(n, 6))
+    z = (-3.0 + 2.5*((X[:, 0] &gt; 0.3) &amp; (X[:, 1] &lt; -0.2))
+         + 2.0*((X[:, 2] &gt; 0) ^ (X[:, 3] &gt; 0)) + 0.5*X[:, 4])
+    return X, (rng.random(n) &lt; 1/(1+np.exp(-z))).astype(float)
+
+def grow(X, g, h, depth):         # one regression tree on Newton targets
+    if depth == 0 or len(g) &lt; 200:
+        return -g.sum()/(h.sum() + 1.0)
+    best = (0.0, None)
+    for f in range(X.shape[1]):
+        for t in np.quantile(X[:, f], [.2, .4, .5, .6, .8]):
+            L = X[:, f] &lt;= t
+            gl, hl = g[L].sum(), h[L].sum()
+            gr, hr = g[~L].sum(), h[~L].sum()
+            s = gl**2/(hl + 1) + gr**2/(hr + 1) - g.sum()**2/(h.sum() + 1)
+            if s &gt; best[0]:
+                best = (s, (f, t, L))
+    if best[1] is None:
+        return -g.sum()/(h.sum() + 1.0)
+    f, t, L = best[1]
+    return (f, t, grow(X[L], g[L], h[L], depth-1),
+            grow(X[~L], g[~L], h[~L], depth-1))
+
+def leaf_ids(tree, X):            # leaf index for every row
+    out = np.zeros(len(X), int); nxt = [0]
+    def walk(node, rows):
+        if not isinstance(node, tuple):
+            out[rows] = nxt[0]; nxt[0] += 1; return
+        f, t, l, r = node
+        m = X[rows, f] &lt;= t
+        walk(l, rows[m]); walk(r, rows[~m])
+    walk(tree, np.arange(len(X))); return out, nxt[0]
+
+def leaf_val(tree, X):
+    out = np.zeros(len(X))
+    def walk(node, rows):
+        if not isinstance(node, tuple):
+            out[rows] = node; return
+        f, t, l, r = node
+        m = X[rows, f] &lt;= t
+        walk(l, rows[m]); walk(r, rows[~m])
+    walk(tree, np.arange(len(X))); return out
+
+def boost(X, y, trees=40, depth=3, lr=0.3):
+    F = np.zeros(len(y)); T = []
+    for _ in range(trees):
+        p = 1/(1 + np.exp(-F))
+        t = grow(X, p - y, p*(1 - p), depth)
+        F += lr*leaf_val(t, X); T.append(t)
+    return T, lr
+
+def raw(T, lr, X):
+    return lr*sum(leaf_val(t, X) for t in T)
+
+def onehot(T, X):
+    cols = []
+    for t in T:
+        ids, k = leaf_ids(t, X)
+        M = np.zeros((len(X), k)); M[np.arange(len(X)), ids] = 1
+        cols.append(M)
+    return np.hstack(cols)
+
+def lr_fit(A, y, steps=60, l2=1.0):
+    A = np.c_[np.ones(len(A)), A]; b = np.zeros(A.shape[1])
+    for _ in range(steps):
+        p = 1/(1 + np.exp(-A@b))
+        g = A.T@(p - y) + l2*b
+        H = (A*(p*(1 - p))[:, None]).T@A + l2*np.eye(len(b))
+        b -= np.linalg.solve(H, g)
+    return b
+
+def lr_pred(b, A):
+    return 1/(1 + np.exp(-(np.c_[np.ones(len(A)), A]@b)))
+
+def ne(y, p):
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    ll = -np.mean(y*np.log(p) + (1 - y)*np.log(1 - p))
+    c = y.mean()
+    return ll/-(c*np.log(c) + (1 - c)*np.log(1 - c))
+
+Xa, ya = make(60_000); Xb, yb = make(60_000)    # train, test
+T, lr = boost(Xa, ya)
+p_tree = 1/(1 + np.exp(-raw(T, lr, Xb)))
+p_lr = lr_pred(lr_fit(Xa, ya), Xb)
+Ta, Tb = onehot(T, Xa), onehot(T, Xb)
+p_hyb = lr_pred(lr_fit(Ta, ya), Tb)
+ref = ne(yb, p_tree)
+for name, p in [(&quot;trees only&quot;, p_tree), (&quot;LR on raw features&quot;, p_lr),
+                (&quot;trees -&gt; leaves -&gt; LR&quot;, p_hyb)]:
+    print(f&quot;{name:24} NE {ne(yb, p):.4f}  relative {ne(yb, p)/ref:7.2%}&quot;)
+print(&quot;leaf features:&quot;, Ta.shape[1])</code></pre>
+      <div class="tryit-out">Relative to the trees-only model (NE <code>0.7831</code>), logistic regression on the raw features is at <code>118.69%</code> (NE <code>0.9294</code>), and the hybrid, which feeds the <code>320</code> leaf indicators to a logistic regression, is at <code>99.10%</code> (NE <code>0.7760</code>).</div>
+    </details>
+
+    <p>A logistic regression on the raw features, with no interactions, is 18.7% worse in NE than the trees, because the label here is mostly interaction. Meanwhile the hybrid, a logistic regression over 320 leaf features (40 trees, up to eight leaves each), beats even the trees it was built from, by 0.9%. In the Facebook paper's real data the direction is the same, with different sizes: LR plus trees reached 96.58% of the trees-only NE and logistic regression alone 99.43%, so the combination won by more than 3.4% relative to plain LR. In that paper's words, a typical feature-engineering experiment gains a couple of tenths of a percent, so a gain of that size is large. They also observe that "LR and Tree models used in isolation have comparable prediction accuracy", and that it's their combination that "yield an accuracy leap".</p>
+
+    <h3 id="6-2-why-two-models">6.2 Why two models and not one</h3>
+
+    <p>The hybrid has a practical reason beyond accuracy. Boosted trees train in batch, and the paper says building a model of hundreds of trees from hundreds of millions of instances "may take more than 24 hours" on a single core, and a few hours with enough cores and memory. Cheap to train, the linear layer on top can learn online, impression by impression. So the trees, which change slowly, can be retrained daily, while the linear layer keeps up with the latest minutes. Section 07 shows why that matters. This design also keeps models compact: the paper varies the number of trees from 1 to 2,000 with at most 12 leaves each, and nearly all the NE gain comes from the first 500 trees, with the last 1,000 adding less than 0.1%. Prediction time grows with the number of trees, so they stay small.</p>
+
+    <p>What goes into the trees? Facebook separates <strong>contextual features</strong>, which depend only on the current request (the device, the page, the hour), from <strong>historical features</strong>, which summarise earlier interactions (an ad's CTR over the last week, a user's average CTR, the count of clicks on this ad). Historical features turned out to dominate. All of the top 10 features by importance were historical, and among the top 20 only two were contextual, even though historical features made up roughly three quarters of the feature set. Dropping the contextual features cost less than 1% of NE, and dropping the historical ones cost 4.5%. Contextual features still matter in one case. For a new user or a new ad, with no history, they're the only signal, so they're indispensable for cold start.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model structure</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Logistic regression, hand-made crosses</td><td>Fast, online, easy to inspect</td><td>Interactions come from engineers' guesses</td></tr>
+        <tr><td>Boosted trees alone</td><td>Finds interactions and thresholds automatically</td><td>Batch training; slow to adapt; large at inference if many trees</td></tr>
+        <tr><td>Trees as a feature transform + online LR (2014)</td><td>Automatic interactions with an online layer; NE gain of 3.4% over plain LR</td><td>Two models to keep in sync; trees must be retrained when features change</td></tr>
+        <tr><td>Deep network with embeddings</td><td>Learns feature representations; scales with data</td><td>Heavy memory and compute; hard to train fresh</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Facebook chose the hybrid in the 2014 paper. Its engineers published a deep model, the subject of section 09, in 2019, and a November 2024 engineering post describes replacing DLRM-style architectures with sequence-learning ones, the subject of section 10. The same trick, a tree ensemble as a learned encoder for a simpler model, is common wherever tabular data meets a need for fast updates, and using a tree ensemble as a learned encoder for a simpler model is a general technique for tabular data.</p>
+  </section>
+
+  <section id="fresh">
+    <h2><span class="num">07</span>Staying fresh: online learning and the joiner</h2>
+
+    <p>Dev launched his shoe campaign at nine this morning. By noon his ad has been shown to tens of thousands of people and the model should already know whether it's working. A model trained last night has seen none of those impressions. Facebook's team measured how much that costs. They trained a model on one day of data and tested it on each of the next six days, and the NE got steadily worse as the gap grew. For both the boosted trees and the hybrid, retraining daily and not weekly improved NE by roughly 1%.</p>
+
+    <p>A daily retrain is the cheapest way to get fresher, and the paper takes it further. If the trees change slowly and the linear layer is cheap, the linear layer can be trained online: update it on each labelled impression as it arrives, and publish the new weights to the ranker periodically.</p>
+
+    <h3 id="7-1-learning-rates">7.1 One learning rate per feature</h3>
+
+    <p>Online learning raises a question that batch training hides: how big should each update be? In stochastic gradient descent, every weight moves a step of size <span>$\eta$</span> times its gradient. A single global rate that decays over time is the textbook choice, and it's a bad one for sparse features. A thought experiment from Google's 2013 paper shows why. Suppose we're estimating the head probability of ten coins with logistic regression, and each round one coin is flipped and we update that coin's weight. A coin that's been flipped a thousand times needs small steps. A coin flipped twice needs large ones. A global schedule that shrinks over time shrinks the step for the rare coin too, even in rounds when it wasn't flipped.</p>
+
+    <p>One fix gives each weight a learning rate that depends on how much that weight has been updated. For weight <span>$i$</span> at step <span>$t$</span>, the per-coordinate rate used in the Facebook paper (proposed in Google's 2013 paper) is</p>
+
+    <div class="eq-block"><span>$$\eta_{t,i} \;=\; \frac{\alpha}{\beta + \sqrt{\sum_{j=1}^{t} g_{j,i}^{2}}}$$</span></div>
+
+    <p>where <span>$g_{j,i}$</span> is the gradient for weight <span>$i$</span> at step <span>$j$</span>, and <span>$\alpha$</span> and <span>$\beta$</span> are two constants (the paper uses <span>$\alpha = 0.1$</span>, <span>$\beta = 1$</span>). That sum of squared gradients grows only when feature <span>$i$</span> is present in an impression, so a popular feature's rate shrinks quickly and a rare feature keeps a large rate until it has data. Facebook compared five schedules for the logistic regression layer. Per-coordinate rates won, with an NE almost 5% lower than the worst, a per-weight rate that shrinks as <span>$1/n_{t,i}$</span>. A global rate did poorly for the reason in the coin example, and the paper says it failed because it decreases the rate for features with few instances "too fast".</p>
+
+    <p>Google's team in 2013 combined the same per-coordinate rates with an update rule called <strong>FTRL-Proximal</strong>, which also produces sparse models, with many weights exactly zero. For each weight it keeps two numbers: <span>$z_i$</span>, an accumulated gradient adjusted for the step sizes already taken, and <span>$n_i$</span>, the sum of squared gradients. A weight is computed from them when needed:</p>
+
+    <div class="eq-block"><span>$$w_{t,i} \;=\; \begin{cases} 0 &amp; |z_i| \le \lambda_1 \\[4pt] -\left(\dfrac{\beta+\sqrt{n_i}}{\alpha} + \lambda_2\right)^{-1}\big(z_i - \operatorname{sgn}(z_i)\,\lambda_1\big) &amp; \text{otherwise} \end{cases}$$</span></div>
+
+    <p>Here <span>$\lambda_1$</span> and <span>$\lambda_2$</span> are the L1 and L2 regularisation strengths. While the accumulated evidence <span>$|z_i|$</span> stays below <span>$\lambda_1$</span> the weight is exactly zero, and a zero weight needs no memory, so a model with billions of possible coefficients fits in RAM. Once the evidence crosses the threshold, the weight is the regularised value above. Underneath it's the same Adagrad-like idea as the learning rate, with an L1 penalty that works properly in the online setting.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How the linear layer learns</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Batch retrain, weekly</td><td>Simple; can reuse the same job as the trees</td><td>Stale: about 1% NE worse than daily in the 2014 test</td></tr>
+        <tr><td>Online SGD, one global learning rate</td><td>Fresh</td><td>Rare features get their rate decayed by traffic they never saw; clearly worse NE</td></tr>
+        <tr><td>Online SGD, per-coordinate rates</td><td>Fresh; best NE of the five schedules tested; model is a single weight per feature</td><td>Needs the joiner infrastructure below</td></tr>
+        <tr><td>Bayesian online probit regression (BOPR)</td><td>Same NE within 0.2%; gives a full predictive distribution, useful for explore/exploit</td><td>Two numbers per weight, so twice the memory and two dot products per prediction</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Facebook chose per-coordinate online logistic regression in 2014 and noted that BOPR's NE was within 0.18% of it, so the extra uncertainty estimate came at a cost in model size. Adagrad, the same idea applied to deep networks, is the optimiser DLRM's authors used in 2019 for their accuracy experiments.</p>
+
+    <h3 id="7-2-the-joiner">7.2 Where do the labels come from?</h3>
+
+    <p>To learn online, the trainer needs a stream of examples, each with its features and its label, arriving seconds after the impression. That's harder than it sounds, because the two halves of an example are born in different places at different times. The impression, with all the features the ranker used, gets logged when the ad is shown. Zoya's phone sends the click later, if at all. And there's no event for "didn't click".</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The online loop: impressions wait for their click, then train the model
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="120" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="120" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="80.0" y="75" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">RANKER</text>
+<text x="80.0" y="89" text-anchor="middle" font-size="10" class="dim">scores ads for</text>
+<text x="80.0" y="103" text-anchor="middle" font-size="10" class="dim">Zoya's request</text>
+<path d="M146,75 L190,75" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="168" y="66" text-anchor="middle" font-size="9" class="dim">shown</text>
+<rect x="196" y="36" width="170" height="98" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="196" y="36" width="170" height="98" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="281.0" y="68" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">ONLINE JOINER</text>
+<text x="281.0" y="82" text-anchor="middle" font-size="10" class="dim">FIFO queue + hash map</text>
+<text x="281.0" y="96" text-anchor="middle" font-size="10" class="dim">keyed by request ID</text>
+<text x="281.0" y="110" text-anchor="middle" font-size="10" class="dim">waits a fixed window</text>
+<rect x="210" y="190" width="140" height="56" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="210" y="190" width="140" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="280.0" y="215" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">MEERA'S TAP</text>
+<text x="280.0" y="229" text-anchor="middle" font-size="10" class="dim">click stream</text>
+<path d="M280,186 L280,140" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M372,85 L416,85" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="394" y="76" text-anchor="middle" font-size="9" class="dim">(x, y)</text>
+<rect x="422" y="50" width="120" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="422" y="50" width="120" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="482.0" y="75" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAINING STREAM</text>
+<text x="482.0" y="89" text-anchor="middle" font-size="10" class="dim">click or no-click</text>
+<text x="482.0" y="103" text-anchor="middle" font-size="10" class="dim">label attached</text>
+<path d="M548,85 L580,85" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="586" y="50" width="98" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="586" y="50" width="98" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="635.0" y="75" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAINER</text>
+<text x="635.0" y="89" text-anchor="middle" font-size="10" class="dim">per-coordinate</text>
+<text x="635.0" y="103" text-anchor="middle" font-size="10" class="dim">online LR</text>
+<path d="M635,126 L635,270 L80,270 L80,126" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="358" y="264" text-anchor="middle" font-size="9.5" class="dim">new model published to the ranker periodically (cadence unpublished)</text>
+<text x="20" y="304" text-anchor="start" font-size="10" class="" fill="#f472b6">If the click stream stalls, every impression leaves as a non-click, the trainer sees CTR near zero, and predictions collapse.</text>
+<text x="20" y="322" text-anchor="start" font-size="10" class="dim">Too short a window loses late clicks; too long a window delays training and holds more impressions in memory.</text>
+      </svg>
+      <div class="diagram-caption">Follow the amber arrows. An impression sits in the joiner until its window ends, then leaves as a click or a non-click. The pink note is the failure the 2014 paper warns about.</div>
+    </div>
+
+    <p>The 2014 paper describes an experimental piece of infrastructure it calls the <strong>online joiner</strong>. Every time the feed refreshes, a request ID is generated, and each ad shown, with its features, is added to an impression stream under that ID. Clicks flow into a click stream carrying the same ID. This joiner is a distributed stream-to-stream join built on a <strong>HashQueue</strong>: a first-in-first-out queue that holds impressions for a fixed window, with a hash map for quick lookup by request ID. When a click arrives it finds its impression in the map and labels it positive. Only when an impression's window expires without a click is it released as a negative example. Next the labelled stream goes to the trainer, which publishes models back to the ranker, closing what the authors call "a tight closed loop".</p>
+
+    <p>That waiting window is a real tradeoff. If it's too long, training data is delayed and the joiner has to hold more impressions in memory. If it's too short, some clicks arrive after their impression has already been released as a negative, so the click coverage, the share of clicks successfully joined, falls and the empirical CTR is biased low. With windows that need manageable memory, the authors report the bias is "decimal points of a percentage", and that it can be measured and corrected. That tension is sharper for conversions, which can arrive days after an impression, and Meta's 2023 Lattice post says engagement can span seconds for a click to days for a purchase.</p>
+
+    <p>They also warn about failure. If the click stream becomes stale because of some data infrastructure issue, the joiner emits training data with a very small or zero CTR, and the online trainer "will begin to incorrectly predict very low, or close to zero probabilities of click". Because the expected value of an ad depends on its click probability, the system may then show fewer ads at all. Their suggestion is anomaly detection that automatically disconnects the trainer from the joiner when the real-time data distribution changes abruptly.</p>
+
+    <p>Only the linear layer learns online, because trees are rebuilt from scratch in a batch job that takes hours, and there's no cheap way to update a tree's structure from one impression. A linear layer over fixed leaves is just a weight per leaf, and one impression changes a handful of those weights. This split puts the slow, expensive part on a daily schedule and the fast, cheap part on a continuous one.</p>
+
+    <p>Streaming joins that attach late labels to earlier events show up in fraud detection (chargebacks arrive weeks later), in recommendations (a watch completes minutes after it starts) and in A/B testing; Google's Photon system, cited by the 2014 paper, does the same for its ad clicks.</p>
+  </section>
+
+  <section id="downsampling">
+    <h2><span class="num">08</span>Too much data: downsampling negatives, and the formula that undoes it</h2>
+
+    <p>Dev's ad is one of more than a million advertisers' ads, and a fraction of one day's impressions already holds hundreds of millions of rows. Training on all of it is expensive, and most of those rows are non-clicks that carry little information each. An obvious way to cut cost is to keep a random fraction of the rows.</p>
+
+    <p>Facebook tested this in 2014. With uniform subsampling, using 10% of the data gave an NE only 1% worse than using all of it, and calibration didn't change. Uniform sampling is attractive because the model trained on the sample can be used as it is. A second method keeps every click and only a fraction <span>$w$</span> of the non-clicks, <strong>negative downsampling</strong>. They tried <span>$w \in \{0.1, 0.01, 0.001, 0.0001\}$</span> and found the best performance at <span>$w = 0.025$</span>. Negative downsampling can both speed up training and improve the model, and it leaves a trap, because the data the model learns from no longer has the click rate the world has.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Negative downsampling and the way back
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 270" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="150" height="90" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="150" height="90" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="75" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">LOGGED IMPRESSIONS</text>
+<text x="95.0" y="89" text-anchor="middle" font-size="10" class="dim">1,000,000 rows</text>
+<text x="95.0" y="103" text-anchor="middle" font-size="10" class="dim">10,000 clicks (1.0%)</text>
+<path d="M176,85 L206,85" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="212" y="40" width="160" height="90" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="212" y="40" width="160" height="90" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="292.0" y="68" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">KEEP</text>
+<text x="292.0" y="82" text-anchor="middle" font-size="10" class="dim">all 10,000 clicks</text>
+<text x="292.0" y="96" text-anchor="middle" font-size="10" class="dim">5% of 990,000 others</text>
+<text x="292.0" y="110" text-anchor="middle" font-size="10" class="dim">= 49,500 rows</text>
+<path d="M378,85 L408,85" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="414" y="40" width="130" height="90" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="414" y="40" width="130" height="90" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="479.0" y="68" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAIN</text>
+<text x="479.0" y="82" text-anchor="middle" font-size="10" class="dim">59,500 rows</text>
+<text x="479.0" y="96" text-anchor="middle" font-size="10" class="dim">click rate 16.8%</text>
+<text x="479.0" y="110" text-anchor="middle" font-size="10" class="dim">predicts p</text>
+<path d="M550,85 L570,85" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="574" y="40" width="110" height="90" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="574" y="40" width="110" height="90" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="629.0" y="68" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RECALIBRATE</text>
+<text x="629.0" y="82" text-anchor="middle" font-size="10" class="dim">q = p / (p +</text>
+<text x="629.0" y="96" text-anchor="middle" font-size="10" class="dim">(1 - p) / w)</text>
+<text x="629.0" y="110" text-anchor="middle" font-size="10" class="dim">w = 0.05</text>
+<text x="20" y="172" text-anchor="start" font-size="10.5" class="dim">Why it works: the sample keeps every click but only a fraction w of non-clicks, so the odds of a click are inflated by 1/w.</text>
+<text x="20" y="196" text-anchor="start" font-size="10.5" class="dim">Example: the model says p = 0.168 in the sampled world. True odds = w x p/(1-p) = 0.05 x 0.202 = 0.0101.</text>
+<text x="20" y="220" text-anchor="start" font-size="10.5" class="" fill="#e9e9ef">So q = 0.0101 / 1.0101 = 0.0100, the 1% we started with.</text>
+<text x="20" y="248" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Skip the last box and every ad looks about seventeen times more clickable than it is.</text>
+      </svg>
+      <div class="diagram-caption">Illustrative numbers: a 1% click rate and 5% of non-clicks kept. The model learns in the middle box's world, and the right-hand box undoes the shift before anyone sees a probability.</div>
+    </div>
+
+    <h3 id="8-1-recalibration">8.1 Undoing the shift</h3>
+
+    <p>If the real click rate is 0.1% and we keep 1% of the non-clicks, the sampled data's click rate becomes roughly 10%, and a well-trained model will predict values near 10%. Fed to an auction, every ad would look roughly a hundred times more clickable than it is. Facebook's fix is a one-line formula, <span>$q = p/(p + (1-p)/w)$</span>, and it's easy to derive. Work in odds, the ratio of the probability of a click to the probability of no click. In the real data a click has probability <span>$P$</span>, so the odds are <span>$P/(1-P)$</span>. In the sample every click is kept and only a fraction <span>$w$</span> of the non-clicks, so the click is relatively <span>$1/w$</span> times more common among the rows the model sees, and the odds it learns are</p>
+
+    <div class="eq-block"><span>$$\frac{p}{1-p} \;=\; \frac{P}{w\,(1-P)} \qquad\Longrightarrow\qquad \frac{q}{1-q} \;=\; w\,\frac{p}{1-p}$$</span></div>
+
+    <p>Here <span>$p$</span> is the model's output in the sampled world, <span>$q$</span> is the true click probability we want, and <span>$w$</span> is the fraction of non-clicks kept. Solving the second equation for <span>$q$</span> gives</p>
+
+    <div class="eq-block"><span>$$q \;=\; \frac{w\,p}{w\,p + (1-p)} \;=\; \frac{p}{p + (1-p)/w}$$</span></div>
+
+    <p>which is the paper's formula. In words, multiply the model's odds by the fraction of negatives kept and convert back to a probability. Take the example from the diagram: <span>$p = 0.168$</span> and <span>$w = 0.05$</span>. Here the odds are 0.168/0.832 = 0.202, times 0.05 is 0.0101, and <span>$q = 0.0101/1.0101 = 0.0100$</span>, the original 1%. Because the formula is monotone in <span>$p$</span>, it never changes the ranking of ads, and that's why AUC doesn't notice whether it was applied.</p>
+
+    <p>Now the experiment. We generate two million impressions with a 2% click rate, train a logistic regression by Newton's method on all of them, then train another on a sample that keeps every click and 5% of the non-clicks, then apply the recalibration to the second model's outputs. We report calibration, NE and AUC on two million fresh impressions.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Downsample negatives, then recalibrate with q = p / (p + (1 - p) / w)</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(7)
+
+def make(n):
+    X = rng.normal(size=(n, 4))
+    z = -5.0 + 1.2*X[:, 0] + 0.8*X[:, 1] - 0.6*X[:, 2]
+    return X, (rng.random(n) &lt; 1/(1+np.exp(-z))).astype(float)
+
+def fit(X, y, steps=12):
+    A = np.c_[np.ones(len(X)), X]
+    b = np.zeros(A.shape[1])
+    for _ in range(steps):                   # Newton steps
+        p = 1/(1+np.exp(-A@b))
+        H = (A*(p*(1-p))[:, None]).T@A
+        b -= np.linalg.solve(H, A.T@(p-y))
+    return b
+
+def predict(b, X):
+    return 1/(1+np.exp(-(np.c_[np.ones(len(X)), X]@b)))
+
+def ne(y, p):
+    ll = -np.mean(y*np.log(p) + (1-y)*np.log(1-p))
+    c = y.mean()
+    return ll/-(c*np.log(c) + (1-c)*np.log(1-c))
+
+def auc(y, p):
+    r = np.argsort(np.argsort(p)) + 1
+    n1 = y.sum(); n0 = len(y) - n1
+    return (r[y == 1].sum() - n1*(n1+1)/2)/(n1*n0)
+
+Xtr, ytr = make(2_000_000)
+Xte, yte = make(2_000_000)
+w = 0.05                                     # keep 5% of negatives
+keep = (ytr == 1) | (rng.random(len(ytr)) &lt; w)
+print(f&quot;rows {len(ytr):,} -&gt; {keep.sum():,}, &quot;
+      f&quot;CTR {ytr.mean():.4f} -&gt; {ytr[keep].mean():.4f}&quot;)
+p_full = predict(fit(Xtr, ytr), Xte)
+p_down = predict(fit(Xtr[keep], ytr[keep]), Xte)
+q = p_down/(p_down + (1 - p_down)/w)         # recalibration
+for name, p in [(&quot;full data&quot;, p_full), (&quot;downsampled&quot;, p_down),
+                (&quot;downsampled + recal&quot;, q)]:
+    print(f&quot;{name:20} calib {p.mean()/yte.mean():5.2f}  &quot;
+          f&quot;NE {ne(yte, p):.4f}  AUC {auc(yte, p):.4f}&quot;)</code></pre>
+      <div class="tryit-out">Negative downsampling cuts the two million training rows to <code>137,499</code> and raises the click rate from <code>0.0197</code> to <code>0.2866</code>. The downsampled model's calibration is <code>9.89</code> and its NE is <code>2.7173</code>, while its AUC is <code>0.8560</code>, exactly the full-data model's. After <code>q = p / (p + (1 - p) / w)</code> the calibration is <code>1.01</code> and the NE is <code>0.7883</code>, the same as the model trained on all two million rows (<code>1.01</code>, <code>0.7883</code>, AUC <code>0.8560</code>).</div>
+    </details>
+
+    <p>The sample is 14.5 times smaller (137,499 rows against two million), and its click rate rose from 2.0% to 28.7%. Its calibration is 9.89, so its probabilities are almost ten times too high, and its NE is 2.72, worse than the 1.0 of a model that knows nothing. Its AUC is 0.8560, identical to the full model's, because the ranking is intact. After the recalibration, calibration is 1.01, NE is 0.7883, and both match the model trained on everything. So the trick saves roughly 93% of the rows and costs nothing measurable here, as long as the correction is applied. A ranker whose AUC is fine can still be wrong by a factor of ten in the auction.</p>
+
+    <h3 id="8-2-weights-or-recalibration">8.2 Reweighting instead of recalibrating</h3>
+
+    <p>Google's 2013 paper takes a different route to the same end. It subsamples at the level of the search query: it keeps every query where at least one ad was clicked, and a fraction <span>$r$</span> of the queries where none was. To keep predictions unbiased, each kept example in a no-click query gets an importance weight <span>$\omega = 1/r$</span> that scales up its loss and gradient, and everything else gets weight 1. Because the sampling probability is known, the expected weighted loss of the sample equals the loss on the full data: for an event sampled with probability <span>$s = 1/\omega$</span>, its expected contribution is <span>$s \cdot \omega \cdot \ell = \ell$</span>. They report that even fairly aggressive subsampling of unclicked queries has "a very mild impact on accuracy".</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Cutting the training data</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Uniform subsampling</td><td>No correction needed; 10% of the data cost 1% NE in 2014</td><td>Throws away clicks, the rare and valuable rows</td></tr>
+        <tr><td>Negative downsampling + recalibration (Facebook, 2014)</td><td>Keeps every click; best NE at <span>$w = 0.025$</span>; faster training</td><td>Raw output is not a probability; the correction must be applied exactly and consistently</td></tr>
+        <tr><td>Subsample with importance weights (Google, 2013)</td><td>Output is calibrated from the start; unbiased in expectation</td><td>Large weights raise the variance of gradient updates; sampling by query keeps related ads together</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Facebook downsampled and recalibrated. Google reweighted. Both rest on the same fact, that the sampling rate is under the engineer's control and therefore known exactly, so the shift can be undone with arithmetic instead of estimation. Rare-event problems in fraud detection, medical diagnosis and anomaly detection use the same pair of moves, and the fraud-detection case study in this series (chapter 42) meets it again.</p>
+
+    <h4 id="why-downsample-improves" class="why">Why would throwing away data improve the model?</h4>
+
+    <p>Facebook reports it as an empirical finding: the best NE appeared at a downsampling rate of 0.025, not at the full dataset. It doesn't give a mechanism, so we shouldn't claim one as fact. A plausible reading, which is ours and not the paper's, is that with a 99 to 1 imbalance the gradient from many easy negatives swamps the few informative positives, and rebalancing gives positives a louder voice per training step. Either way, the lesson is that the data volume that suits the model is a number to tune, and not "all of it".</p>
+  </section>
+
+<section id="dlrm">
+    <h2><span class="num">09</span>Going deep: embeddings, interactions and DLRM</h2>
+
+    <p>The hybrid of section 06 has two limits. Trees only see features that engineers prepared, such as a user's click count over the last seven days, and the ID features are handled by a single weight each. A neural network can learn its own representation of each ID, as section 05 sketched, but it needs a design for categorical data, because the networks used for images and text expect dense numbers. In 2019 Meta published and open-sourced its answer, the <strong>Deep Learning Recommendation Model</strong>, DLRM (Naumov et al., arXiv, May 31, 2019).</p>
+
+    <p>Its authors describe DLRM as a union of two lines of work. One comes from recommender systems, where matrix factorization represents each user and each item as a vector and predicts a rating as their dot product. Predictive analytics supplies the other, where where models for click prediction moved from logistic regression to networks that turn categorical values into embeddings. DLRM takes the embedding idea from both and adds an explicit way to combine them.</p>
+
+    <h3 id="9-1-the-four-steps">9.1 The four steps</h3>
+
+    <div class="diagram">
+      <div class="diagram-title">DLRM: embeddings for IDs, a small MLP for numbers, dot products in between
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 400" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="330" width="150" height="50" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="330" width="150" height="50" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="352" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">DENSE FEATURES</text>
+<text x="95.0" y="366" text-anchor="middle" font-size="10" class="dim">ad age, past CTR, hour...</text>
+<rect x="200" y="330" width="112" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="200" y="330" width="112" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="256.0" y="352" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">USER ID</text>
+<text x="256.0" y="366" text-anchor="middle" font-size="10" class="dim">categorical</text>
+<rect x="322" y="330" width="112" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="322" y="330" width="112" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="378.0" y="352" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">AD ID</text>
+<text x="378.0" y="366" text-anchor="middle" font-size="10" class="dim">categorical</text>
+<rect x="444" y="330" width="112" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="444" y="330" width="112" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="500.0" y="352" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">PAGE ID</text>
+<text x="500.0" y="366" text-anchor="middle" font-size="10" class="dim">categorical</text>
+<rect x="566" y="330" width="112" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="566" y="330" width="112" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="622.0" y="352" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">INTEREST</text>
+<text x="622.0" y="366" text-anchor="middle" font-size="10" class="dim">categorical</text>
+<path d="M95,326 L95,296" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M256,326 L256,296" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M378,326 L378,296" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M500,326 L500,296" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M622,326 L622,296" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="250" width="150" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="250" width="150" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="95.0" y="269" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">BOTTOM MLP</text>
+<text x="95.0" y="283" text-anchor="middle" font-size="10" class="dim">numbers -&gt; vector (d)</text>
+<rect x="200" y="250" width="112" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="200" y="250" width="112" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="256.0" y="269" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">EMBEDDING</text>
+<text x="256.0" y="283" text-anchor="middle" font-size="10" class="dim">table lookup (d)</text>
+<rect x="322" y="250" width="112" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="322" y="250" width="112" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="378.0" y="269" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">EMBEDDING</text>
+<text x="378.0" y="283" text-anchor="middle" font-size="10" class="dim">table lookup (d)</text>
+<rect x="444" y="250" width="112" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="444" y="250" width="112" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="500.0" y="269" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">EMBEDDING</text>
+<text x="500.0" y="283" text-anchor="middle" font-size="10" class="dim">table lookup (d)</text>
+<rect x="566" y="250" width="112" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="566" y="250" width="112" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="622.0" y="269" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">EMBEDDING</text>
+<text x="622.0" y="283" text-anchor="middle" font-size="10" class="dim">table lookup (d)</text>
+<path d="M95,246 L95,214 L350,214" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M256,246 L256,214 L350,214" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M378,246 L378,214 L350,214" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M500,246 L500,214 L350,214" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M622,246 L622,214 L350,214" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="190" y="164" width="320" height="46" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="190" y="164" width="320" height="46" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="350.0" y="184" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">INTERACTION</text>
+<text x="350.0" y="198" text-anchor="middle" font-size="10" class="dim">dot product of every pair: n(n-1)/2 numbers</text>
+<path d="M350,160 L350,130" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="362" y="150" text-anchor="start" font-size="9.5" class="dim">append the dense vector</text>
+<rect x="190" y="84" width="320" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="190" y="84" width="320" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="103" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TOP MLP</text>
+<text x="350.0" y="117" text-anchor="middle" font-size="10" class="dim">layers of 512, 256 ... -&gt; one number</text>
+<path d="M350,80 L350,58" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="250" y="22" width="200" height="34" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="250" y="22" width="200" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="350.0" y="43" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">SIGMOID  -&gt;  pCTR</text>
+<text x="540" y="120" text-anchor="start" font-size="10" class="dim">Embedding tables hold most of</text>
+<text x="540" y="134" text-anchor="start" font-size="10" class="dim">the parameters (GBs each);</text>
+<text x="540" y="148" text-anchor="start" font-size="10" class="dim">MLPs hold the compute.</text>
+      </svg>
+      <div class="diagram-caption">Read bottom to top. Every sparse feature and the processed dense vector become vectors of the same length d, and the interaction layer takes every pairwise dot product.</div>
+    </div>
+
+    <p>Walk the diagram from the bottom. First, every categorical feature, such as the user ID, the ad ID, the page ID or an interest, is looked up in its own embedding table and becomes a vector of length <span>$d$</span>. Second, the numerical features, such as the ad's age or its CTR last week, go through a small multilayer perceptron, the <strong>bottom MLP</strong>, which outputs a vector of the same length <span>$d$</span>. Now every input is a vector in the same space. Third comes the step that gives the model its character, the <strong>interaction layer</strong>. It takes the dot product of every pair of those vectors. For <span>$n$</span> vectors there are <span>$n(n-1)/2$</span> pairs, and each dot product is a single number measuring how much the two vectors agree. Fourth, those numbers are concatenated with the processed dense vector and fed to a second MLP, the <strong>top MLP</strong>, whose single output goes through a sigmoid and becomes the predicted CTR.</p>
+
+    <p>Take a toy case with <span>$d = 2$</span>. Zoya's user vector is <span>$(1.0, 0.5)$</span> and the shoe ad's vector is <span>$(0.8, 1.0)$</span>. Their dot product is <span>$1.0\times0.8 + 0.5\times1.0 = 1.3$</span>, a large positive number meaning "these two point the same way". An ad vector of <span>$(-0.6, 0.2)$</span> gives <span>$-0.5$</span>. During training, the embeddings move so that users and ads that tend to produce clicks end up with high dot products, the matrix-factorization idea carried over to every pair of features, with the top MLP deciding how much each pair matters.</p>
+
+    <h3 id="9-2-why-dot-products">9.2 Why dot products, and what they cost</h3>
+
+    <p>The interaction layer descends from the <strong>factorization machine</strong> (Rendle, 2010), which adds second-order terms to a linear model: <span>$\hat y = b + w^\top x + \sum_{i<j}\langle v_i, v_j\rangle x_i x_j$</span>. Here <span>$x$</span> is the sparse feature vector, <span>$w$</span> a weight per feature, and <span>$v_i \in \mathbb{R}^d$</span> an embedding per feature, so the weight on the pair <span>$(i,j)$</span> isn't a free parameter but the dot product of two low-dimensional vectors. That factorisation is what lets the model learn a pair's effect for combinations never seen together, as long as each feature was seen with others. DLRM uses the same pairwise dot products, between whole embeddings, and passes them through an MLP, where the factorization machine adds them up linearly.</p>
+
+    <p>Cost is quadratic in the number of vectors but linear in <span>$d$</span>. The public Criteo ad datasets in the paper's accuracy experiments have 13 continuous and 26 categorical features. That makes 27 vectors, 351 pairs, and with a 16-number dense vector a 367-wide input to the top MLP. They argue explicitly against going further: other designs such as Deep and Cross or xDeepFM build higher-order terms, and they write that interactions "beyond second-order... may not necessarily be worth the additional computational/memory cost". On the Criteo Kaggle data, a DLRM and a Deep and Cross network sized to about 540 million parameters each reached similar accuracy, with DLRM slightly ahead and without much tuning.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Take a DLRM-style model with 26 embedding tables, each with 10 million rows of 16 numbers stored as 4-byte floats (illustrative sizes; Meta doesn't publish its production tables). How much memory do the embedding tables need? Compare with an MLP whose layers are a few hundred units wide. What does that say about how to spread the model across GPUs?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>26 &times; 10,000,000 &times; 16 &times; 4 bytes is roughly 16.6 GB for the embeddings. An MLP with a few layers of 512 units has well under a million weights, a few megabytes. Embeddings hold almost all the parameters, and MLPs hold almost all the arithmetic, since each example touches only a handful of rows from each table but pushes a dense vector through every layer.</p>
+        <p>That mismatch drives the training design. So the paper spreads the embedding tables across devices (model parallelism), because copying a multi-gigabyte table to every GPU is out of the question. It replicates the MLPs and splits the batch (data parallelism), because they're small and compute-heavy. Combining the two needs an all-to-all exchange of embedding vectors, which the authors implement with a "butterfly shuffle". In 2021 a follow-up from Meta (Mudigere et al.) reported training such models with up to 12 trillion parameters, at a 40 times speedup over earlier systems.</p>
+      </details>
+    </div>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Combining features in a neural CTR model</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Concatenate embeddings, then an MLP</td><td>Simplest; can in principle learn any interaction</td><td>MLPs learn dot-product-like interactions inefficiently and need much data</td></tr>
+        <tr><td>Factorization machine (sum of pairwise dot products)</td><td>Explicit second-order terms with linear cost in <span>$d$</span>; few parameters</td><td>Shallow; no higher-order or non-linear structure</td></tr>
+        <tr><td>DLRM (pairwise dots, then an MLP)</td><td>Explicit pairs plus learned non-linearity; open-source reference; scales with embedding size</td><td>Pairs only; quadratic in the number of features; huge embedding tables</td></tr>
+        <tr><td>Cross networks (Deep and Cross, xDeepFM)</td><td>Explicit higher-order interactions</td><td>More parameters and compute for gains DLRM's authors judged marginal</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Meta chose DLRM in 2019, published it as a benchmark for hardware and software co-design, and kept building on factorization-machine ideas. Its 2025 GEM post says the model extends an architecture called Wukong built from stacked factorization machines with cross-layer attention, the same pairwise-interaction idea scaled up. That pattern, embeddings for IDs plus an interaction step plus an MLP, is shared by Wide and Deep, DeepFM and most large-scale ad and feed models, which makes DLRM a good template to know.</p>
+
+    <p>Every embedding has the same length because the interaction layer takes dot products, and a dot product needs two vectors of equal length. That's also why the numerical features go through a bottom MLP whose output is exactly <span>$d$</span> numbers long. It brings them into the same space as the embeddings, so they can interact with the categorical features as equals.</p>
+  </section>
+
+  <section id="foundation">
+    <h2><span class="num">10</span>From features to sequences to a foundation model</h2>
+
+    <p>DLRM answered the question of how to combine features, and it left another open: where the features come from. Look at what the historical features of section 06 are. "Number of ads Zoya clicked in the last seven days" is an aggregate that a person decided to compute, and it throws away what Zoya did in what order. Meta's engineers made the same point in November 2024, and their post lists the costs of hand-built aggregates. They lose the order of a person's events, they lose the details attached to each event once events are counted together, they depend on engineers' intuition about which aggregates matter, and they pile up overlapping variants that raise storage and compute costs.</p>
+
+    <h3 id="10-1-events-not-aggregates">10.1 Events, not aggregates</h3>
+
+    <p>The fix described in that post is to feed the model the raw sequence. Each event, such as an ad click or a purchase, becomes an <strong>event-based feature</strong>, "a single coherent object that captures all key information about an event", with attributes like ad category and a timestamp. An event model turns each into an embedding with a time encoding to preserve recency and order, and a sequence model reads the whole history. Attention over a long sequence is quadratic in its length, and the post says multi-head attention pooling cuts the cost from <span>$O(N\times N)$</span> to <span>$O(M\times N)$</span>, where <span>$N$</span> is the maximum sequence length and <span>$M$</span> is a tunable number. Meta reports that this gave "2&ndash;4% more conversions on select segments" and that the work was extended with jagged-tensor kernels and a Jagged Flash Attention module, since users' histories have different lengths.</p>
+
+    <p>We should be careful about what the post claims: it reports conversion gains on selected segments and gives no click-through numbers, and the baseline and the experiment design aren't published.</p>
+
+    <h3 id="10-2-one-model-for-many-surfaces">10.2 One model for many surfaces and goals</h3>
+
+    <p>A second kind of fragmentation lived in the model fleet. Over the years Meta had built a separate predictor for each surface, such as Feed, Stories and Reels, and each objective, such as clicks, video views and purchases. Meta's May 11, 2023 post on <strong>Meta Lattice</strong> says these had been "numerous smaller, siloed models", with hundreds of models separately trained, served and tuned. Lattice replaced many of them with one model that learns across datasets and goals. It's built on a transformer backbone as what Meta calls a Deep and Hierarchical Ensemble Network, with trillions of parameters trained on hundreds of billions of examples from thousands of data domains. It reports that joint optimisation gave about an 8% improvement in ads quality, and that early Instagram results showed knowledge shared across Feed, Stories and Reels. It also names two ideas that are easy to miss: handling delayed feedback by giving the model temporal awareness, since engagement ranges from seconds to days, and balancing many objectives with Pareto optimality and techniques such as MetaBalance so that engineers needn't hand-tune weights for thousands of domains and tens of objectives.</p>
+
+    <h3 id="10-3-a-model-that-teaches-models">10.3 A model that teaches the others</h3>
+
+    <p>The next step is the one with the most interesting tradeoff. On November 10, 2025, Meta described its <strong>Generative Ads Recommendation Model</strong>, GEM, as the largest foundation model for recommendation in the industry, trained on thousands of GPUs. GEM does not serve most traffic itself. Meta says it has hundreds of user-facing <strong>vertical models</strong> (VMs), the models that score ads inside the latency budget, and GEM's role is to improve them through post-training knowledge transfer. In direct transfer, GEM passes knowledge to the vertical models trained on the same data. In hierarchical transfer, it distils into domain-specific foundation models which then teach the vertical ones. That post also describes a Student Adapter, a lightweight component that refines the teacher's outputs using recent ground-truth data so the student isn't trained on stale supervision.</p>
+
+    <p>Distillation is a technique with simple arithmetic. A big teacher model produces a probability <span>$p_T$</span> for each example, and a small student is trained to match it as well as the real label <span>$y$</span>:</p>
+
+    <div class="eq-block"><span>$$\mathcal{L}_{\text{student}} \;=\; (1-\lambda)\,\ell\big(y,\,p_S\big) \;+\; \lambda\,\ell\big(p_T,\,p_S\big)$$</span></div>
+
+    <p>where <span>$p_S$</span> is the student's prediction, <span>$\ell$</span> is the log loss (the second term uses the teacher's probability as a soft label), and <span>$\lambda$</span> sets how much to trust the teacher. Soft labels from a teacher carry information a 0/1 click doesn't, such as "this is a 4% impression and not a 0.1% one". Meta hasn't published GEM's exact transfer objective in the posts we use, and the formula above is the textbook form, not a description of GEM. Soft labels matter for the auction as well: if the teacher is calibrated, a student that matches it inherits calibrated probabilities, and if the teacher's output goes stale, the student's does too, the problem the Student Adapter is described as addressing.</p>
+
+    <p>Meta reports results in terms it chose. Meta's 2025 post says that after GEM's launch, ad conversions rose 5% on Instagram and 3% on Facebook Feed in the second quarter, and that architecture changes in the third quarter doubled the gain from each added unit of data and compute. In October 2026 a follow-up post said GEM now runs as a single central model trained across Meta's ad platforms, that the central model brought an 18.9% conversion improvement and a 12% click-through improvement across surfaces, and that conversion uplift over the past year for targeted users was 5.8% on Facebook, 4.1% on Instagram and 1.6% off-site. It also introduced a new architecture called Kunlun and a transfer method called LoopFM, which Meta says doubles transfer effectiveness at no added compute or latency. These are Meta's own numbers. None of the posts states the baselines, test populations or measurement periods behind them, so they show direction and scale and can't be reproduced or compared.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Organising the model fleet</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>A separate model per surface and objective</td><td>Each can be tuned for its own latency and data; failures stay local</td><td>Hundreds of models to train, serve and monitor; small surfaces have little data</td></tr>
+        <tr><td>One multi-domain, multi-objective model (Lattice, 2023)</td><td>Shares knowledge across surfaces; fewer models; helps new surfaces with little data</td><td>One model must meet every surface's latency; objectives can conflict</td></tr>
+        <tr><td>A foundation model that teaches vertical models (GEM, 2025)</td><td>Giant model trained offline with no serving limit; small models stay fast; knowledge flows to all of them</td><td>The student is limited by serving cost; transfer can go stale; a distillation pipeline to maintain</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Meta's fleet design changed twice in two years: from siloed models to one unified model in 2023, and from a unified model to a large teacher with many students in 2025. Serving budget, covered in section 11, seems to be what kept it from being a single model all the way, though no post says so directly. That budget also moved. In March 2026 the same team described an Adaptive Ranking Model that serves models of LLM scale inside the real-time limit, and the October 2026 post describes the central model's gains continuing to flow to the user-facing models. Teacher-student systems of this kind are standard wherever a model too slow to serve still has knowledge worth keeping, from speech recognition to search ranking.</p>
+
+    <h4 id="why-not-serve-gem" class="why">Why not just serve the biggest model on every request?</h4>
+
+    <p>Each request scores thousands of ads inside a latency limit of roughly a tenth of a second for the ranking model, and the traffic is enormous, so the cost per ad scored multiplies into a very large compute bill. A model that's too slow doesn't produce a better ad, it produces a late page. Distillation spends the expensive compute once, offline, and lets the cheap models inherit what it learned. Meta's 2026 serving work shows the balance can shift as hardware and software improve.</p>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">11</span>Serving: one request through the funnel</h2>
+
+    <p>We have a model, or a family of them, and Zoya's feed is waiting. Section 01's arithmetic returns in a new form: the model that gives the best predictions can't score every eligible ad, so the system narrows the field in stages. Meta's December 2024 post on <strong>Andromeda</strong>, its ads retrieval system, puts numbers on the first stage: retrieval takes tens of millions of ad candidates down to a few thousand, and ranking, with larger models that predict value for the person and the advertiser, picks the final ads. Facebook's 2014 paper describes the same shape, a cascade of classifiers of increasing computational cost, and says its own model is the last one.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">From every eligible ad to the one Zoya sees
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="60" width="150" height="150" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="60" width="150" height="150" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="118" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">ELIGIBLE ADS</text>
+<text x="95.0" y="132" text-anchor="middle" font-size="10" class="dim">tens of millions</text>
+<text x="95.0" y="146" text-anchor="middle" font-size="10" class="dim">targeting + budget +</text>
+<text x="95.0" y="160" text-anchor="middle" font-size="10" class="dim">policy filters</text>
+<path d="M176,135 L200,135" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="206" y="75" width="140" height="120" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="206" y="75" width="140" height="120" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="276.0" y="118" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">RETRIEVAL</text>
+<text x="276.0" y="132" text-anchor="middle" font-size="10" class="dim">a few thousand</text>
+<text x="276.0" y="146" text-anchor="middle" font-size="10" class="dim">cheap score each,</text>
+<text x="276.0" y="160" text-anchor="middle" font-size="10" class="dim">index + model</text>
+<path d="M352,135 L376,135" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="382" y="90" width="150" height="90" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="382" y="90" width="150" height="90" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="457.0" y="118" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">RANKING</text>
+<text x="457.0" y="132" text-anchor="middle" font-size="10" class="dim">predicts pCTR and</text>
+<text x="457.0" y="146" text-anchor="middle" font-size="10" class="dim">other action rates</text>
+<text x="457.0" y="160" text-anchor="middle" font-size="10" class="dim">(stage sizes unpublished)</text>
+<path d="M538,135 L562,135" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="568" y="100" width="116" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="568" y="100" width="116" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="626.0" y="125" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">AUCTION</text>
+<text x="626.0" y="139" text-anchor="middle" font-size="10" class="dim">bid x rate +</text>
+<text x="626.0" y="153" text-anchor="middle" font-size="10" class="dim">quality -&gt; winner</text>
+<text x="20" y="244" text-anchor="start" font-size="10" class="dim">Ranking has to finish inside a sub-second budget (Meta, 2026) while the same user signals serve every ad in the request.</text>
+<text x="20" y="264" text-anchor="start" font-size="10" class="dim">Retrieval's job is recall: do not lose the ad that would have won. Ranking's job is calibrated probabilities.</text>
+<text x="20" y="284" text-anchor="start" font-size="10" class="dim">The He et al. (2014) paper describes a cascade of classifiers of rising cost, and studies only the last stage.</text>
+      </svg>
+      <div class="diagram-caption">Each stage looks at far fewer ads, so it can spend far more computation on each. Counts in the first two boxes come from Meta's 2024 retrieval post; the others are unpublished.</div>
+    </div>
+
+    <p>Retrieval has a different job from ranking. It must not lose the ad that would have won, so its measure is recall, and Andromeda reports +6% recall on selected segments along with +8% ad quality. It does this with a hierarchical index in which ads are organised in layers, so inference visits only the most relevant nodes and the cost grows sub-linearly with the number of ads, and Meta says the index and the retrieval model are trained jointly, which it contrasts with two-tower networks plus nearest-neighbour search, the design in the YouTube chapter. Ranking's job is calibrated probabilities for a few thousand ads, using rich features of the person, the ad and the pair.</p>
+
+    <p>Here is one request, with the details that are published and a flag where they aren't. Meta doesn't publish a per-stage latency breakdown, only the totals below.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Request</span><span>Zoya scrolls and the feed asks for an ad slot. It fetches her recent activity and context. Which stores hold these and how long the fetch takes is unpublished.</span></li>
+      <li><span class="st-lane">Retrieve</span><span>Eligibility rules, such as targeting, budget and policy, plus the retrieval model reduce tens of millions of ads to a few thousand (Meta, December 2024). Latency for this stage isn't published.</span></li>
+      <li><span class="st-lane">Rank</span><span>The ranking model predicts click and conversion rates for each candidate. Meta's March 2026 post says the system returns ads with sub-second latency and a bounded latency of roughly 100 ms for the model, and that user signals are computed once per request and shared across all candidates, not recomputed for each ad.</span></li>
+      <li><span class="st-lane">Calibrate</span><span>Predictions pass through whatever correction keeps them calibrated. In 2013 Google applied a calibration layer with per-slice correction functions, and Meta probably still applies something similar, though its posts don't describe a calibration layer.</span></li>
+      <li><span class="st-lane">Auction</span><span>Each ad's total value is computed from its bid, its estimated action rate and its quality. Dev's ad, in our story, has the highest value and wins, and a price is computed. Neither the formula nor the pricing rule is published.</span></li>
+      <li><span class="st-lane">Log</span><span>The impression is logged with its features and a request ID. If Zoya taps, a click event with the same ID goes to the click stream, and the joiner of section 07 attaches the label.</span></li>
+    </ol>
+
+    <h3 id="11-1-sharing-computation">11.1 Computing once per request, not once per ad</h3>
+
+    <p>The step that most shapes ranking cost is the sharing in step 3. Most of what the model knows about the request is about the person: her recent events, her embeddings, the processed sequence. Only the ad side differs between candidates. A model that recomputes the person's part for each ad pays for it a few thousand times, and one that computes it once and reuses it pays once. With illustrative costs, if the person's part costs 20 units and each ad's part costs 1, then scoring 2,000 ads costs 2,000 &times; 21 = 42,000 units one way and 20 + 2,000 = 2,020 the other, roughly twenty times less. Meta's 2026 post describes this under the name request-oriented computation sharing, with an in-kernel broadcast that shares the request-level embeddings across candidates inside the GPU kernel, and long user sequences processed once per request. It reports the model's complexity at on the order of 10 GFLOPs per token, the figure for top-tier LLMs, a scale of around one trillion parameters, 35% model-FLOPs utilisation, and, since launching on Instagram in the fourth quarter of 2025, a 3% increase in ad conversions and a 5% increase in click-through rate for targeted users. Embedding tables there approach terabyte size and are sharded across GPU cards.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to score the candidates</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Run the whole model once per candidate ad</td><td>Simplest; any architecture works</td><td>The person's part is recomputed thousands of times</td></tr>
+        <tr><td>Cheap model for everyone, expensive model for a short list</td><td>Cost falls with each stage; the 2014 cascade</td><td>An early mistake can't be repaired later; stages must agree</td></tr>
+        <tr><td>Compute the request's part once and broadcast it (2026)</td><td>Lets much larger models fit in the budget</td><td>Needs architectures built to split into a request part and an ad part</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Facebook's choice in 2014 was the cascade, and in 2026 the sharing design, and the two aren't exclusive: retrieval and ranking are the cascade, and sharing makes the last stage affordable. Facebook's 2014 paper has a simpler version of the same cost thinking. Prediction time depends on the number of trees, so the paper measured how much accuracy each extra tree buys and stopped adding them when the gain fell below 0.1%. Search engines, feeds and marketplaces all use the same shape of cascade, because scoring everything is never affordable.</p>
+  </section>
+
+  <section id="labels">
+    <h2><span class="num">12</span>Training data, labels and the feedback loop</h2>
+
+    <p>Every stage so far learns from logs, and the logs record what an earlier version of the system chose to show. This section looks at what that does to the labels and to the auction.</p>
+
+    <p>Start with the label. A click is an event, but a non-click is the absence of one, so each impression is held in the joiner until its window ends, and the label is "no click yet" frozen at that time. For purchases the window problem is worse. Meta's 2023 post says engagement spans seconds to days, and a model trained on the labels available at the window's end sees a purchase rate that's biased low for the newest impressions. That paper reports the bias for clicks is small and measurable, and it suggests it can be corrected. Meta doesn't say how it handles the conversion case beyond building temporal awareness into the model.</p>
+
+    <h3 id="12-1-who-gets-a-label">12.1 Only shown ads get labels</h3>
+
+    <p>The deeper problem is selection. An ad that never wins an auction never gets shown, so it never gets a click or a non-click, so the model never learns that it was good. Dev's brand-new shoe ad starts with no history. If the model gives it a pessimistic prediction, it loses the auction, gets no impressions, and the prediction never has a chance to be corrected. Section 03's winner's curse is the other side: ads that did win are over-predicted, so the data on winners overstates their quality.</p>
+
+    <p>A standard remedy is to explore, showing some ads mainly to learn about them. To do that the model needs a measure of how uncertain it is. Facebook's 2014 paper notes that its Bayesian online model, BOPR, outputs a full predictive distribution over the click probability, so percentiles of that distribution can drive explore-and-exploit schemes, an advantage over plain logistic regression, whose output is a single number. For a simple version, give each ad a Beta distribution over its click rate. An ad shown 100 times with 1 click has a posterior with mean 2/102, roughly 2.0%, and a standard deviation near 1.4 percentage points. An ad with 1,000 clicks in 100,000 impressions has a mean of 1.0% and a standard deviation of roughly 0.03 points. The new ad's plausible range is wide and the old ad's is narrow, so an auction that scores the new ad by an optimistic quantile of its distribution gives it a chance, and once it has data the quantile tightens towards the mean. These numbers are illustrative, and the technique is called Thompson sampling when it draws a random sample from the posterior instead. Meta probably explores in some form, since an ad with no history can't otherwise win its first impressions, but how much its auction explores is unpublished.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Treating a new ad</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Score it by its predicted CTR from features alone</td><td>No extra machinery</td><td>A pessimistic guess becomes permanent; data never arrives</td></tr>
+        <tr><td>Boost its score by an optimism bonus that shrinks with data</td><td>Gives new ads a chance; self-correcting</td><td>Costs some revenue while exploring; needs uncertainty estimates</td></tr>
+        <tr><td>Sample from the posterior (Thompson sampling)</td><td>Principled; explores in proportion to uncertainty</td><td>Randomness makes outcomes harder to reproduce and debug</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Google's 2013 team is blunt about the larger loop. Calibration fixes, they write, can't come with theoretical guarantees because "the inherent feedback loop in the system" means that today's model determines tomorrow's training data. Meta's posts describe the loop operationally: GEM is "continuously trained online" so its foundation models refresh, and the vertical models consume its knowledge, which closes the loop at every level of the stack.</p>
+
+
+    <p>Bandit algorithms in news feeds and video recommenders explore in the same way, and A/B platforms often keep a small slice of traffic for random choices.</p>
+
+    <h4 id="why-not-random-ads" class="why">Why not show random ads to some users to collect clean data?</h4>
+
+    <p>Random ads are bad ads for the user, and the advertiser who pays for them is charged for impressions that rarely convert. A little uniform randomness gives clean data and a visible cost in revenue and user experience. Posterior-guided exploration concentrates the cost on ads whose value is most uncertain, and the sources we've read don't say which approach Meta uses.</p>
+  </section>
+
+  <section id="evaluation">
+    <h2><span class="num">13</span>How Meta knows a change helped</h2>
+
+    <p>Dev's ad earned a click from Zoya, but we can't judge a model from one click. Published practice has two layers, just like the YouTube chapter's. Offline, the team replays logged data and computes the metrics of section 04. Online, it runs an experiment on live traffic.</p>
+
+    <p>Offline, the 2014 paper evaluates on "an arbitrary week of the 4th quarter of 2013", split into training and testing, and replays them in order to simulate the streaming setting. Its metrics are NE and calibration, always as relative numbers. Google's 2013 paper instead evaluates with <strong>progressive validation</strong>: each example is predicted first and used for training afterwards, so the loss is always measured on data the model hasn't yet seen, exactly as it would at serving time, and every example serves for both training and testing. Both break the loss down by slice, such as country, query topic and layout, because an average hides which slice went wrong. A model can look better overall and be badly miscalibrated on one segment.</p>
+
+    <p>Offline numbers have a known limit, and it's the one we met in section 12. They're computed on impressions the old system chose, so a new model that would pick different ads can't be fully judged on them. That's why every serious system ends with a live experiment. A common way to size one is the rule of thumb that to detect a difference <span>$\delta$</span> between two proportions near <span>$p$</span> with about 80% power at the usual 5% significance, each arm needs about <span>$16\,p(1-p)/\delta^{2}$</span> observations. For a 1% click rate and a relative improvement of 0.5%, <span>$\delta = 5\times10^{-5}$</span>, which gives roughly 63 million impressions per arm, an illustrative figure that ignores the fact that one user's impressions are correlated. At the scale of these platforms that's a matter of hours, so small relative improvements can be detected and acted on.</p>
+
+    <p>Ad auctions add a complication that most experiments don't have: the two arms compete for the same advertisers' budgets. If the treatment arm's model wins more auctions for some advertiser, it spends that advertiser's budget faster, and the control arm sees less of it. A simple user-level split can then misestimate the effect. This is a general concern for experiments in marketplaces, and Meta probably has a way to handle it, but the papers and posts we've read don't describe one.</p>
+
+    <p>Publicly, results come mostly in the form of lifts on business metrics. Meta's 2023 Lattice post reports about 8% on ads quality, the 2024 sequence-learning post 2 to 4% more conversions on selected segments, the Andromeda post +6% recall and +8% ad quality, the 2025 GEM post 5% and 3% conversion gains on Instagram and Facebook Feed, and the 2026 posts the 18.9% and 12% figures and the 3% and 5% for the ranking model. None of these gives a baseline, a sample or a confidence interval, and a lift of "up to" or "on selected segments" can't be added up across posts. They tell us the direction and the order of magnitude of what these teams care about, and little more.</p>
+
+    <h4 id="why-offline-online" class="why">Why can't we skip A/B tests and trust a good offline NE?</h4>
+
+    <p>Because the offline set was produced by the system we're trying to improve and because the metric isn't the goal. A model can have a better NE on logged impressions and win auctions differently, with different advertisers' budgets and different users' experiences. Only an experiment is a place where the model's own choices meet real people, and where revenue, advertiser outcomes and user feedback are all visible.</p>
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">14</span>What went wrong, and what it cost</h2>
+
+    <p>Meta hasn't published post-mortems of ads-ranking incidents, so this section lists failure modes the papers and posts describe or warn about, and marks which are published and which we're reasoning from the design.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What happens</th><th>What it costs</th><th>What the design does</th></tr></thead>
+      <tbody>
+        <tr><td>The click stream goes stale (published warning, 2014)</td><td>The trainer sees near-zero CTR and predicts near zero; the system may show fewer ads</td><td>Anomaly detection disconnects the trainer from the joiner when the live data's distribution changes abruptly</td></tr>
+        <tr><td>Downsampling applied without recalibration (reasoned from section 08)</td><td>Every ad looks many times too clickable; prices and ranking against other formats are distorted</td><td>Apply <span>$q = p/(p+(1-p)/w)$</span> at one place, and monitor calibration by slice</td></tr>
+        <tr><td>Hundreds of siloed models (published, 2023)</td><td>Compute and engineering cost; small surfaces starved of data</td><td>Lattice, then GEM teaching the vertical models</td></tr>
+        <tr><td>Aggregated features hide order and detail (published, 2024)</td><td>Information lost before the model sees it; costly overlapping features</td><td>Event-based features and sequence models</td></tr>
+        <tr><td>Winner's curse (reasoned; section 03)</td><td>Winning ads are systematically over-predicted, so advertisers are under-charged and weaker ads win</td><td>Calibrate on the slice that wins, not only on all data</td></tr>
+        <tr><td>Delayed conversions (published, 2023)</td><td>Recent impressions look worse than they are</td><td>Temporal awareness in the model; unpublished otherwise</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+
+    <p>One more risk doesn't show up in a table. This system optimises a proxy: predicted clicks or conversions stand in for value to the person and the advertiser. An optimiser pushed hard on a proxy finds whatever raises the proxy, whether or not it raises the value, and clickable isn't the same as good. Meta's published material says little about how it checks this, and the YouTube chapter in this series shows what the same problem looked like at another company.</p>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">15</span>The whole system</h2>
+
+    <p>We can now draw the full design. On the left is Zoya's request, from the app to the winning ad, with Dev's bid and budget entering the auction. On the right is the loop that keeps the models current: logs, the joiner, training data with downsampled negatives, a slow trainer for the big models and a fast one for the online layer, and an experiment gate before anything reaches production.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The whole design: Zoya's request online, the learning loop offline
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 520" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11.5" font-weight="700" class="" fill="#e9e9ef">ONLINE: one request, well under a second</text>
+<text x="380" y="24" text-anchor="start" font-size="11.5" font-weight="700" class="" fill="#e9e9ef">OFFLINE: the loop that keeps models current</text>
+<rect x="20" y="40" width="300" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="300" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="170.0" y="57" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">MEERA'S APP</text>
+<text x="170.0" y="71" text-anchor="middle" font-size="10" class="dim">feed asks for ads</text>
+<path d="M170,84 L170,100" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="102" width="300" height="40" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="102" width="300" height="40" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="170.0" y="119" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">RETRIEVAL</text>
+<text x="170.0" y="133" text-anchor="middle" font-size="10" class="dim">tens of millions -&gt; a few thousand</text>
+<path d="M170,146 L170,162" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="164" width="300" height="54" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="164" width="300" height="54" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="170.0" y="181" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">RANKING</text>
+<text x="170.0" y="195" text-anchor="middle" font-size="10" class="dim">features + embeddings -&gt; pCTR, pConversion</text>
+<text x="170.0" y="209" text-anchor="middle" font-size="10" class="dim">calibration layer on top</text>
+<path d="M170,222 L170,238" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="240" width="300" height="54" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="240" width="300" height="54" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="170.0" y="257" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">AUCTION</text>
+<text x="170.0" y="271" text-anchor="middle" font-size="10" class="dim">total value = bid, action rate, quality</text>
+<text x="170.0" y="285" text-anchor="middle" font-size="10" class="dim">winner shown; price computed</text>
+<rect x="20" y="316" width="140" height="54" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="316" width="140" height="54" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="90.0" y="340" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">DEV'S BID</text>
+<text x="90.0" y="354" text-anchor="middle" font-size="10" class="dim">budget, goal, bid</text>
+<path d="M90,312 L90,298" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="180" y="316" width="140" height="54" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="180" y="316" width="140" height="54" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="250.0" y="333" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">PACING</text>
+<text x="250.0" y="347" text-anchor="middle" font-size="10" class="dim">spend over the day</text>
+<text x="250.0" y="361" text-anchor="middle" font-size="10" class="dim">(details unpublished)</text>
+<path d="M250,312 L250,298" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M324,267 L362,267 L362,70 L376,70" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="40" width="300" height="54" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="380" y="40" width="300" height="54" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="530.0" y="57" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">LOGS</text>
+<text x="530.0" y="71" text-anchor="middle" font-size="10" class="dim">impression stream (features, request ID)</text>
+<text x="530.0" y="85" text-anchor="middle" font-size="10" class="dim">click and conversion streams</text>
+<path d="M530,98 L530,114" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="116" width="300" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="380" y="116" width="300" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="530.0" y="135" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">ONLINE JOINER</text>
+<text x="530.0" y="149" text-anchor="middle" font-size="10" class="dim">attach labels after the wait window</text>
+<path d="M530,164 L530,180" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="182" width="300" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="380" y="182" width="300" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="530.0" y="201" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAINING DATA</text>
+<text x="530.0" y="215" text-anchor="middle" font-size="10" class="dim">downsample non-clicks, keep weights</text>
+<path d="M530,230 L530,246" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="248" width="300" height="60" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="380" y="248" width="300" height="60" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="530.0" y="268" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAINERS</text>
+<text x="530.0" y="282" text-anchor="middle" font-size="10" class="dim">slow: big deep models, days of data</text>
+<text x="530.0" y="296" text-anchor="middle" font-size="10" class="dim">fast: online layer, near real time</text>
+<path d="M530,312 L530,328" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="380" y="330" width="300" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="380" y="330" width="300" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="530.0" y="349" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">A/B TEST + CALIBRATION CHECKS</text>
+<text x="530.0" y="363" text-anchor="middle" font-size="10" class="dim">promote only if live metrics hold</text>
+<path d="M376,352 L338,352 L338,192 L324,192" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="408" text-anchor="start" font-size="10.5" class="dim">A model trained on yesterday's logs changes which ads win today, and that changes tomorrow's logs.</text>
+<text x="20" y="430" text-anchor="start" font-size="10.5" class="dim">Published for the late stages: sub-second latency (2026), retrieval of a few thousand ads (2024), online joiner (2014).</text>
+<text x="20" y="452" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Unpublished: stage sizes after retrieval, exact auction formula and pricing, refresh cadences, per-stage latencies.</text>
+<text x="20" y="482" text-anchor="start" font-size="10.5" class="dim">Meta's 2025-2026 posts describe one very large foundation model (GEM) that teaches the many smaller serving models.</text>
+      </svg>
+      <div class="diagram-caption">Online path on the left, learning loop on the right. Dev's bid enters the auction; Zoya's reaction leaves through the logs and comes back as a better model.</div>
+    </div>
+
+    <p>Follow one tap through the picture. Zoya's feed asks for an ad. Retrieval cuts the eligible set to a few thousand, the ranking model predicts her click and conversion probabilities for each, and a calibration layer keeps those numbers honest. At the auction, each ad's predicted rate is multiplied by its bid, adds quality, and picks Dev's shoes. Her tap leaves through the click stream, meets its impression in the joiner, becomes a labelled example, and reaches the trainers. Tomorrow's model has a little more evidence about shoe ads and runners in Bengaluru.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Component</th><th>What it does</th><th>Added because</th></tr></thead>
+      <tbody>
+        <tr><td>Expected-value ranking</td><td>Orders ads by bid &times; predicted rate</td><td>Highest bid wins loses money (&sect;02)</td></tr>
+        <tr><td>Calibration layer</td><td>Keeps probabilities meaning what they say</td><td>The auction multiplies them by bids (&sect;03)</td></tr>
+        <tr><td>NE and slice metrics</td><td>Scores probabilities, not just orderings</td><td>Accuracy and AUC are blind to scale (&sect;04)</td></tr>
+        <tr><td>Hashed, embedded features</td><td>Bounded memory for billions of IDs</td><td>A dictionary of IDs doesn't fit (&sect;05)</td></tr>
+        <tr><td>Trees, then DLRM-style interactions</td><td>Learn feature combinations</td><td>Linear models miss interactions (&sect;06, &sect;09)</td></tr>
+        <tr><td>Online joiner and per-coordinate learning</td><td>Fresh labels, fresh weights</td><td>Stale models cost accuracy (&sect;07)</td></tr>
+        <tr><td>Negative downsampling + recalibration</td><td>Cuts training cost</td><td>Billions of rows, mostly non-clicks (&sect;08)</td></tr>
+        <tr><td>Sequence features and a foundation model</td><td>Learn from raw behaviour; teach serving models</td><td>Aggregates lose information; siloed models cost too much (&sect;10)</td></tr>
+        <tr><td>Retrieval, ranking, shared computation</td><td>Fits large models into a sub-second budget</td><td>Can't score every ad (&sect;11)</td></tr>
+        <tr><td>Exploration and A/B tests</td><td>Break the feedback loop; verify live</td><td>Only shown ads get labels (&sect;12, &sect;13)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Several parts of this picture are unpublished: the stage sizes after retrieval, the exact auction formula and pricing rule, budget pacing, per-stage latencies, how often models are refreshed and how Meta handles delayed conversions. Our sources describe the system as of 2013, 2014, 2019, 2023, 2024, 2025 and 2026, and the production system will have moved since.</p>
+  </section>
+
+<section id="summary">
+    <h2><span class="num">16</span>Summary</h2>
+    <ol>
+      <li><strong>The money in a slot is bid times probability.</strong> Ranking by bid alone rewards ads nobody clicks, so the auction ranks by expected value, and the whole system exists to estimate the probability.</li>
+      <li><strong>Calibration matters more than ranking.</strong> A uniform scale error cancels out of both the ranking and the second-price price, and errors that differ between ads, or that are selected for by winning, misallocate slots and under-charge winners.</li>
+      <li><strong>Log loss is the right loss and normalized entropy the right report card.</strong> Expected log loss equals the entropy of the truth plus a KL term that is zero only at the true probability, and dividing by the background-CTR entropy makes results comparable across click rates (He et al., 2014).</li>
+      <li><strong>Hash billions of IDs into a fixed table.</strong> Collisions mostly hit rare IDs, and probabilistic inclusion and 16-bit weights cut memory by another 55 to 75% at a tiny accuracy cost (McMahan et al., 2013).</li>
+      <li><strong>Boosted trees can encode features for a linear model.</strong> Each tree contributes the one-hot index of its leaf, so the linear layer weighs learned rules, and the 2014 hybrid beat plain logistic regression by more than 3.4% NE.</li>
+      <li><strong>Freshness is worth about 1% NE, and it needs per-coordinate learning rates.</strong> Daily beats weekly retraining, and online learning with a rate per weight, fed by an online joiner that waits a tuned window before labelling a non-click, beat the other schedules by up to 5% NE.</li>
+      <li><strong>Downsample negatives, then undo it with one formula.</strong> With a fraction <span>$w$</span> of non-clicks kept, the odds are inflated by <span>$1/w$</span>, and <span>$q = p/(p+(1-p)/w)$</span> restores calibration without changing the ranking.</li>
+      <li><strong>DLRM combines embeddings, a bottom MLP, pairwise dot products and a top MLP.</strong> Embeddings hold the memory and MLPs hold the compute, so embeddings are spread across devices and MLPs replicated (Naumov et al., 2019).</li>
+      <li><strong>Sequences and foundation models replaced hand-built aggregates and siloed models.</strong> Meta reported event-sequence features in 2024 and, in 2025 and 2026, a large model (GEM) that teaches hundreds of vertical models, reporting its gains without baselines.</li>
+      <li><strong>Serving is a funnel with shared computation.</strong> Tens of millions of ads become a few thousand, ranking fits a sub-second budget by computing request-level signals once and sharing them across candidates, and Meta hasn't published per-stage latencies.</li>
+      <li><strong>Logs are a feedback loop.</strong> Only shown ads get labels, winners are over-predicted, and exploration, slice calibration and live experiments are how the loop is checked.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">17</span>Build this</h2>
+    <p class="lede">The corrections in this chapter are easy to nod along to and easy to get wrong. You can rebuild the heart of the system in a day with synthetic data and numpy, and watch each fix change what the auction does.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A small ad auction with a calibrated, online-learning click model</span>
+        <span class="proj-meta">~6 hours &middot; numpy only</span>
+      </div>
+      <p>Build a world where you know the truth: 5,000 ads whose true click probability depends on a hidden quality, a user-segment effect and an ad-by-segment interaction, with 500,000 users in 20 segments. Everything you train gets judged against that truth, which no real platform can do.</p>
+      <ol class="proj-steps">
+        <li>Generate impressions with a click label. Give every ad and every user a 64-bit ID and hash them, together with a few categorical features, into a table of 2<sup>18</sup> buckets. Train a logistic regression on the hashed features and report NE, calibration and AUC on a held-out day. Then halve and double the bucket count and plot NE against memory.</li>
+        <li>Downsample the non-clicks to 5% and train again. Report calibration before and after applying the recalibration formula, and check that AUC doesn't move.</li>
+        <li>Add a hand-written boosted-tree encoder, or reuse the one from section 06, and compare the logistic regression on raw features, on leaf features and the trees alone.</li>
+        <li>Stream the data in time order and train the linear layer online, once with a global learning rate and once with per-coordinate rates. Hold the labels back by a random delay and try three joiner window lengths, measuring the click coverage and the bias in the empirical CTR.</li>
+        <li>Run auctions: six candidate ads per impression, scored by bid times your model's CTR with a second-price rule. Compare the true value won against a perfect model, then break your model on purpose (new ads overestimated by 2 times) and measure calibration among the winners.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> NE improves as buckets grow with diminishing returns, the downsampled model is about 10 times too confident until recalibrated and has the same AUC before and after, per-coordinate rates beat the global rate on rare ads, shorter joiner windows give a lower empirical CTR, and winners' calibration is above 1 even when all-ads calibration is exactly 1.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Add an exploration bonus based on a Beta posterior for each new ad and measure how many ads ever get shown, and the total value won, with and without it. Then add a position effect for two ad slots and see what a GSP price does to the winner's payment when your slot-two prediction is miscalibrated.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">18</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why does an ad auction need calibrated probabilities and not just a good ranking?</summary>
+      <div class="qa-body"><p>An auction ranks ads by bid times predicted click probability and often prices the winner by the runner-up's score divided by the winner's own probability. That arithmetic needs probabilities on the right scale, because a bid is in money and a score is only comparable to another score if both are on the same scale. A uniform scale error cancels out of the ranking and of the price, but errors that differ between ads don't. If a model overestimates new ads by a factor of two, they win slots they haven't earned and are charged half the right price. AUC can't see any of this because it only measures order, and that's why Facebook's 2014 paper reports normalized entropy and a calibration ratio.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is normalized entropy and why not use accuracy or log loss?</summary>
+      <div class="qa-body"><p>Normalized entropy is the model's average log loss divided by the log loss of a model that always predicts the average click rate; its loss is the entropy of that rate. An NE of 1 means no better than the baseline, and lower is better. Accuracy is meaningless when 99% of impressions aren't clicked. Raw log loss depends on how hard the problem is, since a 0.1% click rate has a far smaller baseline than a 1% one, so dividing by it makes numbers comparable across surfaces. Unlike AUC, NE rewards calibration: halving an over-confident model's outputs improves NE and leaves AUC unchanged.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How do you handle categorical features with billions of values, and what do collisions cost?</summary>
+      <div class="qa-body"><p>Hash each (feature name, value) pair into one of <span>$m$</span> buckets and keep one weight, or one embedding row, per bucket, so memory is fixed and new IDs need no registration. With <span>$n$</span> values, about <span>$1-e^{-n/m}$</span> of them share a bucket with another, which sounds severe, but traffic is heavily skewed, so a popular ID's weight is dominated by its own data and rare IDs mostly borrow from it. Two heavy IDs colliding is the damaging case, which a larger <span>$m$</span> makes rare. Google's 2013 paper adds probabilistic feature inclusion (Bloom filter with <span>$n=2$</span> saved 66% of memory for 0.008% AUC loss) and 16-bit fixed-point weights (75% saved).</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>You downsampled negatives to 5%. Derive the correction for the model's output.</summary>
+      <div class="qa-body"><p>Work in odds. In the sample, every click is kept and a fraction <span>$w$</span> of non-clicks, so the sampled odds are <span>$p/(1-p) = P/(w(1-P))$</span>, the true odds divided by <span>$w$</span>. So the true odds are <span>$w$</span> times the model's odds, and <span>$q = wp/(wp+1-p) = p/(p+(1-p)/w)$</span>, the formula in the 2014 Facebook paper. It's monotone in <span>$p$</span>, so ranking and AUC are unchanged, and it must be applied exactly once. Google's alternative is importance weighting, which gives each kept non-click a weight <span>$1/w$</span> so the model is calibrated from the start at the cost of noisier gradients.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why did Facebook put a logistic regression on top of boosted trees?</summary>
+      <div class="qa-body"><p>A linear model can't represent feature interactions unless engineers cross features by hand, and boosted trees find interactions and thresholds automatically. Feeding each tree's leaf index to the linear model as a one-hot feature turns the trees into a supervised encoder, and the linear layer weighs the rules the leaves represent. In the 2014 paper, the combination reached 96.58% of the trees-only NE while plain logistic regression was at 99.43%, a gain of more than 3.4% against a typical feature experiment's few tenths of a percent. Splitting also helps operationally: trees train in batch and are retrained daily, and the linear layer can learn online.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why use a learning rate per feature for online learning on sparse data?</summary>
+      <div class="qa-body"><p>A global decaying rate shrinks the step for every weight as traffic grows, including weights for features that have barely been seen and need large updates. Per-coordinate rates, <span>$\alpha/(\beta+\sqrt{\sum g^2})$</span>, decay a weight's rate only as that weight accumulates gradients, so rare features keep learning quickly while popular ones settle. In Facebook's comparison of five schedules this was best, almost 5% lower in NE than the worst. Google's FTRL-Proximal uses the same rates and adds L1 regularisation, which keeps many weights exactly zero so the model is small.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Offline NE improved but the live experiment shows no revenue change. What do you check?</summary>
+      <div class="qa-body"><p>First calibration by slice, because an NE gain can come from the large slices while the winning ads, which have a different distribution, got no better or worse, and winner's-curse calibration among the ads that win is the number the auction sees. Second, whether the offline set reflects the new model's choices at all, since logs only contain ads the old system showed. Third, auction effects: a better model for one advertiser changes budgets and pacing for others, and a user-level split in a marketplace can misestimate this. Fourth, the metric itself: the model is optimising predicted clicks or conversions, which may differ from the advertiser outcome the experiment measures. Meta's papers don't describe its own debugging process, so this list comes from the structure of the system.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you build labels for purchases that arrive days after the impression?</summary>
+      <div class="qa-body"><p>A fixed waiting window labels every impression as a non-purchase until the purchase arrives, so recent data is biased low, and a longer window delays training and holds more state. Practical designs use a short window for fast, approximate labels and correct them later with the late arrivals, or train a model of the delay distribution and weight recent examples to account for conversions still to come. Facebook's 2014 paper describes the click version of this tradeoff and says the bias was small and measurable, and Meta's 2023 Lattice post says delayed feedback is handled with temporal awareness in the model without giving the mechanism, so which correction Meta uses is unpublished.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why does Meta train a very large model and distil it into smaller ones instead of serving it?</summary>
+      <div class="qa-body"><p>Serving has a hard latency budget, on the order of 100 ms for the ranking model in Meta's 2026 post, for thousands of candidate ads per request and a huge request volume. A model with no such limit can learn much more from the data, so Meta's 2025 post describes GEM as a foundation model that transfers knowledge to hundreds of vertical models through direct and hierarchical distillation, with a Student Adapter that refreshes the teacher's targets with recent ground truth. Students stay fast and calibrated against the teacher and the labels. That tradeoff moves as serving improves: the 2026 Adaptive Ranking Model describes serving much larger models in real time through request-level computation sharing, which shifts how much the teacher must do.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">19</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://research.facebook.com/publications/practical-lessons-from-predicting-clicks-on-ads-at-facebook/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Practical Lessons from Predicting Clicks on Ads at Facebook</div><div class="r-sub">He et al., ADKDD 2014. Boosted trees plus logistic regression, normalized entropy, data freshness, the online joiner and the recalibration formula of sections 04 to 08.</div></div>
+      </a>
+      <a class="resource-card" href="https://research.google/pubs/ad-click-prediction-a-view-from-the-trenches/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Ad Click Prediction: a View from the Trenches</div><div class="r-sub">McMahan et al., KDD 2013. Google's FTRL-Proximal, per-coordinate rates, probabilistic feature inclusion, importance-weighted subsampling and calibration layers.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1906.00091" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Deep Learning Recommendation Model for Personalization and Recommendation Systems</div><div class="r-sub">Naumov et al., 2019. DLRM: embeddings, the interaction layer and the model-parallel training design of section 09. arXiv:1906.00091</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2104.05158" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Software-Hardware Co-design for Fast and Scalable Training of Deep Learning Recommendation Models</div><div class="r-sub">Mudigere et al., 2021. Training DLRMs with up to 12 trillion parameters. arXiv:2104.05158</div></div>
+      </a>
+      <a class="resource-card" href="https://ai.meta.com/blog/ai-ads-performance-efficiency-meta-lattice/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Meta Lattice</div><div class="r-sub">Meta AI, May 11, 2023. One model across ad surfaces and objectives, replacing many siloed models.</div></div>
+      </a>
+      <a class="resource-card" href="https://engineering.fb.com/2024/11/19/data-infrastructure/sequence-learning-personalized-ads-recommendations/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Sequence learning: a paradigm shift for personalized ads recommendations</div><div class="r-sub">Engineering at Meta, November 19, 2024. Event-based features in place of hand-built aggregates.</div></div>
+      </a>
+      <a class="resource-card" href="https://engineering.fb.com/2024/12/02/production-engineering/meta-andromeda-advantage-automation-next-gen-personalized-ads-retrieval-engine/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Meta Andromeda: next-gen personalized ads retrieval engine</div><div class="r-sub">Engineering at Meta, December 2, 2024. Retrieval from tens of millions of ads to a few thousand, with a jointly trained hierarchical index.</div></div>
+      </a>
+      <a class="resource-card" href="https://engineering.fb.com/2025/11/10/ml-applications/metas-generative-ads-model-gem-the-central-brain-accelerating-ads-recommendation-ai-innovation/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Meta's Generative Ads Model (GEM)</div><div class="r-sub">Engineering at Meta, November 10, 2025. A foundation model that transfers knowledge to vertical ranking models.</div></div>
+      </a>
+      <a class="resource-card" href="https://engineering.fb.com/2026/03/31/ml-applications/meta-adaptive-ranking-model-bending-the-inference-scaling-curve-to-serve-llm-scale-models-for-ads/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Meta Adaptive Ranking Model</div><div class="r-sub">Engineering at Meta, March 31, 2026. Serving LLM-scale ranking models under a real-time latency bound.</div></div>
+      </a>
+      <a class="resource-card" href="https://engineering.fb.com/2026/10/13/ml-applications/metas-generative-ads-model-gem-scaling-the-central-model-and-compute-engine-for-frontier-ads-ai" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">GEM: scaling the central model for frontier ads AI</div><div class="r-sub">Engineering at Meta, October 13, 2026. The central model, Kunlun and LoopFM.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.aeaweb.org/articles?id=10.1257/aer.97.1.242" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Internet Advertising and the Generalized Second-Price Auction</div><div class="r-sub">Edelman, Ostrovsky and Schwarz, American Economic Review, 2007. The auction behind section 03.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">20</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/16-recommenders-ranking-search"><div class="rc-sec" style="color:var(--c-rec)">16 · The foundations</div><div class="rc-title">Recommenders, Ranking &amp; Search</div><div class="rc-hook">Embeddings, funnels and the feedback loop in general form; this case study is those ideas in an ad auction.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · Another case study</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">The same funnel with a different objective, and the logQ correction for sampled negatives.</div></a>
+      <a class="related-card" href="/topics/42-design-fraud-detection"><div class="rc-sec" style="color:var(--c-rec)">42 · Another case study</div><div class="rc-title">Designing Card Fraud Detection</div><div class="rc-hook">Rare positives, delayed labels and downsampling, with milliseconds to decide.</div></a>
+      <a class="related-card" href="/topics/43-design-search-ranking"><div class="rc-sec" style="color:var(--c-rec)">43 · Another case study</div><div class="rc-title">Designing Search Ranking</div><div class="rc-hook">Click models, position bias and ordering results for one query.</div></a>
+      <a class="related-card" href="/topics/02-classical-ml"><div class="rc-sec" style="color:var(--c-classical)">02 · The basics</div><div class="rc-title">Classical ML</div><div class="rc-hook">Logistic regression, log loss and boosted trees, the ingredients of sections 04 and 06.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">A/B testing, continuous training and monitoring behind sections 07 and 13.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Calibration, proper scoring rules and why offline metrics mislead.</div></a>
+    </div>
+  </section>
+

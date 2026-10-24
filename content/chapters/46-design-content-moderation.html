@@ -1,0 +1,1182 @@
+---
+title: "Designing Content Moderation"
+dek: "Follow Neha's borderline meme from the moment she taps Post to the reviewer who decides it, and see how Meta's integrity systems catch harmful content at scale, route the unclear cases to people, and measure whether any of it works. We build it from a banned-word list and fix each failure in turn."
+readingTime: "~70 min"
+prereqs: "multimodal AI (14), NLP evolution (09), evaluation (25), MLOps (24)"
+group: "ML System Design"
+label: "Case study 46"
+description: "From a blocklist to Meta's integrity stack: perceptual hashes, whole-post multimodal embeddings, thresholds, a harm-ordered review queue, few-shot policy changes, appeals as labels, and prevalence."
+---
+<section id="tldr">
+    <p>Neha is on the 9:40 evening train home in Pune, with one bar of signal, and she posts a meme. It's a photograph of a crowded railway platform with a caption over it that reads "Look who's taking over our city again." She thinks it's a joke about the festival crowds. Neha's cousin reads it as a dig at migrants from another state, and so would several of her friends' friends once the post spreads. By the time she gets off the train the post has been shown to a few hundred people, and a few of them have already tapped Report.</p>
+
+    <p>That scene hides a decision that's harder than it looks. No single word in the caption is on a banned list, and the photograph on its own is an ordinary platform. Meaning sits in the pair, and it depends on who is reading, in which language, and what's been going on in the city that week. Somebody also has to decide, in seconds, with billions of other posts arriving the same day. If the system removes too much, it silences a joke and a person who didn't mean harm. If it removes too little, a post that makes thousands of people feel unwelcome keeps spreading. Software that looks at posts and decides which ones break the platform's rules is a <strong>content moderation</strong> system, and Meta calls the larger effort around it <strong>integrity</strong>. This page follows Meta's integrity systems on Facebook and Instagram. A person who reviews the hard cases is a <strong>reviewer</strong>, and Neha's post will end up in front of one named Kofi.</p>
+
+    <p>So the question this chapter answers is: <strong>how does a platform with billions of posts a day find the harmful ones in seconds, use people only where they're needed, and know whether it's getting better?</strong></p>
+
+    <p>We'll build the design the way an engineer would, from a banned-word list and a report button, and fix each failure in turn. That takes us through matching copies of images already judged, a model that reads the photo and the caption together, thresholds and a review queue sorted by harm, adapting when a policy changes or a language is new, and users who adapt to the detector. After that come serving, where the labels come from (including appeals), and the metric Meta uses to measure whether any of it works, which counts views and not removals. We use Meta's own posts, papers and Transparency Center pages throughout, date every figure, and say plainly where the internals are unpublished.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>The unit of work is a piece of <strong>content</strong>: a post, a photo, a video, a comment, a story, a message request. A written <strong>policy</strong> (Meta calls its policies the Community Standards) says which content isn't allowed, split into dozens of categories such as hate speech, bullying and harassment, violent and graphic content, adult nudity and sexual activity, and spam. For every piece of content the system has to decide one of a few things: leave it alone, remove it, show it to fewer people, put a warning on it, or send it to a person to decide. It has to do that for text in many languages, for images, for video, and for the combination of all three in a single post.</p>
+
+    <p>Three qualities matter, and they pull against each other. A moderation system has to be <strong>fast</strong>, because harm happens while a post is being shared. It has to be <strong>accurate in both directions</strong>: a removal of something that didn't break the rules is a mistake that a real person feels, and so is a violating post left up. And it has to be <strong>measurable</strong>, because a system that can't tell whether it's improving will drift. Meta's own integrity paper (Halevy et al., 2020) adds a fourth fact of life: the people posting violating content adapt. In the paper's words, they "fine tune their techniques to bypass the safeguards."</p>
+
+    <p>This is also a different kind of machine-learning problem from the earlier case studies. YouTube's recommender in chapter 41 chooses the best few items out of a huge pile for one person. A moderation system makes a yes-or-no judgement about every item, and the cost of an error depends on how severe the content is and how many people would see it. Most of this chapter is about where to put the line, how to route the unclear middle to people, and how to measure the result.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>Meta reported 3.60 billion daily active people across its apps for June 2026, up 3% from a year earlier (Meta's Q2 2026 results, July 29, 2026). Meta hasn't published a count of posts per day for the whole company. In a November 2021 post it said its integrity systems have to work at "billions of posts per day", and a September 2020 paper described content created "in over 100 languages." Meta's Transparency Center said, in a page updated in January 2022, that people post in more than 160 languages.</p>
+
+    <p>Detection has been moving from people to software over time. In a November 19, 2020 post Meta's CTO Mike Schroepfer wrote that AI "now proactively detects 94.7 percent of hate speech we remove from Facebook", where proactively means before any user reported it, up from 80.5% a year earlier and 24% in 2017. A November 13, 2019 post reported hate speech acted on (removed or otherwise dealt with, which Meta calls <strong>actioned</strong>) proactively rising from 4.1 million pieces of content in Q1 2019 to 7 million in Q3 2019. For hate speech on Facebook, Meta's Q2 2021 report said 31.5 million pieces were actioned, up from 25.2 million in Q1 2021, while the share of views that showed hate speech was 0.05%, down from 0.05–0.06%.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Take an illustrative 3 billion new posts and comments in a day (Meta hasn't published the real figure). A trained person can judge about one post every 30 seconds for seven hours. How many reviewers would it take to have a person read everything? And if a model takes 5 milliseconds per post, how many CPU cores would it keep busy for the whole day?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>A reviewer gets through 7 hours × 3,600 seconds ÷ 30 seconds = 840 posts a day. Three billion posts ÷ 840 is about 3.6 million reviewers. Running the model costs 3 billion × 0.005 seconds = 15 million CPU-seconds, spread over 86,400 seconds in a day, which is about 174 cores kept busy around the clock. (A real system uses far more cores, because it runs many models per post and has to absorb bursts.)</p>
+        <p>That gap of four orders of magnitude gives the design its shape. Software has to look at everything and decide the clear cases alone, and people have to be spent only on the posts where a human judgement changes the outcome. Which posts those are becomes the key design question.</p>
+      </details>
+    </div>
+
+    <p>Meta hasn't published an end-to-end latency budget for classifying a post, and we won't invent one. Its 2020 paper says only that AI systems inspect content "as it's posted." We'll reason about what a request has to do and mark every number we can't source.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: a blocklist and a report button</h2>
+
+    <p>The first design is the one every forum starts with. A list of banned words is checked against the text of each new post, and a Report button lets anyone flag what the list missed. Reports go into a queue, and a team of reviewers works through it in the order the reports arrived. It needs no machine learning, it's easy to explain to the people who write the policy, and it catches the worst offenders.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Version 1: a blocklist and a report button
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 318" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="120" height="80" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="120" height="80" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="80.0" y="78" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">NEHA'S POST</text>
+<text x="80.0" y="92" text-anchor="middle" font-size="10" class="dim">caption + photo</text>
+<path d="M146,80 L172,80" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="178" y="40" width="130" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="178" y="40" width="130" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="243.0" y="71" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">BLOCKLIST</text>
+<text x="243.0" y="85" text-anchor="middle" font-size="10" class="dim">banned words in</text>
+<text x="243.0" y="99" text-anchor="middle" font-size="10" class="dim">the caption text</text>
+<path d="M314,80 L340,80" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="346" y="40" width="110" height="80" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="346" y="40" width="110" height="80" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="401.0" y="71" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">PUBLISHED</text>
+<text x="401.0" y="85" text-anchor="middle" font-size="10" class="dim">visible to friends</text>
+<text x="401.0" y="99" text-anchor="middle" font-size="10" class="dim">and friends of friends</text>
+<path d="M462,80 L488,80" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="494" y="40" width="186" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="494" y="40" width="186" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="587.0" y="71" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">USER REPORTS</text>
+<text x="587.0" y="85" text-anchor="middle" font-size="10" class="dim">people tap Report;</text>
+<text x="587.0" y="99" text-anchor="middle" font-size="10" class="dim">a queue, oldest first</text>
+<path d="M587,124 L587,150 L400,150 L400,170" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="300" y="172" width="200" height="56" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="300" y="172" width="200" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="400.0" y="198" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">REVIEWER</text>
+<text x="400.0" y="212" text-anchor="middle" font-size="10" class="dim">reads one post at a time</text>
+<text x="20" y="262" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A caption with no banned word sails through, and a post that nobody reports is never seen by a human.</text>
+<text x="20" y="282" text-anchor="start" font-size="10.5" class="dim">A heavily reported spam post and a rare, severe one wait in the same line, and the line only grows.</text>
+<text x="20" y="302" text-anchor="start" font-size="10.5" class="dim">Removing a post also leaves its copies behind: the same photo can be re-uploaded a minute later.</text>
+      </svg>
+      <div class="diagram-caption">Follow the arrows left to right, then down the pink path. Every box is cheap to build, and the three lines underneath say what each one misses.</div>
+    </div>
+
+    <p>Run Neha's post through it. No banned word appears in the caption, so it's published. A few people see it, three of them tap Report, and the post joins the queue behind everything reported earlier. Suppose the queue is 14 hours long (an illustrative figure). By the time Kofi reads it, the post has been shared far beyond Neha's friends, and whatever he decides, most of the damage is done. Version 1 breaks in four ways, and each one points at a section of this chapter.</p>
+
+    <p>First, the list reads words, and meaning lives in the pair of caption and photograph, as well as in slang, misspellings and languages the list doesn't cover. Second, the queue is oldest-first, so a post that's about to reach a million people waits behind a spam link, and so does something that threatens a person's safety. Third, nothing is learned: a removed photo can be uploaded again a minute later by someone else, and the system will treat it as brand new. Fourth, the report button only shows what people chose to report, so a violating post in a language nobody on the thread reads can circulate for days.</p>
+
+    <p>Meta's 2020 paper lists user reports as one of two main ways violations are found, alongside automated systems, and it's honest about their limits. Reports are valuable as a signal and as a source of labels, and they're a late and uneven one. Everything that follows is about moving detection earlier, ahead of the first report, and spending human attention where it matters.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Way to find violating content</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Banned-word lists</td><td>Instant, explainable, no training data</td><td>Easy to dodge, blind to meaning and context, one list per language</td></tr>
+        <tr><td>User reports only</td><td>Catches what real communities care about, gives labels for free</td><td>Late, uneven across languages and groups, and open to brigading</td></tr>
+        <tr><td>Automated detection before any report</td><td>Acts early, scales with traffic, learns from every decision</td><td>Needs training data, can be wrong at scale, needs a way to measure it</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Meta uses all three today, and its Transparency Center says that technology checks content on its apps against the Community Standards and removes most violating content before it's reported. Report buttons survived, and their role changed: it became one input to the automated system and one way to learn what the automation misses.</p>
+  </section>
+
+  <section id="duplicates">
+    <h2><span class="num">03</span>Copies of things already judged</h2>
+
+    <p>The first fix addresses the third failure, because it's the cheapest to fix and removes a large share of the volume. By now the platform has already judged millions of images, and every one that was ruled a violation will come back, re-uploaded by other people, sometimes unchanged, often cropped or recoloured. We don't need a classifier to judge a photo a reviewer already judged. We need a fast way to recognise it again.</p>
+
+    <p>An obvious tool is a cryptographic hash such as SHA-256, a function that turns a file into a short fixed-length fingerprint. Two identical files give the same fingerprint, and that's the end of its usefulness here, because changing one pixel changes the whole fingerprint. A screenshot of an image, a re-save at a different quality, or a small crop each produces a fresh, unrelated hash. What we want is the opposite property: a fingerprint that stays nearly the same when the image looks nearly the same to a person. That's a <strong>perceptual hash</strong>.</p>
+
+    <h3 id="3-1-pdq">3.1 A perceptual hash: PDQ</h3>
+
+    <p>In August 2019 Meta open-sourced PDQ, its perceptual hash for images, together with TMK+PDQF for video, in its ThreatExchange repository. PDQ's documentation describes a spectral method built on the Discrete Cosine Transform (DCT). It's the idea behind the older pHash family. A photo is mostly smooth areas with a few edges, so the slow, large-scale changes in brightness carry most of what a person sees as "the picture" and the fast, fine-grained ones carry noise. A DCT rewrites an image as a sum of waves of different frequencies, and we keep only the lowest frequencies.</p>
+
+    <p>Here's the recipe, in the form widely documented for PDQ. Convert the image to grayscale and shrink it to 64 by 64 pixels, which throws away fine detail and makes the hash independent of the original size. Apply a DCT and keep the 16 by 16 block of lowest-frequency coefficients, which is 256 numbers. Compare each coefficient with the median of the block and write a 1 if it's above and a 0 if it's below. That gives a 256-bit hash. Two hashes are compared by counting the positions where their bits differ, the <strong>Hamming distance</strong>. For two unrelated images each bit is about a coin flip, so the distance follows a binomial distribution:</p>
+
+    <div class="eq-block"><span>$$d \sim \mathrm{Binomial}(256,\tfrac12), \qquad \mathbb{E}[d] = 128, \quad \sigma = \sqrt{256 \cdot \tfrac14} = 8$$</span></div>
+
+    <p>Here <span>$d$</span> is the Hamming distance between two unrelated hashes, 128 is its average (half the bits), and 8 is its spread. PDQ's documentation recommends treating two hashes as similar when the distance is at most 31 as a starting point, which sits twelve spreads below the unrelated average. Two unrelated random hashes land that close with the binomial tail's probability, about <span>$8\times10^{-38}$</span>. Even against an index of 300 million hashes, a number chosen to echo the "hundreds of millions" of known-violating images Meta mentioned in 2021, the chance of a false match by luck is about <span>$2\times10^{-29}$</span>. That calculation assumes the hashes of unrelated images behave like random bits, which fails for featureless images such as a plain colour or a mostly blank screenshot, so PDQ also outputs a quality score and recommends discarding hashes with quality at or below 49.</p>
+
+    <p>This experiment builds a hash of this shape from scratch with numpy, on synthetic smooth images, and sees how far common edits move it. It's a simplified version, with block averaging in place of PDQ's own filter, so read the numbers as showing the behaviour of the family, not as PDQ's exact distances.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Build a DCT perceptual hash and see which edits it survives</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(3)
+N, K = 256, 64
+
+def make_image():
+    # a smooth random photo: a sum of random waves
+    y, x = np.mgrid[0:N, 0:N] / N
+    img = np.zeros((N, N))
+    for _ in range(120):
+        fx, fy = rng.integers(0, 15, 2)
+        p = rng.uniform(0, 6.28, 2)
+        amp = rng.normal() / (1 + fx + fy)
+        img += amp * np.cos(2*np.pi*fx*x + p[0]) \
+                   * np.cos(2*np.pi*fy*y + p[1])
+    return (img - img.min()) / (img.max() - img.min()) * 200 + 25
+
+D = np.array([[np.cos(np.pi * (2*j + 1) * i / (2*K)) for j in range(K)]
+              for i in range(K)]) * np.sqrt(2 / K)
+D[0] /= np.sqrt(2)
+
+def phash(img):
+    small = img.reshape(K, N // K, K, N // K).mean(axis=(1, 3))
+    low = (D @ small @ D.T)[:16, :16].ravel()[1:]   # skip the DC term
+    return low &gt; np.median(low)                     # 255 bits
+
+def dist(a, b):
+    return int((a != b).sum())
+
+def resize(im):                      # nearest-neighbour back to N x N
+    r = np.arange(N) * im.shape[0] // N
+    c = np.arange(N) * im.shape[1] // N
+    return im[np.ix_(r, c)]
+
+orig = make_image()
+h0 = phash(orig)
+fx = {
+ &quot;noise (JPEG-like)&quot;: orig + rng.normal(0, 4, (N, N)),
+ &quot;brightness +20&quot;:    orig + 20,
+ &quot;blur&quot;:              (orig + np.roll(orig, 1, 0) + np.roll(orig, 1, 1)
+                       + np.roll(orig, (1, 1), (0, 1))) / 4,
+ &quot;caption bar&quot;:       np.vstack([orig[:224], np.full((32, N), 255.0)]),
+ &quot;crop 20% edges&quot;:    resize(orig[26:230, 26:230]),
+ &quot;rotate 90&quot;:         np.rot90(orig),
+}
+for name, im in fx.items():
+    print(f&quot;{name:19} distance {dist(h0, phash(im)):3d} of 255 bits&quot;)
+
+others = [dist(h0, phash(make_image())) for _ in range(500)]
+print(f&quot;500 unrelated images: min {min(others)}, &quot;
+      f&quot;median {int(np.median(others))}, max {max(others)}&quot;)</code></pre>
+      <div class="tryit-out">The hash survives noise, a brightness shift and a blur, moving by <code>18</code>, <code>10</code> and <code>12</code> of 255 bits, all well inside a threshold of about 31. A caption bar moves it by <code>64</code> bits, a 20% crop by <code>128</code> and a quarter-turn by <code>118</code>. Five hundred unrelated images sit between <code>100</code> and <code>150</code> bits away (median <code>124</code>), so the gap between "same picture" and "different picture" is wide for the edits the hash was built for, and gone for the edits that rearrange the picture.</div>
+    </details>
+
+    <p>Brightness, noise and a slight blur move the hash by 10 to 18 bits, comfortably under a threshold of about 31 bits, so a re-compressed or lightly edited copy is matched. A caption bar across the bottom moves it by 64 bits, a crop of the outer 20% by 128, which is no closer than a stranger's image, and a quarter-turn by 118. Unrelated images sit between 100 and 150 bits away, so the gap between "same picture" and "different picture" is wide and the hash is reliable inside the edits it was built for. It doesn't survive edits that rearrange the low frequencies, and those are the ones people use on purpose. PDQ's own tooling produces eight hashes for the eight rotations and flips of an image so that a flipped copy can still be found, and a crop or a collage needs something stronger.</p>
+
+
+    <h3 id="3-2-simsearchnet">3.2 A learned matcher: SimSearchNet++</h3>
+
+    <p>A learned matcher replaces the hand-built recipe. A neural network is trained so that an image and an edited copy of it map to nearby vectors, and an unrelated image maps far away. This is the same self-supervised idea as contrastive learning on page 03: take an image, make two edited versions of it (crop, blur, screenshot, add text), tell the network those two belong together, and tell it that any other image in the batch doesn't. After training, matching is a nearest-neighbour search over vectors, the same machinery as section 05 of the YouTube case study.</p>
+
+    <p>Meta's November 19, 2020 post describes its version, SimSearchNet++, as an improved image-matching model "trained using self-supervised learning to match variations of an image with a very high degree of precision and improved recall." Precision here means the share of matches that are real copies, and recall the share of real copies that are found. It's resilient to crops, blurs and screenshots, and its distance metric is more predictive of matches, so more matches can be found efficiently. For images that contain text, matches are grouped using optical character recognition (OCR) to verify them. It runs inside an end-to-end indexing and matching system on images uploaded to Facebook and Instagram. A December 2021 post describes a model it calls SSN++, which is probably the same one, as part of an indexing and matching system that screens new uploads against "the hundreds of millions that we have already found to be in violation of our rules."</p>
+
+    <p>That post also says what keeps this hard. Copies are often not pixel-identical, people flip, crop, distort and recolour them, and the most common evasion was a fragment of one photo pasted onto another. Extreme manipulation makes a copy harder to find, and no current solution catches every copy among billions of uploads. Meta's Image Similarity Challenge, run in 2021, put numbers on the research side: its DISC21 dataset has 1 million reference images and 50,000 query images, about one in five of the queries is an edited copy of a reference, and 46 entries were submitted to the descriptor track.</p>
+
+    <p>Precision matters as much as recall, because a wrong match removes an innocent photo with no human looking at it. That same post warns that small changes can separate truth from misinformation, so matching is highly context-dependent. A photo of a flag in a news report and the same photo in a propaganda post can be near-identical images with opposite meanings. Matching tells the system that a picture is a copy. Whether the copy breaks the rule in its new setting is a second question, and that's why a matched image can still be queued for a person.</p>
+
+
+        <div class="diagram">
+      <div class="diagram-title">Matching copies of images already judged
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 336" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="120" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="120" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="80.0" y="83" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">NEW UPLOAD</text>
+<text x="80.0" y="97" text-anchor="middle" font-size="10" class="dim">Neha's photo</text>
+<path d="M146,85 L172,85" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="178" y="50" width="150" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="178" y="50" width="150" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="253.0" y="76" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">PERCEPTUAL HASH</text>
+<text x="253.0" y="90" text-anchor="middle" font-size="10" class="dim">256 bits from low</text>
+<text x="253.0" y="104" text-anchor="middle" font-size="10" class="dim">image frequencies</text>
+<path d="M334,85 L360,85" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="366" y="50" width="150" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="366" y="50" width="150" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="441.0" y="76" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">HASH INDEX</text>
+<text x="441.0" y="90" text-anchor="middle" font-size="10" class="dim">hashes of removed</text>
+<text x="441.0" y="104" text-anchor="middle" font-size="10" class="dim">images; distance check</text>
+<path d="M522,85 L548,85" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="554" y="50" width="126" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="554" y="50" width="126" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="617.0" y="76" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">CLOSE MATCH</text>
+<text x="617.0" y="90" text-anchor="middle" font-size="10" class="dim">act on it, as</text>
+<text x="617.0" y="104" text-anchor="middle" font-size="10" class="dim">on the original</text>
+<path d="M441,124 L441,168" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="448" y="150" text-anchor="start" font-size="10.5" class="dim">no close hash</text>
+<rect x="366" y="172" width="150" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="366" y="172" width="150" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="441.0" y="198" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">EMBEDDING MATCH</text>
+<text x="441.0" y="212" text-anchor="middle" font-size="10" class="dim">learned vector,</text>
+<text x="441.0" y="226" text-anchor="middle" font-size="10" class="dim">survives crops</text>
+<path d="M522,207 L548,207" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="554" y="172" width="126" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="554" y="172" width="126" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="617.0" y="198" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">NEAR-DUPLICATE</text>
+<text x="617.0" y="212" text-anchor="middle" font-size="10" class="dim">match to a known</text>
+<text x="617.0" y="226" text-anchor="middle" font-size="10" class="dim">violating image</text>
+<path d="M441,246 L441,270" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="366" y="272" width="150" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="366" y="272" width="150" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="441.0" y="292" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">CLASSIFIER</text>
+<text x="441.0" y="306" text-anchor="middle" font-size="10" class="dim">a new image, judged on its own</text>
+<text x="20" y="190" text-anchor="start" font-size="10.5" class="dim">A hash is a few bytes and a lookup:</text>
+<text x="20" y="206" text-anchor="start" font-size="10.5" class="dim">billions of uploads can be checked</text>
+<text x="20" y="222" text-anchor="start" font-size="10.5" class="dim">against hundreds of millions of known images.</text>
+<text x="20" y="256" text-anchor="start" font-size="10.5" class="" fill="#34d399">Brightness, noise and small blurs barely move a hash.</text>
+<text x="20" y="272" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A crop, a collage or a pasted fragment moves it a lot,</text>
+<text x="20" y="288" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">so a learned embedding is the second line.</text>
+      </svg>
+      <div class="diagram-caption">Read left to right along the top: a close hash ends the search. Otherwise the image drops to the embedding match, and only a new image reaches the classifier.</div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to recognise a known image</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Cryptographic hash (SHA-256)</td><td>Exact, tiny, no false matches</td><td>One changed pixel breaks it, so trivial to evade</td></tr>
+        <tr><td>Perceptual hash (PDQ)</td><td>256 bits, fast comparison, open-source and shareable between companies, no model to train</td><td>Survives noise and recompression, not crops, collages or pasted fragments</td></tr>
+        <tr><td>Learned embedding (SimSearchNet++)</td><td>Survives crops, screenshots and overlaid text, with OCR to verify text-heavy images</td><td>A model to train and serve, a vector index to maintain, and a precision risk on look-alikes</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Meta's description of its systems includes all three layers. Meta's integrity paper notes that robust hashing such as PhotoDNA is the standard for locating child exploitation imagery, using a set of unique hashes shared across partners, which justifies publishing and sharing hashes. Which layer handles which category in Meta's own pipeline isn't published. Where the same idea shows up elsewhere: YouTube's Content ID matches uploads against fingerprints of rights-holders' works, photo apps group duplicate photos with perceptual hashes, and the dedup step in a large language model's training data uses the same near-duplicate tricks on text.</p>
+
+    <p>Matching copies handles the content that has already been judged, and it leaves the harder case, a new post nobody has seen. Neha's photo of the platform is new. We need a model that can judge it.</p>
+  </section>
+
+  <section id="whole-post">
+    <h2><span class="num">04</span>Judging a new post as a whole</h2>
+
+    <p>A natural first classifier reads the caption. A text model trained on labelled examples of hate speech looks at the words and outputs a probability. A second model does the same for the photo, and a third for the comments underneath. If any one of them is confident, the post is flagged. That's the design Meta described before 2019: in its November 2019 post it says one classifier looked at the photo for nudity, another for violence, and a separate set looked at the text of the post or the comments.</p>
+
+    <p>It breaks on Neha's post for a clean reason. Here the photograph is benign, the caption on its own is benign, and the model that reads each one is right about its half. What's harmful is the combination, and the combination is invisible to any model that only sees one half. Memes make the problem concrete. Meta's Hateful Memes challenge, released in 2020, was built around it, with "benign confounders" added deliberately: the same caption on a different image, or the same image with a different caption, so that a model can't succeed by looking at just one. In that paper (Kiela et al., 2020) humans scored 84.7% accuracy and the best state-of-the-art methods reached 64.73%, a gap of about 20 points. Meta's integrity paper makes the same observation in plain words: for memes, "it is the combination that reveals their true meaning."</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">We build a toy world where a post is harmful only when its caption's tone and its picture's content agree, and each alone says nothing about the label. We train a text-only model, an image-only model, a "late fusion" model that adds the two models' scores, and an "early fusion" model that sees both inputs together. (A model's score before it becomes a probability is called its logit, and late fusion adds those.) Which gets above chance?</p>
+      <ol>
+        <li>All four, since each model sees some of the information</li>
+        <li>Only the early-fusion model</li>
+        <li>Late fusion as well, since it combines two views</li>
+      </ol>
+      <details>
+        <summary>Show the answer</summary>
+        <p><strong>B, only the early-fusion model.</strong> Adding two scores that are each uninformative still gives an uninformative score. Only a model whose inputs meet before the decision can learn the interaction. Run it below.</p>
+      </details>
+    </div>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Separate text and image models against one model that sees the pair</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+n = 12000
+text = rng.normal(size=(n, 2))     # stand-in for a text embedding
+image = rng.normal(size=(n, 2))    # stand-in for an image embedding
+# harmful only when the caption&#x27;s tone and the picture&#x27;s content agree,
+# so neither half alone says anything about the label
+y = (text[:, 0] * image[:, 0] &gt; 0).astype(float)
+
+sig = lambda z: 1 / (1 + np.exp(-z))
+
+def logreg(X, y, steps=800, lr=0.3):
+    w = np.zeros(X.shape[1])
+    for _ in range(steps):
+        w -= lr * X.T @ (sig(X @ w) - y) / len(y)
+    return w
+
+def mlp(X, y, hidden=16, steps=4000, lr=1.0):
+    add1 = lambda A: np.hstack([A, np.ones((len(A), 1))])
+    X1 = add1(X)
+    W1 = rng.normal(0, 0.5, (X1.shape[1], hidden))
+    w2 = rng.normal(0, 0.5, hidden)
+    for _ in range(steps):
+        H = np.tanh(X1 @ W1)
+        g = (sig(H @ w2) - y) / len(y)
+        gH = np.outer(g, w2) * (1 - H**2)
+        w2 -= lr * H.T @ g
+        W1 -= lr * X1.T @ gH
+    return lambda Z: sig(np.tanh(add1(Z) @ W1) @ w2)
+
+tr, te = slice(0, 8000), slice(8000, n)
+acc = lambda p, t: ((p &gt; 0.5) == t).mean()
+
+wt = logreg(text[tr], y[tr])
+wi = logreg(image[tr], y[tr])
+both = np.hstack([text, image])
+joint = mlp(both[tr], y[tr])
+print(f&quot;share of harmful posts   : {y.mean():.2f}&quot;)
+print(f&quot;text-only classifier     : {acc(sig(text[te] @ wt), y[te]):.2f}&quot;)
+print(f&quot;image-only classifier    : {acc(sig(image[te] @ wi), y[te]):.2f}&quot;)
+late = sig(text[te] @ wt + image[te] @ wi)       # add the two logits
+print(f&quot;late fusion (add logits) : {acc(late, y[te]):.2f}&quot;)
+print(f&quot;early fusion (one MLP)   : {acc(joint(both[te]), y[te]):.2f}&quot;)</code></pre>
+      <div class="tryit-out">The share of harmful posts is <code>0.50</code>. Text-only and image-only classifiers score <code>0.51</code> and <code>0.51</code>, and adding their logits (late fusion) scores <code>0.51</code>, all at chance. A small network that sees both inputs together reaches <code>0.99</code> on held-out posts. Its label depends only on how the two halves agree, so only a model that sees them together can use it.</div>
+    </details>
+
+    <p>Three models that see one input at a time sit at chance, 0.51 or below, while the model that sees both reaches 0.99. This is the exclusive-or problem from the early days of neural networks in a new setting, and it's the reason a stack of per-modality classifiers can't be repaired by averaging their outputs.</p>
+
+    <h3 id="4-1-wpie">4.1 Whole Post Integrity Embeddings</h3>
+
+    <p>Meta's answer is called <strong>Whole Post Integrity Embeddings</strong>, or WPIE. A November 13, 2019 post describes it as "a pretrained universal representation of content for integrity problems", which "works by understanding content across modalities, violation types, and even time." The 2020 integrity paper adds the design choice: <strong>early fusion</strong>, where the inputs are combined inside the model, is preferred, and it calls late fusion "ineffective at understanding content that combines multiple modalities in subtle ways." The word embedding here means a vector the model produces for the whole post, which many downstream classifiers share, and each violation type gets its own small output layer on top of it, called a head. A shared representation also fixes a data problem: the amount of labelled data for each violation type varies widely, as the paper says, so a representation trained across dozens of violation types lets a rare type borrow strength from the common ones.</p>
+
+    <p>Meta's two posts name the training techniques but not the model's size or exact architecture, and we won't invent them. Meta's 2019 post says the latest version was trained on more violation types with greatly increased training data and uses <strong>focal loss</strong> and <strong>gradient blending</strong>. Both are published methods, so we can work through them.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">From one verdict per modality to one per post
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 284" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="26" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Late fusion: two verdicts, then add</text>
+<rect x="20" y="38" width="110" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="38" width="110" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="75.0" y="63" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">text model</text>
+<rect x="20" y="86" width="110" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="86" width="110" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="75.0" y="111" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">image model</text>
+<path d="M134,58 L176,82" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M134,106 L176,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="180" y="62" width="100" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="180" y="62" width="100" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="230.0" y="82" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">ADD LOGITS</text>
+<text x="230.0" y="96" text-anchor="middle" font-size="10" class="dim">blind to the pair</text>
+<text x="20" y="150" text-anchor="start" font-size="10.5" class="dim">Each half of the meme looks benign, so each verdict is benign.</text>
+<text x="360" y="26" text-anchor="start" font-size="10.5" class="" fill="#34d399">Early fusion: one model sees the whole post</text>
+<rect x="360" y="38" width="100" height="34" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="360" y="38" width="100" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="410.0" y="60" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">caption</text>
+<rect x="360" y="78" width="100" height="34" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="360" y="78" width="100" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="410.0" y="100" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">photo</text>
+<rect x="360" y="118" width="100" height="34" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="360" y="118" width="100" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="410.0" y="140" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">OCR text, URL</text>
+<rect x="360" y="158" width="100" height="34" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="360" y="158" width="100" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="410.0" y="180" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">comments</text>
+<path d="M464,55 L500,115" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M464,95 L500,115" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M464,135 L500,115" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M464,175 L500,115" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="500" y="76" width="90" height="78" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="500" y="76" width="90" height="78" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="545.0" y="106" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SHARED</text>
+<text x="545.0" y="120" text-anchor="middle" font-size="10" class="dim">trunk</text>
+<text x="545.0" y="134" text-anchor="middle" font-size="10" class="dim">cross-modal</text>
+<path d="M594,115 L614,115" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="616" y="38" width="64" height="154" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="616" y="38" width="64" height="154" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="648.0" y="71" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">HEADS</text>
+<text x="648.0" y="85" text-anchor="middle" font-size="10" class="dim">hate</text>
+<text x="648.0" y="99" text-anchor="middle" font-size="10" class="dim">nudity</text>
+<text x="648.0" y="113" text-anchor="middle" font-size="10" class="dim">violence</text>
+<text x="648.0" y="127" text-anchor="middle" font-size="10" class="dim">bullying</text>
+<text x="648.0" y="141" text-anchor="middle" font-size="10" class="dim">drugs</text>
+<text x="648.0" y="155" text-anchor="middle" font-size="10" class="dim">...dozens</text>
+<text x="648.0" y="169" text-anchor="middle" font-size="10" class="dim">of types</text>
+<text x="20" y="226" text-anchor="start" font-size="10.5" class="dim">Training pulls in two directions at once, and the answers come from the pair:</text>
+<text x="20" y="246" text-anchor="start" font-size="10.5" class="dim">focal loss down-weights easy cases, so the many posts that are plainly fine do not drown the rare ones.</text>
+<text x="20" y="266" text-anchor="start" font-size="10.5" class="dim">gradient blending sets how much each modality is trusted, from how fast each one overfits.</text>
+      </svg>
+      <div class="diagram-caption">Left shows why separate models cannot see a meme whose halves are each harmless. Right shows the whole-post design Meta describes for WPIE, with one trunk feeding heads for many violation types.</div>
+    </div>
+
+    <h3 id="4-2-focal-loss">4.2 Focal loss: not letting the easy majority win</h3>
+
+    <p>Nearly every post on a platform is fine. A classifier trained with ordinary cross-entropy sees a million easy examples for every hard one, and the gradient from the million, each small, adds up to more than the gradient from the hard few. It gets very good at confidently saying "fine" and learns little about the borderline cases that matter. <strong>Focal loss</strong> (Lin et al., 2017, for object detection, where the same imbalance appears) multiplies each example's cross-entropy by a factor that shrinks as the model gets more confident and correct:</p>
+
+    <div class="eq-block"><span>$$\mathrm{FL}(p_t) \;=\; -(1-p_t)^{\gamma}\,\log p_t$$</span></div>
+
+    <p>Here <span>$p_t$</span> is the probability the model gave to the correct class, so a value near 1 means "easy and right", and <span>$\gamma$</span> controls how hard the easy cases are pushed down (the original paper used 2). Ordinary cross-entropy is <span>$-\log p_t$</span>. For an easy example with <span>$p_t=0.9$</span>, cross-entropy is 0.105 and focal loss with <span>$\gamma=2$</span> is 0.0011, about a hundred times smaller. For a hard one with <span>$p_t=0.1$</span> the cross-entropy is 2.30 and the focal loss is 1.87, barely changed. So the million easy posts fall out of the sum and the hard ones set the direction of training. Meta's 2019 post describes the purpose as preventing "easy-to-classify examples from overwhelming the detector during training."</p>
+
+    <h3 id="4-3-gradient-blending">4.3 Gradient blending: how much to trust each modality</h3>
+
+    <p>The second problem comes from combining modalities. You'd expect a model with the caption and the photo to beat a model with only the better of the two. Wang, Tran and Feiszli (arXiv 2019, CVPR 2020) found that it often doesn't: "the best single-modal network outperformed the multi-modal network, even though the multi-modal network receives more information." They traced it to two causes. A joint model has more capacity, so it overfits more. And each modality overfits and generalises at a different pace, so a single training schedule is right for neither. A model can learn to lean on the stream that's easiest to memorise.</p>
+
+    <p><strong>Gradient blending</strong> is their fix. They give each modality its own classifier head, trained with its own loss alongside the joint one, and weight each loss by how well that modality is likely to generalise, using the measured gap between training and validation performance, the overfitting. A modality that's generalising well gets a larger share of the gradient, and one that's only memorising gets less. Meta's post describes it as computing "an optimal blend of modalities based on their overfitting behavior." Neha's meme shows why it matters. A caption model can overfit to particular phrases quickly, while the cross-modal interaction is learned slowly, and without blending the loud, early signal can crowd out the quiet, late one that does the real work.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to combine caption, photo and comments</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Separate classifiers per modality</td><td>Simple, each one is easy to train and explain, and each team owns its model</td><td>Blind to the pair, so memes pass; many models to maintain per violation type</td></tr>
+        <tr><td>Late fusion (combine the scores)</td><td>Reuses the existing models, cheap to add</td><td>Can't represent an interaction, as the experiment showed</td></tr>
+        <tr><td>Early fusion in one shared trunk (WPIE)</td><td>Sees the pair; one representation reused for dozens of violation types, helps rare types</td><td>Overfits unevenly across modalities, needs focal loss and gradient blending, larger to train and serve</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Meta chose early fusion and a shared representation, and in the November 2021 post it describes a further step in the same direction. It was replacing "dozens of existing individual models with just a few consolidated ones", one system covering hate speech, bullying and harassment, and violence and incitement, which "outperform[s] previous individual classifiers." The post says the bespoke systems had been expensive to compute and maintain and slow to update for new threats. Hate speech prevalence fell over the six months after deployment, in Meta's account, and the same post says replacing per-market classifiers in many markets took weeks instead of months and needed no extra hardware. Similar approaches show up in vision-language models that read an image and a question together, and in the multitask rankers of the YouTube case study. A shared trunk with several heads is a standard way to share what's common across tasks.</p>
+
+    <p>One more piece makes the long posts and comment threads tractable. In a transformer the cost of attention grows with the square of the text length, and the posts and threads the system reads can be long. Meta's Linformer (Wang et al., June 2020) approximates self-attention with a low-rank matrix and cuts the cost from <span>$O(n^2)$</span> to <span>$O(n)$</span> in time and memory. Meta's November 2021 post says Linformer quadruples the length of text the systems can process while reducing compute.</p>
+  </section>
+
+<section id="routing">
+    <h2><span class="num">05</span>Where to draw the line, and who looks at the middle</h2>
+
+    <p>The whole-post model gives Neha's post a score, say 0.62, which we'll read as the model's probability that it breaks the hate speech policy. A score isn't a decision. Something has to turn it into one of the actions from section 01, and the same 0.62 should lead to different actions depending on what's at stake. A 0.62 on a post that three people will see isn't worth a human's time. A 0.62 on a post that's spreading fast and might be about harming a group of people is.</p>
+
+    <h3 id="5-1-thresholds">5.1 A threshold for every kind of mistake</h3>
+
+    <p>Two errors are possible. Removing a post that didn't break the rules is a <strong>false positive</strong>, and leaving up one that did is a <strong>false negative</strong>. If we call the cost of the first <span>$c_{FP}$</span> and the cost of the second <span>$c_{FN}$</span>, then acting on a post with violation probability <span>$p$</span> costs <span>$(1-p)\,c_{FP}$</span> in expected wrongful removal, and not acting costs <span>$p\,c_{FN}$</span> in expected missed harm. Acting is better when the first is smaller:</p>
+
+    <div class="eq-block"><span>$$\text{act if}\quad p\,c_{FN} \;>\; (1-p)\,c_{FP} \quad\Longleftrightarrow\quad p \;>\; \frac{c_{FP}}{c_{FP}+c_{FN}}$$</span></div>
+
+    <p>The right-hand side is the threshold. If a missed violation is nine times as costly as a wrongful removal, the threshold is 1/(1+9) = 0.1, and the system should act at a 10% probability. If the costs are equal it should act at 50%. Notice that <span>$c_{FN}$</span> isn't a constant. It grows with how severe the violation is and with how many people will see the post before anything else happens. A post that will reach 10 people has a tiny <span>$c_{FN}$</span> and a high threshold, and one on its way to a million views has a large one and a low threshold. A single global threshold can't be right for both.</p>
+
+    <p>Meta's published description of the pipeline fits this shape without giving the numbers. Meta's 2020 integrity paper says that content flagged with very high confidence may be removed immediately and the rest goes to human reviewers, and that the ML "must err on the side of increasing recall" with reviewers making the final call. Meta's Transparency Center page on review says clear-cut cases are handled by technology, and cases with "unclear sentiment, complex language, or context-dependent imagery" go to people. No confidence values appear in either source. In the diagram below, the bar is the three-way split those sentences describe, with the position of the cut points left as unpublished.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Three outcomes for every score
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 276" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="30" text-anchor="start" font-size="10.5" class="dim">Classifier score for Neha's post and everyone else's, from 0 to 1</text>
+<rect x="20" y="44" width="660" height="36" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="350" y="44" width="231" height="36" fill="#fbbf24" opacity="0.22"/>
+<rect x="581" y="44" width="99" height="36" rx="8" fill="#f472b6" opacity="0.26"/>
+<rect x="20" y="44" width="660" height="36" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="185" y="67" text-anchor="middle" font-size="10.5" class="" fill="#34d399">leave it up</text>
+<text x="465" y="67" text-anchor="middle" font-size="10.5" class="" fill="#fbbf24">human queue</text>
+<text x="630" y="67" text-anchor="middle" font-size="10.5" class="" fill="#f472b6">auto-act</text>
+<text x="20" y="98" text-anchor="start" font-size="10.5" class="dim">0</text>
+<text x="680" y="98" text-anchor="end" font-size="10.5" class="dim">1</text>
+<text x="350" y="98" text-anchor="middle" font-size="10.5" class="dim">cut points are illustrative; Meta does not publish them</text>
+<line x1="429" y1="40" x2="429" y2="84" stroke="#e9e9ef" stroke-width="2"/>
+<text x="429" y="116" text-anchor="middle" font-size="10.5" class="" fill="#e9e9ef">Neha's post: 0.62</text>
+<path d="M429,124 L429,132 L120,132 L120,140" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="140" width="200" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="140" width="200" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="120.0" y="166" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">PRIORITY KEY</text>
+<text x="120.0" y="180" text-anchor="middle" font-size="10" class="dim">severity x virality x</text>
+<text x="120.0" y="194" text-anchor="middle" font-size="10" class="dim">likelihood of violating</text>
+<path d="M224,175 L256,175" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="260" y="140" width="200" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="260" y="140" width="200" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="360.0" y="166" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">REVIEW QUEUE</text>
+<text x="360.0" y="180" text-anchor="middle" font-size="10" class="dim">sorted by the key, not</text>
+<text x="360.0" y="194" text-anchor="middle" font-size="10" class="dim">by arrival time</text>
+<path d="M464,175 L500,175" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="504" y="140" width="176" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="504" y="140" width="176" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="592.0" y="166" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">KOFI</text>
+<text x="592.0" y="180" text-anchor="middle" font-size="10" class="dim">policy specialist;</text>
+<text x="592.0" y="194" text-anchor="middle" font-size="10" class="dim">decision becomes a label</text>
+<text x="20" y="240" text-anchor="start" font-size="10.5" class="dim">Moving the two cut points trades one error for the other. Raise the upper one and fewer wrong removals happen,</text>
+<text x="20" y="258" text-anchor="start" font-size="10.5" class="dim">but more violating posts wait in the queue. Raise the lower one and the queue shrinks, but more harm stays up.</text>
+      </svg>
+      <div class="diagram-caption">The coloured bar is the classifier's score. Clear cases at either end are handled by software, and the middle band is the work that goes to people, in priority order.</div>
+    </div>
+
+    <h4 class="why">Why not send every uncertain post to a person?</h4>
+
+    <p>Because the middle band would swallow the whole reviewing budget. If even 1% of 3 billion illustrative daily posts landed in the queue, that's 30 million posts, or about 36,000 reviewers' full days from the earlier calculation. A queue has a fixed number of review-minutes in it, so the system has to choose which of the uncertain posts get them, and the order in which they're read is the next design question.</p>
+
+    <h3 id="5-2-queue">5.2 Ordering the queue by expected harm</h3>
+
+    <p>Version 1 ordered the queue by arrival time. A better rule starts from what a delay costs. While a violating post waits, people keep seeing it, so harm accrues at a rate that depends on three things: how likely the post is to violate, how bad it is if it does, and how fast it's being viewed. Multiply them and you have the expected harm per hour of waiting:</p>
+
+    <div class="eq-block"><span>$$\text{priority}(x) \;=\; \underbrace{\ell(x)}_{\text{likelihood}} \times \underbrace{s(x)}_{\text{severity}} \times \underbrace{v(x)}_{\text{virality}}$$</span></div>
+
+    <p>Here <span>$\ell$</span> is the model's probability that the post violates, <span>$s$</span> is a weight for how severe the harm is if it does (a threat to someone's safety counts for more than spam), and <span>$v$</span> is the number of views per hour the post is getting now, which has to be recomputed as it spreads. Meta's Transparency Center names these same three factors: severity, "how likely the content is to lead to harm, both online and offline", virality, "how quickly the content is being shared", and likelihood of violating. It describes the aim as to "prevent as much harm as possible." The multiplicative combination and the weights are our reconstruction, because Meta hasn't published a formula.</p>
+
+    <p>There's a classical result that says why sorting by this product is the right greedy rule. Scheduling jobs on one worker, where each job has a weight (the cost per hour of leaving it waiting) and a processing time, the order that minimises total weighted waiting time is by weight divided by processing time, largest first. That's Smith's rule, from 1956. Reviewing a post probably takes roughly the same time whatever its score, so the order reduces to the weight, and the weight here is the expected harm per hour, the priority above. A reviewer finishing one post and picking up the one with the highest remaining priority is doing the best simple thing available.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">A simulated platform sends 400 flagged posts an hour to a queue and has capacity to review 300 an hour, for 72 hours, so the backlog grows. Each post has a violation probability, a severity of 1, 3 or 10, and a view rate with a heavy tail. We compare three orderings: oldest first, highest likelihood first, and the priority above. Which gives the least total harm (severity × views × hours waited, over violating posts), and which leaves the largest share of violating posts never reviewed?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>Priority ordering gives the least harm by a wide margin, but it isn't the one that leaves the fewest posts unreviewed. Below, the experiment shows the two numbers side by side, because they pull in opposite directions.</p>
+      </details>
+    </div>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Three ways to order an overloaded review queue</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(7)
+HOURS, ARRIVE, CAP = 72, 400, 300   # flagged/hour, reviews/hour
+n = HOURS * ARRIVE
+t0 = np.repeat(np.arange(HOURS), ARRIVE)         # arrival hour
+score = rng.beta(0.8, 1.6, n)                    # P(violating)
+bad = rng.random(n) &lt; score                      # calibrated
+sev = rng.choice([1, 3, 10], n, p=[0.6, 0.3, 0.1])  # spam..self-harm
+rate = rng.lognormal(0, 1.5, n)                  # views/hour
+
+def run(key):
+    waiting, done = [], np.full(n, HOURS, float)  # unreviewed: to end
+    for h in range(HOURS):
+        waiting += list(np.where(t0 == h)[0])
+        w = np.array(waiting)
+        order = np.argsort(-key(w, h), kind=&quot;stable&quot;)
+        take = w[order[:CAP]]
+        done[take] = h
+        waiting = list(w[order[CAP:]])
+    wait = np.maximum(done - t0, 0) + 0.5
+    harm = (sev * rate * wait)[bad]
+    return harm.sum(), np.mean(wait[bad &amp; (sev == 10)]), \
+           np.mean(done[bad] == HOURS)
+
+policies = {
+  &quot;oldest first&quot;:          lambda w, h: -t0[w].astype(float),
+  &quot;likelihood only&quot;:       lambda w, h: score[w],
+  &quot;sev x viral x likely&quot;:  lambda w, h: sev[w] * rate[w] * score[w],
+}
+base = None
+for name, key in policies.items():
+    harm, wait10, left = run(key)
+    base = base or harm
+    print(f&quot;{name:21} harm {harm / base:4.2f}x of oldest-first, &quot;
+          f&quot;severe wait {wait10:4.1f} h, &quot;
+          f&quot;{left:.0%} of violating posts never reviewed&quot;)</code></pre>
+      <div class="tryit-out">Oldest first is the baseline. Likelihood-only ordering has <code>0.20</code> of its harm, with severe posts waiting <code>2.0</code> hours instead of <code>9.7</code>. Priority ordering has <code>0.06</code> of the harm and severe posts wait <code>0.9</code> hours. Look to the last column for the cost: <code>25%</code> of violating posts are never reviewed in arrival order, <code>4%</code> under likelihood-only, and <code>11%</code> under the priority ordering.</div>
+    </details>
+
+    <p>Reviewing oldest-first is the baseline, at 1.00. Ordering by likelihood alone cuts the total harm to 0.20 of it, and the priority ordering cuts it to 0.06, which is about 17 times less harm than reading in arrival order. Severe posts wait 9.7 hours on average in arrival order, 2.0 with likelihood and 0.9 with priority. That last column is the price. With priority ordering 11% of violating posts are never reviewed in the 72 hours, against 4% under likelihood-only ordering, because the low-severity, low-reach posts sit at the bottom of an overloaded queue for ever. Whoever runs the system decides whether that's acceptable. Spam from accounts nobody follows is a fair trade for getting the severe post to a person in under an hour, but a rule that is never revisited can let a category starve, and that's a reason for measuring the whole system, not only the queue.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to order the review queue</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Oldest first</td><td>Fair, simple, easy to promise a turnaround time</td><td>Severe and fast-spreading posts wait behind spam; the delay grows whenever the queue is overloaded</td></tr>
+        <tr><td>By likelihood of violating</td><td>Reviewers' time goes to posts that are mostly violating, which keeps precision high</td><td>Ignores how bad the harm is and how widely the post is seen</td></tr>
+        <tr><td>By severity × virality × likelihood</td><td>Targets expected harm; severe, viral posts are read first</td><td>Low-severity, low-reach violations can wait for ever; needs fresh view counts and a severity weight someone must choose</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Meta moved from the first row to the third. A Transparency Center page describes the current approach: reviewers "focus more on severe, viral, nuanced, novel, and complex content", where previously they spent most of their time on user-reported content. That page also notes that each reviewer decision is used to train the technology, so the queue is both the output of the model and a source of its next training data, which section 09 comes back to. Triage in an emergency room, bug triage in a software team, and the review queues for ads and fraud alerts at other companies all rest on the same idea.</p>
+
+    <p>Neha's post, at 0.62 with a fast-rising view count and a moderate severity, lands near the top of Kofi's queue, a long way ahead of a link-spam post with a similar score. He'll probably read it within the hour. Before he does, we should ask what the model has to know to score posts like hers in the language she wrote it in, and what happens when the rules change.</p>
+  </section>
+
+  <section id="adapt">
+    <h2><span class="num">06</span>New languages and new policies</h2>
+
+    <p>Neha wrote her caption in English, but half the replies underneath are in Marathi and Hindi, some in Roman script. A system trained on English labels is blind to those, and the languages with the fewest labelled examples are often the ones where moderation is thinnest. One classifier per language is the obvious fix, and it breaks in three ways. Each language needs its own labelled data and a team to maintain its model. Small languages never get enough labels to train a good one. And code-switching, mixing two languages in one sentence, is the normal case for millions of people and fits neither model.</p>
+
+    <h3 id="6-1-xlmr">6.1 One model for many languages: XLM-R</h3>
+
+    <p>Meta's cross-lingual work addresses this. XLM-R (Conneau et al., arXiv November 2019) is a transformer trained on text in about 100 languages, over two terabytes of filtered CommonCrawl data, with one shared vocabulary and one shared set of weights. Its training task is <strong>masked language modelling</strong>: hide some words in a sentence and predict them from the rest. Because the same model has to predict words in every language, it ends up placing sentences with similar meaning in similar positions across languages. It reports an average accuracy gain of 14.6% on the XNLI cross-lingual benchmark over multilingual BERT, and gains over previous XLM models of 15.7% for Swahili and 11.4% for Urdu on the same benchmark, which shows the model helping most where data is thinnest.</p>
+
+    <p>For moderation the useful consequence is <strong>cross-lingual transfer</strong>. Train a hate speech classifier on labelled English, French and Spanish examples, and the shared representation means it often works on a language it never saw labelled. Meta's Transparency Center says that XLM-R lets Meta "use one model for many languages instead of one model per language", and that learning in one language can improve performance in others, which helps with less common languages. Meta's November 2019 post says hate speech was being proactively detected in 40 languages at that time, and the November 2020 post describes XLM-R as used to improve hate speech classifiers across Facebook and Instagram in multiple languages. Meta's own goal, in that post, is coverage "for every language and community around the world", which it hasn't claimed to have reached. How accuracy varies from one language to the next isn't published in the sources used here.</p>
+
+    <h4 class="why">Why train one model on many languages and not many models?</h4>
+
+    <p>A shared model can borrow from every language it has seen. A word for a threat in one language is surrounded by the same kinds of context as its translation in another, and the model learns that structure from the languages where it has plenty of text. A separate small model for Marathi would have to learn it from Marathi alone. Its cost is that a single model has a fixed capacity to share across 100 languages, and a language with unusual script or slang is probably served less well than a dedicated model would serve it.</p>
+
+    <h3 id="6-2-fsl">6.2 When the policy changes: Few-Shot Learner</h3>
+
+    <p>The second kind of change is a new rule. Suppose a month from now the policy team adds a line covering a new kind of misleading post, or a new phrase starts being used as a dog whistle. A traditional classifier needs thousands of labelled examples of the new category, and those have to be found, sent to reviewers and labelled before training can start. Meta's December 8, 2021 post says collecting and labelling data for a new category "usually takes months", with traditional systems needing "thousands, if not millions" of labelled examples. By the time the classifier ships, the topic may have moved on.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Adapting to a rule that did not exist last month
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 318" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="150" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="150" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="66" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">POLICY TEXT</text>
+<text x="95.0" y="80" text-anchor="middle" font-size="10" class="dim">a short definition of</text>
+<text x="95.0" y="94" text-anchor="middle" font-size="10" class="dim">the new rule</text>
+<rect x="20" y="124" width="150" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="124" width="150" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="150" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">FEW EXAMPLES</text>
+<text x="95.0" y="164" text-anchor="middle" font-size="10" class="dim">fewer than 50 posts</text>
+<rect x="20" y="194" width="150" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="194" width="150" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="220" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">THE POST</text>
+<text x="95.0" y="234" text-anchor="middle" font-size="10" class="dim">text, image, URL</text>
+<path d="M176,75 L222,140" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M176,152 L222,150" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M176,222 L222,160" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="226" y="100" width="150" height="100" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="226" y="100" width="150" height="100" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="301.0" y="134" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">FEW-SHOT MODEL</text>
+<text x="301.0" y="148" text-anchor="middle" font-size="10" class="dim">pretrained on generic</text>
+<text x="301.0" y="162" text-anchor="middle" font-size="10" class="dim">text, then on past</text>
+<text x="301.0" y="176" text-anchor="middle" font-size="10" class="dim">policy decisions</text>
+<path d="M382,150 L428,150" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="432" y="100" width="248" height="100" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="432" y="100" width="248" height="100" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="556.0" y="127" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">ENTAILMENT QUESTION</text>
+<text x="556.0" y="141" text-anchor="middle" font-size="10" class="dim">Does this post imply:</text>
+<text x="556.0" y="155" text-anchor="middle" font-size="10" class="dim">'this content encourages</text>
+<text x="556.0" y="169" text-anchor="middle" font-size="10" class="dim">violence against a group'?</text>
+<text x="556.0" y="183" text-anchor="middle" font-size="10" class="dim">yes / no, with a score</text>
+<text x="20" y="280" text-anchor="start" font-size="10.5" class="dim">Three training stages: generic text first, then years of labelled violating and borderline content, then the new policy text.</text>
+<text x="20" y="300" text-anchor="start" font-size="10.5" class="dim">No retraining per policy: a new rule is a new sentence plus a handful of examples, so action takes weeks, not months.</text>
+      </svg>
+      <div class="diagram-caption">Read left to right. The model is fixed; what changes between policies is the sentence that tells it what to look for.</div>
+    </div>
+
+    <p>Meta's Few-Shot Learner, FSL, is built to cut that. Meta's post describes it as a "large-scale, multimodal, multilingual, zero or few-shot model" that doesn't need fine-tuning for each new task. Inputs are the whole post (text, image, URL), the policy information (a definition and labelled examples), and optional demonstrations. It has three modes: zero-shot, with only the policy description; few-shot with demonstration, with fewer than 50 examples; and low-shot with fine-tuning, on top of the FSL base model. It handles more than 100 languages. It says it's trained in three stages: pretraining on billions of generic and open-source language examples, then training on the policy-violating and borderline content Meta had labelled over the years, then training on condensed text explaining a new policy. Meta's tests are of two example tasks, flagging misleading or sensationalised content that discourages COVID-19 vaccination, and improving a classifier for content close to inciting violence.</p>
+
+    <p>FSL leans on <strong>entailment</strong>, an idea borrowed from natural language inference. A classifier normally outputs one of a fixed list of labels. An entailment model is shown a pair of sentences, a premise and a hypothesis, and asked whether the premise implies the hypothesis. To turn classification into this task, each label is rewritten as a natural-language statement, and the model judges whether the post entails the statement. For the policy "no content that encourages violence against a group", the hypothesis is that sentence itself, and the model's score for "yes" is the classifier's output. Meta's post gives a sentiment example of the conversion. It comes from Wang et al., "Entailment as Few-Shot Learner" (April 2021), which reports an average 12% improvement over existing few-shot methods across 18 NLP tasks, with as few as 8 examples. Meta's post reports the model outperforming other few-shot methods by up to 55% and by 12% on average in its own evaluations.</p>
+
+    <p>Why does this make a new policy cheap? FSL has already learned, across years of labelled decisions, what the language of a policy violation looks like, and it has learned to read a policy definition. A new rule is a new hypothesis sentence. Meta's post says FSL can act on new or evolving harmful content "within weeks instead of months", and that offline and online A/B tests measured a reduction in prevalence of violating content on Facebook and Instagram, with no figures published. It says combining FSL with existing classifiers helped reduce hate speech prevalence, again without numbers, and it expects the time from policy definition to enforcement to shorten "by orders of magnitude". Parameter counts and serving cost for FSL aren't published.</p>
+
+    <h3 id="6-3-rio">6.3 Optimising on live results: RIO</h3>
+
+    <p>The last piece addresses a weakness in how every model here is chosen. A common way to build a classifier is to freeze a labelled dataset, train several candidates, pick the one with the best offline score, and ship it. Meta's November 19, 2020 post about the <strong>Reinforcement Integrity Optimizer</strong> (RIO) calls the result "not enforcement-aware": the model is scored on a static test set, not on what happens to people's feeds when it runs. What works well in a controlled test, the post says, "isn't the best choice for the real world."</p>
+
+    <p>RIO instead trains on "millions of current pieces of content" and treats the choice of training data, features, architecture and hyperparameters as decisions to be optimised, with online metrics as the reward, the "bottom-line results" for how well people are protected from seeing hate speech. It names the parts: a data sampler that estimates the value of training examples, a model optimiser where engineers define a search space of parameters and features, a deep reinforced controller that generates candidate sampling policies, features and architectures, and a simulator of the enforcement and ranking system that provides online signals for each candidate. It says RIO was deployed at the end of Q3 2020 to optimise the hate speech classifiers that review content uploaded to Facebook and Instagram, and that some components were still being rolled out. It gives no performance figures and doesn't publish the controller's learning rule, so we won't describe one.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to adapt to a new policy or a new language</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Label, then train a new classifier</td><td>Highest accuracy once there's enough data; simple to evaluate</td><td>Months to collect labels; the target moves in the meantime</td></tr>
+        <tr><td>One model per language or market</td><td>Tuned to local usage and script</td><td>A separate label pipeline and model to maintain for each; small languages starve</td></tr>
+        <tr><td>Shared multilingual model (XLM-R)</td><td>Transfers across languages; one model to serve</td><td>Fixed capacity shared across ~100 languages; quality varies by language</td></tr>
+        <tr><td>Few-shot with policy text (FSL)</td><td>New rule in weeks from a sentence and under 50 examples; works across 100+ languages</td><td>Probably weaker than a fully trained classifier on a mature policy; results published only as relative gains</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Meta uses several of these at once and says so: the November 2021 post describes the shift to a few consolidated models and mentions FSL as an area its researchers are exploring, and FSL's own post describes using it to strengthen existing classifiers, not to replace them. Where the same idea shows up elsewhere: instruction-tuned language models take a task described in words and a few examples, as chapter 10 describes, and a spam team adding a rule for a new scam is doing the same job by hand.</p>
+  </section>
+
+  <section id="adversaries">
+    <h2><span class="num">07</span>People who adapt to the detector</h2>
+
+    <p>Suppose the system removes Neha's post, and a week later a near-identical one appears from another account with the caption's key phrase spelled with a digit in place of a letter, and the platform photo cropped slightly and mirrored. Little of it resembles what the detector removed. People who post violating content watch what gets taken down and change their method. Meta's 2020 integrity paper says so directly, and gives examples of how: deliberate misspellings and noise "inserted on purpose in an attempt to confuse the detection systems", new coded terms such as "caravandals" that emerge to avoid keyword matching, and visually similar benign and violating images, such as fried broccoli against marijuana, that are hard to tell apart. Meta's December 2021 post adds that bad actors sometimes resubmit altered versions until one is accepted.</p>
+
+    <p>That last tactic has simple arithmetic. If the detector catches an edited variant with probability <span>$r$</span>, and an attacker tries <span>$k$</span> independent variants, the chance that at least one gets through is</p>
+
+    <div class="eq-block"><span>$$P(\text{at least one passes}) \;=\; 1 - r^{k}$$</span></div>
+
+    <p>Take a detector with recall <span>$r=0.95$</span>, which sounds good. After 14 tries the attacker has about a 51% chance of success, since <span>$0.95^{14}\approx0.49$</span>. At <span>$r=0.99$</span> it takes about 69 tries. This formula assumes the tries are independent, and a real attacker's aren't, because each one reveals something about the detector, which makes the true picture worse for the defender, while a detector that links the tries to one account can make it better. Meta's sources don't describe how it links attempts, so we can't say how it does so. Perfect recall isn't the goal. The goal is to make each additional try cost more than the last, and to find out quickly when a new pattern appears.</p>
+
+    <p>Four defences follow from what Meta has published. One is training for the edits you expect. A standard approach is to read text as sub-word pieces and train on obfuscated variants, so that a digit in place of a letter lands near the original. Image matchers like SimSearchNet++ are trained against crops, blurs and screenshots by construction. Meta hasn't published how it handles text obfuscation. Another is a fast loop. RIO's post says it focuses training on the hate speech violations that previous production models missed, which means each evasion that gets through and is later caught becomes training data. A third is the human tier. Reviewers meet the novel patterns first, and FSL turns a handful of their decisions into a working detector in weeks. A fourth looks beyond the single post: the integrity paper separates content-based violations from behaviour-based ones, such as impersonation and coordinated activity, where the signal sits in the account or the network and not in any one post.</p>
+
+    <p>Perceptual hashes have a weakness of their own. A hash is public in the sense that anyone who can compute it can test candidate edits against it, and academic work has examined how far deliberate perturbations can push a perceptual hash's distance without changing what a person sees (Jain et al., arXiv 2021). That's one reason the hash is the first and cheapest layer and not the only one. Meta's closing line in the 2019 post puts the situation plainly: "the adversarial nature of these challenges means the work will never be done."</p>
+
+    <p>The same arms race runs through spam filtering, fraud detection and malware scanning, and the structure is the same: a cheap fast layer for the known, a learning layer for the new, and a human layer for the ambiguous. We now have all the layers of detection. Next comes how they fit together into something that answers within the time a post is being shared.</p>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">08</span>Serving: one post through the cascade</h2>
+
+    <p>Each layer we've added is more expensive than the one before it, and the order matters. A hash lookup is a few bytes against an index, an embedding match is a model run plus a vector search, and the whole-post classifier is the heaviest of the three. That funnel shape from the YouTube chapter appears here for the same reason: put the cheap test first so that the expensive one runs on fewer items. A post that's an exact or near copy of something already judged never needs the big model.</p>
+
+    <p>A shared whole-post model has a second serving advantage from its shared design. Before WPIE, each violation type was its own model, so a post cost one full model run for each of dozens of categories. With a shared trunk, the post goes through the expensive part once and produces one embedding, and each violation type adds only a small head on top of it. As an illustration, if the trunk costs 20 milliseconds and each head costs 0.05, forty violation types cost about 22 milliseconds, against 800 for forty separate 20-millisecond models. Those figures are illustrative, since Meta publishes neither the model size nor its latency. That saving lets a shared representation scale to "many dozens of violation types", as the 2019 post puts it.</p>
+
+    <p>Indexes have to fit somewhere too, and a back-of-envelope check shows the shape. A 256-bit hash is 32 bytes, so even 300 million of them (an illustrative number echoing "hundreds of millions") are about 10 GB, which fits in memory on one machine, and a lookup that finds everything within 31 bits is a nearest-neighbour search over binary codes. An embedding index is larger. If each image vector had 256 floating-point numbers, which is an assumption since SimSearchNet++'s dimension isn't published, 300 million vectors would take about 300 GB, so such an index is probably compressed and sharded, using the same product-quantization ideas as section 05 of the YouTube case study.</p>
+
+    <p>Here's the path of Neha's post, with the details that are published and a flag where they aren't. Meta hasn't published a per-stage latency for any step, so the steps have no timings.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Upload</span><span>Neha taps Post. Meta's 2020 paper says AI systems inspect content "as it's posted", so the first checks probably run when the post is created. Whether any stage blocks publishing, or runs just after it, isn't published.</span></li>
+      <li><span class="st-lane">Hash</span><span>The photo gets a perceptual hash, and the system looks for a close match among images already judged. Her platform photo is new, so there's none. Hash and index details for the production system aren't published, beyond the open-source PDQ.</span></li>
+      <li><span class="st-lane">Match</span><span>An embedding of the image is checked against the index of known-violating images, with OCR checking any text in it. Nothing close, so the image goes on to the classifier.</span></li>
+      <li><span class="st-lane">Classify</span><span>The whole-post model reads caption, photo and any other text together and produces a score for each violation type. Hate speech scores 0.62, between the two cut points.</span></li>
+      <li><span class="st-lane">Route</span><span>The score is too low for automatic action and too high to ignore. It goes to the review queue with a priority from its likelihood, severity weight and view rate.</span></li>
+      <li><span class="st-lane">Rescore</span><span>As the post spreads and people report it, its view rate and reports change, which changes its priority. Meta's 2020 paper describes reconsidering posts that "have achieved high levels of engagement." A system that weights by view rate probably recomputes priority as views grow, but how often a post is rescored isn't published.</span></li>
+      <li><span class="st-lane">Decide</span><span>Kofi reads the post. Reviewers apply expertise in specific policy areas and locales, per the Transparency Center, and the 2020 paper says content is removed if multiple reviewers agree that it violates. His decision is applied to this post, and logged.</span></li>
+      <li><span class="st-lane">Learn</span><span>Every decision becomes a label for the next training run, and Neha can appeal. Section 09 follows both.</span></li>
+    </ol>
+
+    <p>Two design choices keep this from collapsing under load. Work is done once and reused: the shared embedding feeds every head and the same score feeds both the threshold and the queue priority. And the expensive, uncertain work is pushed to the part of the system that can wait, since a human tier measured in minutes doesn't need the sub-second path that the hash and the classifier share. Hardest to get right is the end of the loop, where the system learns from what happened.</p>
+  </section>
+
+  <section id="labels">
+    <h2><span class="num">09</span>Where the labels come from, and where they mislead</h2>
+
+    <p>Every model above learned from labels, and in moderation the labels are people's judgements, made under policy, about content they'd never seen before, often in a hurry. A label here is a human opinion, and a human opinion is noisier and more biased than a label like "this image contains a cat". Three sources feed the label pool, and each distorts it in a different way.</p>
+
+    <h3 id="9-1-reviewers">9.1 Reviewer decisions</h3>
+
+    <p>Kofi's verdict on Neha's post is the main source of labels, and Meta's Transparency Center says that every reviewer decision is used to train the technology. Two properties of those labels need handling. First, reviewers disagree. Meta's 2020 paper says content is removed when multiple reviewers agree, which makes the removal itself a label with a majority behind it, and it discusses reviewer bias with an example: a reviewer might "be more likely to label a joke about that group as hate speech" depending on their own relationship to the group. Fact-checking partners are one mitigation the paper names. Second, the labelled posts aren't a random sample, because Kofi only sees what the routing sent him, the middle band of scores and the highest-priority items. Training only on his decisions means the model never learns about the confident cases it handles alone, and its estimate of its own error rate is probably wrong in a particular direction.</p>
+
+    <p>A fix for the first problem is redundancy. On its precision page, the Transparency Center describes how Meta measures accuracy with labelled samples: some samples get two reviewers, and a third breaks ties. That logic works for training labels as well, where the posts the reviewers split on are both the most expensive to label and the most informative, because the disagreement says the policy line is unclear at that point. A fix for the second is to add randomly sampled content to the labelled set, with weights that undo the sampling. The next section does the same for measurement.</p>
+
+    <h3 id="9-2-appeals">9.2 Appeals and restores</h3>
+
+    <p>Neha's post is removed, and she disagrees. She taps Appeal, a second review looks at the post, and it's restored. An appeal is the platform asking a different person to check the first decision, and the result is a label that counters the first one. That's useful, since appeals concentrate on the posts where someone is confident the system was wrong. It's also biased: only actioned content can be appealed, so an appeal can correct a false positive and can never reveal a false negative, and only some people appeal. Meta's Transparency Center is careful about this. Its page on appealed content says that the count of appeals shouldn't be read as "an indicator of the accuracy of our decisions", because people appeal for many reasons, and its page on restored content says that restoring a post "doesn't necessarily mean a mistake was made". Restored content also includes posts Meta restored on its own, without an appeal, when it found a problem itself.</p>
+
+    <p>For training, a restored post is a negative example with extra weight, since the first reviewer and the model both got it wrong. Used carelessly it overcorrects, because a model trained on appeals alone learns that everything is fine. A usual answer is to treat appeals as one signal weighted by how reliable the second review is. Meta's January 2025 post says it was adding staff to the appeals process and, in more cases, requiring "multiple reviewers to reach a determination", which fits that logic: a second review that's less reliable than the first makes a poor label.</p>
+
+    <h3 id="9-3-sampling">9.3 A random sample, to keep the rest honest</h3>
+
+    <p>The third source solves both biases and costs the most, because it's a random sample of content or views that's labelled whether or not any model flagged it. Meta labels sampled views to measure the prevalence of violations, which section 10 covers, and the same labelled sample is the only unbiased picture of what the system misses. Posts that scored low and were never reviewed appear in it, in proportion to how often they're seen. That makes it the right data for estimating recall and for checking the model's calibration. It's also tiny next to the stream, because most random samples contain no violation at all.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Where labels come from, and where they are biased
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 362" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="190" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="40" width="190" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="115.0" y="63" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">REVIEWER DECISIONS</text>
+<text x="115.0" y="77" text-anchor="middle" font-size="10" class="dim">Kofi: violating / not,</text>
+<text x="115.0" y="91" text-anchor="middle" font-size="10" class="dim">with the policy line</text>
+<rect x="255" y="40" width="190" height="64" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="255" y="40" width="190" height="64" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="350.0" y="63" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">APPEALS + RESTORES</text>
+<text x="350.0" y="77" text-anchor="middle" font-size="10" class="dim">people dispute removals;</text>
+<text x="350.0" y="91" text-anchor="middle" font-size="10" class="dim">some are reversed</text>
+<rect x="490" y="40" width="190" height="64" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="490" y="40" width="190" height="64" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="585.0" y="63" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">SAMPLED VIEWS</text>
+<text x="585.0" y="77" text-anchor="middle" font-size="10" class="dim">random views labelled</text>
+<text x="585.0" y="91" text-anchor="middle" font-size="10" class="dim">for prevalence</text>
+<path d="M115,108 L115,140" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M350,108 L350,140" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M585,108 L585,140" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="142" width="660" height="40" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="142" width="660" height="40" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="160" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">LABELS</text>
+<text x="350.0" y="174" text-anchor="middle" font-size="10" class="dim">with how each one was chosen</text>
+<path d="M350,186 L350,210" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="212" width="660" height="40" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="212" width="660" height="40" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="237" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">TRAIN + TUNE (RIO-style: data sampling, features, model, thresholds)</text>
+<path d="M350,256 L350,280" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="282" width="660" height="40" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="282" width="660" height="40" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="350.0" y="307" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">A/B TEST ON PREVALENCE AND PRECISION, THEN DEPLOY</text>
+<path d="M684,302 L696,302 L696,62 L684,62" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="346" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Reviewer decisions and appeals only cover what the system already surfaced. The sampled-views stream is the one that keeps it honest.</text>
+      </svg>
+      <div class="diagram-caption">Three streams feed one label set. Read the amber line for which stream to trust for measurement and which only for learning.</div>
+    </div>
+
+    <p>This is the feedback loop of moderation, and it resembles the one in the YouTube case study. Whatever the model flags is what gets reviewed, and what gets reviewed is what it learns from. A category the model is blind to produces no flags, no reviews and no labels, so its blindness is self-sustaining. User reports, reviewer decisions on routed content, and a random sample for the places those two can't see are three ways to break the loop, and the system needs all of them. This arrangement shows up in fraud detection, where only investigated transactions get labels, and in medical screening, where only the patients who were tested get a result.</p>
+
+    <p>We now have a loop that learns, and we need an answer to a question that should have come earlier: how would we know if it was working? Numbers people usually quote don't answer it.</p>
+  </section>
+
+<section id="measuring">
+    <h2><span class="num">10</span>How do we know it's working?</h2>
+
+    <p>Counts are the first numbers anyone reaches for. How many posts did the system remove this quarter? Meta reports that as <strong>content actioned</strong>, the number of pieces of content it took action on. A second number is the <strong>proactive rate</strong>, defined on Meta's Transparency Center as "the percentage of all content or accounts acted on that we found and actioned before users reported them to us." Both are easy to compute and both mislead, and the way they mislead is a useful lesson about measurement.</p>
+
+    <p>Take Meta's own figures for hate speech on Facebook in the second quarter of 2021. Content actioned rose from 25.2 million pieces in Q1 to 31.5 million in Q2, which looks like more hate speech. Meta's own explanation, in the report post by Guy Rosen, was "continued improvement in our proactive detection": the system found more of what was already there. A rising count can be good news, if detection is catching up, or bad news, if there's more of it. A falling count has the same ambiguity. Proactive rate has the same problem, and the Transparency Center page lists its limits: it doesn't show how quickly violating content was found or how many people saw it first, it doesn't count violations that were never found, rates "can reach 99% in some categories" while the remainder still affects people, and better user reporting can lower the rate because Meta relies less on proactive detection. Meta also notes that a burst of identical malicious content, such as during an attack, can move the rate without any change in the technology.</p>
+
+    <h3 id="10-1-prevalence">10.1 Prevalence: count what people saw</h3>
+
+    <p>The measure that avoids these traps is <strong>prevalence</strong>. Meta defines it as the estimated share of views on Facebook or Instagram that show violating content, which it also describes as the share of violating views that weren't prevented. Its Transparency Center says it's estimated "by sampling content views, not by counting posts": reviewers label a random sample of views as violating or not, and the estimate is the estimated number of views that showed violating content divided by the estimated number of total views. A prevalence of 0.05% means about 5 of every 10,000 views were of violating content, which is the Q2 2021 figure for hate speech on Facebook, down from 0.05–0.06% in Q1.</p>
+
+    <p>Counting views, not posts, is a deliberate choice. A single post can be seen millions of times or by nobody, and what matters to the people using the platform is what they saw. Prevalence also gives credit for anything that cuts exposure, not only for removals. Rosen's explanation for the decline in Q2 2021 credits better proactive detection and also News Feed ranking changes, and a ranking change that shows violating posts to fewer people moves prevalence even though no post was removed. A removal count would be blind to it.</p>
+
+    <h3 id="10-2-estimation">10.2 Estimating a rare rate</h3>
+
+    <p>Violations are rare, so estimating the rate takes care. Suppose each sampled view has an independent chance <span>$p$</span> of being a violation. With <span>$n$</span> labelled views, the estimate is the observed fraction and its standard error is <span>$\sqrt{p(1-p)/n}$</span>. To know <span>$p$</span> to within a relative error <span>$\epsilon$</span> at 95% confidence, the sample has to be about</p>
+
+    <div class="eq-block"><span>$$n \;\approx\; \frac{1.96^{2}\,(1-p)}{p\,\epsilon^{2}}$$</span></div>
+
+    <p>where 1.96 is the multiplier for a 95% window, <span>$p$</span> is the true rate, and <span>$\epsilon$</span> is the relative error we'll accept (0.1 for 10%). That <span>$p$</span> in the denominator is what makes rare things expensive.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Hate speech prevalence is about 0.05%. How many randomly sampled views have to be labelled by reviewers to estimate it to within 10% of its value, at 95% confidence? Guess the order of magnitude, then compare with a violation that's ten times as common.</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>With <span>$p=0.0005$</span> and <span>$\epsilon=0.1$</span>, the formula gives 3.84 × 0.9995 ÷ (0.0005 × 0.01), which is about 768,000 labelled views. For a violation ten times as common, at 0.5%, it's about 76,000, ten times fewer. Reviewing three-quarters of a million views is far more than the review budget will allow for every category, language and quarter, so measurement can't be a plain random sample.</p>
+      </details>
+    </div>
+
+    <p>Meta's Transparency Center says that some violation types use <strong>stratified sampling</strong>, which samples higher-risk contexts more often. We split views into groups, called strata, with known sizes, sample more heavily where violations concentrate, and weight each group back to its true share. If stratum <span>$h$</span> makes up a fraction <span>$W_h$</span> of all views, and we label <span>$n_h$</span> of them and find a rate <span>$\hat p_h$</span>, the combined estimate and its variance are</p>
+
+    <div class="eq-block"><span>$$\hat p \;=\; \sum_h W_h\,\hat p_h, \qquad \mathrm{Var}(\hat p) \;=\; \sum_h W_h^{2}\,\frac{p_h(1-p_h)}{n_h}$$</span></div>
+
+    <p>Here the weights <span>$W_h$</span> undo the over-sampling, so the estimate stays unbiased, and the variance is lower when the strata are chosen so that the rate inside each is more uniform. Here's an illustration with made-up strata, defined by a classifier's score. Say 0.02% of views belong to posts scoring above 0.9, of which 60% violate; 1% score in the middle band, with 2% violating; and the other 98.98% score low, with 0.005% violating. Prevalence is then about 0.037%, or 3.7 views in 10,000. With 20,000 labelled views, plain random sampling gives a standard error of 37% of the estimate, because it will see almost no violations. Spreading the same 20,000 labels equally over the three strata brings it to 24%, and a 30/30/40 split to 22%. Meta's strata are defined by context and not by score, and it doesn't publish them, so these figures show the idea and nothing about its actual intervals. Meta reports each estimate as a range, with the note that "This range reflects a 95% confidence window", and for rare violations it gives only an upper limit.</p>
+
+    <h4 class="why">Why does a falling removal count not mean the platform is getting safer?</h4>
+
+    <p>Removals measure the system's activity, and what changed for people is what they see. Removals can fall because there's less violating content, or because the detector got worse, or because bad actors moved to forms it can't see. Prevalence moves with the quantity people care about and is measured on a random sample, so it stays honest in the cases where the detector is blind. Its cost is that it needs human labels on a large sample, and it only moves slowly.</p>
+
+    <h3 id="10-3-precision">10.3 The other side: how many removals were right</h3>
+
+    <p>Prevalence tells us about what slipped through. It says nothing about wrongful removals, which is the error a person like Neha feels. Meta's second metric, <strong>precision</strong>, covers that side: "Precision measures the accuracy of our enforcement actions on Facebook or Instagram." It's estimated by sampling actioned content and having reviewers label whether each action was correct under the policy. Some samples get two reviewers with a third breaking ties, because labellers make mistakes, and results come as a range at a 95% confidence window. In its report for the first half of 2026 Meta gave global enforcement precision of about 91% on Facebook and about 92% on Instagram. A precision of 91% means roughly 9 in 100 actions were taken on content that didn't break the rules, a figure that's easy to overlook next to a high proactive rate.</p>
+
+    <p>Together the two samples give the picture: precision from a sample of the system's actions, prevalence from a sample of what people saw. Neither alone is enough. Raising the threshold improves precision and hurts prevalence, and lowering it does the reverse, so a team that watches only one of them will push the system into the corner the other one measures. That pair of numbers is why Meta can state a tradeoff in public and be checked on it.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Metric</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Content actioned</td><td>Easy to count; shows activity</td><td>Rises when detection improves and when abuse grows; says nothing about exposure</td></tr>
+        <tr><td>Proactive rate</td><td>Shows how much is found before anyone reports it</td><td>Blind to speed, to what was missed, and to changes in reporting</td></tr>
+        <tr><td>Prevalence (sampled views)</td><td>Tracks what people saw; credits ranking changes; unbiased by what the detector flags</td><td>Needs large human-labelled samples; slow to move; wide ranges for rare violations</td></tr>
+        <tr><td>Precision (sampled actions)</td><td>Measures wrongful removals directly</td><td>Says nothing about missed violations; labellers disagree</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Offline evaluation sits underneath all of this. A candidate model is scored on labelled data with the standard metrics for imbalanced problems, such as precision and recall at the operating threshold and the area under the precision-recall curve, and an A/B test then measures its effect on prevalence. For a rare event the test itself is demanding. To detect a 5% relative drop in a prevalence of 0.05% with 95% confidence and 80% power, each arm needs roughly 12.5 million sampled views if the labels come from a simple random sample, from the usual two-proportion formula. A test on rare violations therefore probably leans on large traffic, stratification and model-assisted labelling. Meta says FSL was evaluated in offline and online A/B tests that measured the change in prevalence on Facebook and Instagram, and it doesn't publish how those tests were powered. This principle appears in medical screening, where a test's value is judged on outcomes in a random population, and in fraud detection, where only a random audit shows the fraud that was never flagged.</p>
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">11</span>What went wrong, and what it cost</h2>
+
+    <p>Meta's own reports describe the tradeoff between the two errors more openly than most companies do, and the sequence from 2019 to 2026 shows the threshold being moved in both directions. We list what the sources say and mark what they don't.</p>
+
+    <p>Early posts are frank about limits. Meta's November 2020 post says "While we are constantly improving our AI tools, they are far from perfect", and it stresses that avoiding mistakes matters as much as detecting problems. Hateful Memes tells the same story in numbers, with humans at 84.7% against 64.73% for the best models in 2020, as does the line in the 2019 post that AI isn't Meta's only answer to harmful content. Costs in this period probably fell mostly on one side: high proactive rates, and a good deal of wrongful action that went unmeasured outside the precision samples.</p>
+
+    <p>In January 2025 the balance was deliberately changed. On January 7, 2025, Meta published a post that said Meta had been using automated systems to scan for all policy violations. It estimated that in December 2024, "one to two out of every 10 of these actions may have been mistakes", and noted that the estimate doesn't include actions against large-scale adversarial spam. These were threshold changes. It would "tune our systems to require a much higher degree of confidence before a piece of content is taken down". Automated systems would focus on "illegal and high-severity violations, like terrorism, child sexual exploitation, drugs, fraud and scams". For less severe violations it would "rely on someone reporting an issue before we take any action." It would remove most demotions and require greater confidence for the rest, and it said appeals can be "frustratingly slow", adding staff and requiring multiple reviewers in more cases.</p>
+
+    <p>Effects show in the next reports. Meta's May 29, 2025 update says it saw "a roughly 50% reduction in enforcement mistakes" in the United States from Q4 2024 to Q1 2025. Meta's Q1 2025 integrity report, on the other side of the ledger, said the share of content actioned before a user reported it decreased, and that content appealed and later restored decreased too. Prevalence stayed mostly flat, with two exceptions: bullying and harassment on Facebook rose from 0.06–0.07% to 0.07–0.08%, linked to a spike in violating shares in March, and violent and graphic content on Facebook rose from 0.06–0.07% to about 0.09%, which Meta linked to increased sharing and to its work to reduce mistakes. A higher threshold bought fewer wrongful removals and probably cost a measurable amount of exposure in two categories. Its reports give the cause as Meta understands it, and we have no outside way to verify that attribution.</p>
+
+    <p>Meta's H1 2026 report, which covers Q1 and Q2 2026, gave the more recent figures: global enforcement precision of about 91% on Facebook and 92% on Instagram, and a fall in adult nudity and sexual activity prevalence on Facebook from 0.10–0.11% in Q4 2025 to 0.07–0.08% in Q2 2026, which Meta attributes to deploying large language models (LLMs) to close enforcement gaps. In the same report violent and graphic content rose, on Facebook from 0.15–0.16% to 0.20–0.21% and on Instagram from 0.09–0.10% to 0.14–0.15%, which Meta attributes to real-world events. That May 2025 report describes the role of the language models in the review process: Meta said LLMs were "operating beyond that of human performance in select policy areas", and that they remove content from review queues when Meta is highly confident it doesn't violate policy. That's the queue of section 05 run in reverse: software clearing clear negatives out of the line so reviewers spend their time on posts that need them.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Period</th><th>Stance on automatic action</th><th>What the published figures show</th></tr></thead>
+      <tbody>
+        <tr><td>2019 to 2024</td><td>Automated systems scan for all policy violations; high proactive rates are the headline</td><td>Hate speech proactive rate 24% (2017), 80.5% (2019), 94.7% (Nov 2020); Meta's December 2024 estimate that 10 to 20% of actions may have been mistakes</td></tr>
+        <tr><td>From January 2025</td><td>Much higher confidence needed to act; automation focused on severe and illegal content; less severe content waits for reports</td><td>About 50% fewer mistakes in the US (Q4 2024 to Q1 2025); fewer actions caught before a report; small prevalence rises in two Facebook categories</td></tr>
+        <tr><td>2025 to 2026</td><td>LLMs added to clear clear-cut content from queues and to close gaps</td><td>Precision about 91% (Facebook) and 92% (Instagram) in H1 2026; adult nudity prevalence down; violent and graphic content up, attributed to real-world events</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>This chapter takes no position on the policy debate around the change. As a measurement story it's clean: the company published a mistake estimate, changed the thresholds, and reported the effect on both kinds of error. What the figures can't settle is whether the new balance is the right one, since that depends on how much weight a society puts on a wrongly removed joke compared with a missed insult, which is the cost ratio in section 05. This chapter uses only Meta's own posts, reports and papers. Whistleblower disclosures and Oversight Board decisions also bear on these questions, and this chapter stays with Meta's own posts, reports and papers.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How aggressive should automatic action be?</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Act at low confidence on everything</td><td>Highest recall and proactive rate; harm is caught early</td><td>1 to 2 wrongful actions in every 10 at Meta's December 2024 estimate; appeals queues overloaded; people feel silenced</td></tr>
+        <tr><td>Act only at high confidence, on severe categories</td><td>Far fewer mistakes; reviewers focus on hard cases</td><td>More minor violations stay up until reported; some prevalence rises</td></tr>
+        <tr><td>Tiered by severity, with LLMs clearing negatives</td><td>Spends caution where harm is worst; shrinks the queue</td><td>More moving parts to calibrate and measure; tiers need constant review</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">12</span>The whole system</h2>
+
+    <p>We can now draw the full design. On the left is the path a post takes in the seconds after Neha taps Post, through the cheap layers to the expensive one, and out to either an action, a leave-alone or the queue. On the right is the slower loop that keeps the models current: reviewer decisions, appeals and a random sample of views become labels, the labels train and tune the models, and a test on prevalence and precision decides what ships.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The whole design, in the seconds and over the quarters
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 566" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="10.5" class="" fill="#e9e9ef">IN THE SECONDS AFTER NEHA TAPS POST</text>
+<text x="400" y="24" text-anchor="start" font-size="10.5" class="" fill="#e9e9ef">OVER THE QUARTERS: HOW IT LEARNS</text>
+<rect x="20" y="36" width="300" height="42" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="36" width="300" height="42" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="170.0" y="55" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">NEHA'S POST</text>
+<text x="170.0" y="69" text-anchor="middle" font-size="10" class="dim">caption + photo, shown to a few hundred people</text>
+<path d="M170,80 L170,96" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="98" width="300" height="46" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="98" width="300" height="46" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="170.0" y="119" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">MATCH KNOWN IMAGES</text>
+<text x="170.0" y="133" text-anchor="middle" font-size="10" class="dim">perceptual hash, then embedding match</text>
+<path d="M170,146 L170,162" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="164" width="300" height="46" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="164" width="300" height="46" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="170.0" y="185" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">WHOLE-POST MODEL</text>
+<text x="170.0" y="199" text-anchor="middle" font-size="10" class="dim">shared trunk, a score per violation type</text>
+<path d="M170,212 L170,228" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="230" width="300" height="46" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="230" width="300" height="46" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="170.0" y="251" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">THRESHOLDS + PRIORITY</text>
+<text x="170.0" y="265" text-anchor="middle" font-size="10" class="dim">cost-based cut points; severity x views x score</text>
+<path d="M64,278 L64,300" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M170,278 L170,300" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M270,278 L270,300" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="302" width="88" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="302" width="88" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="64.0" y="332" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">LEAVE UP</text>
+<rect x="126" y="302" width="88" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="126" y="302" width="88" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="170.0" y="318" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">AUTO-ACT</text>
+<text x="170.0" y="332" text-anchor="middle" font-size="10" class="dim">very high</text>
+<text x="170.0" y="346" text-anchor="middle" font-size="10" class="dim">confidence</text>
+<rect x="232" y="302" width="88" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="232" y="302" width="88" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="276.0" y="318" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">QUEUE</text>
+<text x="276.0" y="332" text-anchor="middle" font-size="10" class="dim">sorted by</text>
+<text x="276.0" y="346" text-anchor="middle" font-size="10" class="dim">priority</text>
+<path d="M276,354 L276,376" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="180" y="378" width="140" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="180" y="378" width="140" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="250.0" y="401" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">KOFI</text>
+<text x="250.0" y="415" text-anchor="middle" font-size="10" class="dim">reads, decides</text>
+<path d="M250,430 L250,450" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M170,354 L170,450" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="452" width="300" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="452" width="300" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="170.0" y="472" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">ACTION + LOG</text>
+<text x="170.0" y="486" text-anchor="middle" font-size="10" class="dim">remove, demote, label; appeal possible</text>
+<rect x="400" y="36" width="280" height="42" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="400" y="36" width="280" height="42" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="540.0" y="55" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">REVIEWER DECISIONS</text>
+<text x="540.0" y="69" text-anchor="middle" font-size="10" class="dim">only on routed content</text>
+<rect x="400" y="88" width="280" height="42" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="400" y="88" width="280" height="42" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="540.0" y="107" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">APPEALS + RESTORES</text>
+<text x="540.0" y="121" text-anchor="middle" font-size="10" class="dim">only actioned content</text>
+<rect x="400" y="140" width="280" height="42" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="400" y="140" width="280" height="42" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="540.0" y="159" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">RANDOM SAMPLE OF VIEWS</text>
+<text x="540.0" y="173" text-anchor="middle" font-size="10" class="dim">labelled whether or not flagged</text>
+<path d="M540,184 L540,202" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="204" width="280" height="40" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="400" y="204" width="280" height="40" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="540.0" y="222" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">LABELS</text>
+<text x="540.0" y="236" text-anchor="middle" font-size="10" class="dim">weighted by how each was chosen</text>
+<path d="M540,246 L540,262" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="264" width="280" height="56" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="400" y="264" width="280" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="540.0" y="290" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAIN + TUNE</text>
+<text x="540.0" y="304" text-anchor="middle" font-size="10" class="dim">XLM-R, WPIE-style trunk, few-shot, RIO-style search</text>
+<path d="M540,322 L540,340" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="342" width="280" height="56" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="400" y="342" width="280" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="540.0" y="368" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">TEST</text>
+<text x="540.0" y="382" text-anchor="middle" font-size="10" class="dim">prevalence (views) and precision (actions)</text>
+<path d="M540,400 L540,418" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="420" width="280" height="36" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="400" y="420" width="280" height="36" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="540.0" y="443" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">DEPLOY THE WINNER</text>
+<path d="M322,474 L366,474 L366,225 L398,225" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M540,458 L540,526 L8,526 L8,187 L18,187" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="550" text-anchor="start" font-size="10.5" class="dim">Neha's decision and appeal become labels. The random sample is the only stream that can show what the system never flagged.</text>
+      </svg>
+      <div class="diagram-caption">Start at Neha's post at the top left and follow the path down through the layers. Then follow the labels across to the right, down through training and the test, and back to the models.</div>
+    </div>
+
+    <p>Neha's post enters through the hash and embedding layers, finds no match, and reaches the whole-post model. That score and the post's severity and view rate decide whether it's left up, acted on automatically or put in a queue, where Kofi reads it. His decision is applied and logged, her appeal would go to a second review, and both become labels. A random sample of views, labelled by reviewers, keeps the labels honest and gives the prevalence estimate. Training runs on those labels, tuned against live results, and a candidate model has to win on prevalence and precision before it replaces the one that read her post.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Component</th><th>What it does</th><th>Added because</th></tr></thead>
+      <tbody>
+        <tr><td>Report button, blocklist</td><td>Cheap first checks and a flow of labels</td><td>The starting point, and still a source of signal (§2)</td></tr>
+        <tr><td>Perceptual hash, embedding match</td><td>Recognise copies of already-judged images</td><td>Removed images came back re-uploaded (§3)</td></tr>
+        <tr><td>Whole-post model (WPIE-style)</td><td>One representation, a score per violation type</td><td>Halves of a meme are each harmless (§4)</td></tr>
+        <tr><td>Thresholds and priority queue</td><td>Turn scores into action; spend reviewers where harm is highest</td><td>A score isn't a decision; arrival order wastes review time (§5)</td></tr>
+        <tr><td>XLM-R, FSL, RIO</td><td>Cover new languages, new policies, and tune on live results</td><td>Labels take months; policies and languages keep changing (§6)</td></tr>
+        <tr><td>Fast retraining, hashing, behaviour signals</td><td>Close evasions and follow accounts</td><td>People adapt to what gets removed (§7)</td></tr>
+        <tr><td>Cascade serving with shared trunk</td><td>Cheap layers first; one trunk for dozens of types</td><td>Cost per post must stay small at billions a day (§8)</td></tr>
+        <tr><td>Reviewer labels, appeals, random sample</td><td>Training data and an unbiased view of misses</td><td>Each source misleads alone (§9)</td></tr>
+        <tr><td>Prevalence and precision samples</td><td>Measure exposure and wrongful action</td><td>Removal counts and proactive rate mislead (§10)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Several parts of this picture are unpublished: the cut points on the score, the severity weights, how often posts are rescored, the sizes and latencies of every model, and how reports, hashes and classifiers divide the work in each category. These sources describe the system as of 2019 through 2026, and the current system has probably moved on.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">13</span>Summary</h2>
+    <ol>
+      <li><strong>Humans can't read everything,</strong> so software has to look at every post and decide the clear cases alone. At an illustrative 3 billion posts a day, reading it all would need millions of reviewers.</li>
+      <li><strong>A blocklist and a report button fail in four ways.</strong> They read words and not meaning, order the queue by arrival, forget what they've judged, and only see what people report.</li>
+      <li><strong>Copies of judged images are matched, not re-judged.</strong> A perceptual hash such as PDQ survives noise and recompression, and a learned embedding such as SimSearchNet++ survives crops and screenshots.</li>
+      <li><strong>Meaning lives in the pair,</strong> so the model has to see the post as a whole. Early fusion learns the interaction, and late fusion of separate verdicts cannot, as the experiment showed (0.99 against 0.51).</li>
+      <li><strong>Focal loss and gradient blending make the shared model trainable.</strong> Focal loss stops the easy majority from drowning the rare cases, and blending sets the trust for each modality by how fast it overfits.</li>
+      <li><strong>A score isn't a decision.</strong> Act when the probability exceeds the cost of a wrongful action over the total cost of both errors, a threshold that moves with severity and reach, with a human tier for the uncertain middle.</li>
+      <li><strong>Order the queue by expected harm.</strong> Likelihood × severity × virality cut simulated harm to 0.06 of an oldest-first queue, at the price of leaving more low-severity posts unreviewed.</li>
+      <li><strong>Languages and policies change faster than labels arrive.</strong> XLM-R transfers across about 100 languages, and Few-Shot Learner turns a policy sentence and under 50 examples into a classifier in weeks. RIO tunes on live results.</li>
+      <li><strong>Evasion is part of the problem.</strong> At 95% recall an attacker with 14 independent tries has about even odds, so the defence is a fast loop, many layers and signals beyond the single post.</li>
+      <li><strong>Each label source misleads differently.</strong> Reviewer decisions only cover routed content, appeals only correct false positives, and only a random sample of views shows what the system misses.</li>
+      <li><strong>Measure exposure and wrongful action.</strong> Prevalence (violating views per 10,000, sampled) and precision (correct actions, sampled) beat counts of removals, and Meta's own 2025 changes show the tradeoff between them.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">14</span>Build this</h2>
+    <p class="lede">The ideas in this chapter are easy to agree with and easy to get wrong in numbers. You can rebuild the heart of the system in a day with synthetic data, and watch each choice move the two measures that matter.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A moderation pipeline with a priority queue and an honest prevalence estimate</span>
+        <span class="proj-meta">~6 hours &middot; numpy and a small torch or numpy MLP</span>
+      </div>
+      <p>Build a small world where you know the truth: 200,000 posts a day, each with a hidden violating label, a severity, a view rate, a caption vector and an image vector. A post violates only when caption and image interact, as in the experiment of section 04, and 0.1% of views fall on violating posts. Everything you build is judged against that truth, which no real platform can do.</p>
+      <ol class="proj-steps">
+        <li>Create a pool of previously removed images as 256-bit hashes, and add edited copies using noise, brightness and crops. Match with a Hamming threshold and plot, against the threshold, the share of copies found and the share of unrelated images wrongly matched.</li>
+        <li>Train a text-only, an image-only and a joint classifier with and without focal loss. Compare precision and recall at a fixed threshold, and see how many easy examples dominate the loss without it.</li>
+        <li>Turn scores into actions with two cut points. Choose them from a cost ratio, and sweep the ratio to trace the tradeoff between wrongful removals and violating views.</li>
+        <li>Run the review queue of section 05 for 30 days at 70% of the capacity needed. Compare oldest-first, likelihood-first and priority ordering on harm, wait for severe posts and the share of violating posts never reviewed.</li>
+        <li>Estimate prevalence from a random sample of views, then from a stratified sample defined by classifier score with the weights of section 10. Repeat 1,000 times and compare the spread of both against the true value.</li>
+        <li>Add an adversary who makes five edited resubmissions of each removed post, and measure how the share that gets through changes when you retrain nightly on the ones that did.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the joint model beats chance where the single-modality models don't, the priority queue cuts harm by an order of magnitude and visibly starves low-severity posts, the stratified estimate has a clearly smaller spread than the random one with the same labelling budget, and the nightly retraining closes part of the gap the adversary opens.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Add reviewer noise, with each label wrong 10% of the time, and an appeals stream that corrects only false positives. Train on reviewer labels, then on reviewer labels plus appeals, and compare both against the sampled-view labels to see what each stream does to the model's estimated recall.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">15</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why can't a platform moderate with a list of banned words?</summary>
+      <div class="qa-body"><p>A list reads words, and harm often lives in meaning that no single word carries: a caption and a photo that are each harmless alone, slang that's new this month, a threat in a language the list doesn't cover. It's also trivial to dodge with a changed spelling, which Meta's 2020 integrity paper lists among the evasions it sees. A list still has a place as a cheap first check and a source of training labels. Most of the work moves to models that read the whole post.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why use a perceptual hash and not SHA-256 to recognise a known image?</summary>
+      <div class="qa-body"><p>A cryptographic hash changes completely when one pixel changes, so a re-save or a screenshot of a removed image looks brand new. A perceptual hash such as PDQ keeps the lowest-frequency structure of the picture, 256 bits from a DCT, so that small edits move it by only a few bits. Two images count as the same when the Hamming distance is under a threshold, for PDQ about 31 as a starting point. Crops, collages and pasted fragments still defeat it, so a learned embedding such as SimSearchNet++ is the second layer.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is prevalence, and why is it better than counting removals?</summary>
+      <div class="qa-body"><p>It's the estimated share of views that show violating content, found by labelling a random sample of views. Removals measure the system's activity, which rises when detection improves and also when abuse grows, so the count is ambiguous either way. Prevalence follows what people saw, gives credit for ranking changes that reduce exposure, and stays honest where the detector is blind because the sample isn't drawn from what it flagged. In Q2 2021 Meta's hate speech removals rose from 25.2 million to 31.5 million on Facebook while prevalence fell to 0.05%.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How would you set the action threshold for a violation category?</summary>
+      <div class="qa-body"><p>Estimate the cost of a wrongful action and of a missed violation, and act when the probability exceeds c_FP / (c_FP + c_FN). If a miss is nine times worse than a wrongful removal, the threshold is 0.1. A missed violation's cost isn't constant: it grows with severity and with how many people will see the post, so the threshold should vary by category and by virality. It also needs a calibrated score, so check calibration on a random labelled sample before trusting the formula. Then send the middle band to people and watch precision and prevalence together, because moving the threshold trades one for the other.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Explain early and late fusion with a meme example.</summary>
+      <div class="qa-body"><p>In late fusion a text model and an image model each produce a verdict and the verdicts are combined. If the meme is harmful only through the combination, each model sees something benign and so does their sum. In early fusion the inputs enter one model, which can learn the interaction. In a toy where harm needs the caption and picture to agree, unimodal and late-fusion models stay near 51% accuracy and an early-fusion network reaches 99%. Its cost is uneven overfitting across modalities, which gradient blending (Wang et al., CVPR 2020) addresses by weighting each modality's loss by its generalisation.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How would you order a review queue, and what can go wrong?</summary>
+      <div class="qa-body"><p>By expected harm per unit of reviewer time: likelihood of violating × severity × view rate, which by Smith's rule is the right order when review times are similar. Meta names the same three factors. It must be recomputed as posts spread, because virality changes. In a simulation with 400 flagged posts an hour and capacity of 300, it cut harm to 0.06 of oldest-first. Starvation is the failure: 11% of violating posts were never reviewed, against 4% for likelihood-only ordering. Fix it by watching per-category backlog, reserving some capacity for the low-priority tail, or clearing clear negatives automatically so the queue is shorter.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How do you measure recall when you can't see what the system missed?</summary>
+      <div class="qa-body"><p>Label a random sample of views, whether or not any model flagged them. Violating views in the sample that the system didn't action are the misses, in proportion to how often they were seen. Because violations are rare the sample needs to be large, about 768,000 views for a 0.05% rate at 10% relative error, so use stratification to oversample risky contexts and weight them back. Reviewer-labelled queues and appeals can't give recall, because they only contain what the system already surfaced.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Design the measurement of prevalence for a rare violation.</summary>
+      <div class="qa-body"><p>Define the unit as views, so exposure counts. Sample views at random, label them with two reviewers and a tiebreaker, and estimate violating views over total views with a 95% interval. For a rare rate use strata with known sizes, weight each by W_h, and compute Var = Σ W_h² p_h(1−p_h)/n_h, choosing allocation to minimise variance. Report an upper bound when too few violations appear. Keep the strata independent of the model you're evaluating when you can, or the sample inherits its blind spots. In an illustration with three score strata and 20,000 labels, the standard error fell from 37% to 22–24% of the estimate. Meta describes view-based sampling and stratification by risky contexts, but not its strata.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>What's wrong with training on appeal outcomes?</summary>
+      <div class="qa-body"><p>Only actioned content can be appealed, so appeals can reveal false positives and never false negatives, and only some people appeal. Meta says appealed counts aren't an accuracy measure, and that restoring content doesn't necessarily mean a mistake was made. A model trained on appeals alone learns that more things are fine. Treat a restore as a weighted negative whose weight reflects how reliable the second review is. Meta has moved to multiple reviewers in more appeals for that reason. Balance it with randomly sampled labels, which have no selection bias.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>A new policy takes effect next week. What do you do?</summary>
+      <div class="qa-body"><p>A conventional classifier needs thousands of labels, so it can't be ready in a week. Few-shot approaches of the kind Meta describes for FSL reformulate classification as entailment: the policy definition becomes a hypothesis sentence, and the model judges whether a post implies it. Start with zero-shot on the policy text, add fewer than 50 labelled demonstrations from reviewers, and fine-tune later when more labels exist. Route the new category's mid-confidence scores to reviewers so their decisions both enforce and train. Use a stratified sample to measure prevalence and precision for the new category from the first day, and expect the few-shot model to be weaker than a mature classifier. Meta reports weeks instead of months and doesn't publish absolute accuracy.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">16</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/2009.10311" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Preserving Integrity in Online Social Networks</div><div class="r-sub">Halevy et al., 2020. Meta's own survey of integrity problems, the adversarial setting, early fusion for memes, prevalence and the review pipeline. arXiv:2009.10311</div></div>
+      </a>
+      <a class="resource-card" href="https://ai.meta.com/blog/community-standards-report" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Community Standards report post (WPIE)</div><div class="r-sub">Meta AI, November 13, 2019. Whole Post Integrity Embeddings, focal loss and gradient blending, and proactive-detection figures.</div></div>
+      </a>
+      <a class="resource-card" href="https://ai.meta.com/blog/how-ai-is-getting-better-at-detecting-hate-speech/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">How AI is getting better at detecting hate speech</div><div class="r-sub">Mike Schroepfer, November 19, 2020. Covers the 94.7% proactive figure, XLM-R, Linformer and WPIE.</div></div>
+      </a>
+      <a class="resource-card" href="https://ai.meta.com/blog/training-ai-to-detect-hate-speech-in-the-real-world/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Training AI to detect hate speech in the real world</div><div class="r-sub">Meta AI, November 19, 2020. Introduces the Reinforcement Integrity Optimizer and why offline scores mislead.</div></div>
+      </a>
+      <a class="resource-card" href="https://ai.meta.com/blog/harmful-content-can-evolve-quickly-our-new-ai-system-adapts-to-tackle-it/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Harmful content can evolve quickly: our new AI system adapts to tackle it</div><div class="r-sub">Meta AI, December 8, 2021. Few-Shot Learner, entailment and results in weeks instead of months.</div></div>
+      </a>
+      <a class="resource-card" href="https://ai.meta.com/blog/the-shift-to-generalized-ai-to-better-identify-violating-content/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">The shift to generalized AI to better identify violating content</div><div class="r-sub">Meta AI, November 9, 2021. Replacing dozens of models with a few consolidated ones.</div></div>
+      </a>
+      <a class="resource-card" href="https://ai.meta.com/blog/heres-how-were-using-ai-to-help-detect-misinformation/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Here's how we're using AI to help detect misinformation</div><div class="r-sub">Meta AI, November 19, 2020. SimSearchNet++, OCR verification and near-duplicate matching.</div></div>
+      </a>
+      <a class="resource-card" href="https://ai.meta.com/blog/detecting-manipulated-images-the-image-similarity-challenge-results-and-winners" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Detecting manipulated images: the Image Similarity Challenge</div><div class="r-sub">Meta AI, December 6, 2021. Why copies are hard to find, and the DISC21 dataset.</div></div>
+      </a>
+      <a class="resource-card" href="https://transparency.meta.com/policies/improving/prevalence-metric/" target="_blank" rel="noopener">
+        <div class="r-icon">📖</div>
+        <div class="r-body"><div class="r-kind">Official docs</div><div class="r-title">Prevalence metric</div><div class="r-sub">Meta Transparency Center. Sampling views, stratification and the 95% confidence window.</div></div>
+      </a>
+      <a class="resource-card" href="https://transparency.meta.com/policies/improving/prioritizing-content-review/" target="_blank" rel="noopener">
+        <div class="r-icon">📖</div>
+        <div class="r-body"><div class="r-kind">Official docs</div><div class="r-title">How Meta prioritizes content for review</div><div class="r-sub">Meta Transparency Center. Severity, virality and likelihood of violating.</div></div>
+      </a>
+      <a class="resource-card" href="https://transparency.meta.com/policies/improving/proactive-rate-metric/" target="_blank" rel="noopener">
+        <div class="r-icon">📖</div>
+        <div class="r-body"><div class="r-kind">Official docs</div><div class="r-title">Proactive rate metric</div><div class="r-sub">Meta Transparency Center. Definition and caveats used in section 10; the precision, appealed and restored pages sit beside it.</div></div>
+      </a>
+      <a class="resource-card" href="https://about.fb.com/news/2025/01/meta-more-speech-fewer-mistakes/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">More speech and fewer mistakes</div><div class="r-sub">Meta, January 7, 2025, updated later. Includes the mistake estimate and the move to higher confidence thresholds.</div></div>
+      </a>
+      <a class="resource-card" href="https://transparency.meta.com/reports/integrity-reports-q1-2025/" target="_blank" rel="noopener">
+        <div class="r-icon">📖</div>
+        <div class="r-body"><div class="r-kind">Official report</div><div class="r-title">Integrity Report, Q1 2025</div><div class="r-sub">Meta, updated May 29, 2025. Mistakes halved in the US, prevalence changes and LLMs in review.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/facebook/ThreatExchange/tree/main/pdq" target="_blank" rel="noopener">
+        <div class="r-icon">💻</div>
+        <div class="r-body"><div class="r-kind">Open source</div><div class="r-title">PDQ perceptual hash</div><div class="r-sub">Meta's ThreatExchange repository. A DCT-based image hash, match and quality thresholds.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1911.02116" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Unsupervised Cross-lingual Representation Learning at Scale (XLM-R)</div><div class="r-sub">Conneau et al., 2019. One model across about 100 languages. arXiv:1911.02116</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2104.14690" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Entailment as Few-Shot Learner</div><div class="r-sub">Wang et al., 2021. Classification as entailment, the method behind Few-Shot Learner. arXiv:2104.14690</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1905.12681" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">What Makes Training Multi-Modal Classification Networks Hard?</div><div class="r-sub">Wang, Tran and Feiszli, CVPR 2020. Gradient blending. arXiv:1905.12681</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1708.02002" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Focal Loss for Dense Object Detection</div><div class="r-sub">Lin et al., 2017. Loss used in section 04. arXiv:1708.02002</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2005.04790" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">The Hateful Memes Challenge</div><div class="r-sub">Kiela et al., 2020. Benign confounders, and the gap between people and models. arXiv:2005.04790</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2006.04768" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Linformer: Self-Attention with Linear Complexity</div><div class="r-sub">Wang et al., 2020. Low-rank attention that makes long posts affordable. arXiv:2006.04768</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">17</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/14-multimodal-ai"><div class="rc-sec" style="color:var(--c-multimodal)">14 · Reading the pair</div><div class="rc-title">Multimodal AI</div><div class="rc-hook">Fusing text and images in one model, the idea behind the whole-post classifier of section 04.</div></a>
+      <a class="related-card" href="/topics/09-nlp-evolution"><div class="rc-sec" style="color:var(--c-nlp)">09 · Languages</div><div class="rc-title">NLP Evolution</div><div class="rc-hook">Masked language models and multilingual transfer, the basis of XLM-R and entailment.</div></a>
+      <a class="related-card" href="/topics/03-unsupervised-self-supervised"><div class="rc-sec" style="color:var(--c-unsup)">03 · Learning without labels</div><div class="rc-title">Unsupervised &amp; Self-Supervised</div><div class="rc-hook">Contrastive learning, how an image matcher learns that a crop and its original belong together.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Precision, recall, calibration and why a proxy metric drifts from the goal.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">A/B tests, retraining loops and monitoring, the machinery behind sections 08 to 10.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · Another case study</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">The recommender side of borderline content, and the same feedback loop between a model and its own logs.</div></a>
+    </div>
+  </section>

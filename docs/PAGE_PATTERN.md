@@ -1,3 +1,8 @@
+> **2026-10-24: the site is a Next.js app now.** Chapters live in `content/chapters/<slug>.html`
+> (front matter + HTML body); edit those, not the old `topics/*.html`, which survive only as
+> `content/legacy/` input to `scripts/convert-chapters.py`. Maths and code highlighting render at
+> build time; block styles are in `src/app/kml.css`. The prose rules below still apply.
+
 # Editing a KnowML topic page (the opening pattern)
 
 **First load the `teach-writing` skill** (`~/.claude/skills/teach-writing`). It holds the

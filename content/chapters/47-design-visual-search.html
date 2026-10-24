@@ -1,0 +1,1283 @@
+---
+title: "Designing Visual Search"
+dek: "Follow Lena's photo of a café lamp through Pinterest's visual search: detection, a learned binary embedding, a billion-image index and a blend of sources. We build it from the obvious version, fix each failure in turn, and look at the choices Pinterest published, including the ones that lost engagement."
+readingTime: "~78 min"
+prereqs: "CNNs and vision (05), recommenders and retrieval (16), evaluation (25)"
+group: "ML System Design"
+label: "Case study 47"
+description: "From a phone photo to a few dozen pins: object detection, proxy-based metric learning, one multi-task binary embedding, token-index retrieval and human-judged evaluation, built on Pinterest's own papers."
+---
+<section id="tldr">
+    <p>Lena is sitting in a café in Lisbon with a coffee going cold, looking up at the brass pendant lamp over her table. She opens Pinterest, taps the camera icon, points the phone at the lamp and presses the shutter. A moment later the screen shows a grid: lamps with the same dome shape, a few with the same warm metal, a living room where a lamp like this hangs over a dining table, and some pins that link to shops. She taps one of those and goes to the shop's page. All of it took less time than putting the phone down.</p>
+
+    <p>Hidden in that moment are several problems that don't show on the screen. Her photo was taken at an angle, in yellow café light, with a chair, a cup and part of a stranger's shoulder in the frame, and the lamp fills perhaps a tenth of the picture. Matching happens against a catalogue of billions of images, most of them clean, well-lit pictures taken by someone who wanted the object to look good. Lena has also not said what she wants. She might want this exact lamp, any lamp that looks like it, or a room that has one, and the system can't ask her. Software that takes a picture as the question and returns pictures or products as the answer is a <strong>visual search</strong> system, and the set it searches is the <strong>catalogue</strong>.</p>
+
+    <p>So the question this chapter answers is: <strong>how does Pinterest turn one off-centre café photo into a few dozen relevant pins, out of billions of images, quickly enough that Lena is still holding the phone up?</strong></p>
+
+    <p>We'll build the design the way an engineer would, starting from the most obvious version, "describe the whole picture with a neural network and find the nearest stored pictures", and fixing each failure in turn. That takes us through better features and a compact binary code for each image, an object detector that finds the lamp, the loss function that teaches a network what "looks alike" means, one embedding that replaces three, an index that searches billions of codes, and the blending and checking that stop bad results from reaching Lena. We use Pinterest's own papers from 2015 to 2022 throughout, and we say plainly where its current internals are unpublished.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>Pinterest built several visual search products over about four years, and each answers a different question. <strong>Flashlight</strong> (2016) starts from a Pin already on the site: the person draws a box around any object in the picture, or taps a dot Pinterest has placed on one, and sees Pins that look like it. <strong>Lens</strong> (2017) starts from the phone camera, which is Lena's case, and returns ideas related to what the camera sees. <strong>Shop the Look</strong>, launched in 2017 with human curation and automated in 2018, starts from a scene such as a living room and finds products that match the objects in it. We'll follow the first two most closely.</p>
+
+    <p>Those products share a hard core. Given a picture, and sometimes a region of it, the system has to return catalogue images that a person would call similar, and "similar" changes with the product. In a browsing product a lamp with the same shape counts. In a shopping product only the same item, or something very close, is useful. It also has to be fast enough for a camera, cheap enough that adding an image to the catalogue costs very little, and careful about quality: Pinterest's 2015 paper says it feared poor recommendations "would have lasting effects" on a new user's engagement, and we'll see it choose lower recall for higher precision more than once.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>Published numbers span several years, so we'll date each one. In 2015, Pinterest described a collection of "over a billion unique images". Computing every feature for all of them the first time took a little over a day on several hundred 32-core machines and produced about 5 TB of data, and keeping the collection current as new images arrived needed about five machines. In 2017 the team wrote that Pinterest held "billions of catalog photos" and had detected more than a billion objects inside them. In 2019 Pinterest reported over 250 million monthly users and "over 600 million visual searches per month". In 2020 the Shop the Look paper described over 350 million monthly users, billions of scenes and hundreds of millions of products. Let's turn those into arithmetic. Numbers that aren't published are marked as illustrative.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Take 600 million visual searches a month, which is about 230 a second on average, and an illustrative catalogue of 3 billion images. In 2017 Pinterest compared images using 4096-bit binary codes. How much memory do the codes occupy, and how much memory would a brute-force scan read per second at 230 searches a second? Compare with storing each image as 4096 32-bit floats.</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>A 4096-bit code is 512 bytes, so 3 billion of them take 1.5 TB. As floats the same vectors would be 16 KB each and 49 TB in total, which is 32 times more. A brute-force scan reads the whole 1.5 TB for one query, so at 230 queries a second the memory traffic is about 350 TB per second. If one machine can stream roughly 50 GB per second from memory (an illustrative figure), that's about 7,000 machines doing nothing except scanning, for a product that is one tab in an app.</p>
+        <p>Two conclusions follow, and they shape most of what comes next. A compact code is not a minor optimisation, since it is what lets the index live in memory at all. And the search can't touch every image: an index has to look at a small slice of the catalogue and still find the right neighbours.</p>
+      </details>
+    </div>
+
+    <p>Pinterest hasn't published an end-to-end latency target for Lens, and we won't invent one. We do have latencies for individual pieces, from 2015 and 2017 measurements of the detector, the feature extractor and the retrieval service, and we'll treat those as a guide to what a camera search can afford.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: describe the whole picture, find the nearest</h2>
+
+    <p>Our first design is the one most people would sketch. Take a convolutional neural network that has already been trained on a large labelled image set, feed Lena's photo through it, and read off the activations of one of its late layers as a list of numbers. That list is the picture's <strong>embedding</strong>: a vector whose geometry is meant to carry meaning, so that two pictures that look alike have vectors that sit close together. Do the same for every image in the catalogue ahead of time, store the vectors, and answer a query by finding the stored vectors closest to the query's. This is <strong>content-based image retrieval</strong>, an old idea that deep networks made workable, and it's where Pinterest's visual search started.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Version 1: one vector for the whole picture
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 236" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="140" height="84" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="140" height="84" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="90.0" y="65" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">THE PHOTO</text>
+<text x="90.0" y="79" text-anchor="middle" font-size="10" class="dim">Lena's café shot:</text>
+<text x="90.0" y="93" text-anchor="middle" font-size="10" class="dim">lamp, chair, cup,</text>
+<text x="90.0" y="107" text-anchor="middle" font-size="10" class="dim">wall</text>
+<rect x="188" y="40" width="140" height="84" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="188" y="40" width="140" height="84" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="258.0" y="65" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">PRETRAINED CNN</text>
+<text x="258.0" y="79" text-anchor="middle" font-size="10" class="dim">AlexNet, trained</text>
+<text x="258.0" y="93" text-anchor="middle" font-size="10" class="dim">to name ImageNet</text>
+<text x="258.0" y="107" text-anchor="middle" font-size="10" class="dim">classes</text>
+<rect x="356" y="40" width="140" height="84" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="356" y="40" width="140" height="84" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="426.0" y="65" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">FC6 VECTOR</text>
+<text x="426.0" y="79" text-anchor="middle" font-size="10" class="dim">4096 floats</text>
+<text x="426.0" y="93" text-anchor="middle" font-size="10" class="dim">about 16 KB per</text>
+<text x="426.0" y="107" text-anchor="middle" font-size="10" class="dim">image</text>
+<rect x="524" y="40" width="140" height="84" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="524" y="40" width="140" height="84" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="594.0" y="65" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">NEAREST PINS</text>
+<text x="594.0" y="79" text-anchor="middle" font-size="10" class="dim">L2 distance to</text>
+<text x="594.0" y="93" text-anchor="middle" font-size="10" class="dim">every stored</text>
+<text x="594.0" y="107" text-anchor="middle" font-size="10" class="dim">vector</text>
+<path d="M162,82 L186,82" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M330,82 L354,82" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M498,82 L522,82" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="160" text-anchor="start" font-size="10.5" class="dim">Pin vectors are computed once, offline. A query needs one forward pass and a nearest-neighbour search.</text>
+<text x="20" y="184" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">The whole frame becomes one vector, so the café's other objects pull the answer away from the lamp.</text>
+<text x="20" y="208" text-anchor="start" font-size="10.5" class="dim">Layer features tuned to name ImageNet classes were not tuned to say which pins look alike: precision@5 of 0.051.</text>
+      </svg>
+      <div class="diagram-caption">Read left to right. Every box is cheap to build, and the amber line is the first thing that breaks.</div>
+    </div>
+
+    <p>Pinterest's first use of it, described in the KDD 2015 paper by Yushi Jing and colleagues, was a repair job for Related Pins, the feed of Pins suggested under whatever Pin you're looking at. Those suggestions came mostly from the curation graph: people save Pins to boards, and a Pin's neighbours are the other Pins on the same boards. That fails for new or obscure Pins, and the paper says about 6% of images had very few or no recommendations. For those images the team computed visual neighbours from the sixth fully connected layer of an ImageNet-trained AlexNet. They ran it as an A/B test on about 10% of eligible traffic, with a precision threshold that lowered recall to protect quality, and after three months the visual neighbours had raised total repins in Related Pins by 2%.</p>
+
+    <p>That was a real win, and it also showed where the design stops. Three things break once the same machinery meets Lena's photo.</p>
+
+    <p>One is that the features were never trained to say which Pins look alike: in the paper's own relevance test the AlexNet features scored a precision@5 of 0.051, about one result in twenty. Another is the whole-picture problem. One vector describes the café, with its chair and cup and warm light, and the lamp contributes a small share. A third is cost. A 4096-number float vector is 16 KB, and we've just seen that billions of them don't fit anywhere cheap.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Where recommendations come from</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Curation graph (boards, saves)</td><td>Reflects human judgement about what belongs together</td><td>Needs existing saves, so new and obscure Pins get nothing; useless for a photo that isn't a Pin yet</td></tr>
+        <tr><td>Visual similarity, whole image</td><td>Works from pixels alone, so it covers every image the day it's added</td><td>Weak features, whole-scene vectors, expensive vectors</td></tr>
+        <tr><td>Both, blended and ranked</td><td>Each covers the other's blind spot</td><td>Needs a way to weigh them, and a way to know when to trust each</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Pinterest's papers show the third row, and the 2017 paper shows the weighing step as a linear ranker over many features, with visual similarity as one of them. For Lena the curation graph isn't available, because her photo has never been saved to a board, so she depends entirely on pixels. That makes the weaknesses above urgent, and the next three sections remove them one at a time, starting with the features.</p>
+  </section>
+
+  <section id="features">
+    <h2><span class="num">03</span>Better features, and a code small enough to store</h2>
+
+    <p>Our first fix is to pick better features, and Pinterest tested the choice with the text that already surrounds its images. They took the 1,000 most common search queries, retrieved up to 3,000 images for each (about 1.6 million unique images), and labelled every image with the query that found it. A result counts as relevant to a query image when the two share a label. It's a proxy, but it costs nothing per experiment, so many networks can be compared overnight. The score is <strong>precision@k</strong>, the fraction of the top <span>$k$</span> results that are relevant:</p>
+
+    <div class="eq-block"><span>$$\text{P@}k \;=\; \frac{1}{k}\sum_{i=1}^{k} \mathbb{1}\big[\text{result } i \text{ shares a label with the query}\big]$$</span></div>
+
+    <p>The indicator <span>$\mathbb{1}[\cdot]$</span> is 1 when its condition holds and 0 otherwise. Using it, the 2015 paper compared four feature sets, measuring the whole service's average latency including feature extraction for the query:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Features (2015)</th><th>P@5</th><th>P@10</th><th>Average latency</th></tr></thead>
+      <tbody>
+        <tr><td>AlexNet fc6, as trained on ImageNet</td><td>0.051</td><td>0.040</td><td>193 ms</td></tr>
+        <tr><td>AlexNet fc6, fine-tuned on Pinterest product data</td><td>0.234</td><td>0.210</td><td>234 ms</td></tr>
+        <tr><td>GoogLeNet loss3</td><td>0.223</td><td>0.202</td><td>1207 ms</td></tr>
+        <tr><td>VGG 16-layer fc6</td><td>0.302</td><td>0.269</td><td>642 ms</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Fine-tuning, meaning continuing to train an already-trained network on Pinterest's own images and labels, took precision@5 from 0.051 to 0.234 for the same architecture, a fourfold gain for 41 extra milliseconds. Pinterest's images, as the 2017 paper explains, are often professional product photos, where ImageNet images are casual shots of one generic object. A deeper network helped too: VGG-16 reached 0.302, at more than three times AlexNet's latency, which the paper called "acceptable for our applications".</p>
+
+    <h3 id="3-1-which-layer">3.1 Which layer to read</h3>
+
+    <p>A classification network has a stack of layers, and which one you read as the embedding matters. In 2017, Andrew Zhai and colleagues repeated the comparison (WWW 2017, "Visual Discovery at Pinterest") on a training set of millions of images in roughly 20,000 classes, with an evaluation set of 100,000 images over the same classes, 2,000 of them used as queries. It tried AlexNet, GoogLeNet, VGG-16 and two ResNets, reading different layers.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">In VGG-16 the layers just before the output are fc6 and fc7, which are wide and still general, then fc8, which has one output per ImageNet class. Which layer would you expect to retrieve the most relevant neighbours?</p>
+      <ol>
+        <li>fc8, since it's the most "semantic" layer</li>
+        <li>fc6 or fc7, an intermediate layer</li>
+        <li>All three about equal</li>
+      </ol>
+      <details>
+        <summary>Show the answer</summary>
+        <p><strong>B.</strong> In Table 1 of the 2017 paper, VGG-16 raw features scored P@10 of 0.035 at fc6 and 0.038 at fc7 under L1 distance, and 0.034 at fc8. That pattern held across networks: the paper says intermediate layers (pool5, fc6, fc7) "result in better retrieval performance than more semantic features (fc8, fc1000)". The last layer is shaped to separate the training classes, and similarity within a class is something it has no reason to preserve.</p>
+      </details>
+    </div>
+
+    <p>The embedding for retrieval is a different object from the output of the classifier, and the best layer is found by experiment. Section 05 builds on that, replacing "choose a layer of a classifier" with "train a network so its embedding layer is what's optimised".</p>
+
+    <h3 id="3-2-binary-codes">3.2 Binary codes</h3>
+
+    <p>Now the storage problem. The 2015 system already stored its deep features in binary form and compared them with Hamming distance, and the 2017 paper evaluates the idea directly. To <strong>binarise</strong> a feature vector you replace each number with a single bit: 1 where the number is positive and 0 where it isn't. The <strong>Hamming distance</strong> between two bit strings is the count of positions where they differ, which a computer finds with an exclusive-or and a population count, two instructions per 64 bits.</p>
+
+    <p>The result is unexpected. Binary codes took far less space, and some also retrieved better than the floats they came from. For VGG-16 fc6 the binary code scored P@1 of 0.158 against 0.108 for raw L2, and fine-tuning on Pinterest labels lifted it to 0.169. On the public PASCAL VOC 2011 set, P@1 rose from 0.588 for raw features under L2 to 0.752 for binary features under Hamming distance, and the authors show that binary codes separate noise images from real ones while keeping class clusters. A 4096-bit fc6 code is 16 times smaller than a raw 2048-number ResNet pool5 feature.</p>
+
+    <p>Binarising isn't safe for every layer. Binary ResNet pool5 features scored far worse than their raw versions (P@1 of 0.055 against 0.160). The authors suggest why: pool5 averages ReLU outputs, which are never negative, so most values are positive (83.86% on their set) and most bits become 1, which carries little information. An intermediate VGG or AlexNet layer has many exact zeros, and thresholding at zero keeps the pattern of which units fired.</p>
+
+    <p>There's a clean way to see what a Hamming distance measures. Write each bit string as a vector of <span>$+1$</span> and <span>$-1$</span> entries, <span>$s_a$</span> and <span>$s_b$</span>, each of length <span>$D$</span>. Positions where the signs agree contribute <span>$+1$</span> to the dot product and positions where they differ contribute <span>$-1$</span>, so</p>
+
+    <div class="eq-block"><span>$$s_a^{\top}s_b \;=\; D - 2\,d_H(a,b) \qquad\Longrightarrow\qquad d_H(a,b) \;=\; \frac{D - s_a^{\top}s_b}{2}$$</span></div>
+
+    <p>Hamming distance is a monotonic function of the dot product of the sign vectors, and each sign vector has the same length, <span>$\sqrt{D}$</span>, so ranking by Hamming distance is ranking by cosine similarity between sign vectors. If the original float vector were a random direction and the signs were what you get from random hyperplanes, the fraction of differing bits would estimate the angle between the two vectors divided by <span>$\pi$</span>. A learned embedding isn't random, but the same intuition says that more bits give a better estimate, and that's what we measure now.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Keep only the sign of each number: how much of the cosine ranking survives?</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+N, Q, LAT = 20_000, 200, 32
+z = rng.normal(size=(N + Q, LAT))          # latent &quot;visual meaning&quot;
+
+def top10(scores):                         # indices of 10 best per query
+    return np.argsort(-scores, axis=1)[:, :10]
+
+print(f&quot;{&#x27;bits&#x27;:&gt;5} {&#x27;float bytes&#x27;:&gt;12} {&#x27;binary bytes&#x27;:&gt;13} &quot;
+      f&quot;{&#x27;top-10 overlap&#x27;:&gt;15}&quot;)
+for D in (16, 64, 256, 1024, 2048):
+    P = rng.normal(size=(LAT, D))
+    x = z @ P                              # D-dim float embedding
+    xn = x / np.linalg.norm(x, axis=1, keepdims=True)
+    db, qs = xn[:N], xn[N:]
+    cos = qs @ db.T
+    b = (x &gt; 0).astype(np.float32)            # threshold at zero
+    sgn = 2 * b - 1
+    ham = (D - sgn[N:] @ sgn[:N].T) / 2    # Hamming distance
+    a, c = top10(cos), top10(-ham)
+    ov = np.mean([len(set(i) &amp; set(j)) / 10 for i, j in zip(a, c)])
+    print(f&quot;{D:5d} {4*D:12d} {D//8:13d} {ov:15.2f}&quot;)</code></pre>
+      <div class="tryit-out">The top-10 lists by Hamming distance and by cosine overlap by <code>0.10</code> at 16 bits and <code>0.77</code> at 2048 bits, while the binary code stays 32 times smaller than the float vector at every width (<code>256</code> bytes against <code>8192</code> at 2048). More bits keep more of the geometry, which is the trend the Classification paper reports for learned embeddings.</div>
+    </details>
+
+    <p>The experiment builds vectors with a known low-dimensional structure and projects them to <span>$D$</span> dimensions, so the sign bits behave like random hyperplanes. Zhai and Wu report the same trend for learned embeddings in their 2018 paper: as the dimension grows, the float and binary results converge, and a high-dimensional binary code takes the memory of a 64-dimensional float vector while retrieving better. Section 05 says why.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to store an image's embedding</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Raw floats, L2 or L1 distance</td><td>Keeps all the information; best raw numbers for ResNet pool5</td><td>16 KB per 4096-d vector; every comparison is a float dot product</td></tr>
+        <tr><td>Low-dimensional floats (for example 64)</td><td>Small, familiar, supports any distance</td><td>At equal storage, Pinterest found high-dimensional binary codes retrieved better</td></tr>
+        <tr><td>High-dimensional binary code, Hamming distance</td><td>32 times smaller than floats; comparison is XOR plus popcount; robust to noise in tests</td><td>Needs the network trained or chosen so the bits carry information; some layers binarise badly</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Pinterest chose binary codes in 2015 and kept them, and by 2019 trained networks specifically so that thresholding at zero would lose little. The same trick appears in code search and in duplicate-detection systems that compare billions of items.</p>
+
+    <p>One A/B test justified the better features. In a September 2015 experiment on five million popular query Pins, adding fine-tuned VGG fc6 and fc8 similarity features to the Related Pins ranker raised engagement (clicks and saves) by 3.2%, and extending to 100 million query Pins raised it by 4.0%, after which the model launched. Fine-tuned AlexNet features gave only 0.8%, as the offline table had predicted. The gain was largest in visual categories (art 8.8%, tattoos 8.0%) and smallest in text-driven ones (quotes 2.0%, fitness planning 0.2%).</p>
+
+    <p>We have better features and a code small enough to store, but Lena's lamp is still a tenth of her picture. Fixing that takes a different tool.</p>
+  </section>
+
+  <section id="detection">
+    <h2><span class="num">04</span>Finding the lamp: detect, crop, then search</h2>
+
+    <p>Even with good features, one vector per photo describes the café. Lena's lamp is a tenth of her frame, so its numbers are mixed with those of the chair, the cup and the wall, and the neighbours we find will be café interiors. Fixing it means finding the lamp first and describing only that. A program that returns a box around each object it recognises, with a category such as "lamp" or "bag", is an <strong>object detector</strong>. Cutting the image to a box gives a <strong>crop</strong>, and the crop is what gets embedded and searched.</p>
+
+    <p>Pinterest met this first in fashion. A street-style Pin shows a woman in a leopard-print bag, black boots and sunglasses, and one viewer wants the bag while another wants the glasses. In the 2015 paper, Jing and colleagues describe a prototype called Similar Looks that put a small red dot on each detected object; tapping a dot loaded Pins that looked like that object.</p>
+
+    <h3 id="4-1-two-step-detection">4.1 Two-step detection</h3>
+
+    <p>Running every detector on every image is expensive, and a detector that looks for bags in a mountain photo will sometimes find one. Pinterest's first answer used the text people already attach to Pins. Each save adds a short description and each new board adds board-title words, and a text pipeline turns all of it into short phrases. Rules over those phrases, regular expressions in the paper's description, classify an image annotated "spring fashion, tote with flowers" as "bag". Only the detectors for the guessed categories then run, which saves compute and removes false positives.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Two-step detection: text decides what to look for
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="36" width="140" height="84" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="36" width="140" height="84" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="90.0" y="61" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">PIN TEXT</text>
+<text x="90.0" y="75" text-anchor="middle" font-size="10" class="dim">board titles and</text>
+<text x="90.0" y="89" text-anchor="middle" font-size="10" class="dim">pin descriptions</text>
+<text x="90.0" y="103" text-anchor="middle" font-size="10" class="dim">(weak labels)</text>
+<rect x="188" y="36" width="140" height="84" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="188" y="36" width="140" height="84" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="258.0" y="61" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">CATEGORY GUESS</text>
+<text x="258.0" y="75" text-anchor="middle" font-size="10" class="dim">rules on the text:</text>
+<text x="258.0" y="89" text-anchor="middle" font-size="10" class="dim">'tote with flowers'</text>
+<text x="258.0" y="103" text-anchor="middle" font-size="10" class="dim">gives 'bag'</text>
+<rect x="356" y="36" width="140" height="84" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="356" y="36" width="140" height="84" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="426.0" y="61" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">DETECTORS</text>
+<text x="426.0" y="75" text-anchor="middle" font-size="10" class="dim">run only for the</text>
+<text x="426.0" y="89" text-anchor="middle" font-size="10" class="dim">guessed categories</text>
+<text x="426.0" y="103" text-anchor="middle" font-size="10" class="dim">on this image</text>
+<rect x="524" y="36" width="140" height="84" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="524" y="36" width="140" height="84" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="594.0" y="61" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">BOXES</text>
+<text x="594.0" y="75" text-anchor="middle" font-size="10" class="dim">one box per object</text>
+<text x="594.0" y="89" text-anchor="middle" font-size="10" class="dim">after non-maximum</text>
+<text x="594.0" y="103" text-anchor="middle" font-size="10" class="dim">suppression</text>
+<path d="M162,78 L186,78" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M330,78 L354,78" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M498,78 L522,78" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M594,122 L594,140 L90,140 L90,158" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="160" width="140" height="84" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="160" width="140" height="84" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="90.0" y="185" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CROP</text>
+<text x="90.0" y="199" text-anchor="middle" font-size="10" class="dim">the box around</text>
+<text x="90.0" y="213" text-anchor="middle" font-size="10" class="dim">the object,</text>
+<text x="90.0" y="227" text-anchor="middle" font-size="10" class="dim">not the scene</text>
+<rect x="188" y="160" width="140" height="84" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="188" y="160" width="140" height="84" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="258.0" y="192" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">EMBEDDING</text>
+<text x="258.0" y="206" text-anchor="middle" font-size="10" class="dim">binary code of</text>
+<text x="258.0" y="220" text-anchor="middle" font-size="10" class="dim">the crop alone</text>
+<rect x="356" y="160" width="140" height="84" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="356" y="160" width="140" height="84" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="426.0" y="192" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">NEAREST PINS</text>
+<text x="426.0" y="206" text-anchor="middle" font-size="10" class="dim">results for the</text>
+<text x="426.0" y="220" text-anchor="middle" font-size="10" class="dim">crop</text>
+<rect x="524" y="160" width="140" height="84" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="524" y="160" width="140" height="84" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="594.0" y="185" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">DOT GATE</text>
+<text x="594.0" y="199" text-anchor="middle" font-size="10" class="dim">show the dot only</text>
+<text x="594.0" y="213" text-anchor="middle" font-size="10" class="dim">if the results</text>
+<text x="594.0" y="227" text-anchor="middle" font-size="10" class="dim">agree</text>
+<path d="M162,202 L186,202" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M330,202 L354,202" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M498,202 L522,202" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="268" text-anchor="start" font-size="10.5" class="dim">False positives on 2,399 labelled fashion objects (2015): text 6.7%, image alone 2.5%, both together 0.5%.</text>
+<text x="20" y="288" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A detector can be confident about an object that is not there; results that disagree with each other are a second alarm.</text>
+      </svg>
+      <div class="diagram-caption">Top row decides which detectors to run, bottom row turns the box into a search. The gate on the right came from a failed experiment in 2016.</div>
+    </div>
+
+    <p>Early detectors were cascaded deformable part models, a pre-deep-learning method that scores an object as a set of parts in a flexible arrangement. Pinterest measured them on 2,399 hand-labelled fashion objects in nine categories, counting a detection as correct when the <strong>intersection over union</strong> of its box and the true box was at least 0.3:</p>
+
+    <div class="eq-block"><span>$$\text{IoU}(A,B) \;=\; \frac{\text{area}(A \cap B)}{\text{area}(A \cup B)}$$</span></div>
+
+    <p>Two identical boxes score 1 and two boxes that don't touch score 0. Table 2 of the paper reports the true positive (TP) and false positive (FP) rates, averaged over the nine categories:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Method (2015, 2,399 objects)</th><th>True positives</th><th>False positives</th></tr></thead>
+      <tbody>
+        <tr><td>Text rules alone</td><td>72.7%</td><td>6.7%</td></tr>
+        <tr><td>Image detector alone</td><td>49.5%</td><td>2.5%</td></tr>
+        <tr><td>Text first, then the detector</td><td>38.1%</td><td>0.5%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Neither signal was good enough alone, and together they cut false positives to 0.5% at the price of finding fewer real objects (38.1% instead of 49.5%). That's a deliberate trade of recall for precision; the paper calls a very low false positive rate "vital for our application". Per-category numbers show why combining helps. For glasses, the image detector was reliable (0.4% false positives) and text was not (18.8%). For dresses the detector had 12.3% false positives and the text filter fixed most of them. For shoes, bags and pants, text prefiltering was needed to reach 1% or less.</p>
+
+    <h3 id="4-2-what-the-first-experiments-said">4.2 What the first live experiments said</h3>
+
+    <p>Pinterest's detector found over 80 million clickable objects in a subset of images, and the dots launched to a small share of traffic for a month. On a given day, 12% of users who viewed a Pin with a dot clicked one, and they went on to click 0.55 Similar Looks results on average. But when the team added Related Pins and Similar Looks engagement together, Similar Looks lowered overall engagement on the Pin close-up by 4%, and the click rate on dots settled near 10% after the novelty faded.</p>
+
+    <p>Pinterest suspected the new gesture, tapping a dot, was confounding the test, so they blended Similar Looks results straight into Related Pins on Pins where an object was detected, at a fixed ratio of one visual result to three ordinary ones. Overall engagement (repins and close-ups) on those Pins rose 5%. So the visual results were relevant, and the interface had been the obstacle.</p>
+
+    <h4 class="why">Why did matching a crop against whole images help so little at first?</h4>
+
+    <p>In an October 2015 experiment on 315,000 fashion query Pins, computing features on just the dominant detected object (variant A) gained 0.5% engagement over the whole-image baseline, and also raising the weight of visual similarity fivefold (variant B) gained 0.9%. Variant C kept the whole-image features and raised the weight fivefold only when a dominant object was detected, and gained 4.9%. Pinterest's explanation for A and B is that their detector's tight boxes gave the embedding too little context when matching a query object against whole-image candidates. C says the presence of a shoe or bag was itself a strong sign that look-alikes were what people wanted. Both lessons explain why later systems index objects against objects and use the category as a signal.</p>
+
+    <h3 id="4-3-flashlight">4.3 Flashlight: let the person draw the box</h3>
+
+    <p>Similar Looks had a coverage problem: only 2.4% of daily active users saw a detected object, because the offline detection pipeline covered a subset of images, and user research showed the inconsistency confused people, who expected a dot on every picture. Flashlight (2016) let people draw the box themselves. A search icon on a Pin opens a crop tool, results update as the corners move, and any object in any image can be searched. Early on 2% of people who opened a Pin close-up pressed it, about 4 million visual searches a day.</p>
+
+    <p>Crops have no metadata, so the reranking that normally uses a Pin's text has little to work with and results depend mostly on the embedding. Even so, Flashlight reached two thirds of the engagement rate of text search, a product developed for years. A few months after launch, automatic detection came back as dots over the objects found in real time.</p>
+
+    <h3 id="4-4-faster-r-cnn-and-ssd">4.4 Real-time detectors</h3>
+
+    <p>Real-time detection needed a neural detector, and the 2017 paper describes two. <strong>Faster R-CNN</strong> proposes candidate regions with a small network that shares convolutional features with the classifier that labels each region. Pinterest used a ResNet-101 backbone, trained it end to end, and cut the regions evaluated from 300 to 100 with no loss in precision or recall. It was trained for 300,000 iterations on an internal detection set of 74,653 images and evaluated on 79 categories in fashion, home decor and vehicles. For Flashlight it ran with aggressive caching and "dark reads" during model swaps, meaning duplicate traffic sent to a new model so its cache is warm before it takes over.</p>
+
+    <p>Second comes a variant of the <strong>Single Shot Multibox Detector</strong> (SSD) that predicts boxes and categories in one pass at 290-by-290 pixels. Pinterest trained it with a 0.7 IoU threshold instead of 0.5 so boxes would bound objects tightly, used stride 1 on the added convolution layers because stride 2 localised poorly at 0.7, and sampled anchors by online hard example mining. On a Pinterest evaluation set at 0.7 IoU, the paper's Table 3 shows the trade:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Detector (2017, 79 categories)</th><th>Precision</th><th>Recall</th><th>Latency</th></tr></thead>
+      <tbody>
+        <tr><td>Faster R-CNN, ResNet-101</td><td>0.426</td><td>0.470</td><td>272 ms</td></tr>
+        <tr><td>SSD, VGG-based, 290x290</td><td>0.502</td><td>0.371</td><td>59 ms</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Table 3 lists SSD at 59 ms and the text quotes 93 ms on an older AWS GPU, so read it as tens of milliseconds, four to five times faster. SSD's localisation looked worse in qualitative checks, perhaps because its small input is a warped version of the image. Faster R-CNN served the interactive Flashlight dots, where quality mattered and results could be cached. SSD indexed objects across billions of catalogue images for Lens, where any speed-up was a large cost saving.</p>
+
+    <p>Detectors often fire several times on one object, so the output is cleaned with <strong>non-maximum suppression</strong>: keep the highest-scoring box, delete any other box that overlaps it too much, and repeat.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Where to get the crop</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>No crop: embed the whole picture</td><td>Nothing to run or get wrong</td><td>Small objects are swamped by the scene</td></tr>
+        <tr><td>User draws the box (Flashlight, 2016)</td><td>Any object works; the person states their intent</td><td>Extra effort per search; every query is unique, so engagement can't be aggregated per query</td></tr>
+        <tr><td>Detector offline, over a subset (Similar Looks, 2015)</td><td>Cheap per request</td><td>Only 2.4% of users saw a dot; inconsistent coverage confused people</td></tr>
+        <tr><td>Detector in real time, with dots (Flashlight, 2016 on)</td><td>One tap instead of a drag; a fixed object per dot enables aggregated signals</td><td>Bad boxes and hallucinated objects reach the user</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Pinterest used both, with the free crop as the fallback for anything the detector missed. In camera search the detector runs on Lena's photo and her lamp becomes one of the boxes. Photo apps that offer to cut out the subject, and product search at other companies, follow the same pattern, and in visual search the box is only the start of the pipeline.</p>
+
+    <h3 id="4-5-dots-that-lowered-engagement">4.5 The dots that lowered engagement</h3>
+
+    <p>Adding real-time detection to Flashlight looked like a safe win, since dots are simpler than dragging a box. The A/B test said otherwise. Control showed a default bounding box, the treatment a clickable dot over each detected object, and Flashlight save propensity, the fraction of users who saved a result, fell. Looking closer, the team found two causes: bad detections, with poor localisation or an object that wasn't there, and irrelevant retrieval results, which could be a symptom of the first or a separate problem.</p>
+
+    <p>Their fix was to judge detections by what the search returned. Pinterest tested three signals: the Hamming distance of the top result (from the 4096-dimensional binary code), the top annotation score (tf-idf-weighted annotations aggregated across the results), and <strong>category conformity</strong>, the largest share of results that carry the same category label. A real lamp should retrieve results that mostly agree, and a hallucinated object retrieves a scatter. With a detection threshold of 0.7:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Visual threshold</th><th>Annotation threshold</th><th>Category conformity</th><th>Engagement change</th></tr></thead>
+      <tbody>
+        <tr><td>0.0</td><td>0</td><td>0.0</td><td>&minus;3.8%</td></tr>
+        <tr><td>1.0</td><td>0</td><td>0.0</td><td>&minus;5.3%</td></tr>
+        <tr><td>0.0</td><td>1000</td><td>0.0</td><td>&minus;5.2%</td></tr>
+        <tr><td>1.0</td><td>1000</td><td>0.0</td><td>+2.1%</td></tr>
+        <tr><td>1.0</td><td>1000</td><td>0.8</td><td>+4.9%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Pinterest concluded that detector confidence alone isn't enough, and that category conformity "was critical". When the top results disagree about what the object is, either it isn't there or the search can't find it, and the dot shouldn't appear. A simulation shows how much better that proxy is than detector confidence. Its assumptions are illustrative, since Pinterest hasn't published its detections: 70% of detections are real, confidence overlaps heavily between real and hallucinated ones, a real crop's top 20 results land in its own category 30 to 80% of the time, a fifth of hallucinated crops are plausible fakes, and the rest retrieve at random.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Gate a detection by its confidence or by whether its results agree (simulated)</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(2)
+n, K, CATS = 20_000, 20, 10
+real = rng.random(n) &lt; 0.7                 # 70% genuine detections
+# detector confidence overlaps a lot between real and hallucinated
+conf = np.where(real, rng.beta(6, 2, n), rng.beta(4, 3, n))
+true_cat = rng.integers(0, CATS, n)
+
+def conformity(i):
+    # top-20 results: a real crop lands in its category 30-80% of results,
+    # a hallucinated one retrieves from whatever the pixels resemble
+    if real[i]:
+        hit = rng.random(K) &lt; rng.uniform(0.3, 0.8)
+        cats = np.where(hit, true_cat[i], rng.integers(0, CATS, K))
+    elif rng.random() &lt; 0.2:             # a plausible-looking fake
+        hit = rng.random(K) &lt; 0.4
+        cats = np.where(hit, true_cat[i], rng.integers(0, CATS, K))
+    else:
+        cats = rng.integers(0, CATS, K)
+    return np.bincount(cats, minlength=CATS).max() / K
+conf_c = np.array([conformity(i) for i in range(n)])
+
+def report(name, score, thr):
+    keep = score &gt;= thr
+    print(f&quot;{name:22} thr {thr:4.2f}  dots shown {keep.mean():5.1%}  &quot;
+          f&quot;hallucinated among them {1 - real[keep].mean():5.1%}&quot;)
+
+report(&quot;no gate&quot;, np.ones(n), 0.0)
+for t in (0.8, 0.9):
+    report(&quot;detector confidence&quot;, conf, t)
+for t in (0.4, 0.5, 0.6):
+    report(&quot;category conformity&quot;, conf_c, t)</code></pre>
+      <div class="tryit-out">In this simulation 29.9% of detections are hallucinated. A detector-confidence gate at <code>0.90</code> leaves <code>4.7%</code> of the shown dots hallucinated but keeps only <code>11.3%</code> of all detections. A category-conformity gate at <code>0.50</code> leaves <code>4.6%</code> hallucinated and keeps <code>54.8%</code>. The probabilities that generate the data are our assumptions, so read it as the shape of Pinterest's finding, not a measurement of Pinterest.</div>
+    </details>
+
+    <p>At about the same share of hallucinated dots, conformity keeps five times as many detections, and that's the shape of Pinterest's finding: the retrieval step knows something the detector doesn't. Checking one model with another component's behaviour is common in production, as when a moderation pipeline asks a second classifier to agree.</p>
+
+    <h3 id="4-6-shop-the-look">4.6 Three years later: Shop the Look's detector</h3>
+
+    <p>The 2020 Shop the Look paper by Raymond Shiau and colleagues shows the detector after three years of work. Its training set had 251,000 images with 727,000 boxes in home decor and fashion. Products photographed alone on white made up about 39% of potential queries yet were rare in detection data, so the team added 133,000 weakly labelled single-product images, taking merchant-labelled products, keeping the detector's largest box when it covered at least 80% of the image. Its backbone moved to ResNeXt-101 with a Feature Pyramid Network, which handles objects of different sizes, and training added random multi-scale resizing.</p>
+
+    <p>Each step showed in the online numbers. Adding the Feature Pyramid Network raised scene mean average precision from 0.276 to 0.373 and, in the live test, scene close-up volume by 51.6% and product click-through volume by 29.2%, mostly because recall rose and more objects became shoppable. Multi-scale training and cleaner fashion labels added 16.4% close-ups and 3.2% click-throughs. Human Home Decor Similar P@5 rose 24.0% and then 38.6%, mainly through better category labels, since product results are filtered to the predicted category.</p>
+  </section>
+
+  <section id="metric">
+    <h2><span class="num">05</span>Teaching the network what "looks alike" means</h2>
+
+    <p>Detection gives us a crop of the lamp, and the embedding of that crop still comes from a network trained to classify. In section 03 we picked a layer and fine-tuned on about 20,000 Pinterest classes, which helped a lot. Now we can ask for what we want directly: a network whose output vectors are close when images look alike and far apart otherwise. Training a network to produce that kind of geometry is <strong>deep metric learning</strong>, and the choice of loss function decides whether it works.</p>
+
+    <h3 id="5-1-triplets">5.1 Triplets and their sampling problem</h3>
+
+    <p>A classic loss works on <strong>triplets</strong>: an anchor image <span>$a$</span>, a positive <span>$p$</span> that should match it, and a negative <span>$n$</span> that shouldn't. With <span>$f$</span> the network and <span>$m$</span> a margin, the loss is</p>
+
+    <div class="eq-block"><span>$$\mathcal{L}_{\text{triplet}} \;=\; \max\!\big(0,\; \lVert f(a)-f(p)\rVert^{2} - \lVert f(a)-f(n)\rVert^{2} + m\big)$$</span></div>
+
+    <p>It's zero once the negative is farther from the anchor than the positive by the margin, and positive otherwise, when the gradient pulls anchor and positive together and pushes the negative away. That "once" is the difficulty. As training proceeds most random triplets are already satisfied and contribute nothing, so the useful ones have hard negatives, and negatives that are too hard destabilise training. Andrew Zhai and Hao-Yu Wu, in a 2018 paper, note that the fixes mostly use relationships among all images in a batch, which needs large batches, and batch size is limited by GPU memory, so as a dataset grows "the diminishing probability of a randomly sampled batch containing any informative triplet" becomes the problem.</p>
+
+    <h3 id="5-2-classification-with-proxies">5.2 Classification with proxies</h3>
+
+    <p>Classification is the alternative the paper revisits. Give every class a vector of its own, a <strong>proxy</strong>, and train the network so each image's embedding is nearest to the proxy of its class. No triplet is mined, because every image is compared with every proxy at once. Pinterest's version, normalised softmax loss, makes the embedding and proxies unit length and divides by a temperature. For an image with embedding <span>$x$</span> and class <span>$y$</span>, with <span>$p_z$</span> the proxy of class <span>$z$</span> and <span>$Z$</span> all classes:</p>
+
+    <div class="eq-block"><span>$$\mathcal{L}_{\text{norm}} \;=\; -\log \frac{\exp\!\big(x^{\top}p_y/\sigma\big)}{\sum_{z\in Z}\exp\!\big(x^{\top}p_z/\sigma\big)}$$</span></div>
+
+    <p>Here <span>$x^{\top}p_z$</span> is the cosine of the angle between the image and class <span>$z$</span>, between <span>$-1$</span> and <span>$1$</span>, and the temperature <span>$\sigma$</span> stretches it. Pinterest used <span>$\sigma = 0.05$</span>, so logits span <span>$-20$</span> to <span>$20$</span>. Take 15,000 classes and an image with cosine 1 to its own proxy and 0 to every other. With <span>$\sigma = 1$</span> the right class gets probability <span>$e/(e + 14{,}999) \approx 0.00018$</span>, so even a perfect embedding has a huge loss. With <span>$\sigma = 0.05$</span> it's <span>$e^{20}/(e^{20} + 14{,}999) \approx 0.99997$</span>. Temperature lets a normalised softmax express confidence.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Classification used as metric learning: proxies on a sphere
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<circle cx="180" cy="150" r="105" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<line x1="180" y1="150" x2="279" y2="114" stroke="#f472b6" stroke-width="1" opacity="0.45"/>
+<circle cx="279" cy="114" r="6" fill="#f472b6"/>
+<text x="296" y="112" text-anchor="middle" font-size="10.5" fill="#f472b6">p_a</text>
+<line x1="180" y1="150" x2="198" y2="47" stroke="#34d399" stroke-width="1" opacity="0.45"/>
+<circle cx="198" cy="47" r="6" fill="#34d399"/>
+<text x="201" y="33" text-anchor="middle" font-size="10.5" fill="#34d399">p_y</text>
+<line x1="180" y1="150" x2="100" y2="83" stroke="#f472b6" stroke-width="1" opacity="0.45"/>
+<circle cx="100" cy="83" r="6" fill="#f472b6"/>
+<text x="86" y="75" text-anchor="middle" font-size="10.5" fill="#f472b6">p_b</text>
+<line x1="180" y1="150" x2="85" y2="194" stroke="#f472b6" stroke-width="1" opacity="0.45"/>
+<circle cx="85" cy="194" r="6" fill="#f472b6"/>
+<text x="69" y="206" text-anchor="middle" font-size="10.5" fill="#f472b6">p_c</text>
+<line x1="180" y1="150" x2="162" y2="253" stroke="#f472b6" stroke-width="1" opacity="0.45"/>
+<circle cx="162" cy="253" r="6" fill="#f472b6"/>
+<text x="159" y="275" text-anchor="middle" font-size="10.5" fill="#f472b6">p_d</text>
+<line x1="180" y1="150" x2="260" y2="217" stroke="#f472b6" stroke-width="1" opacity="0.45"/>
+<circle cx="260" cy="217" r="6" fill="#f472b6"/>
+<text x="274" y="233" text-anchor="middle" font-size="10.5" fill="#f472b6">p_e</text>
+<path d="M180,150 L229,57" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<circle cx="229" cy="57" r="5" fill="#fbbf24"/>
+<text x="237" y="73" font-size="10.5" fill="#fbbf24">x</text>
+<text x="340" y="70" text-anchor="start" font-size="10.5" class="dim">Each class owns one unit vector, its proxy.</text>
+<text x="340" y="94" text-anchor="start" font-size="10.5" class="dim">Logit for class z is cos(x, p_z) divided by 0.05.</text>
+<text x="340" y="118" text-anchor="start" font-size="10.5" class="" fill="#34d399">Pull: x turns toward p_y, the proxy of its own class.</text>
+<text x="340" y="142" text-anchor="start" font-size="10.5" class="" fill="#f472b6">Push: x turns away from the other proxies,</text>
+<text x="340" y="166" text-anchor="start" font-size="10.5" class="" fill="#f472b6">hardest first, weighted by their softmax probability.</text>
+<text x="340" y="190" text-anchor="start" font-size="10.5" class="dim">Subsampling: only a few thousand proxies are loaded</text>
+<text x="340" y="214" text-anchor="start" font-size="10.5" class="dim">per batch, always including the classes in the batch.</text>
+<text x="340" y="250" text-anchor="start" font-size="10.5" class="dim">Triplets need a good negative picked per example.</text>
+<text x="340" y="270" text-anchor="start" font-size="10.5" class="dim">Proxies give every example all the negatives at once.</text>
+      </svg>
+      <div class="diagram-caption">The amber vector is one image's embedding. Its loss rises when the green proxy is not the closest dot on the circle.</div>
+    </div>
+
+    <p>Its gradient shows what the loss does. Differentiating with respect to the (pre-normalisation) embedding, and writing <span>$\pi_z$</span> for the softmax probability of class <span>$z$</span>, gives</p>
+
+    <div class="eq-block"><span>$$\frac{\partial \mathcal{L}}{\partial x} \;=\; \frac{1}{\sigma}\Big[\sum_{z\neq y}\pi_z\,p_z \;-\; (1-\pi_y)\,p_y\Big]$$</span></div>
+
+    <p>The second term pulls the embedding toward its own proxy, with a strength that fades as <span>$\pi_y$</span> approaches 1. The first term pushes it away from every other proxy, each in proportion to the probability the model currently gives that wrong class, so the hardest negatives get the largest push automatically. This is what a triplet loss with perfectly chosen negatives would do, with nothing to mine.</p>
+
+    <p>Two more ingredients make it work. A <strong>layer normalisation</strong> without learned scale and shift after the final pooling layer centres each embedding's values near zero, so thresholding at zero splits them evenly into 0 and 1 bits; it also fixes initialisation, since with 100 classes a random classifier should start at <span>$-\ln(1/100) = 4.6$</span>, which the network reaches with it and doesn't without. And <strong>class-balanced sampling</strong>: each batch takes <span>$C$</span> classes and <span>$S$</span> samples from each. On CUB-200 with batches of 75, Recall@1 for ResNet50 was 59.5 without balancing, 61.3 with 25 samples from each of 3 classes, and 40.9 with all 75 from one class.</p>
+
+    <p>On the standard benchmarks the results were competitive with the best triplet methods of the time. On Stanford Online Products with ResNet50 and 128 dimensions, normalised softmax reached Recall@1 of 75.2 against 72.7 for distance-weighted margin loss, and 78.2 at 512 dimensions. Unlike triplet methods, the classification embeddings improved with dimension, and the binary version's Recall@1 converged on the float version's. They conclude that "when given enough representational freedom, Softmax learns bit like features", so a high-dimensional binary embedding reaches state-of-the-art accuracy at the memory of a 64-dimensional float embedding. That is the design Pinterest deployed.</p>
+
+    <h3 id="5-3-many-classes">5.3 When there are thousands of classes</h3>
+
+    <p>That denominator sums over every class, and Pinterest's engagement data can generate millions of classes. One remedy is to keep the proxies in CPU memory and sample a subset of classes per batch, guaranteed to contain every class in the batch, and treat it as the whole softmax. With 2,048 sampled classes, a random guess has loss <span>$\ln(2048) \approx 7.62$</span>. On Stanford Online Products, sampling 10% of classes per iteration cost less than one point of Recall@1, 1% gave 75.7 and 0.1% gave 72.0. It's the sampled softmax of case study 41 with a different sampling rule: YouTube corrected for negatives that followed the watch distribution, whereas here the sampled classes are uniform and always include the positive, so no correction is needed.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Loss for embeddings</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Triplet or contrastive, with mined negatives</td><td>Learns directly from similar and dissimilar pairs; no class labels needed, only pair judgements</td><td>Hard to pick informative negatives; large batches; slow convergence</td></tr>
+        <tr><td>Classification with proxies (normalised softmax)</td><td>No mining; global context from all proxies; high-dimensional binary codes work</td><td>Needs class labels; cost grows with the number of classes unless sampled</td></tr>
+        <tr><td>Classification with margin (LMCL, a face-recognition loss)</td><td>Adds a gap between classes</td><td>One more hyperparameter; evaluated in the paper, not adopted as the base</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Pinterest settled on the normalised-softmax family and built the next three years of embeddings on it. Face recognition adopted classification losses with margins for the same reasons, and contrastive image-text models such as CLIP use in-batch negatives, the other way of getting many negatives per example.</p>
+  </section>
+
+  <section id="unified">
+    <h2><span class="num">06</span>Three products, three embeddings, one bill</h2>
+
+    <p>By 2018 Pinterest had a loss function that worked and a detector that found Lena's lamp. What it also had, according to the 2019 KDD paper by Andrew Zhai and colleagues, was three visual search products running on three embeddings. Flashlight used the 4096-dimensional fc6 layer of a VGG-16, Lens the 2048-dimensional pooling layer of a ResNeXt-50, and Shop the Look the 2048-dimensional pooling layer of a ResNet-101. Each had been tuned for its product when it was built, so the architectures recorded when each team last had time to work on it.</p>
+
+    <p>That arrangement has a cost that shows up over years. Every better architecture needs a <strong>backfill</strong>, running every catalogue image through the new network and rebuilding the index, which the paper says can be prohibitively expensive. Other systems, such as the Related Pins ranker, depended on particular versions of those embeddings, so old generations had to be kept alive. Three embeddings meant three backfills per architecture change, plus a growing pile of old versions.</p>
+
+    <p>Each product also wanted different things from the same pixels. Flashlight is browsing within Pinterest's own images, trained on engagement. Lens turns a camera photo into Pinterest content, so the embedding must bridge a domain shift. Shop the Look looks for the exact product matching an object in a room scene. Pinterest's 2019 idea was to train one network on all three objectives and see whether it was worse than the specialists or better.</p>
+
+    <h3 id="6-1-three-datasets">6.1 Three datasets</h3>
+
+    <p>Each product got a dataset that expresses its idea of similarity as class labels. Flashlight's set uses engagement as a stand-in for relevance, in the manner of Memboost, a system Pinterest described for Related Pins: image sets related to a query image and ranked by engagement get an identifier that works like a class, and strict filters on impressions and interactions remove noise, leaving about 800,000 images in 15,000 classes. Lens's set couldn't be built that way, because camera photos are rare on Pinterest and engagement on them is sparse, so the team had people label 540,000 images in 2,000 classes, from broad ("tofu") to fine ("the same denim jacket in a camera shot and a product shot"), each class mixing product, camera and Pinterest images so the network sees the domain shift directly. Shop the Look's set, also human-labelled, has 340,000 images with 189 product classes such as bar stools and 50,000 instance labels, where images sharing a label are exact matches or very close under an internal guide covering design, colour and material.</p>
+
+    <h3 id="6-2-one-network-four-heads">6.2 One network, four heads</h3>
+
+    <p>Everything is shared up to the embedding, and then the network splits. Each task branch is a fully connected layer whose weights are the proxies, followed by a softmax cross-entropy loss, and there are four: the Flashlight class, the Shop the Look product class, the Shop the Look instance and the Lens category. Flashlight and instance tasks have too many classes to compute in full, so they use the class subsampling of section 05. An image contributes only to heads that have a label for it. Writing <span>$\mathcal{T}$</span> for the tasks, <span>$B_t$</span> for the images in the batch with a label for task <span>$t$</span> and <span>$\ell_t$</span> for its normalised-softmax loss:</p>
+
+    <div class="eq-block"><span>$$\mathcal{L} \;=\; \sum_{t\in\mathcal{T}} \lambda_t\,\frac{1}{|B_t|}\sum_{i\in B_t} \ell_t\big(f(x_i),\, y_i^{t}\big), \qquad \lambda_t = 1$$</span></div>
+
+    <p>The weights are all 1 in the 2019 paper ("the losses from all the tasks are assigned equal weights"). Batches draw evenly from the three datasets, and an epoch is one pass over the largest. More sophisticated alternatives lost, as we'll see. Its backbone is a SE-ResNeXt-101 initialised from ImageNet, trained on one machine with eight V100 GPUs, first for one epoch updating only the new layers and then for nine epochs end to end.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">One embedding, three datasets, four loss heads
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="26" width="160" height="62" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="26" width="160" height="62" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="100.0" y="47" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">FLASHLIGHT</text>
+<text x="100.0" y="61" text-anchor="middle" font-size="10" class="dim">800K images, 15K</text>
+<text x="100.0" y="75" text-anchor="middle" font-size="10" class="dim">classes: engagement</text>
+<rect x="20" y="104" width="160" height="62" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="104" width="160" height="62" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="100.0" y="125" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">LENS</text>
+<text x="100.0" y="139" text-anchor="middle" font-size="10" class="dim">540K images, 2K</text>
+<text x="100.0" y="153" text-anchor="middle" font-size="10" class="dim">classes: human labels</text>
+<rect x="20" y="182" width="160" height="62" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="182" width="160" height="62" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="100.0" y="203" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">SHOP THE LOOK</text>
+<text x="100.0" y="217" text-anchor="middle" font-size="10" class="dim">340K images; 189 product</text>
+<text x="100.0" y="231" text-anchor="middle" font-size="10" class="dim">classes, 50K instances</text>
+<rect x="222" y="74" width="120" height="130" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="222" y="74" width="120" height="130" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="282.0" y="122" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SHARED NET</text>
+<text x="282.0" y="136" text-anchor="middle" font-size="10" class="dim">SE-ResNeXt101,</text>
+<text x="282.0" y="150" text-anchor="middle" font-size="10" class="dim">pretrained on</text>
+<text x="282.0" y="164" text-anchor="middle" font-size="10" class="dim">ImageNet</text>
+<rect x="374" y="74" width="120" height="130" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="374" y="74" width="120" height="130" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="434.0" y="115" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">EMBEDDING</text>
+<text x="434.0" y="129" text-anchor="middle" font-size="10" class="dim">GroupNorm, ReLU,</text>
+<text x="434.0" y="143" text-anchor="middle" font-size="10" class="dim">dropout; a bit is</text>
+<text x="434.0" y="157" text-anchor="middle" font-size="10" class="dim">1 where the</text>
+<text x="434.0" y="171" text-anchor="middle" font-size="10" class="dim">value is above 0</text>
+<path d="M182,57 L220,118" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M182,135 L220,138" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M182,213 L220,157" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="536" y="18" width="144" height="52" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="536" y="18" width="144" height="52" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="608.0" y="41" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">Flashlight class</text>
+<text x="608.0" y="55" text-anchor="middle" font-size="10" class="dim">subsampled softmax</text>
+<path d="M496,139 L534,44" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="536" y="78" width="144" height="52" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="536" y="78" width="144" height="52" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="608.0" y="101" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">STL product class</text>
+<text x="608.0" y="115" text-anchor="middle" font-size="10" class="dim">softmax</text>
+<path d="M496,139 L534,104" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="536" y="138" width="144" height="52" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="536" y="138" width="144" height="52" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="608.0" y="161" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">STL instance</text>
+<text x="608.0" y="175" text-anchor="middle" font-size="10" class="dim">subsampled softmax</text>
+<path d="M496,139 L534,164" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="536" y="198" width="144" height="52" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="536" y="198" width="144" height="52" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="608.0" y="221" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">Lens category</text>
+<text x="608.0" y="235" text-anchor="middle" font-size="10" class="dim">softmax</text>
+<path d="M496,139 L534,224" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M344,139 L372,139" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="262" text-anchor="start" font-size="10.5" class="dim">A batch mixes the three datasets evenly. An image sends loss only to the heads that have a label for it.</text>
+<text x="20" y="284" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Head losses are added with equal weight; the vector feeding all four heads is the one stored and searched.</text>
+<text x="20" y="306" text-anchor="start" font-size="10.5" class="dim">Before 2018 each product had its own network: VGG16 FC6, ResNeXt50 and ResNet101 (Zhai et al., KDD 2019).</text>
+      </svg>
+      <div class="diagram-caption">Follow one Lens training photo: it goes through the shared net, becomes a bit pattern, and only the Lens head scores it.</div>
+    </div>
+
+    <p>One engineering detail shows how much of the work is plumbing. Each iteration touches only the sampled rows of a large proxy matrix, and PyTorch's momentum would turn those sparse updates into dense ones. Engineers dropped momentum on the sparse parameters and raised the learning rate instead, since momentum 0.9 gives a gradient a total effect of <span>$1 + 0.9 + 0.9^2 + \dots = 10$</span> times its size. That cut training time by 40% with comparable accuracy.</p>
+
+    <h3 id="6-3-making-the-bits-carry-information">6.3 Making the bits carry information</h3>
+
+    <p>Because the embedding must be binary, which means the network that produces it has to be designed for thresholding. Table 1 of the paper walks through the changes, scoring each on the three offline sets: Shop the Look precision@1 (STL), Flashlight average precision@20 (F) and Lens average precision@20 (L), where average precision@20 is the mean of P@1 through P@20. Their baseline, the classification recipe from section 05 with float embeddings, scored 47.5, 60.1 and 18.6. Binarising that same network cost it 5.6 points on Shop the Look and 4.5 on Flashlight.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model (binary unless marked)</th><th>STL P@1</th><th>Flashlight avg P@20</th><th>Lens avg P@20</th></tr></thead>
+      <tbody>
+        <tr><td>Baseline, float embedding</td><td>47.5</td><td>60.1</td><td>18.6</td></tr>
+        <tr><td>Baseline, binary</td><td>41.9</td><td>55.6</td><td>17.7</td></tr>
+        <tr><td>+ plain softmax, GroupNorm</td><td>48.4</td><td>59.3</td><td>17.8</td></tr>
+        <tr><td>+ ReLU before the bits</td><td>49.7</td><td>61.1</td><td>17.6</td></tr>
+        <tr><td>+ dropout 0.5 (deployed)</td><td>52.8</td><td>60.2</td><td>18.4</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Each change has a stated purpose. Plain softmax removes the unit-length constraint. Group normalisation with 256 groups is finer-grained and suits several tasks better. A ReLU makes the network ignore negative magnitudes, which matches what thresholding at zero does anyway. Dropout, a random half of the units switched off in training, spreads information over many bits so no single bit is critical, which probably suits a code compared bit by bit. Then the binary embedding beat the float baseline on Shop the Look (52.8 against 47.5) and matched it on the other two, and at the same storage, "learning binary embedding led to better performance than learning float embeddings".</p>
+
+    <h3 id="6-4-does-sharing-help">6.4 Does sharing help or hurt?</h3>
+
+    <p>Now the main question. If three tasks share one network, each might lose to a specialist trained on its own data. Table 3 trains the same architecture on each dataset alone, with the same total number of training iterations, and compares it with the multi-task model.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Trained on (binary embeddings)</th><th>STL P@1</th><th>Flashlight avg P@20</th><th>Lens avg P@20</th></tr></thead>
+      <tbody>
+        <tr><td>Shop the Look only</td><td>49.2</td><td>42.1</td><td>14.7</td></tr>
+        <tr><td>Flashlight only</td><td>11.0</td><td>53.4</td><td>16.1</td></tr>
+        <tr><td>Lens only</td><td>26.2</td><td>47.8</td><td>18.2</td></tr>
+        <tr><td>All three, multi-task</td><td>52.8</td><td>60.2</td><td>18.4</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The multi-task model is best on every column, including each specialist's own task. Their hypothesis is that the datasets cover each other's weaknesses. Flashlight lets people crop, yet its training data is whole images, and the Shop the Look crops bridge that gap. Lens has camera queries but a corpus of Pinterest content, so Flashlight's data helps it organise that corpus. That claim isn't tested directly, but the numbers agree with it and it's probably part of the story. Before the ablations on how to combine tasks, guess the mixing rule.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">The three datasets have very different sizes: Flashlight has about 800,000 images, Lens 540,000 and Shop the Look 340,000. Suppose that instead of drawing each batch evenly from the three datasets, we draw in proportion to dataset size. Which score do you expect to move most, and in which direction?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>Shop the Look P@1 falls from 52.8 to 44.4. Flashlight average P@20 slips from 60.2 to 57.8, and Lens moves from 18.4 to 18.6, which is within noise. With size-based sampling the smallest dataset gets the smallest share of the gradient, and it's the task with the most precise definition of similarity (the exact product), so it's the one that suffers. Learning the task weights automatically with GradNorm, a published method that balances gradient magnitudes across tasks, did no better than equal weights: 47.2, 57.8 and 17.2. Pinterest concludes that "our simple approach achieved the best balance of performance".</p>
+      </details>
+    </div>
+
+    <p>Table 4 of the paper compares against what was in production, with binary embeddings throughout. Old specialised embeddings scored 33.0 (Shop the Look P@1), 53.4 (Flashlight) and 17.8 (Lens), an ImageNet-pretrained baseline 5.6, 33.1 and 15.0, and the unified embedding 52.8, 60.2 and 18.4. Human and A/B results in section 11 were large enough that Pinterest replaced all three. Its statement on cost is qualitative: "we have been able to substantially reduce experimentation, storage, and serving costs as our visual search products rely on a unified retrieval system".</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to serve three products</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>One specialised embedding per product (before 2018)</td><td>Each product tuned to its own task and data</td><td>Three backfills per architecture change; old versions pile up; each task sees only its own data</td></tr>
+        <tr><td>One shared network, one embedding per product from separate heads</td><td>Shares the backbone</td><td>Still stores and indexes several embeddings per image</td></tr>
+        <tr><td>One unified embedding, multi-task training (2019)</td><td>One lineage to backfill; datasets help each other; one index</td><td>Tasks can pull against each other; needs a balanced mixing rule; new tasks must not hurt old ones</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Pinterest chose the third row in 2019 and kept it. In 2020 Shop the Look added fashion matching data and visual attribute tasks (colour, pattern, fabric, lower-body length, dress style) to the same training, each with one hidden layer and a loss weight of 0.1, and the fashion data lifted offline fashion retrieval P@1 from 0.346 to 0.622. This recipe, a multi-task embedding with light heads on a common backbone, also appears in training one text encoder for search, ads and recommendations, and in the multi-task ranker of case study 41.</p>
+
+    <h4 class="why">Why isn't one big network for every task always better?</h4>
+
+    <p>Tasks can conflict. Product matching wants two photos of the same sofa nearly identical in the embedding, and browsing wants sofas with the same mood nearby, and there are a limited number of bits. For these three tasks the shared structure helped more than the conflict hurt, given even sampling, a binary-friendly design and equal loss weights. It isn't a general law. The 2022 ItemSage paper, on product embeddings for shopping, also trains one embedding for several engagement objectives, and reports that multi-task training helped where labels were sparse and that new objectives could be added with little or no penalty on existing ones where labels were plentiful.</p>
+  </section>
+
+  <section id="index">
+    <h2><span class="num">07</span>Searching billions of codes</h2>
+
+    <p>Lena's lamp now has a crop and the crop has a binary code, and the catalogue has billions of codes. Section 01's arithmetic said a scan of every code per query isn't affordable, so we need an index that returns the likely neighbours by touching a small part of the catalogue. Pinterest's index has changed twice in the published record, and both designs are built on one idea from text search.</p>
+
+    <h3 id="7-1-visual-words">7.1 Visual words in an inverted index</h3>
+
+    <p>A web search engine answers "brass pendant lamp" without reading every page, using an <strong>inverted index</strong>: for each word, a list of the documents that contain it. A query looks up its words, takes the lists and scores documents by how many words match. Pinterest's 2015 system did the same with <strong>visual tokens</strong> in place of words. Its first index was a token index "with vector-quantized features (e.g. visual vocabulary) as key, and image doc-id hashes as posting lists. This is analogous to text based image retrieval system except text is replaced by visual tokens." Each machine holds a shard by document ID, plus a memory-cached store of features and metadata such as annotations and topic vectors from the board graph.</p>
+
+    <p>Each machine runs a leaf ranker that uses the token index to pull likely neighbours quickly but imprecisely, then re-scores the top candidates with accurate features and metadata, sometimes skipping tokens for a tree search with approximate nearest-neighbour methods. A root ranker collects each leaf's top results, merges them and returns the list. It's a funnel: a cheap loose filter first, an expensive accurate score on what survives.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Searching billions of codes without reading them all
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 290" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="44" width="140" height="128" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="44" width="140" height="128" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="90.0" y="91" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CATALOGUE</text>
+<text x="90.0" y="105" text-anchor="middle" font-size="10" class="dim">billions of images</text>
+<text x="90.0" y="119" text-anchor="middle" font-size="10" class="dim">one binary code</text>
+<text x="90.0" y="133" text-anchor="middle" font-size="10" class="dim">each, in shards</text>
+<rect x="190" y="58" width="150" height="100" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="190" y="58" width="150" height="100" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="265.0" y="91" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">TOKEN LOOKUP</text>
+<text x="265.0" y="105" text-anchor="middle" font-size="10" class="dim">bits grouped into</text>
+<text x="265.0" y="119" text-anchor="middle" font-size="10" class="dim">tokens; keep images</text>
+<text x="265.0" y="133" text-anchor="middle" font-size="10" class="dim">sharing several</text>
+<rect x="370" y="72" width="150" height="72" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="370" y="72" width="150" height="72" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="445.0" y="98" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">CANDIDATES</text>
+<text x="445.0" y="112" text-anchor="middle" font-size="10" class="dim">thousands, reranked</text>
+<text x="445.0" y="126" text-anchor="middle" font-size="10" class="dim">by exact Hamming</text>
+<rect x="550" y="86" width="130" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="550" y="86" width="130" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="615.0" y="105" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">TOP RESULTS</text>
+<text x="615.0" y="119" text-anchor="middle" font-size="10" class="dim">a few dozen</text>
+<path d="M162,108 L188,108" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M342,108 L368,108" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M522,108 L548,108" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="190" y="40" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">category, gender, price filters apply here</text>
+<text x="20" y="214" text-anchor="start" font-size="10.5" class="dim">Each index node holds a slice of the catalogue. A root node merges the nodes' best results.</text>
+<text x="20" y="236" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Restricting to the query's category first shrinks the space enough for exact nearest neighbours (2020).</text>
+<text x="20" y="258" text-anchor="start" font-size="10.5" class="dim">Pinterest describes its token scheme only as LSH-based; section 07 shows the textbook version.</text>
+      </svg>
+      <div class="diagram-caption">Each stage sees fewer images than the one before, so it can afford more work per image.</div>
+    </div>
+
+    <h3 id="7-2-hashing-bits-into-tokens">7.2 Hashing bits into tokens</h3>
+
+    <p>By 2020 the Shop the Look paper describes a different token scheme, and since the codes are already bits there's a direct way to build one. <strong>Locality-sensitive hashing</strong> (LSH) maps similar items to the same hash value with high probability. For Hamming distance, the simplest form picks <span>$b$</span> of the <span>$D$</span> bit positions as a token and repeats with <span>$L$</span> different choices. If two codes differ in <span>$d$</span> bits, one sampled bit agrees with probability <span>$1 - d/D$</span>, a <span>$b$</span>-bit token matches with probability <span>$(1-d/D)^b$</span>, and the expected number of matching tokens is</p>
+
+    <div class="eq-block"><span>$$\mathbb{E}[\text{matching tokens}] \;=\; L\,\Big(1 - \frac{d}{D}\Big)^{b}$$</span></div>
+
+    <p>Take 256-bit codes, <span>$b = 8$</span> and <span>$L = 32$</span>. Two photos of the same lamp might differ in about 40 bits (<span>$d/D \approx 0.16$</span>), so a token matches with probability <span>$0.84^8 \approx 0.25$</span> and we expect about 8 matching tokens. Unrelated codes differ in about half their bits, so a token matches with probability <span>$0.5^8 \approx 0.004$</span> and we expect 0.125. Counting matches separates the cases clearly. Pinterest describes its method only as "LSH-based", so this is the textbook version, which the deployed scheme probably differs from in detail, and the experiment builds one over 200,000 synthetic codes.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">A token index over 200,000 bit codes: recall against images reranked</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(1)
+N, Q, D, BAND = 200_000, 100, 256, 8
+nb = D // BAND                                  # 32 tokens per image
+cent = rng.normal(size=(5_000, D))              # 5,000 &quot;looks&quot;
+lab = rng.integers(0, 5_000, N)
+x = cent[lab] + 0.9 * rng.normal(size=(N, D))   # catalogue images
+qi = rng.integers(0, N, Q)
+q = x[qi] + 0.6 * rng.normal(size=(Q, D))       # new photos, same things
+bits = lambda a: (a &gt; 0).astype(np.uint8)
+db, qb = bits(x), bits(q)
+
+def tokens(b):                                  # 32 tokens of 8 bits each
+    w = 1 &lt;&lt; np.arange(BAND)
+    return (b.reshape(len(b), nb, BAND) * w).sum(2)
+dt, qt = tokens(db), tokens(qb)
+
+# exact answer: Hamming distance to every image
+true = [np.argsort((db != qb[i]).sum(1))[:10] for i in range(Q)]
+
+print(f&quot;{&#x27;min shared tokens&#x27;:&gt;18} {&#x27;images reranked&#x27;:&gt;16} &quot;
+      f&quot;{&#x27;recall of top-10&#x27;:&gt;17}&quot;)
+for m in (1, 2, 3, 4):
+    rec, cand = [], []
+    for i in range(Q):
+        hits = (dt == qt[i]).sum(1)             # shared tokens per image
+        c = np.where(hits &gt;= m)[0]
+        cand.append(len(c))
+        if len(c):
+            d = (db[c] != qb[i]).sum(1)
+            got = c[np.argsort(d)[:10]]
+        else:
+            got = []
+        rec.append(len(set(got) &amp; set(true[i])) / 10)
+    print(f&quot;{m:18d} {np.mean(cand):16,.0f} {np.mean(rec):17.2f}&quot;)
+print(f&quot;{&#x27;brute force&#x27;:&gt;18} {N:16,d} {1.0:17.2f}&quot;)</code></pre>
+      <div class="tryit-out">Requiring one shared token puts <code>23,586</code> images (about 12% of the catalogue) in front of the exact reranker and finds <code>0.86</code> of the true top 10. Requiring two cuts the reranked set to <code>1,419</code> images, 0.7% of the catalogue, and recall falls to <code>0.59</code>. At three or four shared tokens the index is almost free and almost empty of the right answers. The data are synthetic, so only the shape of the trade is meaningful.</div>
+    </details>
+
+    <p>Each required shared token is a dial that exchanges recall for work, set from the product's latency and quality numbers.</p>
+
+    <p>In Shop the Look the retrieval works in two steps that mirror the funnel. Each index has an inverted index keyed by tokens and a forward index from image ID to full embedding. A query retrieves candidates with matching tokens, ranks them by the number of matches, then reranks them by exact embedding distance from the forward index. The platform is Pinterest's in-house search system, Manas, and the paper describes only the parts we've listed.</p>
+
+    <h3 id="7-3-what-the-inverted-index-gives-for-free">7.3 What the inverted index gives for free</h3>
+
+    <p>A text-style index makes it natural to restrict search by attributes, because attribute values can be tokens too. The paper gives an example query: "gender:Men AND (category:Shirt OR category:Tie) AND (NOT price &lt; 50)". Before this, Shop the Look used a tree index from the FLANN library over the embeddings, using only visual similarity, and that could return candidates from a different category than the query object. Filtering afterwards doesn't fix it, because the top results may contain none of the right category. So the team built a separate index per category, searched with the category the detector predicted. In end-to-end human evaluation on fashion, "Bad" results in the top 5 fell 17.1% and "Similar" results rose 9.9%. Each category index is much smaller than the whole, so the search could return exact nearest neighbours.</p>
+
+    <p>Moving to the Manas platform allowed restrictions on more attributes, starting with gender: every product image is classified by gender, or "unisex" when unsure, and a query searches its predicted gender together with unisex to avoid retrieving too little. "Similar" results in the top five rose 5.9% and "Extremely Similar" results 12.7%, and the product click-through rate in an A/B test fell 0.49%, which the authors judged noise, outweighed by the relevance gain.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Index design</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Brute-force Hamming scan</td><td>Exact; trivial</td><td>Reads the whole catalogue per query (350 TB/s in our estimate)</td></tr>
+        <tr><td>Tree index over embeddings (FLANN)</td><td>Fast approximate neighbours; no hashing</td><td>Visual similarity only; wrong-category results; filters can't be applied before the search</td></tr>
+        <tr><td>Visual-word inverted index (2015)</td><td>Reuses text-search machinery; disk-backed with a memory cache</td><td>Vector-quantised tokens must be trained and rebuilt when the features change</td></tr>
+        <tr><td>LSH tokens, inverted plus forward index, per-category indexes (2020)</td><td>Attribute filters inside the search; exact rerank; smaller spaces</td><td>Recall depends on the token dial; every restriction needs a trustworthy label (category, gender)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Pinterest's stated reason for the move was to use "the full power of a search system", with restrictions on attributes such as gender, price, domain and merchant, which an embedding can't express. Product search at e-commerce companies works the same way, since a vector search must obey "in stock, under 50, size M".</p>
+
+    <h4 class="why">Why not put category and gender into the embedding itself?</h4>
+
+    <p>Because a restriction is a guarantee and an embedding is a preference. If the embedding encodes "this is a shirt", a sufficiently similar-looking tie might still beat a shirt with a different pattern, and there's no way to tell the system never to. That paper says moving to restrictions in retrieval removed "the burden of encoding category and gender information into the embedding", which is a gain for the embedding as well, since its limited bits can go to visual detail.</p>
+  </section>
+
+  <section id="blend">
+    <h2><span class="num">08</span>From neighbours to results: reranking and blending</h2>
+
+    <p>An index returns the closest codes, and the closest codes aren't always what Lena should see. This is where the extra signals Pinterest has about its Pins come in, and where Lens differs from Flashlight in its aim.</p>
+
+    <p>Flashlight, as the 2017 paper says, ranks by retrieval followed by a light reranking that uses the full image's metadata as context. When the query is a crop, there is no metadata for it, so the reranking is minimal and some components, such as near-duplicate scoring, still apply. Flashlight also returns clickable annotations: phrases collected from the annotations of the results and weighted by tf-idf (a score that boosts words frequent in these results and rare elsewhere), so a person looking at lamp results can narrow to "pendant" or "brass". Each annotation is a way to turn a vague visual query into a more specific one.</p>
+
+    <p>Lens, on the other hand, isn't trying to return only look-alikes. The paper says Lens "is not optimized to return visually similar results, but instead is implemented to return a diverse set of engaging results semantically relevant to the query": a photo of blueberries yields lookalike blueberries and also recipes for blueberry desserts. A nearest-neighbour list can't do that, so Lens is built in two layers. A <strong>query understanding</strong> layer computes features from the photo: annotations, detected objects and salient colours. A <strong>blending</strong> layer then calls several sources and merges them.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Lens: understand the query, then blend sources
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 306" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="34" width="160" height="164" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="34" width="160" height="164" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="100.0" y="92" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">QUERY UNDERSTANDING</text>
+<text x="100.0" y="106" text-anchor="middle" font-size="10" class="dim">objects (SSD)</text>
+<text x="100.0" y="120" text-anchor="middle" font-size="10" class="dim">salient colours</text>
+<text x="100.0" y="134" text-anchor="middle" font-size="10" class="dim">annotations</text>
+<text x="100.0" y="148" text-anchor="middle" font-size="10" class="dim">embedding</text>
+<rect x="240" y="20" width="210" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="240" y="20" width="210" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="345.0" y="49" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">VISUAL NEIGHBOURS</text>
+<text x="345.0" y="63" text-anchor="middle" font-size="10" class="dim">Flashlight: looks alike</text>
+<path d="M182,116 L238,52" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M452,52 L508,116" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="240" y="98" width="210" height="64" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="240" y="98" width="210" height="64" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="345.0" y="120" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">SEMANTIC</text>
+<text x="345.0" y="134" text-anchor="middle" font-size="10" class="dim">annotations feed</text>
+<text x="345.0" y="148" text-anchor="middle" font-size="10" class="dim">Pinterest image search</text>
+<path d="M182,116 L238,130" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M452,130 L508,116" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="240" y="176" width="210" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="240" y="176" width="210" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="345.0" y="198" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">CONTEXT</text>
+<text x="345.0" y="212" text-anchor="middle" font-size="10" class="dim">object search: scenes</text>
+<text x="345.0" y="226" text-anchor="middle" font-size="10" class="dim">containing the object</text>
+<path d="M182,116 L238,208" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M452,208 L508,116" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="510" y="50" width="170" height="130" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="510" y="50" width="170" height="130" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="595.0" y="98" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">BLENDER</text>
+<text x="595.0" y="112" text-anchor="middle" font-size="10" class="dim">mixes the sources;</text>
+<text x="595.0" y="126" text-anchor="middle" font-size="10" class="dim">ratios change with the</text>
+<text x="595.0" y="140" text-anchor="middle" font-size="10" class="dim">query's features</text>
+<text x="20" y="266" text-anchor="start" font-size="10.5" class="dim">Not every source fires: image search is skipped when the annotations are low confidence.</text>
+<text x="20" y="288" text-anchor="start" font-size="10.5" class="dim">Source: Zhai et al., WWW 2017. The blending ratios themselves are unpublished.</text>
+      </svg>
+      <div class="diagram-caption">Lens returns related ideas as well as lookalikes, so one nearest-neighbour list is not enough.</div>
+    </div>
+
+    <p>Three sources are named in the 2017 paper. Visually similar results come from Flashlight. Semantically similar results come from Pinterest's text image search, called with the annotations the query understanding layer produced. Contextual results, such as living rooms containing the chair in the photo, come from <strong>object search</strong>: Pinterest runs its SSD detector over billions of catalogue images and indexes each object (more than a billion), so a query object finds similar objects and each match is mapped back to the scene it came from. The paper says it knew of no earlier production system serving that kind of recommendation. A blender changes the ratios and which sources run based on features from the query understanding layer: image search isn't called when the annotations have low confidence, for instance, so a photo with nothing recognisable in it gets fewer sources.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What to return</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Nearest neighbours only</td><td>Predictable; easy to evaluate with precision@k</td><td>Returns only copies of the look; no ideas or contexts</td></tr>
+        <tr><td>Fixed mix of several sources</td><td>Variety; each source covers a different intent</td><td>A fixed ratio is wrong for most queries</td></tr>
+        <tr><td>Blend ratios and sources chosen from query features (Lens, 2017)</td><td>Skips sources with nothing to say; adapts to the photo</td><td>Needs query understanding to be reliable; harder to evaluate as a whole</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Pinterest chose the third row for Lens and kept nearest-neighbour search as the engine of Flashlight and Shop the Look, where look-alike or exact-match is the product. A recommender that merges candidate sources of several kinds and decides how many of each to show appears in nearly every large feed, and case study 41 describes YouTube's version, where the sources are generators and the merge happens before ranking.</p>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">09</span>Serving: one photo through the pipeline</h2>
+
+    <p>We can now follow Lena's request from the shutter to the grid. Steps below are what the published papers support, and where they don't give a latency we say so.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Capture</span><span>Lena's phone takes the picture and sends it to Pinterest. Papers say nothing about on-device preprocessing, image size or upload time, and the 2017 paper mentions on-device TensorFlow only as separate work under investigation.</span></li>
+      <li><span class="st-lane">Detect</span><span>The SSD detector runs on the photo at 290 by 290 pixels and finds the lamp, and possibly the chair. In 2017 it was reported at 59 ms in one table and 93 ms on an older GPU in the text. Object search is triggered only if the photo contains an object.</span></li>
+      <li><span class="st-lane">Describe</span><span>The query understanding layer computes the other features: a binary embedding of the lamp's crop, annotations and salient colours. The 2015 service's full retrieval path, including feature extraction for the query, averaged 193 ms with AlexNet and 642 ms with VGG-16. Today's number is unpublished.</span></li>
+      <li><span class="st-lane">Retrieve</span><span>The sources run. Flashlight's visual neighbours come from a sharded index like the one in section 07, where leaf rankers return candidates by token match and exact rerank and a root ranker merges them. Object search queries a separate index of more than a billion objects. Annotations call image search.</span></li>
+      <li><span class="st-lane">Blend</span><span>The blender picks which sources count and in what proportion, from the query's features. Reranking uses annotations and other metadata where it exists, and the near-duplicate score.</span></li>
+      <li><span class="st-lane">Gate</span><span>Detections whose search results disagree on category, or whose top Hamming distance or annotation score is too weak, are suppressed, as in section 04. That experiment was on Flashlight. Lens probably applies some such check, but whether it uses the same gate, and with what thresholds, is unpublished.</span></li>
+      <li><span class="st-lane">Show</span><span>The grid renders. If Lena taps a result, that tap is logged, and so is the absence of a tap on everything else.</span></li>
+    </ol>
+
+    <p>The catalogue side does its work in advance, which is why the online path can be short. Pinterest's incremental fingerprinting service splits images into daily epochs by upload date and keeps one feature store per version of each feature, so each day only the new epoch needs features. Shards hold about 200,000 images, jobs are cut into work chunks of about 30 minutes, and the queue can run on spot instances because a lost chunk is rescheduled. A new feature version starts a new store and computes every epoch for it. What Lena's query meets in the index was therefore computed hours or days earlier, and the online work is the part that touches her photo: one detection pass, an embedding pass, and the index lookups.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Work</th><th>When</th><th>Published cost or scale</th></tr></thead>
+      <tbody>
+        <tr><td>Embedding and detecting every catalogue image</td><td>Offline, daily epochs; full recompute on a new model</td><td>2015: a little over a day on several hundred 32-core machines for the first run, about 5 machines in steady state</td></tr>
+        <tr><td>Building tokens, forward index, per-category indexes</td><td>Offline, after features are ready</td><td>Unpublished</td></tr>
+        <tr><td>Detecting objects in the query photo</td><td>Online</td><td>59 to 93 ms (2017, older GPU)</td></tr>
+        <tr><td>Embedding the crop, retrieving, blending, gating</td><td>Online</td><td>2015 service average 193 to 1207 ms by network; current figure unpublished</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Our design leans on one trade, which is to spend compute on the catalogue so that a query is cheap. It works while the catalogue's features stay fixed, and it hurts when a model changes, because a new embedding forces a recompute of everything, and we'll see in section 13 how that pushed Pinterest toward the unified embedding. Offline precomputation of the corpus with a light online query is the standard split in recommendation and search systems of every kind.</p>
+  </section>
+
+  <section id="labels">
+    <h2><span class="num">10</span>Where the labels come from</h2>
+
+    <p>Every number in the last four sections depends on labels, and Pinterest's papers spend as much space on where they come from as on the networks. Someone or something has to decide which images are "the same", and the published record shows four sources, each with its own price and failure.</p>
+
+    <h3 id="10-1-four-sources">10.1 Four sources of "the same"</h3>
+
+    <p>The cheapest source is the text people already write. The 2017 paper builds its fine-tuning set by taking 20,000 of the 100,000 most common search queries and labelling images with the query that found them. This is <strong>weak supervision</strong>: noisy and free, so there can be millions of labels. The second source is engagement, as in the Flashlight set of 800,000 images in 15,000 classes. The third is human labelling, slow and costly, used where the first two fail: Lens, because camera photos barely appear in engagement data, and Shop the Look, because "the exact product" is a judgement no click expresses. The fourth is creators' own annotations: 600,000 inspirational images tagged with a product to promote, which Pinterest cleaned by hand to 113,000 images with 9 category labels and 62,000 instance labels, because wrong boxes, wrong categories, spam and dissimilar products were common.</p>
+
+    <p>The sources aren't interchangeable. In the fashion work, the cleaned matching set lifted offline P@1 from 0.346 to 0.622, a relative gain of 79.8%, while better pretraining added 6.5% and the colour attribute task 3.2%. After listing its detection, embedding and infrastructure changes, the Shop the Look paper reports that dataset improvements had the largest impact, then the model, then the infrastructure. A better description of what "similar" means in the training data did more than a deeper network.</p>
+
+    <h3 id="10-2-the-loop">10.2 The loop in the labels</h3>
+
+    <p>Engagement labels carry a hazard from case study 41: people engage with what the system showed them, so a dataset that says "these images belong together because people clicked them" describes the old ranker's choices as much as people's tastes, and an embedding trained on it can probably pick up the old ranker's preferences in ways nobody measured. The Pinterest papers don't discuss this for visual search, and what follows is our reading of how the data is made. Two things in the record reduce the risk. The Lens team avoided engagement for camera photos, and the datasets behind Shop the Look's relevance judgements are human-labelled or human-cleaned. Human raters also check the engagement-derived numbers, as section 11 shows, and the 2019 paper says that although engagement-based offline sets are noisy, improvements on them have correlated with online results.</p>
+
+    <h3 id="10-3-label-quality">10.3 Who labels, and how well</h3>
+
+    <p>Human labels aren't automatically good, and the Shop the Look paper has the clearest published measurements of that. It compared three ways of getting the same relevance-rating task done and measured two quantities: label consistency, the average agreement among labelers on their most common answer, and label accuracy, the share of labels that match a golden set from experts.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Labelling platform (home decor relevance task)</th><th>Consistency</th><th>Accuracy</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Amazon Mechanical Turk</td><td>47%</td><td>32.5%</td><td>Fast and cheap; fine for simple boxes</td><td>Consistency and accuracy drop on harder tasks; labels skew toward easy examples</td></tr>
+        <tr><td>Third-party fixed pool ("Hybrid")</td><td>49%</td><td>26.0%</td><td>Same labelers every time</td><td>No feedback channel, so edge cases can't be settled</td></tr>
+        <tr><td>In-house team with an on-site expert</td><td>95%</td><td>89.5%</td><td>Real-time questions; calibration sessions; labels traceable to a person</td><td>Slower to set up and more expensive</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Pinterest moved its relevance evaluation to the in-house team. The authors' explanation is that subjectivity in a task like "is this lamp similar to that one?" shows up as inconsistency, usually caused by edge cases the training guide hadn't addressed, and the in-house expert could settle each one, update the guide and recalibrate the team. The model's own mistakes in evaluation also exposed edge cases, since some flagged "mistakes" were mislabeled or fell into gaps in the taxonomy. Cleaner labels improve the model, its remaining mistakes expose harder edge cases, and the guide improves again.</p>
+
+    <h3 id="10-4-a-billion-weak-labels">10.4 A billion weak labels</h3>
+
+    <p>The same mix shows up at the largest scale. In 2021, Josh Beal and colleagues described pretraining Pinterest's backbone on 1.329 billion images, called Annotations-1.3B, with 18,000 labels and about 2.88 labels per image. The labels come from a text pipeline in four steps, each removing a specific kind of noise.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Select</span><span>Take the high-confidence outputs of a keyword prediction model that reads the text around an image, and keep canonical, non-sensitive English keywords, called annotations, above a score threshold, which favours precision.</span></li>
+      <li><span class="st-lane">Concreteness</span><span>Many terms, such as "best design", are fine for understanding content and useless for learning to see. For each of 218,879 annotations, the team trained a small classifier on the existing embedding to tell images with that annotation from random ones, and used its top-1 accuracy as the term's <strong>visual concreteness</strong>. Terms below a threshold, chosen by testing the effect on pretraining, are dropped.</span></li>
+      <li><span class="st-lane">Cluster</span><span>A classifier assigns each annotation to one or more of 24 top-level interests (home decor, food and drinks, fashion and so on). Within each interest, k-means on the terms' text embeddings groups related annotations into clusters, which become the classes: this shrinks the label space from hundreds of thousands to thousands.</span></li>
+      <li><span class="st-lane">Match</span><span>A cluster is kept for an image only if its interest agrees with the interest assigned to the image. This handles words with several meanings: "jaguar" on a car page, an animal page and a fashion page lands in three different clusters, and only the right one survives.</span></li>
+    </ol>
+
+    <p>Each step helped. The label count falls from 34,000 with clustering alone to 26,000 after the visual dictionary and 18,000 after the interest restriction, and Visual Shopping retrieval improves 0.9% and then 1.1% relative. Training uses a multi-label softmax loss, which beat separate sigmoid outputs per cluster. The architecture matters too. A Vision Transformer, which splits the image into patches and processes them with attention, did worse than the ResNeXt-101 baseline when pretrained on ImageNet-1k (Visual Shopping P@1 of 29.2 for ViT-B/32 against 39.6) and better when pretrained on Annotations-1.3B (54.7 for ViT-B/16 at 384 pixels against 52.4). The paper's reading is that the transformer needs the larger dataset to use its capacity.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Backbone and pretraining (2021)</th><th>Visual Shopping P@1</th><th>Flashlight avg P@20</th><th>Lens avg P@20</th></tr></thead>
+      <tbody>
+        <tr><td>ResNeXt-101, ImageNet-1k</td><td>39.6</td><td>59.7</td><td>17.2</td></tr>
+        <tr><td>ResNeXt-101, IG-940M (generic large dataset)</td><td>46.7</td><td>67.6</td><td>20.2</td></tr>
+        <tr><td>ResNeXt-101, Annotations-1.3B</td><td>52.4</td><td>70.8</td><td>22.7</td></tr>
+        <tr><td>ViT-B/16, Annotations-1.3B, 384 px</td><td>54.7</td><td>74.3</td><td>26.7</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>In human evaluation of a visual shopping system with about 8,000 traffic-weighted queries, "Extremely Similar" top-1 results went from 17.3% for the production model to 23.9% for the ViT-B/16 (the abstract reports a 36% relative improvement in top-1 relevance), and an A/B test on the ViT-B/16 at 224 pixels measured click volume up 22% and click-through volume up 23%. The same embedding powered, without further training, a near-duplicate detector whose recall at 95% precision rose from 42.4% (ImageNet) to 84.9% (Annotations-1.3B) for the ResNeXt-101 backbone, a task no one had collected data for.</p>
+  </section>
+
+  <section id="evaluation">
+    <h2><span class="num">11</span>Knowing whether it works</h2>
+
+    <p>A visual search system can look excellent in a demo and still be wrong in ways that don't show until many people use it. Pinterest's papers describe three layers of measurement, each answering a question the one below can't. Offline retrieval scores are quick, cheap and run before every experiment. Human relevance judgements measure whether a person would call the results right. Online A/B experiments measure whether the change moves what the business cares about.</p>
+
+    <h3 id="11-1-offline">11.1 Offline retrieval sets</h3>
+
+    <p>The 2019 paper builds one retrieval evaluation set per product. For Shop the Look, curators labelled bounding boxes of objects in home decor scenes sampled by popularity, with their matching products: 600 objects and 1,421 ground-truth matches in a corpus of 51,421 images. The score is precision@1, the percentage of objects for which a ground-truth product comes back first. Flashlight and Lens sets come from engagement data in the way of their training data (807 queries against 42,881 images for Flashlight, 1,000 human-filtered camera queries against 49,000 images for Lens). Because those labels are noisy, the score is the average precision@20, the mean of P@1 through P@20:</p>
+
+    <div class="eq-block"><span>$$\text{Avg P@}20 \;=\; \frac{1}{20}\sum_{k=1}^{20} \text{P@}k$$</span></div>
+
+    <p>Averaging over <span>$k$</span> reports quality across the top of the list at once. The authors add: "Empirically we have found that though these evaluations are noisy, significant improvements in this Average P@20 have correlated with improvements in our online A/B experiment metrics." Detection has its own sets: 1,200 scene images and 1,400 single-product images, and a fashion retrieval set of 5,000 object-product pairs with 100,000 distractors, queried with the production detector so the evaluation sees the same imperfect crops users do.</p>
+
+    <h3 id="11-2-human">11.2 Human relevance judgements</h3>
+
+    <p>Offline sets measure the embedding alone on a small corpus, but a deployed system has a detector, an index, filters and a ranker. So the 2019 paper builds a cluster per product that differs from production only in the embedding and sends both to human raters. For each product it takes a traffic-weighted sample of real queries, gets five results from each system, and turns each (query, result) pair into a question: 10,000 questions per system per product. Raters work from a template tuned with an internal guide, must reach at least 80% precision on a golden set, see each question five times with the majority kept, and are tracked for consistency, the share of questions answered the same across repeated jobs.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Human judgement, unified vs specialised embedding (2019)</th><th>Win</th><th>Lose</th><th>Draw</th><th>P@5 change</th><th>Worker consistency</th></tr></thead>
+      <tbody>
+        <tr><td>Flashlight</td><td>41.3%</td><td>13.9%</td><td>44.8%</td><td>+22.2%</td><td>98.0%</td></tr>
+        <tr><td>Lens</td><td>54.0%</td><td>7.9%</td><td>38.0%</td><td>+110.1%</td><td>92.9%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>"Win" means the new system's top five for that query had higher precision, "lose" lower and "draw" the same. Shop the Look, measured separately since it hadn't launched, went from 37.3% to 64.2% precision@5 (+72.1%), improving in all but one of 20 home categories. The exception was candles, from 60.0% to 40.0%. An average hides that: a unified embedding can win overall and lose a category. For Shop the Look the human result was the launch criterion, since there was no product yet to A/B test.</p>
+
+    <h3 id="11-3-online">11.3 Online experiments</h3>
+
+    <p>The A/B tests use the same two-cluster arrangement. For Flashlight the paper reports two treatments: ranking disabled, which shows the embedding's effect without dilution, and ranking enabled, which matters for deployment. Both showed significant gains in volume metrics (impressions, close-ups, repins, click-throughs, long click-throughs) and propensity metrics (the share of users who act in a day), tracked by day to check for novelty effects. For Lens:</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Lens A/B, unified vs specialised (2019)</th><th>Close-up</th><th>Repin</th><th>Click-through</th></tr></thead>
+      <tbody>
+        <tr><td>Volume</td><td>+32.7%</td><td>+46.7%</td><td>+35.0%</td></tr>
+        <tr><td>Share of users acting (closeuppers, repinners, clickthroughers)</td><td>+16.3%</td><td>+26.7%</td><td>+24.3%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Shop the Look's 2020 paper defines its own measures: scene close-up volume (scene impressions with detected objects, a measure of coverage), product click-through volume and rate (result quality), and end-to-end relevance@5, the human-rated precision of the top five products for detected objects, each rated "Extremely Similar", "Similar" or "Bad". It ran embedding experiments mostly offline, because embedding hundreds of millions of products and gathering engagement can take weeks. Across detector, embedding, data and infrastructure changes the cumulative gains were over 160% in end-to-end human relevance and over 80% in engagement.</p>
+
+    <p>Three habits stand out. Every layer checks a different failure: an offline set can't see the detector's crops, a human rater can't see click behaviour, and an A/B test can't say why. Experiments are built so the thing under test is the only difference. And results are reported as relative gains row by row, so a regression such as the 2016 Flashlight dots shows up as a negative number instead of disappearing into an average.</p>
+  </section>
+
+  <section id="fresh">
+    <h2><span class="num">12</span>New images, new products, new models</h2>
+
+    <p>A search system has to work on the day an image appears, before anyone has saved, clicked or labelled it. For visual search that's the main strength of the approach, and Pinterest's papers show it in several forms.</p>
+
+    <p>New Pins come first. Related Pins in 2015 depended on the curation graph, which needs saves, so about 6% of images had few or no recommendations. Visual search needs only pixels: the fingerprinting service computes features for each day's uploads as a separate epoch, so a new Pin probably has an embedding within a daily cycle, and the visual neighbours raised repins by 2% in the three-month test. The lag from upload to searchable isn't published, and with a daily epoch plus an index build it is probably a day or more.</p>
+
+    <p>New products come second. Shop the Look retrieves products by the embedding of their images, with category from the merchant or an in-house classifier and gender from another classifier with a "unisex" fallback, so a product with no engagement history can be searched by look, category and gender. The 2022 ItemSage paper extends this to product embeddings built from images and text, trained to be compatible with image and search-query embeddings, with reported gains of up to +7% gross merchandise value per user and +11% click volume in A/B tests.</p>
+
+    <p>New query domains are third. Lena's photo is itself a cold start: it isn't a Pin, has no board or engagement, and its lighting and angle differ from the catalogue. The Lens team built the 540,000-image set that mixes camera, product and Pinterest images under one label, so the network learns to ignore the difference, and a test set of camera queries filtered by human judgement.</p>
+
+    <p>New models are the fourth, and the costliest. A new embedding makes every stored vector obsolete, and the system can't use it until all images are re-embedded. The fingerprinting service keeps a store per feature version and computes only what changed, yet the 2019 paper still lists backfill expense as a reason to unify, since each improvement then needs one backfill instead of three. It's the same mechanism as cold start: a new model faces a catalogue with no embeddings of its own.</p>
+
+    <p>New categories need data, not code. When Shop the Look expanded from home decor to fashion, the cleaned fashion set was the largest single improvement (offline P@1 from 0.346 to 0.622). The pipeline carries over to a new domain; the labelled examples of what matches don't.</p>
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">13</span>What went wrong, and what it cost</h2>
+
+    <p>Pinterest's papers are unusually open about experiments that failed, and the failures follow a pattern: each one was a result of the system working as designed while the product around it didn't. We list them as the papers present them.</p>
+
+    <p>The first was Similar Looks, the red dots of 2015. The click rate on dots was healthy at 12% of viewers a day, yet overall Pin close-up engagement fell 4%, because the feature competed with Related Pins and asked people to learn a new gesture, and only 2.4% of daily active users saw a detected object. The team tested relevance without the interface (the 5% gain from blending) and rebuilt the entry point as Flashlight's free crop.</p>
+
+    <p>The second was the dots that came back in 2016, when detections were generated in real time. Engagement fell by 3.8% to 5.3% in the variants without a full gate, because bad boxes and hallucinated objects reached the user, and it rose by 4.9% once the dot was shown only when the results agreed. The cost was a permanent extra dependency: the detector's output is now judged by the search it triggers.</p>
+
+    <p>The third was wrong-category and wrong-gender results in Shop the Look. Retrieval by visual similarity alone could return a candidate from a different category than the query object, and gender mismatches were a second source of bad results. Post-filtering couldn't help because the top results might hold no valid candidates, so the fix was to move restrictions inside retrieval, with a separate index per category and, later, attribute tokens. That's what cut Bad results in the top five by 17.1%.</p>
+
+    <p>The fourth was label quality. Relevance evaluations on MTurk had 47% consistency and 32.5% accuracy against experts, so few high-quality labels survived, and the ones that did skewed toward easy examples. Every experiment in the Shop the Look paper depends on the end-to-end relevance metric, and an evaluation that disagrees with experts two times in three can't be a launch criterion.</p>
+
+    <p>The fifth was fragmentation. Three embeddings on three architectures meant three backfills for each improvement, and old versions that downstream models still used. The unified embedding fixed that, at the price of a new problem, balance: sampling by dataset size cost Shop the Look P@1 8.4 points (52.8 to 44.4), and even the deployed unified model lost a category, candles, in human judgements.</p>
+
+    <p>Smaller disappointments appear too. Fine-tuned AlexNet features gave 0.8% in the 2015 Related Pins test against 4.0% for VGG-16. Binarising ResNet pool5 features cut P@1 from 0.160 to 0.055. SSD was four to five times faster than Faster R-CNN but localised worse. And returns probably diminish: in the fashion experiments, V2's gain over V1.4 was a 0.6% loss in "Similar" P@5 and a 0.83% click-through gain, after earlier steps gave 7.14% and 5.99%.</p>
+
+    <p>These failures probably share a cause. A retrieval system optimises a similarity score, and what people want is narrower: the right category, a crop that contains the object, an interface that adds no work. Each fix added a second source of evidence, the text for detection, the results' agreement for the dot, category and gender labels for retrieval, human raters for evaluation, and none came from improving the embedding alone.</p>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">14</span>The whole system</h2>
+
+    <p>We can now draw the full design. On the left, the online path is Lena's request. On the right, the offline path runs every day: new images are detected and embedded, indexes are rebuilt, and when the model changes the catalogue is processed again. Labels from text, engagement and human raters train the unified embedding, which is evaluated offline, by human judges and in an A/B test before it replaces the old one.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The whole design, online and offline
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 520" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">ONLINE: Lena's request</text>
+<text x="400" y="22" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">OFFLINE: the loop that keeps it current</text>
+<rect x="20" y="36" width="280" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="36" width="280" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="160.0" y="55" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">LENA'S PHOTO</text>
+<text x="160.0" y="69" text-anchor="middle" font-size="10" class="dim">camera, café light, lamp off-centre</text>
+<rect x="20" y="98" width="280" height="46" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="98" width="280" height="46" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="160.0" y="118" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">QUERY UNDERSTANDING</text>
+<text x="160.0" y="132" text-anchor="middle" font-size="10" class="dim">detect objects, crop the lamp</text>
+<rect x="20" y="162" width="280" height="46" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="162" width="280" height="46" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="160.0" y="182" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">UNIFIED EMBEDDING</text>
+<text x="160.0" y="196" text-anchor="middle" font-size="10" class="dim">one model, a bit code per crop</text>
+<rect x="20" y="226" width="280" height="46" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="226" width="280" height="46" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="160.0" y="246" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">INDEX SEARCH</text>
+<text x="160.0" y="260" text-anchor="middle" font-size="10" class="dim">tokens, then Hamming rerank</text>
+<rect x="20" y="290" width="280" height="46" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="290" width="280" height="46" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="160.0" y="310" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">BLEND + RERANK</text>
+<text x="160.0" y="324" text-anchor="middle" font-size="10" class="dim">sources, metadata, agreement gate</text>
+<rect x="20" y="354" width="280" height="40" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="354" width="280" height="40" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="160.0" y="371" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">RESULTS</text>
+<text x="160.0" y="385" text-anchor="middle" font-size="10" class="dim">lookalikes, products, rooms</text>
+<path d="M160,81 L160,97" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M160,145 L160,161" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M160,209 L160,225" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M160,273 L160,289" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M160,337 L160,353" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="36" width="280" height="50" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="400" y="36" width="280" height="50" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="540.0" y="58" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">CATALOGUE</text>
+<text x="540.0" y="72" text-anchor="middle" font-size="10" class="dim">new pins and products every day</text>
+<rect x="400" y="104" width="280" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="400" y="104" width="280" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="540.0" y="126" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">FINGERPRINTING</text>
+<text x="540.0" y="140" text-anchor="middle" font-size="10" class="dim">detector and embedding, per daily epoch</text>
+<rect x="400" y="172" width="280" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="400" y="172" width="280" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="540.0" y="194" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">INDEX BUILD</text>
+<text x="540.0" y="208" text-anchor="middle" font-size="10" class="dim">tokens, forward index, per category</text>
+<rect x="400" y="240" width="280" height="50" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="400" y="240" width="280" height="50" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="540.0" y="262" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">LABELS</text>
+<text x="540.0" y="276" text-anchor="middle" font-size="10" class="dim">text, engagement, human judgements</text>
+<rect x="400" y="308" width="280" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="400" y="308" width="280" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="540.0" y="330" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">TRAINING</text>
+<text x="540.0" y="344" text-anchor="middle" font-size="10" class="dim">multi-task, one embedding</text>
+<rect x="400" y="376" width="280" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="400" y="376" width="280" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="540.0" y="398" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">EVALUATION</text>
+<text x="540.0" y="412" text-anchor="middle" font-size="10" class="dim">offline sets, human judges, A/B</text>
+<path d="M540,87 L540,103" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M540,155 L540,171" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M540,223 L540,239" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M540,291 L540,307" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M540,359 L540,375" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M398,401 L352,401 L352,129 L398,129" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M352,185 L302,185" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M398,197 L372,197 L372,249 L302,249" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="306" y="380" text-anchor="start" font-size="10" class="dim">new model</text>
+<text x="20" y="452" text-anchor="start" font-size="10.5" class="dim">The same embedding runs on both sides: on the catalogue in daily batches, on Lena's photo in real time.</text>
+<text x="20" y="474" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A new embedding means re-running every image through it before the index can use it.</text>
+<text x="20" y="496" text-anchor="start" font-size="10.5" class="dim">Engagement with results returns as training labels; human judges score a sample at every release.</text>
+      </svg>
+      <div class="diagram-caption">Follow Lena's photo down the left column, then follow the catalogue and the labels down the right. The pink line is a new model reaching both sides.</div>
+    </div>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Component</th><th>What it does</th><th>Added because</th></tr></thead>
+      <tbody>
+        <tr><td>Binary embedding</td><td>One bit code per image or crop; Hamming distance</td><td>Floats can't be stored or scanned at billions of images (sections 01, 03)</td></tr>
+        <tr><td>Two-step detector</td><td>Text picks categories; detectors find boxes; crops are embedded</td><td>One vector per photo describes the scene, not the lamp (section 04)</td></tr>
+        <tr><td>Agreement gate</td><td>Drops dots whose search results disagree</td><td>Real-time detection lowered engagement (section 04)</td></tr>
+        <tr><td>Normalised-softmax training</td><td>Proxy-based metric learning with sampled classes</td><td>Triplet mining doesn't scale to thousands of classes (section 05)</td></tr>
+        <tr><td>Unified multi-task embedding</td><td>One network, several datasets and heads</td><td>Three embeddings meant three backfills (section 06)</td></tr>
+        <tr><td>Token index with exact rerank</td><td>LSH tokens find candidates; Hamming distance orders them</td><td>A full scan costs thousands of machines (section 07)</td></tr>
+        <tr><td>Category and attribute restriction</td><td>Index per category; gender and price as tokens</td><td>Visual similarity alone crosses category lines (section 07)</td></tr>
+        <tr><td>Query understanding and blender</td><td>Detect, annotate, call sources, mix by query</td><td>Lens should return ideas as well as lookalikes (section 08)</td></tr>
+        <tr><td>Daily fingerprinting</td><td>Per-epoch features, versioned per feature</td><td>Catalogue work must stay out of the query path (sections 09, 12)</td></tr>
+        <tr><td>Labels, human judges, A/B</td><td>Several label sources; trained raters; paired clusters</td><td>No single measure sees every failure (sections 10, 11)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Several parts of the picture are unpublished: how the blender sets its ratios, the thresholds on the gate in Lens, the end-to-end latency, the exact number of index nodes and how often indexes are rebuilt. The sources describe the system as of 2015, 2017, 2019, 2020 and 2021, and the current system has probably moved since.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">15</span>Summary</h2>
+    <ol>
+      <li><strong>A camera search is a nearest-neighbour search in a learned space.</strong> The photo and every catalogue image become vectors, and similar images should get close vectors.</li>
+      <li><strong>The first version was weak where it mattered.</strong> ImageNet features of a whole picture scored a precision@5 of 0.051 on Pinterest data in 2015, and fine-tuning on Pinterest labels raised it to 0.234.</li>
+      <li><strong>Intermediate layers retrieve better than the output layer,</strong> and binarising them by thresholding at zero gives 32-times smaller codes that compare with an exclusive-or and retrieve as well or better.</li>
+      <li><strong>A detector turns the photo into the object.</strong> Text picks which detectors run, which cut false positives from 2.5% to 0.5% in 2015, and the crop, not the scene, is embedded.</li>
+      <li><strong>A detector's confidence is not enough.</strong> Showing a dot only when the search results agree on a category turned a 3.8% to 5.3% engagement loss into a 4.9% gain.</li>
+      <li><strong>Classification with proxies is metric learning without mining.</strong> Normalised softmax with temperature 0.05 pulls each image toward its class proxy and pushes it from the others, weighted by their probability.</li>
+      <li><strong>Sample classes, not triplets, to scale.</strong> Loading a few thousand proxies per batch costs under a point of recall on a benchmark.</li>
+      <li><strong>One multi-task embedding replaced three.</strong> Even sampling of datasets, equal loss weights and a binary-friendly head beat each specialist on its own task and removed two backfills per upgrade.</li>
+      <li><strong>The index is a text-search index for bit codes.</strong> LSH tokens retrieve candidates, an exact Hamming rerank orders them, and attribute and category restrictions run inside the search.</li>
+      <li><strong>Labels were the biggest lever.</strong> Dataset changes had the largest measured impact in Shop the Look, and an in-house labelling team raised accuracy from 32.5% to 89.5%.</li>
+      <li><strong>Measure at three layers.</strong> Offline retrieval sets iterate fast, five-rater human judgements check the whole system, and A/B tests measure engagement, and each of them caught failures the others missed.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">16</span>Build this</h2>
+    <p class="lede">You can rebuild the main moving parts of this system in a few days on a laptop, with a small labelled image set and a pretrained network, and watch each of the design's choices change a number.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A small visual search engine with binary codes, a detector and a gate</span>
+        <span class="proj-meta">~8 hours &middot; torch, torchvision, numpy</span>
+      </div>
+      <p>Pick a labelled image set with at least 50 classes and a few hundred images per class, such as Oxford Flowers 102 or Caltech-101, and treat "same class" as "relevant", the way Pinterest's offline sets do. Hold out about a fifth of the classes entirely, so you test on classes the model never trained on.</p>
+      <ol class="proj-steps">
+        <li>Embed every image with an ImageNet-pretrained ResNet-50 and compute P@5 and P@10 by cosine distance. Compare the pooled layer with an earlier layer and with the classifier output, as in section 03.</li>
+        <li>Binarise each embedding by thresholding at zero, compare with Hamming distance, and report precision and storage. Then repeat with a layer that ends in a ReLU, so you can see how a layer's activation pattern changes what the bits keep.</li>
+        <li>Train a normalised-softmax head on the training classes with temperature 0.05, layer normalisation after pooling and class-balanced batches, and measure Recall@1 on the held-out classes. Compare it with a triplet loss that uses semi-hard negatives and report training time to equal accuracy.</li>
+        <li>Build the token index from section 07 over your binary codes with bit-sampled tokens. Plot recall of the exact top 10 against the number of images you rerank, for one, two and three required matching tokens.</li>
+        <li>Take images that contain several objects (COCO is convenient), run torchvision's pretrained Faster R-CNN, and compare retrieval with the whole image and with the best crop. Then add a gate that drops a crop whose top 20 results share no majority category, and report how many detections it removes and how many of those were wrong.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> your binary embeddings take about a thirty-second of the float storage while precision falls by a small amount or not at all on the layer that suits binarising and by a lot on the one that doesn't, the proxy loss beats triplets on held-out classes at equal training time, the token index recovers most of the exact neighbours while reranking a few percent of the images, and the gate removes mostly wrong crops at a small cost in coverage.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Add a second dataset with a different notion of similarity, such as a product-matching set with instance labels, and train both heads together. Compare even sampling with sampling by dataset size, and look at per-class results to find a class that lost.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">17</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why does visual search use embeddings instead of classifying the photo and looking up the class?</summary>
+      <div class="qa-body"><p>A class label such as "lamp" is far too coarse. Lena wants lamps that look like this one, and a classifier would return every lamp equally. An embedding places each image in a space where distance means visual similarity, so the system can rank the catalogue by closeness. Features from an ImageNet classifier aren't tuned to that either: in Pinterest's 2015 test their precision@5 was 0.051, and fine-tuning on Pinterest labels took it to 0.234. The embedding has to be trained for similarity.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why store a binary code instead of the float vector?</summary>
+      <div class="qa-body"><p>Space and speed. A 4096-dimensional float vector is 16 KB and a 4096-bit code is 512 bytes, so billions of images fit in memory only as bits, and the distance is an exclusive-or and a bit count. Pinterest found that binarised intermediate-layer features also retrieved as well or better than the floats on its tests, and that high-dimensional binary codes beat low-dimensional float vectors at equal storage. The condition is that the network is trained or chosen so thresholding at zero keeps the information, which is why it added layer normalisation, ReLU and dropout in its binary embedding.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What does an object detector add to a visual search system?</summary>
+      <div class="qa-body"><p>It lets the query be the object and not the scene. A whole-photo embedding mixes the lamp with the chair, the cup and the wall, so the neighbours are café interiors. The detector returns a box and a category, the crop is embedded, and the category can restrict the search. Pinterest also ran detectors on the catalogue, so objects could be indexed and matched with objects, and scenes containing a matching object could be returned.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Explain normalised softmax loss and why it divides by a temperature.</summary>
+      <div class="qa-body"><p>Each class has a unit-length proxy vector, and an image's embedding is also unit length. The logit for a class is the cosine between them divided by a temperature, here 0.05, and the loss is the cross-entropy of the softmax over those logits. Cosines lie between minus one and one, so with a temperature of 1 even a perfect embedding gives a small probability when there are thousands of classes: about 0.00018 for 15,000 classes. A temperature of 0.05 stretches the logits to between minus 20 and 20, so the probability can approach 1. The gradient pulls the embedding toward its own proxy and pushes it away from the others in proportion to their predicted probability, so hard negatives get the largest push without being mined.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why did Pinterest prefer classification with proxies over triplet loss?</summary>
+      <div class="qa-body"><p>Triplets need informative negatives, which are neither too easy (zero loss) nor too hard (unstable), and finding them needs large batches. As the dataset grows, a random batch is less likely to contain any informative triplet. Proxies compare every image with every class vector at once, so there's nothing to mine. On Stanford Online Products with ResNet50 at 128 dimensions the paper reports Recall@1 of 75.2 against 72.7 for a distance-weighted margin loss. The cost is that class labels are required and the softmax grows with the number of classes, which Pinterest handled by sampling a few thousand proxies per batch, always including the batch's classes.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why train one embedding for several products, and what can go wrong?</summary>
+      <div class="qa-body"><p>Three embeddings meant three full backfills of the catalogue for every architecture change, plus old versions kept alive for downstream models. One multi-task network trained on all datasets also did better: on offline sets the unified model beat each specialist on its own task, and in human judgements it won 54.0% of Lens queries against 7.9% losses. The risks are balance and conflict. Sampling datasets in proportion to size cost Shop the Look 8.4 points of P@1 because the smallest dataset gets the smallest share, a learned loss-weighting method did no better than equal weights, and a unified embedding can win overall and still lose a category, as candles did in Shop the Look.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How would you index billions of bit codes, and how would you filter by category or gender?</summary>
+      <div class="qa-body"><p>Group bits into tokens with locality-sensitive hashing, build an inverted index from token to image IDs, and keep a forward index from ID to full code. A query retrieves images that share tokens, ranks them by the number of shared tokens and reranks the survivors by exact Hamming distance. The number of required shared tokens trades recall for work: in a synthetic test, one shared token reranked 12% of the catalogue and found 86% of the true top 10, and two reranked 0.7% and found 59%. Attributes such as category, gender and price can be indexed as tokens, so restrictions run inside the search and are guaranteed, which Pinterest found cut bad results in its top five by 17.1% for category. Sharding by image, with a root node merging the top results of each shard, spreads the load.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>You add real-time detection dots and engagement drops. How do you diagnose and fix it?</summary>
+      <div class="qa-body"><p>Slice by failure type before changing anything. Pinterest found two: bad detections (poor boxes or objects that weren't there) and irrelevant retrieval results, which may be a symptom of the first or a separate problem. Detector confidence alone didn't separate them, so they used the search results as a signal: the Hamming distance of the top result, the top annotation score and category conformity, the largest share of results with one category. Imposing minimum thresholds on all three turned a loss of 3.8% to 5.3% into a gain of 4.9%, and conformity was the most important. A low conformity means the results disagree, which fits both a hallucinated object and a crop the index can't match. The general method is to check one model's output against another component's behaviour, and to run the experiment so the control shows the same interface without the change.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you evaluate a visual search system, and what are the traps?</summary>
+      <div class="qa-body"><p>Use three layers. Offline retrieval sets with class labels give precision@k or average precision@20 quickly, and Pinterest says improvements on them correlated with online results even though engagement-derived sets are noisy. Human relevance judgements measure the end-to-end system: a traffic-weighted sample of queries, five results each, five raters per question with the majority kept, raters screened to at least 80% on a golden set, and consistency tracked. Online A/B tests then measure engagement, with the control differing from the treatment only in the component under test. The traps are label quality (a platform with 47% consistency can't judge anything), averages that hide category regressions, novelty effects that fade after launch, and offline sets built from the same data as the training set. The Shop the Look paper also reports that dataset changes gave the biggest gains, so evaluation data needs the same care as training data.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>A user's photo comes from a phone camera and the catalogue is professional photography. How do you handle the domain shift?</summary>
+      <div class="qa-body"><p>Put both domains under the same label in the training data. Pinterest's Lens set has 540,000 human-labelled images in 2,000 classes with product shots, camera photos and Pinterest images sharing each label, so the embedding learns to ignore lighting, angle and clutter. Engagement couldn't supply this, since camera photos are sparse in engagement data. Train it together with the catalogue datasets in one multi-task network, because the Pinterest-wide data helps organise the corpus and the camera data helps bridge the gap, and evaluate on camera queries, as the Lens offline set does with 1,000 human-filtered query photos. Detection helps too, since cropping the object removes much of the background that distinguishes a café snapshot from a studio picture.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">18</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/1505.07647" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Visual Search at Pinterest</div><div class="r-sub">Jing et al., KDD 2015. Two-step detection, incremental fingerprinting, the token index, Related Pins and Similar Looks. arXiv:1505.07647</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1702.04680" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Visual Discovery at Pinterest</div><div class="r-sub">Zhai et al., WWW 2017 Companion. Feature layers and binarisation, Faster R-CNN and SSD, Flashlight, the category-conformity gate and Lens. arXiv:1702.04680</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1811.12649" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Classification is a Strong Baseline for Deep Metric Learning</div><div class="r-sub">Zhai and Wu, BMVC 2019. Normalised softmax, class subsampling and high-dimensional binary embeddings of section 05. arXiv:1811.12649</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1908.01707" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Learning a Unified Embedding for Visual Search at Pinterest</div><div class="r-sub">Zhai et al., KDD 2019. The multi-task binary embedding, dataset ablations, human judgements and A/B results of sections 06 and 11. arXiv:1908.01707</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2006.10866" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Shop The Look: Building a Large Scale Visual Shopping System at Pinterest</div><div class="r-sub">Shiau et al., KDD 2020. Detection upgrades, per-category and LSH-token indexes, attribute tasks and label platforms. arXiv:2006.10866</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2108.05887" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Billion-Scale Pretraining with Vision Transformers for Multi-Task Visual Representations</div><div class="r-sub">Beal et al., 2021. Weak-label generation for Annotations-1.3B and the ViT backbone of section 10. arXiv:2108.05887</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2205.11728" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">ItemSage: Learning Product Embeddings for Shopping Recommendations at Pinterest</div><div class="r-sub">Baltescu et al., KDD 2022. Multi-modal, multi-task product embeddings compatible with image and query embeddings. arXiv:2205.11728</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/azgo14/classification_metric_learning" target="_blank" rel="noopener">
+        <div class="r-icon">💻</div>
+        <div class="r-body"><div class="r-kind">Code</div><div class="r-title">classification_metric_learning</div><div class="r-sub">The authors' implementation of normalised softmax with class sampling, linked from the Classification paper.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">19</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/05-cnn-vision-foundations"><div class="rc-sec" style="color:var(--c-vision)">05 · The networks</div><div class="rc-title">CNNs &amp; Vision Foundations</div><div class="rc-hook">Convolutions, ResNet and detection, the building blocks of sections 03, 04 and 06.</div></a>
+      <a class="related-card" href="/topics/06-modern-vision-foundation-models"><div class="rc-sec" style="color:var(--c-visionfm)">06 · Bigger backbones</div><div class="rc-title">Modern Vision Foundation Models</div><div class="rc-hook">Vision Transformers and large-scale pretraining, as in section 10.</div></a>
+      <a class="related-card" href="/topics/14-multimodal-ai"><div class="rc-sec" style="color:var(--c-multimodal)">14 · Image and text together</div><div class="rc-title">Multimodal AI</div><div class="rc-hook">Contrastive image-text training and shared embedding spaces, the neighbour of the metric learning here.</div></a>
+      <a class="related-card" href="/topics/16-recommenders-ranking-search"><div class="rc-sec" style="color:var(--c-rec)">16 · The foundations</div><div class="rc-title">Recommenders, Ranking &amp; Search</div><div class="rc-hook">Retrieval, ranking and the feedback loop in general form. This case study is the retrieval half with pixels as the query.</div></a>
+      <a class="related-card" href="/topics/23-efficient-ai-systems"><div class="rc-sec" style="color:var(--c-efficient)">23 · Cost</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Quantization and compact representations, the same trade as the binary codes in section 03.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Human raters, golden sets and why offline numbers mislead, the machinery behind section 11.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">Case study 41</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">Sampled softmax, multi-task ranking and the feedback loop in a system where the query is a person.</div></a>
+      <a class="related-card" href="/topics/43-design-search-ranking"><div class="rc-sec" style="color:var(--c-rec)">Case study 43</div><div class="rc-title">Designing Search Ranking</div><div class="rc-hook">What happens after retrieval, when thousands of candidates must be put in order for one query.</div></a>
+    </div>
+  </section>

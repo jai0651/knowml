@@ -1,0 +1,1098 @@
+---
+title: "Designing People You May Know"
+dek: "Follow Kavya, who joins LinkedIn on her third day at a new job, from the moment she opens My Network down to the machinery that picks a few people for her out of over a billion members. We build it from a count of shared friends and fix each failure in turn."
+readingTime: "~68 min"
+prereqs: "recommenders (16), graph ML (18), MLOps (24), evaluation (25)"
+group: "ML System Design"
+label: "Case study 52"
+description: "From counting shared friends to graph neural networks: triangle closing at a billion members, Adamic-Adar, personalised PageRank, two-sided ranking of invitations and acceptances, and ego-cluster experiments."
+---
+<section id="tldr">
+    <p>Kavya started a new job in Bengaluru on Monday, and on Wednesday evening she finally makes a LinkedIn account. She uploads the contacts from her phone when the app offers to, fills in her new employer, and opens the My Network tab. Twelve people are already connected to her, mostly college friends whose numbers she had saved. Below them sits a short list under the heading People You May Know. There is Meghana from her old team, whom she hadn't thought to look for. There is Rohan, who sat two seats away at Monday's orientation and whom she never got round to asking for a last name. And there is a recruiter she has never met, with a very polished profile photo. She taps Connect on Rohan and on Meghana and closes the recruiter. Ten minutes later Rohan accepts, and when she pulls down to refresh, three new names have appeared, two of them from his team.</p>
+
+    <p>LinkedIn can't know who Kavya knows. It can see a graph, a map of which members are connected to which, and it can see what each member has written about themselves. From that it has to guess, for one person with a dozen connections, which few people out of more than a billion she would want to connect with. Behind the guess there are two more difficulties. A connection exists only when one person sends an invitation and the other accepts, so the system is trying to please two people at once, and one of them is a stranger who never opened the app. And whatever it suggests changes the graph it will learn from tomorrow. A member who gets suggested a lot collects connections, and a member with many connections gets suggested more.</p>
+
+    <p>Software that suggests links between members of a network is called a <strong>link recommender</strong>, and the task underneath, guessing which pairs of members will become connected, is <strong>link prediction</strong>. LinkedIn's version has been running since at least 2008 under the name People You May Know, or PYMK. So the question this chapter answers is: <strong>how does LinkedIn pick a handful of people for one new member out of a billion, when it can only see a graph, and each suggestion needs two people to say yes?</strong></p>
+
+    <p>We'll build it the way an engineer would, starting from the most obvious version, "count the friends two people share", and fix each failure in turn. That takes us through why even the counting is hard at this scale, scoring that discounts celebrity connections, random walks and personalised PageRank, graph neural network embeddings, and a ranker that predicts both the invitation and the acceptance. After that we look at network effects that break ordinary A/B tests and the experiments LinkedIn built to measure them, and at the feedback loop that favours the already popular. Throughout we rely on LinkedIn's own papers, talks and engineering posts, and we say plainly where its internals are unpublished.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>PYMK shows up in several places, among them the My Network tab, the feed, notifications and emails. We'll concentrate on the tab, where Kavya is, because that's where the full list gets shown and acted on. For each member the system has to produce a ranked list of people, fresh enough that someone who has just joined, or just accepted an invitation, sees the change within the same visit. Each person on the list should be someone the member would honestly want to connect with, which is a narrower thing than someone they might tap on.</p>
+
+    <p>In a 2018 talk at QCon San Francisco, Hema Raghavan described what LinkedIn wanted from the feature as "engaged members with high quality connections". She then proposed a metric to match, and it carries a lot of the design we'll build: count PYMK invitations that are <em>sent and accepted</em>, instead of invitations that are sent. Her slides show both series side by side over a month. We'll use "sent and accepted" as the target for the rest of the chapter, and section 07 turns it into a model.</p>
+
+    <p>Three awkward cases need sensible behaviour too. For a brand-new member like Kavya, there's almost no graph. For a very visible member, such as a recruiter or a senior executive, it must not bury them in requests. And it must respect what members have agreed to share, a constraint that shapes which data can be used at all and that we come back to in section 09.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>LinkedIn's about page, as it stood in October 2026, lists more than 1.3 billion members, and says that more than 18,000 connections are made every minute. That is about 300 a second, or roughly 26 million a day. In its LiGNN paper (Borisyuk et al., KDD 2024), the team describes the connection graph used for people recommendation as having "up to one billion member nodes and billions of connection edges", and says it generated embeddings for 500 million members. The team page for PYMK states that the system is "responsible for building more than 50% of LinkedIn's professional graph", processes hundreds of terabytes of data a day and considers hundreds of billions of potential connections. It adds that the second-degree data grows faster than the site itself. That page isn't dated, so its figures probably come from a different year than the about page's, and the 50% figure is LinkedIn's own claim.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Say each of 500 million members has 300 connections, and each of those has 300 connections too. That's an illustrative figure, since LinkedIn doesn't publish its degree distribution. How many friend-of-friend paths start at one member, and how many in total? If each path costs a microsecond of CPU to look at, how many CPU-days is one pass over all of them?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>One member has 300 × 300 = 90,000 two-step paths. Over 500 million members that's 4.5 × 10<sup>13</sup> paths, which at a microsecond each is 45 million CPU-seconds, about 520 CPU-days. A thousand machines could do that in half a day.</p>
+        <p>That number is too comfortable, and the problem hides in the word "average". Connection counts are heavy-tailed, a few members have tens of thousands of connections, and the number of paths through a member grows with the square of their connections, so the real total is dominated by a few hubs and is much larger than the average suggests. LinkedIn's own figure is hundreds of billions of candidate pairs, and the volume grows faster than the membership. Section 03 puts numbers on the skew.</p>
+      </details>
+    </div>
+
+    <p>Latency is a separate matter, and LinkedIn hasn't published a latency budget for PYMK. We'll treat the answer as a lookup in a store that was filled ahead of time, with some work to rescore it, and reason about what a request must do without inventing figures.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: count the friends two people share</h2>
+
+    <p>Our first design uses one idea. If Kavya knows Meghana, and Meghana knows Rohan, then Kavya may know Rohan. Sociologists call this closing a triangle, and LinkedIn's own PYMK team page names it as the first signal the system uses: if A knows B and B knows C, then A and C may know each other. We can turn the idea into a score. For every pair of members who aren't connected, count how many connections they have in common, and show each member the pairs with the highest counts.</p>
+
+    <p>Formally, write <span>$\Gamma(u)$</span> for the set of members connected to <span>$u$</span>. The score for a pair <span>$u, v$</span> is the number of members they share:</p>
+
+    <div class="eq-block"><span>$$\mathrm{CN}(u,v) \;=\; \lvert\, \Gamma(u) \cap \Gamma(v) \,\rvert$$</span></div>
+
+    <p>Here <span>$\lvert\cdot\rvert$</span> means "the number of elements in". If the graph is stored as a table with one row per member and one column per member, holding a 1 where two members are connected, then this count for every pair at once is just that table multiplied by itself. We'll come back to that in the next section. In the six-person graph of a later experiment, members 0 and 3 share two friends, so their score is 2.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Version 1: count the friends two people share
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="150" height="80" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="150" height="80" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="81" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CONNECTIONS</text>
+<text x="95.0" y="95" text-anchor="middle" font-size="10" class="dim">who is linked</text>
+<text x="95.0" y="109" text-anchor="middle" font-size="10" class="dim">to whom</text>
+<rect x="190" y="50" width="150" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="190" y="50" width="150" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="265.0" y="81" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">PAIR UP</text>
+<text x="265.0" y="95" text-anchor="middle" font-size="10" class="dim">every two friends</text>
+<text x="265.0" y="109" text-anchor="middle" font-size="10" class="dim">of one member</text>
+<rect x="360" y="50" width="150" height="80" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="360" y="50" width="150" height="80" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="435.0" y="81" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">COUNT</text>
+<text x="435.0" y="95" text-anchor="middle" font-size="10" class="dim">shared friends</text>
+<text x="435.0" y="109" text-anchor="middle" font-size="10" class="dim">per pair</text>
+<rect x="530" y="50" width="150" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="530" y="50" width="150" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="605.0" y="81" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">KEEP THE TOP</text>
+<text x="605.0" y="95" text-anchor="middle" font-size="10" class="dim">highest counts</text>
+<text x="605.0" y="109" text-anchor="middle" font-size="10" class="dim">for each member</text>
+<path d="M174,90 L206,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M344,90 L376,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M514,90 L546,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="170" text-anchor="start" font-size="10.5" class="dim">Built in a batch job, then read as a lookup when Kavya opens the tab.</text>
+<text x="20" y="196" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Cost grows with the square of every member's connection count, and a</text>
+<text x="20" y="212" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">recruiter with 4,000 connections counts as much as a close friend.</text>
+<text x="20" y="234" text-anchor="start" font-size="10.5" class="dim">Kavya has 12 connections on day three, so there is little graph to count over.</text>
+      </svg>
+      <div class="diagram-caption">Follow the boxes left to right. Each one is cheap to describe, and the amber lines under them are the two things that break first: the pairing step explodes, and every shared friend is treated alike.</div>
+    </div>
+
+    <p>This design has a long history behind it. In a podcast interview recorded for Software Engineering Daily and transcribed in 2019, a LinkedIn engineer recalled that when PYMK was first introduced, the index was built with a process called triangle closing running on an Oracle database. A run took about a day at first. As the feature drove growth, the same job took up to a week, and the results were going stale. In 2008 LinkedIn set up its first Hadoop cluster, a group of machines that runs large batch jobs in parallel, for exactly this job, and the engineer says that moved the run to a couple of hours, and that adding machines brought it lower. So the first version worked, and it also shows us the first pressure: the cost of the counting.</p>
+
+    <p>It breaks in three ways, and each one points to a section. First comes the counting itself. To count shared friends we have to look at every pair of friends of every member, and a member with 4,000 connections is in 8 million such pairs all by herself. Second, every shared friend counts the same, so Kavya sharing a recruiter with a stranger looks as strong as sharing a close colleague with Rohan. Third, Kavya has twelve connections. A count of shared friends needs friends, and on her third day she has hardly any. We take these in order, and the third one stays with us until section 06.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Candidate source</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Most connected members</td><td>Trivial, never empty</td><td>The same list for everyone, and it feeds the already popular</td></tr>
+        <tr><td>Same company or school</td><td>Works with almost no graph, which suits a new member</td><td>Large employers produce thousands of candidates, most of them strangers</td></tr>
+        <tr><td>Friends of friends (triangle closing)</td><td>Strong signal, easy to explain, and the first one LinkedIn used</td><td>Cost grows with the square of connection counts; useless without connections</td></tr>
+        <tr><td>Learned embeddings</td><td>Can reach beyond two steps and use profile data</td><td>Needs training, a vector index and fresh embeddings</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>LinkedIn kept all of the last three. Raghavan's 2018 QCon talk lists "friends of friends" as the core candidate source with personalised PageRank as an extension, and the 2024 LiGNN paper describes adding embedding-based retrieval on top, so the sources have been pooled over time and haven't been replaced one by another.</p>
+  </section>
+
+  <section id="closing">
+    <h2><span class="num">03</span>Triangle closing at a billion members</h2>
+
+    <p>The first thing to fix is the counting. Written naively, the job is a program with three nested loops: for each member, for each pair of that member's friends, record the pair. Every recorded pair gets one more shared friend. In a large batch system, the recorded pairs become records that are shuffled across machines so that all the records for the same pair meet in one place and can be added up. Total records are the sum, over every member, of the number of pairs of that member's friends.</p>
+
+    <div class="eq-block"><span>$$\text{records} \;=\; \sum_{z} \binom{d_z}{2} \;=\; \sum_{z} \frac{d_z\,(d_z-1)}{2}$$</span></div>
+
+    <p>Here <span>$z$</span> runs over every member and <span>$d_z$</span> is how many connections <span>$z$</span> has. Each member <span>$z$</span> is the shared friend for every pair among their own connections, so they contribute that many records. Each contribution grows with the square of <span>$d_z$</span>, which is what makes the sum so sensitive to the largest members. Our experiment below builds a million members with a heavy-tailed connection count and measures how the records divide up. (The distribution is an illustrative shape. LinkedIn hasn't published its real one.)</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Where do the friend-of-friend pairs come from?</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(7)
+n = 1_000_000
+# heavy-tailed connection counts (an illustrative shape, not LinkedIn&#x27;s)
+d = np.minimum(150 * (1 - rng.random(n)) ** -0.45, 30_000).astype(int)
+pairs = d * (d - 1) // 2        # friend pairs each member sits between
+top = np.argsort(-pairs)[: n // 1000]          # busiest 0.1% of members
+print(f&quot;members {n:,}, mean connections {d.mean():.0f}&quot;)
+print(f&quot;candidate pairs, all members: {pairs.sum():,}&quot;)
+print(f&quot;  share from the top 0.1%: {pairs[top].sum() / pairs.sum():.0%}&quot;)
+small = d &lt;= 2_000
+print(f&quot;  members above 2,000 connections: {(~small).sum():,}&quot;)
+print(f&quot;  pairs left if they are skipped: &quot;
+      f&quot;{pairs[small].sum() / pairs.sum():.0%}&quot;)
+
+# the same count as a matrix product, on a six-person graph
+A = np.zeros((6, 6), int)
+for u, v in [(0,1),(0,2),(1,2),(1,3),(2,3),(3,4),(4,5)]:
+    A[u, v] = A[v, u] = 1
+C = A @ A
+print(&quot;common friends of 0 and 3:&quot;, C[0, 3], &quot; of 1 and 4:&quot;, C[1, 4])</code></pre>
+      <div class="tryit-out">A million members average <code>272</code> connections, and the pairing step would produce <code>81,019,846,142</code> records. Its busiest 0.1% of members, a thousand people, account for <code>32%</code> of them. Members above 2,000 connections number <code>3,064</code>, which is 0.3% of the total, and skipping them would remove 40% of the records, leaving <code>60%</code>. On the six-person graph, the matrix product gives <code>2</code> shared friends for members 0 and 3 and <code>1</code> for members 1 and 4.</div>
+    </details>
+
+    <p>Read the numbers from the top. A mean of 272 connections says nothing about the work: a job sized for the average member would be too small by a large factor, because a thousand members produce a third of the records. A design that skips the 3,064 largest members would remove 40% of the records, which sounds attractive until you remember that those members are real friends of real people, and a recruiter's contacts include genuine colleagues. Last, the same count appears a different way. Multiplying the six-person connection table by itself gives 2 shared friends for members 0 and 3, the same answer as counting by hand.</p>
+
+    <p>That skew is why the batch job was the hard part of PYMK for years. LinkedIn's 2018 QCon slides show a plain version of the scoring step as two joins in a database sense: first attach each member's features to a pair, then attach the other member's, with a "wide middle" in between where the pair table is enormous. Under the heading "Need Smart Joins" the slides give two before-and-after numbers. Scoring moved from a plain join to a two-dimensional hash join and went from 6 hours to 10 seconds. Triangle closing moved to a matrix multiplication and went from 3 to 4 hours to 10 minutes. Both figures come from the slides, and the engineering blog post they cite for the details is titled "Managing Exploding Big Data".</p>
+
+    <p>Of the two views, the matrix one rewards a closer look. Write the connections as a square table <span>$A$</span>, one row and one column per member, with <span>$A_{uv} = 1$</span> if <span>$u$</span> and <span>$v$</span> are connected and 0 if not. Multiply the table by itself and look at one cell:</p>
+
+    <div class="eq-block"><span>$$(A^{2})_{uv} \;=\; \sum_{z} A_{uz}\,A_{zv} \;=\; \lvert\, \Gamma(u) \cap \Gamma(v) \,\rvert$$</span></div>
+
+    <p>The sum adds a 1 for every <span>$z$</span> that is connected to both <span>$u$</span> and <span>$v$</span>, so it counts the shared friends. One matrix product gives the score of every pair. Because almost all of the table is zeros, it's stored as a list of nonzero entries, and the product is computed in blocks. Cut the member list into, say, a thousand groups, so the table becomes a thousand-by-thousand grid of blocks, and give each machine one pair of blocks to multiply. Every machine then reads only the slices of the graph it needs, instead of every machine reading all of it. That's the general idea behind the two-dimensional partitioning in the slides, though LinkedIn hasn't published the exact blocking scheme.</p>
+
+    <p>Blocks also give us places to cut cost. Hubs make up most of the records, and they carry the least information, which we'll see in the next section. A design could skip them, cap the number of friends considered per member, or sample from them. Which of these LinkedIn applies isn't in the slides, so we'll treat them as options a design has. A system that finishes in minutes over this graph probably does something to tame the hubs, but that's an inference.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to count shared friends</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Loops over friend pairs, shuffled and summed</td><td>Easy to write on any batch system</td><td>Records grow with the sum of squared degrees; a few hubs dominate</td></tr>
+        <tr><td>Blocked sparse matrix product</td><td>Each machine reads a slice; 3 to 4 hours down to 10 minutes in LinkedIn's slides</td><td>Needs a partitioning scheme; the whole pass still runs as a batch</td></tr>
+        <tr><td>Skip or sample the largest members</td><td>Removes most of the records</td><td>Throws away real links, and the hubs include real friends</td></tr>
+        <tr><td>Update incrementally when an edge appears</td><td>Fresh within seconds, no full pass</td><td>Needs the graph in memory and an update stream; see section 08</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>LinkedIn's sources describe the second, and the 2018 talk adds the fourth for freshness, which section 08 describes. Counting pairs by multiplying a table by itself shows up in plenty of other places. Counting how many documents two words share, how many users two products share, and how many paths of length two exist in a network are all the same product, and recommendation systems that count co-occurrence, like the co-visitation graph in chapter 41, are using it.</p>
+
+    <h4 class="why">Why only two steps out? Why not friends of friends of friends?</h4>
+
+    <p>Because the number of candidates grows by a factor of a few hundred with each step, and the evidence weakens. In the Facebook study of Backstrom and Leskovec (WSDM 2011), the authors restricted candidates mainly to nodes two steps from the source, because most new links in an online social network close a triangle, and because it keeps each candidate set small. They also dropped candidates with fewer than four mutual friends, which they say cost practically no accuracy. LinkedIn's own pipeline is described as friends of friends too, and the longer reach comes later, from random walks and embeddings.</p>
+  </section>
+
+  <section id="scoring">
+    <h2><span class="num">04</span>Not every shared friend is equal</h2>
+
+    <p>With the counting made cheaper, we can return to the second break. Look at Kavya's twelve connections. Meghana has twelve connections of her own, and so does Dev, her former teammate. Anita, a recruiter who contacted Kavya last year, has four thousand. Rohan is connected to both Meghana and Dev. A stranger called Sam is connected to Anita. Counting shared friends gives Rohan 2 and Sam 1, which already ranks them the right way round, but it overstates the case for Sam. A recruiter with four thousand connections has connected with people from every industry in the city, and the chance that two of them know each other, because they're both on her list, is small.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Two shared friends are not worth the same
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<circle cx="70" cy="150" r="30" fill="#34d399" opacity="0.18"/>
+<circle cx="70" cy="150" r="30" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="70" y="154" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">Kavya</text>
+<text x="70" y="194" text-anchor="middle" font-size="10" class="dim">12 friends</text>
+<circle cx="280" cy="70" r="26" fill="#818cf8" opacity="0.18"/>
+<circle cx="280" cy="70" r="26" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="280" y="74" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">Meghana</text>
+<text x="280" y="110" text-anchor="middle" font-size="10" class="dim">degree 12</text>
+<circle cx="280" cy="170" r="26" fill="#818cf8" opacity="0.18"/>
+<circle cx="280" cy="170" r="26" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="280" y="174" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">Dev</text>
+<text x="280" y="210" text-anchor="middle" font-size="10" class="dim">degree 20</text>
+<circle cx="280" cy="262" r="34" fill="#fbbf24" opacity="0.18"/>
+<circle cx="280" cy="262" r="34" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="280" y="266" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">Anita</text>
+<text x="280" y="310" text-anchor="middle" font-size="10" class="dim">recruiter, 4,000</text>
+<circle cx="520" cy="100" r="28" fill="#f472b6" opacity="0.18"/>
+<circle cx="520" cy="100" r="28" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="520" y="104" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">Rohan</text>
+<circle cx="520" cy="250" r="28" fill="#f472b6" opacity="0.18"/>
+<circle cx="520" cy="250" r="28" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="520" y="254" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">Sam</text>
+<line x1="100" y1="150" x2="254" y2="70" stroke="#818cf8" stroke-width="1.6" opacity="0.8"/>
+<line x1="100" y1="150" x2="254" y2="170" stroke="#818cf8" stroke-width="1.6" opacity="0.8"/>
+<line x1="100" y1="150" x2="254" y2="240" stroke="#818cf8" stroke-width="1.6" opacity="0.8"/>
+<line x1="306" y1="70" x2="495" y2="92" stroke="#34d399" stroke-width="2" opacity="0.8"/>
+<line x1="306" y1="170" x2="495" y2="112" stroke="#34d399" stroke-width="2" opacity="0.8"/>
+<line x1="314" y1="262" x2="493" y2="252" stroke="#fbbf24" stroke-width="2" opacity="0.8"/>
+<text x="395" y="70" text-anchor="start" font-size="10" class="" fill="#34d399">1 / ln 12 = 0.40</text>
+<text x="395" y="160" text-anchor="start" font-size="10" class="" fill="#34d399">1 / ln 20 = 0.33</text>
+<text x="395" y="290" text-anchor="start" font-size="10" class="" fill="#fbbf24">1 / ln 4000 = 0.12</text>
+<text x="580" y="100" text-anchor="start" font-size="10" class="dim">common friends 2</text>
+<text x="580" y="114" text-anchor="start" font-size="10" class="dim">Adamic-Adar 0.74</text>
+<text x="580" y="250" text-anchor="start" font-size="10" class="dim">common friends 1</text>
+<text x="580" y="264" text-anchor="start" font-size="10" class="dim">Adamic-Adar 0.12</text>
+<text x="20" y="24" text-anchor="start" font-size="10.5" class="dim">Kavya's connections on the left, two people she might know on the right.</text>
+      </svg>
+      <div class="diagram-caption">Rohan and Sam are both two steps from Kavya. Rohan reaches her through two people with small circles, Sam through one recruiter who is connected to thousands, so the Adamic-Adar score gives Rohan about six times Sam's evidence.</div>
+    </div>
+
+    <p>A classic fix comes from a 2003 paper by Lada Adamic and Eytan Adar, which measured how similar two people are from what their web pages share. It weights each shared item by how rare it is, and applied to friends it weights each shared friend by how exclusive that friend is. Call the score <strong>Adamic-Adar</strong>:</p>
+
+    <div class="eq-block"><span>$$\mathrm{AA}(u,v) \;=\; \sum_{z \,\in\, \Gamma(u)\cap\Gamma(v)} \frac{1}{\ln \lvert\Gamma(z)\rvert}$$</span></div>
+
+    <p>The sum runs over the same shared friends as before, but each one contributes <span>$1/\ln d_z$</span> instead of 1, where <span>$d_z = \lvert\Gamma(z)\rvert$</span> is that friend's number of connections. A friend with 12 connections contributes 1/ln 12, about 0.40. A friend with 20 contributes about 0.33. A recruiter with 4,000 contributes 1/ln 4000, about 0.12. So Rohan scores 0.40 + 0.33 = 0.74 and Sam scores 0.12, a gap of about six to one where the raw count gave two to one. A logarithm keeps the discount gentle: doubling someone's connections lowers their weight by a small amount, and only members in the thousands are discounted hard.</p>
+
+    <p>There are other ways to normalise. Dividing the shared count by the geometric mean of the two members' connection counts gives the cosine form <span>$\mathrm{CN}(u,v)\big/\sqrt{d_u d_v}$</span>. LinkedIn's LiGNN paper uses exactly this quantity as the edge weight in its people-recommendation graph: the weight between two members is their number of common connections divided by the square root of the product of their connection counts. In that paper the weight decides how likely a neighbour is to be sampled, which is a different job from scoring a pair, and we meet it in section 06.</p>
+
+    <h4 class="why">Why does a shared recruiter tell us so little?</h4>
+
+    <p>Because a connection is evidence about the relationship between two people only when it is rare. If Anita is connected to 4,000 people, then "connected to Anita" describes a large and mixed group, so two people drawn from it share almost nothing else. If Meghana is connected to 12 people, the group is small and probably real: a team, a class, a family. Information is about how much a fact narrows down the possibilities, and a hub narrows them very little. That is also why the cost problem and the quality problem in this chapter have the same source, the hubs. They produce most of the pairs and say the least about them.</p>
+
+    <h3 id="4-1-from-one-score-to-a-model">4.1 From one score to a model</h3>
+
+    <p>A single number built from the graph can't use what members have written about themselves, and it can't be tuned to what led to connections. LinkedIn moved to a trained model early on. Its PYMK team page frames relevance as a <strong>binary classification</strong> problem, predicting whether two people know each other or not. According to the page, the model is a logistic regression combining hundreds of features, trained on billions of samples with LinkedIn's open-sourced large-scale machine learning library. Raghavan's 2018 slides sort the inputs into two groups. Node features describe one member: skill, school, company, and later P(invite) and P(accept given invite). Edge features describe a pair: common connections, same school, same company.</p>
+
+    <p>Two of the features have published papers behind them. An <strong>organisational overlap</strong> model, from a WWW 2013 paper the team page cites, accounts for when two people joined and left an organisation, how large it is and how social it is. Its own example is that a long shared tenure at a small organisation implies a stronger tie than a few months together at a large one. And <strong>impression discounting</strong>, from a KDD 2014 paper, handles the fact that a person who has been shown a suggestion several times and ignored it is unlikely to act on it later, so repeated unactioned results are ranked lower.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Scoring approach</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Common friends</td><td>One matrix product; easy to explain</td><td>Hubs inflate it; blind to profile data</td></tr>
+        <tr><td>Adamic-Adar</td><td>Same cost, with hubs discounted</td><td>Still graph-only; one fixed formula</td></tr>
+        <tr><td>Logistic regression over many features (LinkedIn)</td><td>Combines graph and profile signals; weights learned from outcomes</td><td>Pair features must be built for every candidate; linear in its inputs</td></tr>
+        <tr><td>Deeper models and embeddings</td><td>Capture interactions between features and reach past two steps</td><td>Costlier to train and serve; harder to explain</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>LinkedIn's team page describes the logistic model, and its QCon slides from 2018 still list the same node and edge features, so the choice held for years. When deeper models arrived for ranking isn't dated on the page, and the ranker is probably deeper today than the 2018 slides suggest. What it does show, in 2024, is a graph neural network feeding embeddings into the retrieval stage, which section 06 covers. Weighting a shared connection by how exclusive it is shows up wherever co-occurrence is counted: in text, a word that appears in every document carries no weight (the idea behind TF-IDF, chapter 16), and in recommendations, a product everyone buys says little about taste.</p>
+  </section>
+
+  <section id="walks">
+    <h2><span class="num">05</span>Walking the graph: personalised PageRank</h2>
+
+    <p>Both scores so far look at paths of length two. Imagine a woman called Tara who sits on Rohan's team, which is full of people connected to Dev and Meghana, and whom Kavya has never met. Kavya, Dev, one of Dev's teammates, Tara: that is three steps, so Tara shares no friend with Kavya and neither score sees her. Yet a person standing in the middle of Kavya's colleagues is a likelier acquaintance than a stranger who happens to share a recruiter. To catch these cases we need a score that follows paths of any length and counts the ones that stay within Kavya's own circle.</p>
+
+    <p>A random walk is the standard tool. Put a token on Kavya. At each step, with probability <span>$\alpha$</span> (say 0.15) the token jumps back to Kavya, and otherwise it moves to a random neighbour of whichever member it's on, chosen in proportion to how strong the connection is. After a very long walk, count the share of time the token spent at each member. Members the token visits often are close to Kavya in a way that counts every route, short or long, and favours routes that circle back through tight groups. Those shares are the <strong>personalised PageRank</strong> of the graph from Kavya's point of view. In symbols, let <span>$Q$</span> be the table of step probabilities, with <span>$Q_{uv}$</span> the chance of stepping from <span>$u$</span> to <span>$v$</span>, and <span>$e_s$</span> a vector with a 1 at the start member <span>$s$</span> and 0 elsewhere. Those visiting shares <span>$p$</span> satisfy</p>
+
+    <div class="eq-block"><span>$$p \;=\; \alpha\, e_s \;+\; (1-\alpha)\, Q^{\top} p \qquad\Longleftrightarrow\qquad p \;=\; \alpha \sum_{k=0}^{\infty} (1-\alpha)^{k}\,\big(Q^{\top}\big)^{k} e_s$$</span></div>
+
+    <p>The left form says the token is at <span>$s$</span> with probability <span>$\alpha$</span> because it just restarted, and otherwise is wherever one step from the previous distribution leads. Unrolling the equation gives the right-hand form, which shows what it means: <span>$(Q^{\top})^{k} e_s$</span> is the distribution after exactly <span>$k$</span> steps, and each step count gets weight <span>$\alpha(1-\alpha)^k$</span>, so short paths count most and long ones less, but none is ignored. With <span>$\alpha = 0.15$</span> the weight halves roughly every four steps. In practice the shares are computed by repeating the update until it settles, which takes a few dozen passes over the edges.</p>
+
+    <p>LinkedIn's 2018 talk lists "personalised PageRank" as the extension to friends of friends in candidate generation. Lars Backstrom, then at Facebook, and Jure Leskovec used the same idea in their 2011 paper and added a learning step. Their <strong>supervised random walk</strong> doesn't treat all edges as equal. Each edge <span>$(u,v)$</span> has a feature vector <span>$\psi_{uv}$</span>, for example how old the friendship is or how often the two people communicate, and the walk's step weight is a learned function of it, <span>$a_{uv} = f_w(\psi_{uv})$</span>. We train the weights <span>$w$</span> so that, for a source member <span>$s$</span>, the walk visits the people <span>$s$</span> did befriend next, the set <span>$D$</span>, more than the people <span>$s$</span> didn't, the set <span>$L$</span>:</p>
+
+    <div class="eq-block"><span>$$\min_{w}\;\; \lVert w\rVert^{2} \;+\; \lambda \sum_{d\in D}\sum_{l\in L} h\big(p_l - p_d\big), \qquad h(x) = \frac{1}{1+e^{-x/b}}$$</span></div>
+
+    <p>Term by term: <span>$\lVert w\rVert^{2}$</span> keeps the weights small, <span>$\lambda$</span> sets how much the ranking errors matter next to that, and <span>$p_l - p_d$</span> is how much more the walk likes a non-friend <span>$l$</span> than a future friend <span>$d$</span>. Here <span>$h$</span> is a smooth step that is near 0 when friends are ranked above non-friends and near 1 when the order is wrong, with width <span>$b$</span>. So the loss counts, softly, how many wrong pairs there are. It's the same idea as the area under the ROC curve, turned into something a gradient can follow. Squared and Huber losses were tested as well, and the authors used this one, a logistic form of the Wilcoxon-Mann-Whitney statistic, after the others performed close to plain PageRank.</p>
+
+    <p>Read the results with their size in mind. On a Facebook graph of Iceland from November 2009, with 174,000 people and about 29 million edges, the authors predicted friendships formed over the next ten weeks. Their supervised walk reached an AUC of 0.828, against 0.817 for plain random walk with restart and 0.816 for Adamic-Adar. (AUC is the chance that a random future friend outranks a random non-friend, so 0.5 is a coin flip.) Its precision at 20, the number of true friends among the top 20 suggestions, was 7.57 against 6.80 and 7.35. They report an 11% relative gain in precision at 20 over the plain walk, and say the differences against a logistic regression on the same features were within the variance. Cost matters too. One edge type, with 8 weights, took about 96 minutes to train on that graph, and six edge types, with 48 weights, took about 13 hours. By node count that graph is several thousand times smaller than the one LiGNN describes.</p>
+
+    <p>Now we can compare the three scores on a world where we know the truth. Our next experiment builds 2,000 members in ten communities, adds ten recruiters who connect to 5% of everyone regardless of community, hides 15% of the real friendships, and asks how well each score ranks the hidden friendships among the candidate pairs, those sharing at least one friend in what's left. AUC is the chance that a random hidden friendship outranks a random non-friendship.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Common friends, Adamic-Adar and personalised PageRank on a graph with recruiters</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(3)
+n, K, H = 2000, 10, 10
+grp = rng.integers(0, K, n)                  # community: industry, school
+same = grp[:, None] == grp[None, :]
+P = np.where(same, 0.06, 0.003)              # friends cluster by group
+A = np.triu(rng.random((n, n)) &lt; P, 1)
+A[:H, :] |= rng.random((H, n)) &lt; 0.05        # H recruiters link to anyone
+A = np.triu(A, 1)
+A = (A | A.T).astype(float)
+iu = np.array(np.triu_indices(n, 1)).T
+edges = iu[A[iu[:, 0], iu[:, 1]] &gt; 0]
+edges = edges[edges[:, 0] &gt;= H]              # predict only member pairs
+test = edges[rng.random(len(edges)) &lt; 0.15]  # hide 15% of friendships
+A[test[:, 0], test[:, 1]] = A[test[:, 1], test[:, 0]] = 0
+deg = A.sum(1)
+CN = A @ A                                    # common friends
+AA = (A / np.log(np.maximum(deg, 2))) @ A     # Adamic-Adar weights
+alpha = 0.15                                  # restart probability
+Q = A / deg.clip(1)[:, None]                  # one random-walk step
+PPR = alpha * np.linalg.inv(np.eye(n) - (1 - alpha) * Q)
+PPR = PPR + PPR.T                             # walk from either end
+cand = (CN &gt; 0) &amp; (A == 0) &amp; np.triu(np.ones((n, n), bool), 1)
+cand[:H, :] = False
+y = np.zeros((n, n), bool)
+y[test[:, 0], test[:, 1]] = True
+yc = y[cand]
+print(f&quot;members {n} (first {H} are recruiters), hidden {len(test)}&quot;)
+print(f&quot;candidate pairs {cand.sum():,}; hidden friendships among them &quot;
+      f&quot;{yc.sum()}&quot;)
+print(f&quot;mean degree: recruiters {deg[:H].mean():.0f}, &quot;
+      f&quot;others {deg[H:].mean():.0f}&quot;)
+
+def auc(s):
+    r = s[cand].argsort().argsort() + 1.0
+    pos, neg = yc.sum(), (~yc).sum()
+    return (r[yc].sum() - pos * (pos + 1) / 2) / (pos * neg)
+
+for name, s in [(&quot;common friends&quot;, CN), (&quot;Adamic-Adar&quot;, AA),
+                (&quot;personalised PageRank&quot;, PPR)]:
+    print(f&quot;{name:22} AUC {auc(s):.3f}&quot;)</code></pre>
+      <div class="tryit-out">With ten recruiters among 2,000 members there are <code>238,586</code> candidate pairs, and <code>839</code> of the <code>2,600</code> hidden friendships are among them. A recruiter has <code>118</code> connections on average and an ordinary member <code>15</code>. Ranked by common friends, the hidden friendships score an AUC of <code>0.543</code>, barely better than chance. Adamic-Adar reaches <code>0.622</code> and personalised PageRank reaches <code>0.735</code>.</div>
+    </details>
+
+    <p>Common friends is close to a coin flip, because the recruiters create far more candidate pairs than the communities do, and every such pair has the recruiter as its one shared friend. Adamic-Adar discounts that friend and recovers part of the signal. Personalised PageRank does best, since walks that start at a member and stay inside her community collect visits from members several steps away, and those are the members whose friendships were hidden. Gap sizes belong to this toy. On the real Facebook graph in the 2011 paper the three methods were much closer, 0.816 for Adamic-Adar, 0.817 for the plain walk and 0.828 for the supervised walk, so the ordering is the thing to carry away and the margins are not.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Beyond two steps</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Personalised PageRank, fixed edge weights</td><td>Counts routes of every length; no training</td><td>Needs a sparse solver per source member</td></tr>
+        <tr><td>Supervised random walk (2011)</td><td>Learns which edge types matter; best AUC in its paper</td><td>Hours of training on a 29-million-edge graph; gains small on Facebook</td></tr>
+        <tr><td>Learned embeddings (LiGNN, 2024)</td><td>Fixed-size vectors; search by similarity; use profile data</td><td>Needs a training pipeline and a vector index; see the next section</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Facebook chose to restrict candidates to two hops and train the walk on them, and LinkedIn's slides list personalised PageRank as a candidate-generation extension. When LinkedIn moved to graph neural networks it kept PageRank, but changed its job: LiGNN uses it to choose which neighbours each member's embedding is built from, which is where we go next. A full walk per member over a graph this size is probably too costly, which fits the paper's choice of a fast two-hop approximation. Random walks with restart also rank web pages for a particular reader, and the same equation works on any graph where closeness to one starting point matters.</p>
+  </section>
+
+  <section id="gnn">
+    <h2><span class="num">06</span>Learning a vector for every member</h2>
+
+    <p>Walks fix the reach problem and leave two others standing. A walk needs a pass over the graph for each member it starts from, and it sees profiles only through edges. Kavya's profile says that she works in payments, lives in Bengaluru, studied at a particular college and joined a particular company on Monday. Twelve edges can't carry all of that, and a random walk doesn't read it. What we want is a compact summary of each member, built once, that mixes who they're connected to with what they've written, so that two members who would plausibly know each other end up with similar summaries. Then finding candidates for Kavya becomes finding the members whose summaries are closest to hers.</p>
+
+    <p>That summary is a vector of a few hundred numbers called an <strong>embedding</strong>, and a <strong>graph neural network</strong> (chapter 18) is a way to compute it. Fedor Borisyuk and colleagues at LinkedIn describe the framework they built for this in the LiGNN paper (KDD 2024). For people recommendation it integrates the embeddings into the retrieval stage, as a source of candidates. Its encoder follows the GraphSAGE design. To compute a member's embedding, the network looks at a sample of that member's neighbours, combines their vectors, mixes the result with the member's own, and repeats for a second layer so that friends of friends contribute too. For layer <span>$k$</span>:</p>
+
+    <div class="eq-block"><span>$$h_v^{(k)} \;=\; \sigma\!\Big( W^{(k)}\,\big[\, h_v^{(k-1)} \,\Vert\, \operatorname{AGG}\big(\{\, h_u^{(k-1)} : u \in S(v) \,\}\big) \big] \Big)$$</span></div>
+
+    <p>Here <span>$h_v^{(0)}$</span> is the member's input features (the profile), <span>$S(v)$</span> is the sampled set of neighbours, <span>$\Vert$</span> glues two vectors end to end, <span>$W^{(k)}$</span> is a learned matrix, <span>$\sigma$</span> is a nonlinearity, and <span>$\operatorname{AGG}$</span> combines the neighbours' vectors, by averaging or with attention weights, which the paper says it uses. After two layers, <span>$z_v = h_v^{(2)}$</span> is the member's embedding. Sampling is the part that connects to the earlier sections. A member with 4,000 neighbours can't feed all of them in for every training step, so we draw a few dozen, and which few dozen matters. LiGNN compares ways to draw them for people recommendation. Against a baseline of weighted two-hop sampling, personalised PageRank sampling improved validation AUC by 2.1% for the two-hop version and 2.3% for a multi-hop version computed with a forward-push approximation, and the authors say the PageRank family beats weighted sampling by at least 2%. They chose the two-hop version for production because it captures about 90% of the gain and samples three times faster. Weights in the baseline come from the edge-weight formula of section 04, the shared connections divided by the square root of the product of the two members' connection counts.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">A graph neural network for people recommendation
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 360" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="150" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="150" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="66" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">GRAPH + PROFILES</text>
+<text x="95.0" y="80" text-anchor="middle" font-size="10" class="dim">connections, skills,</text>
+<text x="95.0" y="94" text-anchor="middle" font-size="10" class="dim">schools, companies</text>
+<rect x="190" y="40" width="150" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="190" y="40" width="150" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="265.0" y="66" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">SAMPLE</text>
+<text x="265.0" y="80" text-anchor="middle" font-size="10" class="dim">neighbours by 2-hop</text>
+<text x="265.0" y="94" text-anchor="middle" font-size="10" class="dim">personalised PageRank</text>
+<rect x="360" y="40" width="150" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="360" y="40" width="150" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="435.0" y="66" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">AGGREGATE</text>
+<text x="435.0" y="80" text-anchor="middle" font-size="10" class="dim">two GraphSAGE-style</text>
+<text x="435.0" y="94" text-anchor="middle" font-size="10" class="dim">layers: mean / attention</text>
+<rect x="530" y="40" width="150" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="530" y="40" width="150" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="605.0" y="66" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">EMBEDDING z</text>
+<text x="605.0" y="80" text-anchor="middle" font-size="10" class="dim">one vector per member,</text>
+<text x="605.0" y="94" text-anchor="middle" font-size="10" class="dim">computed offline</text>
+<path d="M174,75 L206,75" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M344,75 L376,75" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M514,75 L546,75" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M605,114 L605,170" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="430" y="172" width="250" height="60" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="430" y="172" width="250" height="60" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="555.0" y="193" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RETRIEVAL + RANKING</text>
+<text x="555.0" y="207" text-anchor="middle" font-size="10" class="dim">nearest neighbours of z(Kavya)</text>
+<text x="555.0" y="221" text-anchor="middle" font-size="10" class="dim">and z as a feature in the ranker</text>
+<rect x="20" y="172" width="380" height="60" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="172" width="380" height="60" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="210.0" y="193" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAINING: link prediction</text>
+<text x="210.0" y="207" text-anchor="middle" font-size="10" class="dim">pair (u, v) that connected = positive; other members</text>
+<text x="210.0" y="221" text-anchor="middle" font-size="10" class="dim">in the batch = negatives; loss on the score of z_u and z_v</text>
+<path d="M402,202 L428,202" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="268" text-anchor="start" font-size="10.5" class="dim">LiGNN reports this for a graph of up to a billion members and billions of connection edges.</text>
+<text x="20" y="290" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">The sampling step is where 2-hop PPR beat weighted sampling by at least 2% validation AUC.</text>
+<text x="20" y="312" text-anchor="start" font-size="10.5" class="dim">Which loss and features PYMK uses in production is not stated in the paper.</text>
+<text x="20" y="340" text-anchor="start" font-size="10.5" class="dim">Read the top row left to right, then the bottom row: the same embeddings serve training and search.</text>
+      </svg>
+      <div class="diagram-caption">The top row turns one member's neighbourhood into a vector, and the bottom row shows how the vector is trained and then used, as a retrieval source and as a feature for ranking.</div>
+    </div>
+
+    <p>Link prediction is the task the network trains on. Take a pair of members who did become connected as a positive example, take other members as negatives, and train so that the positives score higher. LiGNN lists the decoder choices for turning two embeddings into a score: a small neural network over the pair, the cosine similarity of the two vectors, or a dot product with the other pairs in the same training batch serving as negatives. For people recommendation it states the task, and it doesn't say which decoder or loss is used. Generic shapes are standard, so we can write them out. With a score <span>$s(u,v)$</span> from a dot product or cosine of <span>$z_u$</span> and <span>$z_v$</span>, a binary cross-entropy loss on a labelled pair, and a softmax loss over a batch of <span>$B$</span> pairs, are</p>
+
+    <div class="eq-block"><span>$$\ell_{\text{pair}} = -\big[\, y\,\log\sigma(s) + (1-y)\log\big(1-\sigma(s)\big) \big], \qquad \ell_{\text{batch}}(i) = -\log\frac{e^{s(u_i,v_i)}}{\sum_{j=1}^{B} e^{s(u_i,v_j)}}$$</span></div>
+
+    <p>In the first, <span>$y$</span> is 1 for a real connection and 0 for a sampled non-connection, and <span>$\sigma$</span> turns the score into a probability. In the second, every other member <span>$v_j$</span> in the batch acts as a negative for <span>$u_i$</span>, and the loss falls as the true partner's score rises above theirs. That batch form is cheap, because the embeddings are already computed, and it has the same catch as chapter 41's two-tower model. Members who connect often appear in more batches, so they appear as negatives more often, and the model learns to push down exactly the people who are popular. Chapter 41 shows a correction, subtracting the log of each item's sampling frequency from its score. LinkedIn's paper doesn't say whether its people-recommendation loss applies one, and a correction would probably help there as it did at YouTube.</p>
+
+    <p>Reported results are modest in size and specific. For people recommendation, the paper's Table 7 has embeddings from the network feeding an embedding-based retrieval model. Offline, recall rose 29.6%. In the online experiment, new member connections rose 2.4%, sessions 0.2% and weekly active users 0.1%. Its abstract gives the last two as the lift LiGNN delivered for people recommendation. At LinkedIn's scale a tenth of a percent in weekly users is a large absolute number, and the paper is plain that it's small in relative terms. A 2.4% rise in connections is the number closest to what PYMK is for.</p>
+
+    <h3 id="6-1-the-new-member-problem">6.1 The new-member problem</h3>
+
+    <p>Kavya's graph has twelve edges, so the neighbourhood the network samples from is thin and her embedding probably leans almost entirely on her profile. LiGNN has a technique aimed at this. It calls it <strong>graph densification</strong>: when a member with few outgoing edges looks similar to a member with many, add an artificial edge between them, so the sparse member's embedding can borrow from a richer neighbourhood. In the paper, low-degree means below the 30th percentile of out-degree and high-degree means above the 90th, each low-degree node is linked to about 50 similar nodes found by an approximate nearest-neighbour index, and similarity comes from language-model embeddings of profiles. It reports a 0.5% validation AUC gain for its Follow Feed model and 0.28% for ads. It describes the method for those uses, and doesn't report it for people recommendation, so whether PYMK applies it to new members is unpublished. It's a design that fits Kavya's case, though, because it gives a three-day-old account a neighbourhood from its profile alone.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Candidate model</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Friends of friends only</td><td>Strong, cheap, explainable</td><td>Two steps; needs connections; ignores profiles</td></tr>
+        <tr><td>Personalised PageRank</td><td>Any number of steps, no training</td><td>One solve per member; profiles enter only through weights</td></tr>
+        <tr><td>GNN embeddings plus nearest-neighbour search</td><td>Profiles and graph together; one vector per member; reaches new members through attributes</td><td>Training and index infrastructure; freshness of embeddings becomes a concern</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>LinkedIn pooled all three. Raghavan's 2018 talk lists friends of friends and PageRank, and the 2024 paper adds embedding-based retrieval fed by the network and keeps PageRank inside the sampler. Which of the sources contributes how many of the final candidates is unpublished. Learning vectors from a graph and a profile together is also how product recommenders on purchase graphs and fraud detectors on payment graphs work, and the encoder differs little between them.</p>
+
+    <h4 class="why">Why compute the embeddings ahead of time instead of when Kavya opens the tab?</h4>
+
+    <p>Because running a two-layer network over a sampled neighbourhood for every request would add work to the moment she's waiting, and because the answer barely changes between two page loads. LiGNN says it produced embeddings for 500 million members and added them as features for downstream models. A vector for each member sits in a store and the retrieval model looks it up. Staleness is the cost, since a member who just connected to ten people has an old embedding until the next refresh, and section 08 shows how LinkedIn handles freshness for the graph itself.</p>
+  </section>
+
+  <section id="ranking">
+    <h2><span class="num">07</span>Ranking for two people at once</h2>
+
+    <p>Between triangle closing, walks and embeddings, we now have a pool of candidates for Kavya. How many there are per member isn't published. We still have to put them in order, and that means deciding what the order is for. An obvious target is whether Kavya taps Connect, which is the question every click-through model answers. It's easy to log and plentiful. It's also the target that went wrong at LinkedIn, and it shows up in Raghavan's 2018 slides as the "before" in a before-and-after: PYMK invitations sent, replaced as the headline metric by PYMK invitations sent <em>and accepted</em>, with the same swap proposed on the receiving side, invitations received and accepted.</p>
+
+    <p>An invitation is half of a connection, and that drives the switch. Kavya taps Connect on Rohan, and nothing happens to the graph until Rohan sees the request and says yes. If we rank only on what Kavya will do, we'll favour profiles that look appealing to a stranger, and many of those requests will go unanswered. Showing Rohan to Kavya is worth the chance that both steps happen. Write <span>$P(\text{send})$</span> for the chance Kavya sends and <span>$P(\text{accept}\mid\text{send})$</span> for the chance Rohan accepts, given that she did:</p>
+
+    <div class="eq-block"><span>$$P(\text{connect}) \;=\; P(\text{send}) \times P(\text{accept}\mid\text{send})$$</span></div>
+
+    <p>That's the product rule for two events in sequence. That second probability is conditional because Rohan can only accept an invitation that was sent. Raghavan's 2018 slides name P(connect) as the model's score, and list P(invite) and P(accept given invite) among its member-level features. Whether production splits the score into two separately trained models is unpublished, and separate models would probably be easier to calibrate and debug. We write the factors out because they make the structure plain: a candidate who is certain to accept and has zero chance of being invited has value zero, and so does one who is certain to be invited and never accepts. Adding the two probabilities would let a strong one cover for a missing other. Multiplying them doesn't.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Ranking for both sides of an invitation
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="130" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="130" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="85.0" y="76" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CANDIDATES</text>
+<text x="85.0" y="90" text-anchor="middle" font-size="10" class="dim">triangle closing,</text>
+<text x="85.0" y="104" text-anchor="middle" font-size="10" class="dim">PPR, embeddings</text>
+<rect x="180" y="50" width="130" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="180" y="50" width="130" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="245.0" y="76" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">P(send)</text>
+<text x="245.0" y="90" text-anchor="middle" font-size="10" class="dim">will Kavya tap</text>
+<text x="245.0" y="104" text-anchor="middle" font-size="10" class="dim">Connect?</text>
+<rect x="340" y="50" width="130" height="70" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="340" y="50" width="130" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="405.0" y="76" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">P(accept | send)</text>
+<text x="405.0" y="90" text-anchor="middle" font-size="10" class="dim">will the other</text>
+<text x="405.0" y="104" text-anchor="middle" font-size="10" class="dim">person say yes?</text>
+<rect x="500" y="50" width="180" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="500" y="50" width="180" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="590.0" y="76" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SCORE</text>
+<text x="590.0" y="90" text-anchor="middle" font-size="10" class="dim">P(send) x P(accept)</text>
+<text x="590.0" y="104" text-anchor="middle" font-size="10" class="dim">= expected new connection</text>
+<path d="M154,85 L176,85" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M314,85 L336,85" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M474,85 L496,85" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M590,124 L590,160" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="430" y="162" width="250" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="430" y="162" width="250" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="555.0" y="188" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RE-RANK</text>
+<text x="555.0" y="202" text-anchor="middle" font-size="10" class="dim">discount recipients who already got too</text>
+<text x="555.0" y="216" text-anchor="middle" font-size="10" class="dim">many invitations; include newer members</text>
+<rect x="20" y="162" width="370" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="162" width="370" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="205.0" y="188" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">RECIPIENT INBOX (last week, illustrative)</text>
+<text x="205.0" y="202" text-anchor="middle" font-size="10" class="dim">Anita, a recruiter: 40 invitations   -&gt; multiply by 0.2</text>
+<text x="205.0" y="216" text-anchor="middle" font-size="10" class="dim">Rohan, a new colleague: 2 invitations -&gt; multiply by 1</text>
+<path d="M392,197 L428,197" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="268" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Ranking on P(send) alone pushes eye-catching profiles up and fills their inboxes.</text>
+<text x="20" y="290" text-anchor="start" font-size="10.5" class="dim">The 2021 post describes a decay factor between 0 and 1 from a piecewise linear function of invitations received.</text>
+<text x="20" y="316" text-anchor="start" font-size="10.5" class="dim">Read across the top for the score, then down for the correction applied after it.</text>
+      </svg>
+      <div class="diagram-caption">A connection exists only if one person sends and the other accepts, so the score multiplies the two probabilities and a re-ranker then protects the recipients who are already overloaded.</div>
+    </div>
+
+    <p>Our second factor depends on something the first doesn't: the state of the person receiving the invitation. In 2021 LinkedIn's Growth Data Science team published a post on equity in PYMK that describes what happens when it ignores that. Some highly visible members, such as influencers, senior executives and recruiters at large companies, receive very large numbers of invitations. Their feeds and notifications fill up with loosely relevant people, and they may miss the ones that matter. According to the post, this showed up in usage data and in direct feedback. A ranker trained on invitations learns that these members are attractive, which is true, and recommends them to everyone, which makes their inboxes worse and lowers the chance that any given request is answered. As the first factor gets more accurate, the problem gets worse.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">In a toy world, eye-catching profiles are more likely to be invited, and anyone whose inbox holds more than a few invitations answers a smaller share of them. We rank each sender's candidates three ways and count what the system gets: (1) by P(send) alone, (2) by P(send) × P(accept), (3) the same with a discount for recipients who already received many invitations last week. Which gives the most accepted connections, and which sends the most invitations?</p>
+      <ol>
+        <li>Ranking by P(send) gives the most of both</li>
+        <li>The product sends fewer invitations but gets more accepted, and the discount sends fewer still but gets more accepted again</li>
+        <li>All three give about the same number of accepted connections</li>
+      </ol>
+      <details>
+        <summary>Show the answer</summary>
+        <p><strong>B.</strong> More invitations are not more connections. In the experiment below, the product sends about 6% fewer invitations and gets about 60% more accepted, and the discount sends about 28% fewer again and gets about 64% more than that. It also shows the problem with the product alone: the busiest inbox is still over two thousand invitations.</p>
+      </details>
+    </div>
+
+    <p>Our code makes the assumption explicit: a recipient's chance of accepting falls once they hold more invitations than they can read, and members differ in how eye-catching they are. Numbers belong to the toy; look at the shape of the result.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Rank on P(send), on the product, and on the product with an inbox discount</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(5)
+N, M, SHOW, CAP = 20_000, 60, 5, 8   # members, candidates, slots, inbox
+vis = rng.pareto(1.5, N) + 1         # how eye-catching a profile is
+fit = rng.random((N, M))             # how well sender and candidate fit
+cand = rng.integers(0, N, (N, M))    # candidate lists per sender
+cand = np.where(rng.random((N, M)) &lt; 0.3,
+                rng.choice(N, (N, M), p=vis / vis.sum()), cand)
+sig = lambda x: 1 / (1 + np.exp(-x))
+p_send = sig(-4 + 3 * fit + 1.2 * np.log(vis[cand]))    # taps Connect
+p_acc = sig(-1.5 + 4 * fit)                  # accepts, if inbox is empty
+rows = np.arange(N)[:, None]
+
+def run(score):
+    pick = np.argsort(-score, 1)[:, :SHOW]
+    j, ps, pa = cand[rows, pick], p_send[rows, pick], p_acc[rows, pick]
+    sent = rng.random(ps.shape) &lt; ps
+    inbox = np.bincount(j[sent], minlength=N)    # invites received
+    pa = pa * np.minimum(1.0, CAP / np.maximum(inbox[j], 1))  # overload
+    acc = sent &amp; (rng.random(ps.shape) &lt; pa)
+    return sent.sum(), acc.sum(), (inbox &gt; 30).sum(), inbox.max(), inbox
+
+def decay(inbox):    # piecewise linear: 1 up to 10 invites, 0.2 at 50+
+    return np.clip(1 - 0.8 * (inbox - 10) / 40, 0.2, 1.0)
+
+prod = p_send * p_acc
+last_week = run(prod)[4]
+variants = [(&quot;P(send)&quot;, p_send), (&quot;P(send) x P(accept)&quot;, prod),
+            (&quot;... x load discount&quot;, prod * decay(last_week)[cand])]
+print(f&quot;{&#x27;rank by&#x27;:22}{&#x27;sent&#x27;:&gt;8}{&#x27;accepted&#x27;:&gt;10}{&#x27;&gt;30 invites&#x27;:&gt;13}&quot;)
+for name, s in variants:
+    a, b, c, d, _ = run(s)
+    print(f&quot;{name:22}{a:8,}{b:10,}{c:13,}   busiest inbox {d}&quot;)</code></pre>
+      <div class="tryit-out">Ranking by P(send) alone produces the most invitations, <code>85,024</code>, and the fewest accepted, <code>12,522</code>. Ranking by the product sends <code>79,966</code> and gets <code>20,282</code> accepted. With the inbox discount the system sends <code>57,441</code> invitations and gets <code>33,224</code> accepted, and the busiest inbox holds <code>40</code> invitations against <code>3,463</code> before. Members holding more than 30 invitations fall from <code>461</code> to <code>24</code>, although with the product alone they rise to <code>533</code>.</div>
+    </details>
+
+    <p>Counting invitations would rank the first row best, and counting accepted connections ranks it worst. Row two shows why the decay is needed: it finds more connections, but it learns that the same few members are the most likely to accept and send, so their inboxes grow, and the toy's overload rule punishes that. Discounting spreads the invitations over many more recipients, so each one is answered more often. Our toy builds in the assumption that an overloaded recipient answers less, so these numbers show the mechanism and are not a forecast for LinkedIn, where the 2021 post reports the real effects.</p>
+
+    <p>LinkedIn's 2021 post describes the same remedy for real. A re-ranker sits on top of the P(connect) score and multiplies it by a <strong>decay factor</strong>, so that newScore equals score times a number between 0 and 1. That factor comes from a piecewise linear function of how many invitations the recipient has received. As the post gives the example, recipients with more than ten invitations in the past week get lower priority, and the more they have received, the higher a candidate's original score has to be to appear. Our toy decay does the same, with the shape taken from that description. Its results: the number of overloaded recipients fell 50%, connection requests sent fell 1%, recipient-side sessions rose 1% and sender-side sessions were neutral, an overall session gain of 1%. Survey responses on sending and receiving requests also improved. Its authors explain the gain by saying members who receive fewer invitations get more value from each.</p>
+
+    <p>That post addresses a second effect that comes from the training data. Members who use LinkedIn often are overrepresented in PYMK's training data, so the model recommends them to others more, which gives them more connections and more data, a loop we look at in section 09. Their answer was a fairness re-ranking built on the LinkedIn Fairness Toolkit's equality of opportunity and equalised odds, so that qualified infrequent members and frequent ones get equal representation. It reports invitations sent to infrequent members up 5.44% and connections they made up 4.8%, with metrics for frequent members unchanged. It notes that neutral results for the frequent group alongside gains for the infrequent group are unusual, since shifting invitations towards one group would normally cost the other.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What the ranker optimises</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>P(send): will she tap Connect?</td><td>Plenty of labels, immediate</td><td>Favours eye-catching profiles; many unanswered requests</td></tr>
+        <tr><td>P(accept): will they say yes?</td><td>Close to a real relationship</td><td>Ignores whether the sender would ever act</td></tr>
+        <tr><td>Product: P(send) x P(accept | send)</td><td>Counts only connections that complete; the metric of the 2018 talk</td><td>Blind to recipient overload; reinforces popular members</td></tr>
+        <tr><td>Product, then a re-ranker for load and equity</td><td>Protects recipients; spreads exposure; 2021 results above</td><td>Fewer invitations sent; needs the invitation counts live</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>LinkedIn's 2018 slides show the headline metric moving to sent-and-accepted, and its 2021 post publishes the two re-rankers. Pairing a sender's interest with a receiver's willingness shows up wherever a service connects two parties: ride matching, hiring marketplaces, and dating apps all rank on the chance that both sides agree.</p>
+
+    <h4 class="why">Why not just rank by the chance that the recipient accepts?</h4>
+
+    <p>Because a person who would certainly accept might never be invited. Rohan accepts nearly anything from a colleague, and if Kavya wouldn't have sent him a request, showing him to her produces nothing. Equally, a candidate Kavya loves but who ignores every stranger produces nothing. Success needs both, so the score has to carry both.</p>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">08</span>Serving: one visit to My Network</h2>
+
+    <p>We now have candidates and a ranker, and one more constraint decides how they run: Kavya won't wait for a billion-member graph to be walked. Everything expensive has to happen before she asks. LinkedIn's 2018 QCon talk describes the PYMK architecture "circa 2015" in three pieces. Offline, a batch job generates candidates and scores them with the P(connect) model, and the results go into a key-value store, which the slides name Venice. Online, a request fetches the stored list and rescores it with real-time signals. Alongside both, tracking events flow back for A/B testing and for model training, which the slides label Photon ML. One slide on scale makes a point that explains much of what comes later: the data processed grows linearly, while the number of records scored grows super-linearly with member growth.</p>
+
+    <p>A daily batch has a weakness for Kavya in particular. She joined on Wednesday, so a list built overnight on Tuesday has nothing for her, and once she's connected to Rohan the best next suggestions are on his team, which the stored list doesn't know. Raghavan's slides address this under the heading "Observation: freshness matters!" with a short argument. Network building is contextual, it often involves exploring a cohort of people who share something, and people build networks in a few long sessions and not in a daily habit. A new job, like Kavya's, is probably one of those moments. A list that lags by a day probably misses the session. Gaia, on the slides, is the near-real-time platform that was the remedy. Its input is any kind of graph, kept as a snapshot on Hadoop's file system, plus a stream of updates arriving through Kafka, a log that systems read in order, and a data-change tool, with graph algorithms written as Java code against a compute interface. One slide describes the result as one of the biggest site-wide improvements in connections, and lists more members reaching 30 connections and higher-quality sign-ups among the gains. No figures accompany it.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Offline, nearline and online paths to the list
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 360" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">OFFLINE (a batch job, around 2015)</text>
+<rect x="20" y="36" width="150" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="36" width="150" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">GRAPH SNAPSHOT</text>
+<text x="95.0" y="76" text-anchor="middle" font-size="10" class="dim">connections + profiles</text>
+<rect x="190" y="36" width="150" height="56" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="190" y="36" width="150" height="56" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="265.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">CANDIDATES</text>
+<text x="265.0" y="76" text-anchor="middle" font-size="10" class="dim">triangle closing</text>
+<rect x="360" y="36" width="150" height="56" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="360" y="36" width="150" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="435.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">SCORE P(connect)</text>
+<text x="435.0" y="76" text-anchor="middle" font-size="10" class="dim">features per pair</text>
+<rect x="530" y="36" width="150" height="56" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="530" y="36" width="150" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="605.0" y="62" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">STORE</text>
+<text x="605.0" y="76" text-anchor="middle" font-size="10" class="dim">a list per member</text>
+<path d="M174,64 L206,64" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M344,64 L376,64" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M514,64 L546,64" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="124" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">NEARLINE (described in 2018)</text>
+<rect x="20" y="136" width="150" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="136" width="150" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="162" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">EVENT STREAM</text>
+<text x="95.0" y="176" text-anchor="middle" font-size="10" class="dim">new connections, edits</text>
+<rect x="190" y="136" width="150" height="56" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="190" y="136" width="150" height="56" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="265.0" y="162" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">GRAPH UPDATE</text>
+<text x="265.0" y="176" text-anchor="middle" font-size="10" class="dim">incremental, in memory</text>
+<rect x="360" y="136" width="150" height="56" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="360" y="136" width="150" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="435.0" y="162" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">RECOMPUTE</text>
+<text x="435.0" y="176" text-anchor="middle" font-size="10" class="dim">only affected members</text>
+<rect x="530" y="136" width="150" height="56" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="530" y="136" width="150" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="605.0" y="162" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">STORE</text>
+<text x="605.0" y="176" text-anchor="middle" font-size="10" class="dim">fresh lists</text>
+<path d="M174,164 L206,164" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M344,164 L376,164" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M514,164 L546,164" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="224" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">ONLINE (Kavya opens My Network)</text>
+<rect x="20" y="236" width="150" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="236" width="150" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="262" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">REQUEST</text>
+<text x="95.0" y="276" text-anchor="middle" font-size="10" class="dim">member id, context</text>
+<rect x="190" y="236" width="150" height="56" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="190" y="236" width="150" height="56" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="265.0" y="262" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">FETCH LIST</text>
+<text x="265.0" y="276" text-anchor="middle" font-size="10" class="dim">from the store</text>
+<rect x="360" y="236" width="150" height="56" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="360" y="236" width="150" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="435.0" y="262" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">RESCORE</text>
+<text x="435.0" y="276" text-anchor="middle" font-size="10" class="dim">with real-time signals</text>
+<rect x="530" y="236" width="150" height="56" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="530" y="236" width="150" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="605.0" y="262" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SHOW</text>
+<text x="605.0" y="276" text-anchor="middle" font-size="10" class="dim">a page of people</text>
+<path d="M174,264 L206,264" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M344,264 L376,264" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M514,264 L546,264" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M605,94 L605,134" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="322" text-anchor="start" font-size="10.5" class="dim">Stages and names follow LinkedIn's 2018 QCon talk; latencies and list sizes are unpublished.</text>
+<text x="20" y="344" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Freshness was the reason for the middle row: people build networks in a few long sessions.</text>
+      </svg>
+      <div class="diagram-caption">Read each row left to right: a list per member is built once a day, updated as the graph changes, and turned into the page Kavya sees.</div>
+    </div>
+
+    <p>Here is Kavya's evening against that picture, with a flag wherever the numbers aren't published. LinkedIn hasn't published latency for any stage of PYMK, and the only timings in its sources are the durations of batch jobs.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Sign-up</span><span>Kavya creates her account, adds her employer and school, and agrees to upload her phone contacts. LinkedIn's help page says the upload is one-time, that imported contacts are used only to improve PYMK, and that contacts import data isn't used for generalised AI model training.</span></li>
+      <li><span class="st-lane">Events</span><span>The new account, the profile fields and the first connections arrive on an event stream. Near-line, the graph picks them up, and the affected members, Kavya and the people she's connected to, are queued for fresh candidates. How long that takes is unpublished.</span></li>
+      <li><span class="st-lane">Request</span><span>She opens My Network. Her request carries her member ID and context, and the service fetches her stored list: candidates from friends of friends, walks and embedding search, already scored.</span></li>
+      <li><span class="st-lane">Rescore</span><span>Real-time signals adjust the scores, for example profiles she has just viewed or members she has just connected with. Slides name the stage, not the signals.</span></li>
+      <li><span class="st-lane">Re-rank</span><span>The load discount lowers candidates whose inboxes are full, like Anita, and the fairness re-ranking makes sure newer and less active members are represented. A handful of people make the page.</span></li>
+      <li><span class="st-lane">Act</span><span>She taps Connect on Rohan and Meghana and closes Anita. All three are logged with what was on screen. Rohan accepts ten minutes later, the edge arrives on the stream, and her next refresh probably draws on his team, depending on how fast the near-line path runs.</span></li>
+    </ol>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>When to compute the list</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>On every request</td><td>Always fresh</td><td>Graph work while the member waits; far beyond any request budget</td></tr>
+        <tr><td>Daily batch</td><td>Efficient; the whole graph in one pass</td><td>Stale for new members and for members mid-session</td></tr>
+        <tr><td>Batch plus near-line updates (described in 2018)</td><td>Fresh where it matters; batch remains the bulk</td><td>Two pipelines to keep consistent; a graph in memory</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>LinkedIn started with batch index builds, moved them to Hadoop in 2008, still ran a daily batch as the base in the 2015 architecture, and described the near-line layer in 2018, driven by the freshness argument above. Splitting work between a heavy offline pass and a light online one is how most large recommenders run, and chapter 41's funnel at YouTube sizes its stages the same way.</p>
+
+    <p>Slides also describe data growing under the batch jobs. They show that records scored grow faster than membership, and the slide titled "Scalability of Batch Offline" gives the shape of the pipeline: a wide middle where the pair table lives. That's the same blow-up as section 03, now seen from the scoring side.</p>
+  </section>
+
+  <section id="feedback">
+    <h2><span class="num">09</span>Training data, labels and the feedback loop</h2>
+
+    <p>Each model so far learns from logs, and those logs record what the previous version of PYMK chose to show. Kavya's tap on Rohan is a positive example. Anita, whom she closed, is a negative, or something close to one. A candidate who was never shown to anyone has no label at all, because nobody could act on them. That last group probably contains the members the system would most like to learn about, and the logs say nothing of them.</p>
+
+    <p>Labels also carry the two-sidedness of section 07. An invitation sent is a different outcome from an invitation accepted, and a member who never opened the app contributes no information about whether they would have said yes. Impression discounting, from the team page's KDD 2014 reference, is the first fix: a suggestion shown repeatedly and never acted on is evidence, and it lowers the rank of that suggestion for that person. No formula is given, though the penalty probably grows with the number of times a suggestion was shown.</p>
+
+    <p>At the structural level, the loop is the one the 2021 post names. Frequent members are more engaged, so they appear more in the training data. So the model learns to recommend them more. They gain connections, and they appear more still. LinkedIn's fix was the fairness re-ranking of section 07, which changes what's shown, and it left the data collection alone. There's a mechanism built into triangle closing too, and we can reason about it from section 02. A member with more connections is a shared friend in more pairs and is suggested through more routes, so a score built from common friends rewards members who already have many. Normalising by the square root of the degrees, as the edge weights in LiGNN do, removes part of that advantage, and Adamic-Adar removes some of it for shared friends. Neither removes the advantage of being well connected. That argument is ours, not a measurement published by LinkedIn.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Handling the loop</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Train on the logs as they are</td><td>Simple; matches what was shown</td><td>The model learns the old system's choices and favours active members</td></tr>
+        <tr><td>Impression discounting</td><td>Stops repeated unwanted suggestions; published in 2014</td><td>Treats ignoring as dislike, and a person may just be busy</td></tr>
+        <tr><td>Re-rank for load and for equality of opportunity (2021)</td><td>Measured gains for infrequent members; no loss for frequent ones</td><td>Treats the symptom after the model has scored; exposure data is still biased</td></tr>
+        <tr><td>Random exploration of unshown candidates</td><td>Gives unshown members a label</td><td>Shows some members someone they won't want; not described for PYMK</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>LinkedIn's published responses are the second and third rows. Exploration is a standard remedy that chapter 41 describes for YouTube, and LinkedIn's sources don't describe it for PYMK. Training on logged choices and correcting afterwards is the same compromise that ad systems and search engines make.</p>
+
+    <h3 id="9-1-what-the-system-may-use">9.1 What the system may use</h3>
+
+    <p>PYMK's inputs are about people who haven't been asked. Kavya uploaded her address book, which contains the phone numbers and emails of people who never agreed to anything. LinkedIn's help page on importing contacts says the upload is a one-time upload of names and email addresses, that imported contacts are used only to improve People You May Know, and that the company doesn't use contacts import data for generalised AI model training. Adam Nash, a LinkedIn employee writing on his own blog in 2008, answered readers' worries about an early version with: "We don't search your hard drive, outlook, or other files." Both statements are constraints on the data the design may use and on the models it may train, and they are why the contact import enters section 08's step list as something with a stated purpose.</p>
+
+    <p>Another constraint follows from the shape of the problem and from reasoning, not from anything LinkedIn has written. A suggestion carries information. If Kavya is shown Rohan because both know Meghana, Kavya learns, a little, who Meghana knows. A design has to decide how much of one member's graph may drive what another member sees, and what happens when a member has restricted who sees their connections. LinkedIn hasn't published how PYMK handles that, and we don't claim a rule for it.</p>
+  </section>
+
+  <section id="evaluation">
+    <h2><span class="num">10</span>How LinkedIn knows a change helped</h2>
+
+    <p>There are two layers, as in any recommender: offline numbers computed on logged data, and online experiments. Offline, the sources show several. For the graph network, validation AUC compares sampling strategies, and for retrieval, recall. A standard offline test for link prediction hides a share of existing connections and checks how well the model ranks them, which is what the experiment of section 05 does. These numbers are cheap, and they're also biased in the way section 09 describes. They come from logs of what an older system showed.</p>
+
+    <p>Online, the metrics are the ones the sources name. Raghavan's 2018 headline is invitations sent and accepted. LiGNN reports sessions, weekly active users and new member connections for the GNN. LinkedIn's 2021 post measures the number of overloaded recipients, invitations sent, connections made by infrequent members, and recipient and sender sessions. Recipients show a measurement problem, which the post explains. Sender-side impact is read directly from invitations sent, but a recipient may receive invitations from several senders. So the team built an attribution framework that credits a recipient's session to the sender whose invitation the recipient acted on.</p>
+
+    <p>That leads to the deeper problem. Take the experiment that tests a new ranker on half the members. Kavya is in the treatment group, and the new ranker sends Rohan a request. Rohan is in the control group. His inbox, his notifications and his decision all changed because of Kavya's treatment. An ordinary A/B test assumes each member's outcome depends only on their own assignment, which is known as the <strong>stable unit treatment value assumption</strong>, or SUTVA. In a network it fails, and the failure doesn't average out. Guillaume Saint-Jacques, Maneesh Varshney, Jeremy Simpson and Ya Xu state the consequence in their 2019 ego-cluster paper: a typical experimentation platform, with random assignment per member and a two-sample t-test, can fail to account for the network effect and give highly biased results. Their example is a feature that makes treated members share more. Control members then see more interesting content and become more engaged too, so the measured difference between the two groups understates the true effect.</p>
+
+    <p>A standard remedy is to randomise whole groups of connected members together, but the paper explains why that fails on a graph like LinkedIn's. Partitioning it into 10,000 balanced clusters gives only about 20% isolation, so a member has on average 80% of their connections outside their own cluster, and the number of clusters is too small for a powerful test. Its alternative is the <strong>ego cluster</strong>. Choose a focal member, the ego, and her connections, the alters. Give the ego and all her alters the same assignment, then measure only the ego. Different egos get different assignments by a coin flip, so each ego experiences a world where all her peers got variant A or all got variant B. Two quantities matter in the paper:</p>
+
+    <div class="eq-block"><span>$$\underbrace{Y_i(1,1) - Y_i(1,0)}_{\text{pure network effect}} \qquad\qquad \underbrace{Y_i(1,1) - Y_i(0,0)}_{\text{total effect}}$$</span></div>
+
+    <p>where <span>$Y_i(z, z')$</span> is ego <span>$i$</span>'s outcome when she has treatment <span>$z$</span> and her peers have <span>$z'$</span>. If all egos are put in treatment and only the alters vary, the difference isolates the network effect. If each ego shares her alters' assignment, it gives the total effect. Analysis is the plain two-sample t-test between egos, which keeps it compatible with the existing platform.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Why a plain A/B test breaks on a network, and the ego-cluster fix
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">Member-level A/B test</text>
+<text x="380" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">Ego-cluster test</text>
+<line x1="60" y1="80" x2="140" y2="60" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="60" y1="80" x2="90" y2="160" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="140" y1="60" x2="220" y2="90" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="140" y1="60" x2="170" y2="150" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="220" y1="90" x2="260" y2="170" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="90" y1="160" x2="170" y2="150" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="90" y1="160" x2="120" y2="230" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="170" y1="150" x2="260" y2="170" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="170" y1="150" x2="230" y2="235" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="120" y1="230" x2="230" y2="235" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="260" y1="170" x2="230" y2="235" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<line x1="60" y1="80" x2="170" y2="150" stroke="#818cf8" stroke-width="1.2" opacity="0.8"/>
+<circle cx="60" cy="80" r="13" fill="#34d399" opacity="0.18"/>
+<circle cx="60" cy="80" r="13" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="60" y="84" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399"></text>
+<circle cx="140" cy="60" r="13" fill="#f472b6" opacity="0.18"/>
+<circle cx="140" cy="60" r="13" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="140" y="64" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6"></text>
+<circle cx="220" cy="90" r="13" fill="#34d399" opacity="0.18"/>
+<circle cx="220" cy="90" r="13" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="220" y="94" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399"></text>
+<circle cx="90" cy="160" r="13" fill="#f472b6" opacity="0.18"/>
+<circle cx="90" cy="160" r="13" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="90" y="164" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6"></text>
+<circle cx="170" cy="150" r="13" fill="#34d399" opacity="0.18"/>
+<circle cx="170" cy="150" r="13" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="170" y="154" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399"></text>
+<circle cx="260" cy="170" r="13" fill="#f472b6" opacity="0.18"/>
+<circle cx="260" cy="170" r="13" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="260" y="174" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6"></text>
+<circle cx="120" cy="230" r="13" fill="#34d399" opacity="0.18"/>
+<circle cx="120" cy="230" r="13" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="120" y="234" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399"></text>
+<circle cx="230" cy="235" r="13" fill="#f472b6" opacity="0.18"/>
+<circle cx="230" cy="235" r="13" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="230" y="239" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6"></text>
+<text x="20" y="275" text-anchor="start" font-size="10" class="dim">Each person is flipped alone, so most of her friends are in the other group.</text>
+<ellipse cx="450" cy="120" rx="75" ry="70" fill="#34d399" opacity="0.10"/><ellipse cx="450" cy="120" rx="75" ry="70" fill="none" stroke="#34d399" stroke-width="1.4" stroke-dasharray="4 4"/>
+<ellipse cx="610" cy="180" rx="65" ry="62" fill="#f472b6" opacity="0.10"/><ellipse cx="610" cy="180" rx="65" ry="62" fill="none" stroke="#f472b6" stroke-width="1.4" stroke-dasharray="4 4"/>
+<line x1="450" y1="120" x2="410" y2="90" stroke="#34d399" stroke-width="1.2" opacity="0.8"/>
+<line x1="450" y1="120" x2="480" y2="80" stroke="#34d399" stroke-width="1.2" opacity="0.8"/>
+<line x1="450" y1="120" x2="500" y2="135" stroke="#34d399" stroke-width="1.2" opacity="0.8"/>
+<line x1="450" y1="120" x2="430" y2="155" stroke="#34d399" stroke-width="1.2" opacity="0.8"/>
+<line x1="610" y1="180" x2="575" y2="160" stroke="#f472b6" stroke-width="1.2" opacity="0.8"/>
+<line x1="610" y1="180" x2="640" y2="150" stroke="#f472b6" stroke-width="1.2" opacity="0.8"/>
+<line x1="610" y1="180" x2="630" y2="215" stroke="#f472b6" stroke-width="1.2" opacity="0.8"/>
+<line x1="610" y1="180" x2="585" y2="220" stroke="#f472b6" stroke-width="1.2" opacity="0.8"/>
+<circle cx="450" cy="120" r="15" fill="#34d399" opacity="0.18"/>
+<circle cx="450" cy="120" r="15" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="450" y="124" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">ego</text>
+<circle cx="610" cy="180" r="15" fill="#f472b6" opacity="0.18"/>
+<circle cx="610" cy="180" r="15" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="610" y="184" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">ego</text>
+<circle cx="410" cy="90" r="9" fill="#34d399" opacity="0.18"/>
+<circle cx="410" cy="90" r="9" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="410" y="94" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399"></text>
+<circle cx="480" cy="80" r="9" fill="#34d399" opacity="0.18"/>
+<circle cx="480" cy="80" r="9" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="480" y="84" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399"></text>
+<circle cx="500" cy="135" r="9" fill="#34d399" opacity="0.18"/>
+<circle cx="500" cy="135" r="9" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="500" y="139" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399"></text>
+<circle cx="430" cy="155" r="9" fill="#34d399" opacity="0.18"/>
+<circle cx="430" cy="155" r="9" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="430" y="159" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399"></text>
+<circle cx="575" cy="160" r="9" fill="#f472b6" opacity="0.18"/>
+<circle cx="575" cy="160" r="9" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="575" y="164" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6"></text>
+<circle cx="640" cy="150" r="9" fill="#f472b6" opacity="0.18"/>
+<circle cx="640" cy="150" r="9" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="640" y="154" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6"></text>
+<circle cx="630" cy="215" r="9" fill="#f472b6" opacity="0.18"/>
+<circle cx="630" cy="215" r="9" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="630" y="219" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6"></text>
+<circle cx="585" cy="220" r="9" fill="#f472b6" opacity="0.18"/>
+<circle cx="585" cy="220" r="9" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="585" y="224" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6"></text>
+<text x="380" y="275" text-anchor="start" font-size="10" class="dim">An ego and her alters share one assignment; only egos are measured.</text>
+      </svg>
+      <div class="diagram-caption">On the left, the colour is each member's own assignment and most edges join different colours, so treated members affect control members. On the right, a whole circle gets one colour, and the effect is read on the ego in the middle.</div>
+    </div>
+
+    <p>Here's the difficulty: every member can sit in only one cluster, so clusters take each other's alters, and some of an ego's friends end up in another group. Its name for the share of an ego's alters lost this way is the <strong>loss rate</strong>, written <span>$\alpha$</span>. Here is what that does to the measurement.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Half the traffic outside the clusters is treated, so the lost alters of any ego are treated half the time. Suppose each ego loses 20% of her alters (<span>$\alpha = 0.2$</span>). In the "all peers treated" arm, what share of an ego's peers is treated, and in the "no peers treated" arm? If a member's response grows in proportion to the share of peers treated, what fraction of the true network effect does the test measure?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>In the treated arm, 80% of alters are treated by design and half of the lost 20% are treated by chance, so 90% are treated. In the control arm, none of the 80% are treated and half the lost 20% are, so 10% are treated. So the test compares 90% with 10%, an 80-point gap in place of 100. In general with a global treatment share <span>$p$</span>, the arms see <span>$1-\alpha(1-p)$</span> and <span>$\alpha p$</span>, and with <span>$p = \tfrac12$</span> the gap is <span>$1-\alpha$</span>. A linear response then gives 80% of the true effect. That test is biased towards zero and not away from it, which the paper calls conservative, and for a launch decision that is probably the safer error.</p>
+      </details>
+    </div>
+
+    <p>That's why the paper accepts a small loss rate. Its design principles are to keep the loss rate low and equal across egos, to keep the egos representative of the member base, and to avoid modelling assumptions. In its algorithm, egos are drawn in turn from bins of connection count, from the lowest bin up, taking just enough alters to hit a target loss rate, until the highest-degree bin runs out. That typically yields 150,000 to 200,000 egos with a degree distribution that matches LinkedIn's. A map-reduce step then attaches the leftover members to the egos they are most strongly connected to, subject to equalising loss rates. They also compare it with a naive sequential approach, which sees loss rates climb to 30% after 100,000 egos, so late egos have a much higher loss.</p>
+
+    <p>Traffic and statistical power are the price. Getting about 200,000 egos, the paper reports, takes treating about 10 million members, and since only egos are measured, the effective sample is small. Its guidance is that p-values under 0.1 count as significant or borderline, and that users should look at the sign and size of the difference. An extension with a variance-reducing nearest-neighbour assignment brings the minimum detectable effect, at 80% power, from 1.5% to 1% on sessions. Clusters go stale, so the paper advises never using a selection older than a month and rerunning the clustering for every experiment. It also warns that the definition of an edge matters. For feed experiments the team used past feed impressions in place of connections, because connections gave very large clusters and a subset of them were ever seen.</p>
+
+    <p>Its examples are about the feed and not PYMK. In one, a feed ranking traded some direct engagement for more sharing. With every ego in control, egos whose alters received the ranking showed engagement up 3.1% (p = 0.03) and scrolling up 2.9% (p = 0.02), a network effect by construction. LinkedIn's sources don't say which PYMK experiments run this way. They do show that PYMK's two-sidedness is exactly the case where one member's treatment changes another's experience, so PYMK is probably among the places the method is used.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Experiment design</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Member-level A/B test</td><td>Standard platform; huge samples</td><td>Treated members change control members' outcomes; biased</td></tr>
+        <tr><td>Graph-cluster randomisation</td><td>Whole communities share an assignment</td><td>At LinkedIn, 10,000 clusters isolate about 20%; low power</td></tr>
+        <tr><td>Ego clusters (2019)</td><td>No product-specific design; runs on the existing platform; dozens a year</td><td>About 10 million treated for 200,000 egos; conservative bias; short-lived clusters</td></tr>
+        <tr><td>Attribution of receiver sessions to senders (2021)</td><td>Measures the receiving side of an invitation inside a normal test</td><td>Credits one sender when several invited; a modelling choice</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>LinkedIn's 2021 post describes members randomly assigned to different models, and its 2019 paper describes ego clusters for the cases where network effects are the question, run, the authors say, dozens of times a year. Marketplaces, ride-hailing and ad auctions have the same interference, where a treated buyer changes the price a control buyer sees, and they use switchback and cluster designs for it.</p>
+
+    <h4 class="why">Why can't we just compare treated and control members and adjust afterwards?</h4>
+
+    <p>Because the damage is done at the assignment stage. If Kavya's treatment changes Rohan's behaviour, then the control group is no longer a picture of a world without the feature, and no adjustment recovers a counterfactual that was never observed. Ego clusters change who gets which assignment, so that each ego's neighbourhood is, as nearly as possible, in a single state.</p>
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">11</span>What went wrong, and what it cost</h2>
+
+    <p>LinkedIn's sources describe several rounds of fixing a system that had learned to chase the wrong thing or hit a wall. We list them as the sources present them.</p>
+
+    <p>First came freshness through cost. According to the Software Engineering Daily interview, the index took a day to build on Oracle, and as the feature drove growth it took up to a week, with results growing stale. Moving to Hadoop cut it to a couple of hours. Success carries the second cost: the 2018 slides show that records scored grow faster than membership, and the team page says second-degree data grows faster than the site, so every few years the same job needed a new trick. Smart joins in 2018 are one of those tricks, and the figures from them, 6 hours to 10 seconds and 3 to 4 hours to 10 minutes, are what a missed scaling step costs.</p>
+
+    <p>Third came the metric. Counting invitations sent rewarded a model for getting people to tap, whatever followed. Raghavan's 2018 talk replaced it with sent and accepted, on both the sending and receiving side, and what that changed in the ranking is the content of section 07.</p>
+
+    <p>Fourth, in 2021, came overloaded recipients and frequent-member bias. That post is direct about both: visible members' inboxes filled with loosely relevant requests, and the model favoured members who were already active because they filled the training data. Fixes cost a little of what the team had been measuring, about 1% fewer connection requests sent, in return for 50% fewer overloaded recipients and 1% more sessions, and for 5.44% more invitations sent to infrequent members. It says the team expected key engagement metrics such as invitations sent to fall, and saw net engagement gains instead.</p>
+
+    <p>Fifth comes a limit, not an incident. LiGNN's gains from graph neural networks for people recommendation are 0.2% in sessions and 0.1% in weekly active users, with a 2.4% rise in new member connections. They are honest, small, and they come from a system that was already tuned for years. In the Facebook study of 2011 the supervised walk's precision at 20 was within the variance of a plain logistic regression. Neither result says the methods are weak. Both say that on a mature product each new idea buys little, and the measurement has to be good enough to see it. Ego clusters carry a minimum detectable effect, the paper reports, of 1.5% on sessions, falling to 1% with an extension, so a 0.1% or 0.2% effect is far below what a test of that size could detect.</p>
+
+    <p>Mistakes in this list share a structure. Each had a stand-in for the real goal, a build time, an invitation count, a click, and the system optimised the stand-in until it stopped tracking the goal. Fixes were rarely a better model. They were a better target, or a correction applied after the score.</p>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">12</span>The whole system</h2>
+
+    <p>We can now draw the full design. On the left is the online path, Kavya's visit. On the right, the offline and near-line path keeps the lists and models current: events and invitations are logged, candidates are generated from the graph by three routes, models are trained and scored, and a change reaches members only after an experiment that is built to survive network effects.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The whole design, online and offline
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 500" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">ONLINE: Kavya opens My Network</text>
+<text x="400" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">OFFLINE + NEARLINE: how lists and models stay current</text>
+<rect x="20" y="40" width="290" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="290" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="165.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">APP</text>
+<text x="165.0" y="72" text-anchor="middle" font-size="10" class="dim">My Network tab</text>
+<path d="M165,82 L165,98" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="100" width="290" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="100" width="290" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="165.0" y="120" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">FETCH + RESCORE</text>
+<text x="165.0" y="134" text-anchor="middle" font-size="10" class="dim">stored list, real-time signals</text>
+<path d="M165,146 L165,162" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="164" width="290" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="164" width="290" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="165.0" y="184" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TWO-SIDED SCORE</text>
+<text x="165.0" y="198" text-anchor="middle" font-size="10" class="dim">P(send) x P(accept | send)</text>
+<path d="M165,210 L165,226" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="228" width="290" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="228" width="290" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="165.0" y="248" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RE-RANK</text>
+<text x="165.0" y="262" text-anchor="middle" font-size="10" class="dim">inbox load discount, newer members</text>
+<path d="M165,274 L165,290" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="292" width="290" height="40" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="292" width="290" height="40" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="165.0" y="310" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">PAGE OF PEOPLE</text>
+<text x="165.0" y="324" text-anchor="middle" font-size="10" class="dim">Connect / Ignore</text>
+<rect x="20" y="350" width="290" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="350" width="290" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="165.0" y="369" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">INVITATION AND REPLY</text>
+<text x="165.0" y="383" text-anchor="middle" font-size="10" class="dim">Kavya sends; Rohan accepts or ignores;</text>
+<text x="165.0" y="397" text-anchor="middle" font-size="10" class="dim">both are logged with what was shown</text>
+<path d="M165,334 L165,348" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="40" width="280" height="54" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="400" y="40" width="280" height="54" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="540.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">GRAPH + EVENTS</text>
+<text x="540.0" y="72" text-anchor="middle" font-size="10" class="dim">connections, profiles, contact imports</text>
+<text x="540.0" y="86" text-anchor="middle" font-size="10" class="dim">(only for PYMK), invitations</text>
+<path d="M540,96 L540,110" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="112" width="280" height="54" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="400" y="112" width="280" height="54" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="540.0" y="130" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">CANDIDATES</text>
+<text x="540.0" y="144" text-anchor="middle" font-size="10" class="dim">triangle closing, PPR walks,</text>
+<text x="540.0" y="158" text-anchor="middle" font-size="10" class="dim">GNN embedding retrieval</text>
+<path d="M540,168 L540,182" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="184" width="280" height="54" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="400" y="184" width="280" height="54" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="540.0" y="202" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAIN + SCORE</text>
+<text x="540.0" y="216" text-anchor="middle" font-size="10" class="dim">P(send), P(accept), embeddings;</text>
+<text x="540.0" y="230" text-anchor="middle" font-size="10" class="dim">scored in batch and near-line</text>
+<path d="M540,240 L540,254" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="256" width="280" height="54" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="400" y="256" width="280" height="54" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="540.0" y="274" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">A/B TEST</text>
+<text x="540.0" y="288" text-anchor="middle" font-size="10" class="dim">member-level, plus ego-cluster</text>
+<text x="540.0" y="302" text-anchor="middle" font-size="10" class="dim">tests for network effects</text>
+<path d="M400,284 L350,284 L350,186 L312,186" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="318" y="176" text-anchor="start" font-size="10" class="dim">promote</text>
+<path d="M312,378 L370,378 L370,66 L398,66" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<text x="376" y="352" text-anchor="start" font-size="10" class="dim">what was shown</text>
+<text x="376" y="366" text-anchor="start" font-size="10" class="dim">and what happened</text>
+<text x="20" y="440" text-anchor="start" font-size="10.5" class="dim">Kavya's click and Rohan's reply become the next model's labels, so the system learns from</text>
+<text x="20" y="458" text-anchor="start" font-size="10.5" class="dim">a graph that its earlier suggestions helped to build. That is the feedback loop.</text>
+<text x="20" y="482" text-anchor="start" font-size="10.5" class="dim">Sizes, latencies and refresh schedules in this picture are unpublished.</text>
+      </svg>
+      <div class="diagram-caption">Start at the app on the left and follow the request down to the page. Then follow the log across to the right, through training, scoring and the experiment, and back to the ranker.</div>
+    </div>
+
+    <p>Kavya's request fetches a list that was prepared earlier and rescores it with live signals. A two-sided score ranks it, the re-ranker protects overloaded members and spreads exposure, and she sees a page of people. What she does, and what Rohan does in reply, is logged with what was on screen and flows back into the graph and the training data. A new ranker, a new sampling strategy or a new decay factor goes to an experiment, usually a member-level test and, where a feature's effect travels along connections, an ego-cluster test. Several parts of this picture are unpublished: how many candidates each source contributes, the sizes of the lists, the refresh schedule for embeddings, and every online latency. Sources describe the system as of 2008, 2015, 2018, 2021 and 2024, and the current system has probably moved on since.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Component</th><th>What it does</th><th>Added because</th></tr></thead>
+      <tbody>
+        <tr><td>Triangle closing as a matrix product</td><td>Counts shared connections for every pair</td><td>Friends of friends is the strongest cheap signal (§02), and loops over pairs explode (§03)</td></tr>
+        <tr><td>Exclusivity-weighted scores</td><td>Discount shared friends who know everyone</td><td>Hubs produce most pairs and carry the least evidence (§04)</td></tr>
+        <tr><td>Personalised PageRank</td><td>Reaches past two steps; samples neighbours</td><td>A candidate three steps away inside Kavya's circle has no shared friend (§05)</td></tr>
+        <tr><td>GNN embeddings</td><td>One vector per member, searched by similarity</td><td>Profiles and graph together; a way into sparse neighbourhoods (§06)</td></tr>
+        <tr><td>Two-sided score</td><td>P(send) x P(accept | send)</td><td>An invitation is half a connection (§07)</td></tr>
+        <tr><td>Load discount and fairness re-rank</td><td>Protects recipients; spreads exposure</td><td>Visible members drowned; frequent members over-represented (§07, §09)</td></tr>
+        <tr><td>Offline + near-line serving</td><td>Stored lists, updated as the graph changes</td><td>A day-old list misses a new member's session (§08)</td></tr>
+        <tr><td>Ego-cluster experiments</td><td>Measure effects that travel along edges</td><td>Plain A/B tests are biased on a network (§10)</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">13</span>Summary</h2>
+    <ol>
+      <li><strong>PYMK is link prediction on a graph of over a billion members.</strong> LinkedIn's about page lists 1.3 billion members and over 18,000 connections a minute, and the system says it built more than half of the professional graph.</li>
+      <li><strong>Version 1 counts shared friends.</strong> Triangle closing is a matrix product, and at first it took a day on Oracle, then up to a week, then a couple of hours on Hadoop.</li>
+      <li><strong>Counting is dominated by hubs.</strong> Records grow with the sum of squared connection counts, so a tiny share of members produces a third of the work in our illustration, and smart joins cut LinkedIn's runs from hours to minutes.</li>
+      <li><strong>Shared friends differ in value.</strong> Adamic-Adar weights each by one over the log of their connections, so a recruiter with 4,000 contacts counts for about a third of a colleague with 12.</li>
+      <li><strong>Random walks reach further.</strong> Personalised PageRank counts routes of every length with decaying weight, and the supervised version learns edge strengths, at a cost of hours on a graph of 29 million edges.</li>
+      <li><strong>GNN embeddings combine graph and profile.</strong> LiGNN samples neighbours by two-hop personalised PageRank, which beat weighted sampling by about 2%, and its embeddings raised offline recall 29.6% and new connections 2.4%.</li>
+      <li><strong>An invitation is half a connection.</strong> The score is P(send) times P(accept given send), and in 2018 LinkedIn changed its headline metric from invitations sent to invitations sent and accepted.</li>
+      <li><strong>Protect the recipients.</strong> A decay on invitations received cut overloaded recipients by 50% and lifted sessions 1%, and a fairness re-ranking raised connections made by infrequent members 4.8%.</li>
+      <li><strong>Freshness needs a near-line path.</strong> A daily batch misses the session of a new member, so LinkedIn added a graph updated from an event stream.</li>
+      <li><strong>The logs are a feedback loop.</strong> Frequent members fill the training data and get recommended more, and the fixes are re-ranking and discounting, with exploration left unpublished for PYMK.</li>
+      <li><strong>Network effects break ordinary A/B tests.</strong> Ego clusters give each ego a neighbourhood in one state, at the price of about 10 million treated members for 200,000 egos and a conservative bias.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">14</span>Build this</h2>
+    <p class="lede">The ideas in this chapter are easy to agree with and easy to get wrong in code. You can rebuild the heart of PYMK on a laptop with synthetic data, and watch each fix change what gets recommended.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A small PYMK with hubs, two-sided ranking and an ego-cluster test</span>
+        <span class="proj-meta">~5 hours &middot; numpy only</span>
+      </div>
+      <p>Build a world where you know the truth: 3,000 members in 12 communities, a handful of recruiters who connect to everyone, and a hidden 15% of the real friendships to predict.</p>
+      <ol class="proj-steps">
+        <li>Generate the graph and hide the test friendships. Rank candidate pairs three ways, by common friends, by Adamic-Adar and by personalised PageRank, and report AUC and precision at 10 for each. Vary the number of recruiters from 0 to 30 and plot how each score degrades.</li>
+        <li>Count the records the pairing step would produce, the sum of d(d-1)/2, and compare with the number of nonzero entries in the product of the adjacency matrix with itself. Cap the number of friends per member at 200 and measure the quality you lose.</li>
+        <li>Give each member a sociability and a response rule: a probability of sending that grows with the candidate's visibility, and an acceptance probability that falls once their inbox exceeds a limit. Rank by P(send), by the product, and by the product with a decay on last week's invitation counts. Report invitations sent, accepted and the largest inbox.</li>
+        <li>Simulate a feature whose effect spreads along edges: a treated member increases the response of each of their friends by a fixed amount. Run an ordinary member-level A/B test and measure the estimated effect. Then build ego clusters with a loss rate near 20% and compare the estimate with the true total effect.</li>
+        <li>Close the loop. Retrain your ranker for 10 rounds on the connections the previous round produced, and track the share of members who ever get recommended. Repeat with a fairness re-rank that reserves a fixed share of slots for the least-connected quarter of members.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> common friends degrades fastest as recruiters are added and Adamic-Adar and the walk degrade more slowly, the product ranking sends fewer invitations than P(send) but gets more accepted, the member-level test reports a fraction of the true spread effect while the ego-cluster estimate lands within a few percent of it, and the re-rank keeps a larger share of members visible after ten rounds.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Add profile attributes and train a small two-layer neighbourhood-averaging network as in section 06. Compare retrieval recall against the walk for members who have fewer than five connections.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">15</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is triangle closing and why is it the first signal for People You May Know?</summary>
+      <div class="qa-body"><p>If A knows B and B knows C, then A and C may know each other, and the more friends they share, the likelier it is. In a graph stored as an adjacency table, multiplying the table by itself gives the number of shared friends for every pair at once. LinkedIn's team page names it as the first signal, and early on the job of building the index ran for a day on Oracle before it moved to Hadoop in 2008. It's strong because most new links in an online social network close a triangle, which Backstrom and Leskovec use to restrict candidates to two steps.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why does PYMK optimise for invitations accepted and not invitations sent?</summary>
+      <div class="qa-body"><p>A connection forms only when the other person accepts. A ranker trained on sends favours eye-catching profiles and produces many unanswered requests. Raghavan's 2018 QCon talk proposed counting PYMK invitations sent and accepted, and received and accepted, as the metric, in service of "engaged members with high quality connections". So the score becomes P(send) times P(accept given send), so both steps must be likely.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does Adamic-Adar beat a plain count of common friends?</summary>
+      <div class="qa-body"><p>It weights each shared friend by 1 over the log of their connection count. A friend with 12 connections contributes about 0.40 and one with 4,000 about 0.12. A shared hub says little because it is connected to a large, mixed group, and hubs also account for most of the candidate pairs. In a toy graph with ten recruiters connected to 5% of everyone, common friends ranked hidden friendships at an AUC of 0.54, Adamic-Adar at 0.62 and personalised PageRank at 0.74. On the real Facebook graph in the 2011 supervised-walk paper, the differences between these methods were far smaller, about 0.001 in AUC between Adamic-Adar and a plain walk.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Explain personalised PageRank and how it differs from friends of friends.</summary>
+      <div class="qa-body"><p>Start a walker at the member. At each step, with probability alpha it returns to the start, otherwise it moves to a neighbour in proportion to edge weight. Long-run share of time at each node is the score. Unrolled, it is a weighted sum over walks of every length, with weight alpha(1-alpha)^k for length k, so it counts routes beyond two steps and favours those that circle back through tight groups. A candidate three steps away, with no shared friend, can still rank high. LiGNN also uses personalised PageRank to choose which neighbours feed each member's embedding.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How would you handle a recruiter who is recommended to everyone?</summary>
+      <div class="qa-body"><p>Their inbox fills, they answer less, and the first-stage model, which has learned they are attractive, keeps promoting them. LinkedIn's 2021 post adds a re-ranker that multiplies the score by a decay factor between 0 and 1, from a piecewise linear function of the invitations received that week. In the post, overloaded recipients fell 50%, connection requests sent fell 1% and recipient sessions rose 1%. An earlier stage uses the same idea, impression discounting, which lowers suggestions a member keeps ignoring.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why embed members with a GNN when you already have friends of friends?</summary>
+      <div class="qa-body"><p>Friends of friends needs connections and sees only two steps. A GNN builds a vector from a member's profile and a sampled neighbourhood, so a member with few connections still gets a useful vector, and retrieval becomes nearest-neighbour search. LiGNN reports a 29.6% offline recall gain and a 2.4% rise in new member connections for people recommendation. Its sampling uses two-hop personalised PageRank, chosen over weighted sampling because it gave about 2% more validation AUC.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why can't you A/B test a new PYMK ranker by assigning members at random?</summary>
+      <div class="qa-body"><p>Behind the test sits an assumption, that one member's outcome depends only on their own assignment, and it fails. A treated sender's invitations change a control recipient's inbox, and treatment on one side of an edge affects the other. Control is then not a world without the feature, and the estimate is biased, often towards zero. Ego-cluster randomisation gives an ego and all her alters one assignment and measures the ego. With a loss rate alpha and half the outside traffic treated, the two arms see shares 1-alpha/2 and alpha/2 of peers treated, so with a linear response you see a fraction 1-alpha of the true effect. Cost: about 10 million treated members for 200,000 egos.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you keep results fresh for a member who joined an hour ago?</summary>
+      <div class="qa-body"><p>A daily batch has nothing for them. LinkedIn's 2018 talk describes a near-real-time platform: a graph kept as a snapshot plus a stream of updates from Kafka, with algorithms run on affected members when edges change. People build networks in a few long sessions, so a delay of hours misses the session. For the profile-only start, a design can use attribute-based candidates and embeddings, and LiGNN's densification links sparse members to similar well-connected ones, though the paper describes it for other products and not for PYMK.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Describe the feedback loop in PYMK and how you would test whether you've broken it.</summary>
+      <div class="qa-body"><p>Active members fill the training data, so the model recommends them more, they gain connections, and they appear more in later data. Triangle closing adds its own pull, since well-connected members sit in more candidate pairs. LinkedIn's 2021 fix re-ranks for equal representation of qualified infrequent and frequent members, with gains of 5.44% in invitations sent to infrequent members and 4.8% in their connections, neutral for frequent members. To test it, track the share of members who are ever recommended, the concentration of invitations received, and connections for the least-connected quartile across successive retrains, and run longer tests, since the effect builds over months.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">16</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/2402.11139" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">LiGNN: Graph Neural Networks at LinkedIn</div><div class="r-sub">Borisyuk et al., KDD 2024. PageRank sampling, densification and the people-recommendation results of section 06. arXiv:2402.11139</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1903.08755" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Using Ego-Clusters to Measure Network Effects at LinkedIn</div><div class="r-sub">Saint-Jacques, Varshney, Simpson and Xu, 2019. Why member-level A/B tests are biased on a network and how ego clusters fix it. arXiv:1903.08755</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1011.4071" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Supervised Random Walks: Predicting and Recommending Links in Social Networks</div><div class="r-sub">Backstrom and Leskovec, WSDM 2011. Learned edge strengths in personalised PageRank, tested on Facebook. arXiv:1011.4071</div></div>
+      </a>
+      <a class="resource-card" href="https://qconsf.com/sf2018/system/files/presentation-slides/qconf2018-talk-peerreview.pdf" target="_blank" rel="noopener">
+        <div class="r-icon">🎤</div>
+        <div class="r-body"><div class="r-kind">Talk</div><div class="r-title">Building Near Realtime Contextual Recommendations for Active Communities on LinkedIn</div><div class="r-sub">Hema Raghavan, QCon San Francisco 2018. Covers the sent-and-accepted metric, the 2015 architecture, smart joins and near-real-time updates.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.linkedin.com/blog/engineering/member-customer-experience/optimizing-pymk-for-equity-in-network-creation" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Optimizing People You May Know (PYMK) for Equity in Network Creation</div><div class="r-sub">LinkedIn Engineering, August 5, 2021. Overloaded recipients, frequent-member bias and the re-rankers of section 07.</div></div>
+      </a>
+      <a class="resource-card" href="https://engineering.linkedin.com/teams/data/artificial-intelligence/people-you-may-know" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company page</div><div class="r-title">People You May Know</div><div class="r-sub">LinkedIn Engineering team page, undated. Triangle closing, the logistic model, organisational overlap and impression discounting.</div></div>
+      </a>
+      <a class="resource-card" href="https://softwareengineeringdaily.com/wp-content/uploads/2019/10/SED03-LinkedIn-Hadoop.pdf" target="_blank" rel="noopener">
+        <div class="r-icon">🎙️</div>
+        <div class="r-body"><div class="r-kind">Interview</div><div class="r-title">Software Engineering Daily, episode 3: LinkedIn and Hadoop</div><div class="r-sub">A LinkedIn engineer on the first Hadoop use case: the PYMK index that took a day, then a week, on Oracle. Transcript, 2019.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.linkedin.com/help/linkedin/answer/a10129019" target="_blank" rel="noopener">
+        <div class="r-icon">📘</div>
+        <div class="r-body"><div class="r-kind">Official docs</div><div class="r-title">Import your Gmail contacts to LinkedIn</div><div class="r-sub">LinkedIn Help. What imported contacts are used for and what they are not used for.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">17</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/16-recommenders-ranking-search"><div class="rc-sec" style="color:var(--c-rec)">16 · The foundations</div><div class="rc-title">Recommenders, Ranking &amp; Search</div><div class="rc-hook">The funnel, retrieval and ranking, and the feedback loop, in general form.</div></a>
+      <a class="related-card" href="/topics/18-graph-ml"><div class="rc-sec" style="color:var(--c-graph)">18 · The graph view</div><div class="rc-title">Graph ML</div><div class="rc-hook">Message passing, sampling and embeddings, the machinery inside section 06.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · Case study</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">Two towers, in-batch negatives with the logQ correction, and the feedback loop for a one-sided recommender.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">A/B testing, batch and near-line pipelines, and train-serve skew.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Why offline metrics mislead and how stand-in metrics drift from the goal.</div></a>
+    </div>
+  </section>

@@ -1,0 +1,1140 @@
+---
+title: "Designing Code Completion"
+dek: "Follow Aditi as she writes one Python function in VS Code and a grey suggestion appears under her cursor. We build the system behind it from the obvious version, fix each failure in turn, and look at what GitHub Copilot and Google have published about the choices along the way."
+readingTime: "~77 min"
+prereqs: "LLM architecture and training (10), inference serving (31), evaluation (25)"
+group: "ML System Design"
+label: "Case study 50"
+description: "How inline code completion works: token-budgeted prompts, Jaccard snippet retrieval, fill-in-the-middle training, debounce and caching, pass@k versus acceptance and retention, and public-code filters, from GitHub's own sources."
+---
+<section id="tldr">
+    <p>Aditi is in her editor in Bengaluru, a little after six in the evening, writing a function called <code>parse_duration</code>. It's supposed to turn strings like <code>"1h30m"</code> into a number of seconds. She has typed the signature and a one-line docstring, and she has written <code>total = 0</code> on the first line of the body. Then she stops to think. Before she has decided what comes next, a line of grey text appears after her cursor: a loop that splits the string into numbers and units, adds them up using a dictionary called <code>UNITS</code>, and stops exactly where her existing <code>return</code> statement begins. She presses Tab, the grey text turns into real code, and she changes one variable name. That whole exchange took less time than it takes to lift her hands off the keyboard.</p>
+
+    <p>Three problems are hiding in that scene. One is context. <code>UNITS</code> isn't defined anywhere in the file she's editing; it lives in <code>retry.py</code>, in another tab she opened an hour ago, and the suggestion used it correctly. Another is position. Aditi's cursor is in the middle of the file, with code already below it, so the text has to connect to what's there and then stop. A third is time. A suggestion that arrives a second after she has typed on is worse than no suggestion, because it interrupts instead of helping. Underneath all three sits a measurement problem: nobody can read Aditi's mind, so a company building this has to decide, from logs and experiments, whether a suggestion like the one she accepted was any good.</p>
+
+    <p>So the question this chapter answers is: <strong>how does a code editor produce, within a fraction of a second, a suggestion that fits the file around Aditi's cursor and the files beside it, and how does the company behind it tell whether suggestions like that are any good?</strong></p>
+
+    <p>We'll build the design the way an engineer would, starting from the most obvious version, "send the file to a big model", and repair each failure as it appears. That leads us through assembling a prompt from a fixed budget of tokens, retrieving useful snippets from other open files, training a model to fill in the middle of a document, and cutting latency with debouncing, caching and streaming. After that come the decision about when a suggestion should be shown at all, the logs the editor records, and the two kinds of evaluation, offline benchmarks with <span>$\text{pass@}k$</span> and online metrics with acceptance and retention. Most of what follows comes from GitHub Copilot, whose engineers have published a good deal, and since 2025 its editor extension is open source, so some details here come from the code itself. Google's 2022 code completion work provides a second published system to compare against. Where internals are unpublished we say so.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>The feature we're designing is <strong>inline completion</strong>: as a developer types, the editor shows a suggestion in dimmed text after the cursor, which the developer can accept with one key or ignore by typing on. Copilot and its competitors also have chat panels, agents and next-edit suggestions, and we leave those aside. Everything here is about the grey text.</p>
+
+    <p>A few requirements follow from what Aditi is doing. A suggestion has to arrive fast enough that it's there when she pauses and gone when she carries on typing. It has to fit the code on both sides of the cursor, in whichever of dozens of languages she happens to be using. It has to be short when a line will do and longer when a whole block is the natural next step. It has to be cheap enough to run for millions of people who press keys all day, and it must not leak or reproduce code it shouldn't. One more constraint has nothing to do with machine learning, and GitHub's engineers described it plainly in 2023: "It's a bug if you have to change the way you code when using GitHub Copilot." The suggestion lives inside the editor, it doesn't ask Aditi to switch windows, and it never takes anything away from her until she presses Tab.</p>
+
+    <p>GitHub's account of how it chose the scope in 2020 and 2021 is instructive. At the time most code completion tools finished a single line. Its team judged that generating a whole commit was beyond what the models could do reliably, and settled on suggesting whole functions, a size where a model could be right often enough to be useful (Shuyin Zhao, GitHub blog, September 2023).</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>Published numbers come from different dates, so we'll date each one. On Microsoft's earnings call in July 2025, Satya Nadella said GitHub Copilot had passed 20 million all-time users, and on the January 2026 call he said it had 4.7 million paid subscribers. GitHub doesn't publish how many completion requests it serves per day, and we won't invent that figure.</p>
+
+    <p>A 2022 study by GitHub researchers gives a sense of how often the feature is used and how often it's right. Albert Ziegler and colleagues matched usage logs from people in the Copilot technical preview with survey answers. In that data the <strong>acceptance rate</strong>, the fraction of shown suggestions that the developer accepted, was 27%, and the mean number of accepted completions per user per day was above 31 (Ziegler et al., MAPS 2022). If both figures describe the same people, a typical user in that study probably saw about 115 suggestions a day, since 31 divided by 0.27 is about 115. Google's 2022 report on its own completion system, deployed to more than 10,000 engineers, gave a 25% acceptance rate for single-line suggestions and 34% for multi-line ones, with about 3% of new code (counted in characters) coming from accepted suggestions.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose a million developers are typing at the same moment, and each one presses a key every 300 milliseconds on average. If the editor sent a request on every keystroke, how many requests per second would reach the servers? Now suppose a typical request carries a 3,000-token prompt and gets back a line of about 5 tokens. Which costs the servers more, reading the prompts or writing the answers, and by roughly how much? (All of these are illustrative figures, since GitHub doesn't publish its request volume or prompt lengths.)</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>A million developers each producing 1 key per 0.3 seconds is about 3.3 million keystrokes a second, so per-keystroke requests would mean about 3.3 million requests a second. Each request reads 3,000 prompt tokens and writes 5, so the servers read 600 times more tokens than they write. At those request rates the prompt-reading side would be roughly 10 billion tokens a second, so almost every trick in this chapter aims at sending fewer requests and re-reading less of each prompt.</p>
+        <p>That shape fixes the design. We can't treat each keystroke as a request. Prompts need careful assembly because they dominate the cost. And whatever is the same between two nearby requests, nearly all of it, should not be recomputed.</p>
+      </details>
+    </div>
+
+    <p>We have no published end-to-end latency budget for Copilot either. What exists is Google's: its 2022 system used a model of roughly 0.5 billion parameters, reported a median model inference time of about 40 milliseconds, and ran semantic checks within a budget of under 100 milliseconds. Copilot's October 2025 post gives only relative changes, a 35% latency reduction and 3 times the token throughput for its new model. We'll use those as guides and reason about the rest from what a request has to do.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: send the file to a big model</h2>
+
+    <p>The obvious first design needs no cleverness. Take everything in Aditi's file from the top down to the cursor, send it to a large language model, and print whatever the model writes next. A <strong>language model</strong> is a program that, given some text, predicts the text most likely to follow, one small piece at a time. Those pieces are called <strong>tokens</strong>, and for code a token is typically a few characters: a keyword, part of an identifier, a bracket. What we send is the <strong>prompt</strong>, and the model reads it and then <strong>generates</strong> the continuation one token after another until it chooses to stop. This is the design that made the first code-writing models look impressive. OpenAI's Codex, the model behind the original Copilot, was GPT-3 trained further on public code, and GitHub described testing early versions on self-contained programming problems, solving about half at first and then over 90 percent of them (Inside GitHub, May 2023).</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Version 1: send the file, print what comes back
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="150" height="80" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="150" height="80" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">EDITOR</text>
+<text x="95.0" y="94" text-anchor="middle" font-size="10" class="dim">whole file, top to</text>
+<text x="95.0" y="108" text-anchor="middle" font-size="10" class="dim">the cursor</text>
+<path d="M176,90 L212,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="218" y="50" width="150" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="218" y="50" width="150" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="293.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">BIG MODEL</text>
+<text x="293.0" y="94" text-anchor="middle" font-size="10" class="dim">continues the text</text>
+<text x="293.0" y="108" text-anchor="middle" font-size="10" class="dim">left to right</text>
+<path d="M374,90 L410,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="416" y="50" width="130" height="80" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="416" y="50" width="130" height="80" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="481.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TEXT</text>
+<text x="481.0" y="94" text-anchor="middle" font-size="10" class="dim">until the model</text>
+<text x="481.0" y="108" text-anchor="middle" font-size="10" class="dim">decides to stop</text>
+<path d="M552,90 L588,90" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="594" y="50" width="86" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="594" y="50" width="86" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="637.0" y="87" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SCREEN</text>
+<text x="637.0" y="101" text-anchor="middle" font-size="10" class="dim">as grey text</text>
+<text x="20" y="170" text-anchor="start" font-size="10.5" class="dim">Aditi&#x27;s file is 900 lines; the cursor is in the middle of parse_duration.</text>
+<text x="20" y="192" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">It never sees the lines below the cursor, and it never sees retry.py in the next tab.</text>
+<text x="20" y="214" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Nothing limits the length of the reply, and nothing makes the first token arrive quickly.</text>
+<text x="20" y="236" text-anchor="start" font-size="10.5" class="dim">The prompt is as long as the file, so a long file is slow and eventually does not fit.</text>
+      </svg>
+      <div class="diagram-caption">Follow the arrows left to right, then read the three amber and grey lines underneath. Each is a place where the next sections add something.</div>
+    </div>
+
+    <p>Version 1 works well enough to demonstrate and breaks in ways that tell us what to build next. Its first problem is that the model can't see anything after the cursor. Aditi's file has a <code>return</code> statement and a second function below the spot where she's typing, and a model that only reads from the top never learns those exist. Its suggestion may duplicate the return, or run on into territory the file already covers, or finish with code that doesn't join up with what follows. Second, the cursor's file is only one of the files that matter. <code>UNITS</code> is defined in a neighbouring tab, and a model reading only the current file has to guess its name.</p>
+
+    <p>Third comes length. A model reads a bounded amount of text, called its <strong>context window</strong>, measured in tokens. A 900-line file can exceed it, and then something has to be dropped, which the naive design handles by cutting from the top, losing the imports and class definitions that tell the model what the names mean. Even when the file fits, a longer prompt takes longer to read, and we've already seen that reading the prompt dominates the cost. Fourth, nothing tells the model when to stop. A base model asked to continue a file will happily write the rest of the file, three functions Aditi never asked for, and a docstring for each.</p>
+
+    <p>Each of these points to a section of the design. Choosing what goes into a limited prompt is section 03. Teaching the model to write the middle of a document, joining the code above and below the cursor, is section 04. Pulling snippets in from other files is section 05, and making all of this fast enough to be useful is section 06. We start with the prompt itself, because every later decision is made inside its limit.</p>
+  </section>
+
+  <section id="context">
+    <h2><span class="num">03</span>Assembling the prompt under a token budget</h2>
+
+    <p>If the prompt can only hold so much, then building it is an allocation problem: given a fixed number of tokens and several kinds of text competing for them, how many should each get? Copilot's engineers have described the constraint from the start. In May 2023 GitHub said the models fast enough for completion could process "about 6,000 characters at a time", so not all of a developer's code can go in, and an algorithm decides what to include and in what order (Johan Rosenkilde, GitHub blog, May 2023). John Berryman, a researcher on the team, put the underlying idea in one line: the model is "just a document completion model", so the job is to build a pseudo-document that makes the right continuation the likeliest one.</p>
+
+    <p>Copilot's VS Code extension became open source in 2025, under the MIT licence, so we can read the budget instead of inferring it. In its constants file the window is 8,192 tokens, of which 500 are held back for the completion, leaving 7,692 for the prompt. By default it divides the prompt into four parts: 35% for the <strong>prefix</strong>, the code above the cursor; 15% for the <strong>suffix</strong>, the code below it; and the remaining 50% for context drawn from other sources, in two buckets the code calls stable and volatile context, at 35% and 15%. In numbers, that's roughly 2,700 tokens of prefix, 1,150 of suffix and 3,850 of other context. What goes into the other half isn't fixed by the constants; the main provider is the similar-files snippet search of section 05, and the extension also accepts snippets supplied by other extensions, such as language-aware tools.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Spending a fixed token budget
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="28" text-anchor="start" font-size="11" class="">Model window: 8,192 tokens in the open-source client&#x27;s constants</text>
+<rect x="20" y="44" width="213.90087890625" height="70" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="44" width="213.90087890625" height="70" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="126.950439453125" y="69" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">PREFIX</text>
+<text x="126.950439453125" y="83" text-anchor="middle" font-size="10" class="dim">code above</text>
+<text x="126.950439453125" y="97" text-anchor="middle" font-size="10" class="dim">35%</text>
+<rect x="236.90087890625" y="44" width="89.95751953125" height="70" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="236.90087890625" y="44" width="89.95751953125" height="70" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="281.879638671875" y="69" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">SUFFIX</text>
+<text x="281.879638671875" y="83" text-anchor="middle" font-size="10" class="dim">code below</text>
+<text x="281.879638671875" y="97" text-anchor="middle" font-size="10" class="dim">15%</text>
+<rect x="329.8583984375" y="44" width="213.90087890625" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="329.8583984375" y="44" width="213.90087890625" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="436.808837890625" y="69" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">STABLE</text>
+<text x="436.808837890625" y="83" text-anchor="middle" font-size="10" class="dim">context</text>
+<text x="436.808837890625" y="97" text-anchor="middle" font-size="10" class="dim">35%</text>
+<rect x="546.75927734375" y="44" width="89.95751953125" height="70" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="546.75927734375" y="44" width="89.95751953125" height="70" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="591.738037109375" y="69" text-anchor="middle" font-size="10" font-weight="700" fill="#fbbf24">VOLATILE</text>
+<text x="591.738037109375" y="83" text-anchor="middle" font-size="10" class="dim">context</text>
+<text x="591.738037109375" y="97" text-anchor="middle" font-size="10" class="dim">15%</text>
+<rect x="639.716796875" y="44" width="40.283203125" height="70" rx="8" fill="#34d399" opacity="0.2"/>
+<rect x="639.716796875" y="44" width="40.283203125" height="70" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="659.8583984375" y="76" text-anchor="middle" font-size="9" font-weight="700" fill="#34d399">OUT</text>
+<text x="659.8583984375" y="90" text-anchor="middle" font-size="10" class="dim">500</text>
+<text x="20" y="138" text-anchor="start" font-size="10.5" class="dim">7,692 tokens for the prompt; 500 held back for the completion.</text>
+<path d="M128,116 L128,160" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="162" width="200" height="92" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="162" width="200" height="92" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="120.0" y="191" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">PREFIX</text>
+<text x="120.0" y="205" text-anchor="middle" font-size="10" class="dim">def parse_duration(s):</text>
+<text x="120.0" y="219" text-anchor="middle" font-size="10" class="dim">docstring, first lines of</text>
+<text x="120.0" y="233" text-anchor="middle" font-size="10" class="dim">the body, up to the cursor</text>
+<path d="M283,116 L283,160" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="230" y="162" width="150" height="92" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="230" y="162" width="150" height="92" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="305.0" y="191" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">SUFFIX</text>
+<text x="305.0" y="205" text-anchor="middle" font-size="10" class="dim">the return statement</text>
+<text x="305.0" y="219" text-anchor="middle" font-size="10" class="dim">and the next function</text>
+<text x="305.0" y="233" text-anchor="middle" font-size="10" class="dim">below the cursor</text>
+<path d="M560,116 L560,160" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="390" y="162" width="290" height="92" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="390" y="162" width="290" height="92" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="535.0" y="184" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">OTHER CONTEXT</text>
+<text x="535.0" y="198" text-anchor="middle" font-size="10" class="dim">best-matching 60-line windows</text>
+<text x="535.0" y="212" text-anchor="middle" font-size="10" class="dim">from the open tabs (retry.py),</text>
+<text x="535.0" y="226" text-anchor="middle" font-size="10" class="dim">scored by Jaccard similarity</text>
+<text x="535.0" y="240" text-anchor="middle" font-size="10" class="dim">and sorted so the best sits last</text>
+<text x="20" y="282" text-anchor="start" font-size="10.5" class="dim">The 35/15/35/15 split is the default in the open-source client (2025). The 2023 GitHub post</text>
+<text x="20" y="300" text-anchor="start" font-size="10.5" class="dim">described the same constraint in characters: roughly 6,000 fit at a time.</text>
+      </svg>
+      <div class="diagram-caption">Read the bar across the top, then the three boxes under it. Whatever is not chosen for one of these slots is invisible to the model.</div>
+    </div>
+
+    <p>A few details of how the pieces get ordered show how the team thinks about the model. Each prompt starts with a header naming the file's path and language, since the file name often reveals the language and purpose of the code (Rosenkilde, 2023). A prefix that doesn't fit is cut from the top, keeping the lines nearest the cursor. And in the open-source client, the similar-file snippets are sorted so the best match comes last, directly before the code being completed, probably because text near the end of a prompt influences a completion more than text at the start. That reasoning is our inference; the code only shows the sort order.</p>
+
+    <p>These choices are testable, and GitHub tested them with experiments on real users. Adding snippets from neighbouring tabs raised acceptance by 5% in an <strong>A/B test</strong>, an experiment in which some users get one version and the rest get another, chosen at random, and the team reported that a very low similarity threshold for including a snippet gave the best results, because including an imperfect match beat including nothing (GitHub blog, May 2023). Berryman called the neighbouring-tab change a "huge lift in our acceptance rate and characters retained". Both numbers are relative, so a baseline acceptance rate of 27% would become about 28.4%, which sounds small until you multiply it by hundreds of millions of suggestions.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What goes into the prompt</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Prefix only (Version 1)</td><td>Trivial, cheap, always available</td><td>Blind to the code below the cursor and to every other file</td></tr>
+        <tr><td>Prefix and suffix</td><td>The model can join the code above and below, and knows what follows</td><td>Needs a model trained for it (section 04), and a bigger prompt</td></tr>
+        <tr><td>Plus snippets from open tabs</td><td>Brings in names and patterns the project already uses; +5% acceptance in GitHub's 2023 test</td><td>Costs prompt tokens, and a poor snippet can mislead</td></tr>
+        <tr><td>Plus embedding search over a whole repository</td><td>Finds code that is similar in meaning, not only in words</td><td>Needs an index to build and keep fresh; GitHub described it as experimental and opt-in for enterprises in 2023</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>GitHub's choice was the third row for the default experience. In 2023 it was building the fourth for enterprise customers who opt in, storing embeddings of code snippets, potentially billions for private repositories, and matching the developer's current context against them in real time. That's the same machinery chapter 16 describes for recommenders and chapter 11 for retrieval-augmented generation, with a query of a few lines of code and an answer due before the next keystroke.</p>
+
+  </section>
+
+  <section id="fim">
+    <h2><span class="num">04</span>Teaching the model to fill in the middle</h2>
+
+    <p>We've given the prompt a suffix, but a model trained only to continue text from left to right doesn't know what to do with one. Reading the code below the cursor and then writing something that connects to it is a different task from continuing a document, and a model that has only ever seen text in order has no reason to treat the suffix as anything but more prefix. GitHub and OpenAI fixed this with a change to the training data. OpenAI described it in 2022 in "Efficient Training of Language Models to Fill in the Middle" (Bavarian et al.), and GitHub reported that adding it to Copilot gave a 10% relative increase in the share of completions developers accepted (GitHub blog, May 2023). Its name is <strong>fill-in-the-middle</strong>, or FIM.</p>
+
+    <p>Here the idea is that you don't need a new kind of model; you need a new arrangement of the training text. Take a document and cut it at two random places into three parts: a prefix, a middle and a suffix. Then write the document back out in a different order, with the middle moved to the end and special marker tokens saying which part is which. An ordinary left-to-right model trained on this rearranged text learns, as a side effect of predicting the middle last, to write a middle that connects the prefix to the suffix it has already read.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Fill in the middle: the same text in two orders
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 360" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11" class="">A file, cut at two random points, becomes a prefix, a middle and a suffix</text>
+<rect x="20" y="36" width="220" height="50" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="36" width="220" height="50" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="130.0" y="58" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">PREFIX</text>
+<text x="130.0" y="72" text-anchor="middle" font-size="10" class="dim">def parse_duration(s):</text>
+<rect x="240" y="36" width="200" height="50" rx="8" fill="#34d399" opacity="0.22"/>
+<rect x="240" y="36" width="200" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="340.0" y="58" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">MIDDLE</text>
+<text x="340.0" y="72" text-anchor="middle" font-size="10" class="dim">the part we want to learn</text>
+<rect x="440" y="36" width="240" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="440" y="36" width="240" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="560.0" y="58" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">SUFFIX</text>
+<text x="560.0" y="72" text-anchor="middle" font-size="10" class="dim">return timedelta(seconds=total)</text>
+<text x="20" y="112" text-anchor="start" font-size="11" class="">Training moves the middle to the end, so an ordinary left-to-right model sees it last:</text>
+<text x="20" y="134" text-anchor="start" font-size="11" font-weight="700" class="" fill="#fbbf24">PSM</text>
+<rect x="60" y="120" width="90" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="60" y="120" width="90" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="105.0" y="141" text-anchor="middle" font-size="10" font-weight="700" fill="#fbbf24">&lt;PRE&gt;</text>
+<rect x="154" y="120" width="130" height="34" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="154" y="120" width="130" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="219.0" y="141" text-anchor="middle" font-size="10" font-weight="700" fill="#818cf8">prefix</text>
+<rect x="288" y="120" width="90" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="288" y="120" width="90" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="333.0" y="141" text-anchor="middle" font-size="10" font-weight="700" fill="#fbbf24">&lt;SUF&gt;</text>
+<rect x="382" y="120" width="150" height="34" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="382" y="120" width="150" height="34" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="457.0" y="141" text-anchor="middle" font-size="10" font-weight="700" fill="#f472b6">suffix</text>
+<rect x="536" y="120" width="90" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="536" y="120" width="90" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="581.0" y="141" text-anchor="middle" font-size="10" font-weight="700" fill="#fbbf24">&lt;MID&gt;</text>
+<rect x="630" y="120" width="50" height="34" rx="8" fill="#34d399" opacity="0.22"/>
+<rect x="630" y="120" width="50" height="34" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="655.0" y="141" text-anchor="middle" font-size="9" font-weight="700" fill="#34d399">middle</text>
+<text x="20" y="184" text-anchor="start" font-size="11" font-weight="700" class="" fill="#fbbf24">SPM</text>
+<rect x="60" y="170" width="90" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="60" y="170" width="90" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="105.0" y="191" text-anchor="middle" font-size="10" font-weight="700" fill="#fbbf24">&lt;SUF&gt;</text>
+<rect x="154" y="170" width="150" height="34" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="154" y="170" width="150" height="34" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="229.0" y="191" text-anchor="middle" font-size="10" font-weight="700" fill="#f472b6">suffix</text>
+<rect x="308" y="170" width="90" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="308" y="170" width="90" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="353.0" y="191" text-anchor="middle" font-size="10" font-weight="700" fill="#fbbf24">&lt;PRE&gt;</text>
+<rect x="402" y="170" width="130" height="34" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="402" y="170" width="130" height="34" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="467.0" y="191" text-anchor="middle" font-size="10" font-weight="700" fill="#818cf8">prefix</text>
+<rect x="536" y="170" width="90" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="536" y="170" width="90" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="581.0" y="191" text-anchor="middle" font-size="10" font-weight="700" fill="#fbbf24">&lt;MID&gt;</text>
+<rect x="630" y="170" width="50" height="34" rx="8" fill="#34d399" opacity="0.22"/>
+<rect x="630" y="170" width="50" height="34" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="655.0" y="191" text-anchor="middle" font-size="9" font-weight="700" fill="#34d399">middle</text>
+<text x="20" y="238" text-anchor="start" font-size="10.5" class="dim">At serving time the prompt stops after &lt;MID&gt;, and the model writes the middle.</text>
+<text x="20" y="258" text-anchor="start" font-size="10.5" class="dim">It ends the middle with an end-of-text token once the text it wrote joins the suffix.</text>
+<text x="20" y="288" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">In SPM order, typing at the end of the prefix leaves the suffix&#x27;s cached keys and values valid.</text>
+<text x="20" y="308" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">In PSM order, every keystroke changes tokens that come before the suffix.</text>
+<text x="20" y="336" text-anchor="start" font-size="10.5" class="dim">OpenAI&#x27;s 2022 FIM paper trains with both orders at once, each on half of the FIM examples.</text>
+      </svg>
+      <div class="diagram-caption">Read the top row as the file, then each lower row as the sequence the model is trained on. Every piece is in the loss, so the model still learns ordinary left-to-right writing.</div>
+    </div>
+
+    <p>Formally, write the three parts as <span>$P$</span>, <span>$M$</span> and <span>$S$</span>, with the sentinel tokens <span>$\langle\text{PRE}\rangle$</span>, <span>$\langle\text{SUF}\rangle$</span> and <span>$\langle\text{MID}\rangle$</span>. In the paper's first format, called PSM for prefix, suffix, middle, the training sequence is</p>
+
+    <div class="eq-block"><span>$$\tilde{x} \;=\; \langle\text{PRE}\rangle \circ P \circ \langle\text{SUF}\rangle \circ S \circ \langle\text{MID}\rangle \circ M \circ \langle\text{EOT}\rangle$$</span></div>
+
+    <p>where <span>$\circ$</span> means concatenation and <span>$\langle\text{EOT}\rangle$</span> is an end-of-text token. That loss is the ordinary one for a language model, the negative log-probability of each token given those before it:</p>
+
+    <div class="eq-block"><span>$$\mathcal{L} \;=\; -\sum_{t=1}^{|\tilde{x}|} \log p_\theta\big(\tilde{x}_t \mid \tilde{x}_{<t}\big)$$</span></div>
+
+    <p>Here <span>$\tilde{x}_t$</span> is the token at position <span>$t$</span> and <span>$\tilde{x}_{<t}$</span> everything before it. Nothing about the objective changed; only the sequence did. When the middle's tokens are being predicted, the model has already read <span>$P$</span> and <span>$S$</span>, so the best way to lower the loss is to write a middle that fits both. The last token, <span>$\langle\text{EOT}\rangle$</span>, matters too. According to the paper it signals "a successful join to the suffix", and at inference time the model's own decision to emit it is the stopping rule that Version 1 lacked.</p>
+
+    <p>Other findings in the paper explain why this became standard practice. Cuts are made on characters before tokenization, uniformly at random, so each part is a third of the document on average and the boundaries fall mid-word as often as between words, which matches what happens when a developer's cursor is halfway through an identifier. FIM is applied to each document with a probability called the FIM rate, and the authors used 50% in their main runs; they report that even a rate as high as 90% didn't harm left-to-right quality, while 100% did. Loss is kept on all three parts, which the authors say matters for the central result, that FIM can be learned "for free": models trained with half their data rearranged matched models trained without FIM on ordinary left-to-right test loss at every size tried. Their recommendation was that future autoregressive models be trained with FIM by default.</p>
+
+    <p>SPM, the second format in the diagram, puts the suffix before the prefix, and caching is the motivation. A transformer reading a prompt computes intermediate values for every token, called keys and values, and a decoder can reuse them for the start of the prompt if that start hasn't changed. Aditi's prefix changes with every character she types, while the code below her cursor usually doesn't. In PSM order every keystroke changes tokens that sit before the suffix, so the suffix's stored values go stale. In SPM order the suffix comes first and typing only appends to the prefix at the end, so the earlier values stay valid. It trains with both orders, each on half of the FIM examples, and found SPM slightly better even on infilling benchmarks. Which order Copilot's servers use, and whether they cache this way, isn't published; the client sends the prefix and the suffix as separate fields and leaves the arrangement to the server.</p>
+
+    <h4 class="why">Why not train a separate model that only does infilling?</h4>
+
+    <p>Because the same weights can do both, which was the surprise of the FIM paper. One model serves left-to-right requests (when the cursor is at the end of the file, with nothing below it) and infilling requests, and it costs no more to train. A separate infilling model would double the training and serving bill and still have to be kept in step with the other. In its October 2025 post, GitHub went further and said chat-style models underperform on FIM code completion, one of the reasons it trained a model specifically for the task.</p>
+
+    <p>This transformation appears wherever a model has to edit and not only extend, and the span-corruption objective behind T5 is a relative of it, since both hide a span of text and ask the model to restore it. For our design, the practical result is that the prompt can now carry a suffix and the model will use it.</p>
+  </section>
+
+  <section id="retrieval">
+    <h2><span class="num">05</span>Finding useful snippets in the other open files</h2>
+
+    <p>Half the prompt is set aside for context, and Aditi's missing <code>UNITS</code> is the kind of thing that context exists to supply. Now we have to choose, from every file she has open, the few dozen lines most likely to help with the line she's about to write. A query has to be built from the cursor, every file has to be scanned for text that resembles it, and the whole search has to run on her laptop in a few milliseconds, before any network request goes out. Copilot's answer, described in 2023 and visible in the open-source client, is old and cheap: compare sets of words.</p>
+
+    <p>That comparison is the <strong>Jaccard similarity</strong> of two sets of words. Take the words near Aditi's cursor as one set, <span>$A$</span>, and the words in a candidate window of another file as a second set, <span>$B$</span>. It is the number of words they share divided by the number of distinct words in either:</p>
+
+    <div class="eq-block"><span>$$J(A, B) \;=\; \frac{|A \cap B|}{|A \cup B|}$$</span></div>
+
+    <p>It's 0 when the sets share nothing and 1 when they're identical, and no other number is involved. Those "words" come from a deliberately crude tokenizer, not the model's. It splits text on anything that isn't a letter or a digit, so <code>parse_duration</code> becomes <code>parse</code> and <code>duration</code>, and it drops common English words and each language's keywords such as <code>def</code> and <code>return</code>, because those appear everywhere and tell us nothing about similarity. A code comment in the client says this tokenizer is "NOT an OpenAI model tokenizer". Here's a worked example. Aditi's cursor context contains the words <code>parse</code>, <code>duration</code>, <code>total</code>, <code>unit</code>, <code>value</code> and <code>s</code>, six in all. A window in <code>retry.py</code> contains <code>total</code>, <code>unit</code>, <code>value</code>, <code>UNITS</code>, <code>seconds</code>, <code>sleep</code> and <code>delay</code>, seven words. They share three, so the union has 6 + 7 &minus; 3 = 10 distinct words and <span>$J = 3/10 = 0.30$</span>. A window in <code>settings.py</code> with <code>total</code>, <code>timeout</code>, <code>config</code>, <code>s</code> and <code>port</code> shares two words out of 9 in the union, so <span>$J \approx 0.22$</span>. A window from a README that shares nothing scores 0. Retry's window wins.</p>
+
+    <p>Which windows get compared? Copilot's client slides a window of lines over each candidate file one line at a time, so a 60-line window starts at every line. By default the window is 60 lines, the lowest score that still counts is 0, which means any window sharing at least one word qualifies, and the best-scoring window from each file is kept. Overlapping windows are merged by keeping the better one. It looks at up to 20 neighbouring files, ignores everything after 10,000 characters in each, and keeps the top 4 snippets overall. Those neighbouring files come from the tabs open in the editor, and the client's code caps the combined text it will consider at 200,000 characters. A second preset in the same file is more conservative, with 10-line windows, a minimum score of 0.3 and a single snippet, and the code doesn't say where each preset is used. A zero threshold in the default matches GitHub's 2023 finding that including even imperfect matches beat including nothing.</p>
+
+    <p>Cost is what makes the approach viable at keystroke rate. Scoring a window is a set intersection, and the token set of each window of each neighbour can be computed once and reused. A small client-side cache holds those window token sets, keyed by file contents, so after the first request only Aditi's own cursor context changes between requests and the neighbours' windows are looked up, not rebuilt. There's no index to build and no server involved.</p>
+
+    <p>To see whether the idea carries any signal beyond intuition, here's an experiment on real code. It's a simplified version, with 20-line windows, and it takes the 35 files in Python's own <code>asyncio</code> package, picks 200 random lines as pretend cursor positions, and builds a snippet three ways: the best Jaccard window from the other files, a random window from a random other file, and the first 20 lines of an arbitrary other file. For each cursor it checks how many of the identifiers on the line that follows, which don't appear in the previous 30 lines, show up in the snippet. Those are the names the model would otherwise have to guess.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Does the Jaccard window contain the names the next line needs?</span>
+      </summary>
+<pre><code>import re, random, glob, os
+import numpy as np
+random.seed(3)
+files = sorted(glob.glob(os.path.dirname(os.__file__) + &quot;/asyncio/*.py&quot;))
+STOP = set(&quot;self def return if else import from for in is not and or &quot;
+           &quot;None True False the a to of&quot;.split())
+
+def toks(text):
+    return {w for w in re.split(r&quot;[^a-zA-Z0-9]&quot;, text)
+            if w and w not in STOP}
+
+lines = {f: open(f).read().split(&quot;\n&quot;) for f in files}
+lt = {f: [toks(l) for l in lines[f]] for f in files}
+W = 20                                    # window length in lines
+
+def window_sets(f):
+    return [(s, set().union(*lt[f][s:s + W]))
+            for s in range(0, max(1, len(lines[f]) - W + 1), 2)]
+
+wins = {f: window_sets(f) for f in files}
+
+def jaccard(a, b):
+    return len(a &amp; b) / len(a | b)
+
+def best_snippet(ref, others):
+    best = (-1.0, None, 0)
+    for g in others:
+        for s, t in wins[g]:
+            best = max(best, (jaccard(t, ref), g, s), key=lambda x: x[0])
+    return best
+
+def coverage(snippet, target, prefix):
+    need = toks(target) - prefix          # names the prefix lacks
+    return len(need &amp; snippet) / len(need) if need else None
+
+out = {&quot;jaccard&quot;: [], &quot;random&quot;: [], &quot;first file&quot;: []}
+while len(out[&quot;jaccard&quot;]) &lt; 200:
+    f = random.choice(files)
+    n = len(lines[f])
+    if n &lt; 120: continue
+    i = random.randrange(60, n - 1)
+    if len(lines[f][i].strip()) &lt; 25: continue
+    prefix = set().union(*lt[f][i - 30:i])
+    ref = set().union(*lt[f][i - 10:i])   # tokens near the cursor
+    others = [g for g in files if g != f]
+    _, g, s = best_snippet(ref, others)
+    c = coverage(set().union(*lt[g][s:s + W]), lines[f][i], prefix)
+    if c is None: continue
+    g2 = random.choice(others)
+    s2 = random.randrange(0, max(1, len(lines[g2]) - W))
+    out[&quot;jaccard&quot;].append(c)
+    out[&quot;random&quot;].append(coverage(
+        set().union(*lt[g2][s2:s2 + W]), lines[f][i], prefix))
+    out[&quot;first file&quot;].append(coverage(
+        set().union(*lt[others[0]][:W]), lines[f][i], prefix))
+for k, v in out.items():
+    v = np.array(v)
+    print(f&quot;{k:11} names found {v.mean():.3f}   &quot;
+          f&quot;lines helped {np.mean(v &gt; 0):.2f}&quot;)</code></pre>
+      <div class="tryit-out">Over 200 cursor positions the best Jaccard window contained <code>13.3%</code> of the names the next line needed, against <code>5.4%</code> for a random window and <code>3.7%</code> for the first lines of an arbitrary file. A snippet contained at least one needed name for <code>24%</code> of lines with Jaccard retrieval and <code>14%</code> with either baseline. The gain is real and modest, in line with GitHub's own report of a 5% relative lift in acceptance, not a doubling.</div>
+    </details>
+
+    <p>Read honestly, the experiment says that a similar-looking window helps a bit more than a random one and often doesn't help at all. For about three lines in four, none of the identifiers the next line introduces appear in any retrieved snippet. That fits the product's results: neighbouring tabs improved acceptance by a few percent, not by multiples, and the gain comes from the minority of positions where a helper function, a constant or a naming convention sits one tab away.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>How to pick snippets</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Most recently viewed files</td><td>Free, no scoring at all</td><td>Recency says little about relevance to this line</td></tr>
+        <tr><td>Jaccard over word sets</td><td>Runs locally in milliseconds, needs no index, behaves predictably, explainable</td><td>Lexical only: misses code that does the same job under different names</td></tr>
+        <tr><td>Embedding search</td><td>Matches meaning, can search a whole repository</td><td>Needs a model, an index and refreshes; slower and costlier per request</td></tr>
+        <tr><td>Language-server symbols</td><td>Exact definitions of the names near the cursor</td><td>Per-language work, and needs a running language service</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>GitHub's client uses the second row by default and, as the code shows, has room for the fourth: other extensions can supply code snippets with an importance score, which the client sorts and places in the prompt alongside the similar-file snippets. Embedding search was in development for enterprise customers in 2023. Copilot's reasons for starting lexical aren't stated, but the costs in the table probably explain the sequence: the cheapest method that gives a measurable gain ships first, and costlier ones are added where they pay for themselves.</p>
+
+    <h4 class="why">Why compare sets of words instead of whole files?</h4>
+
+    <p>A whole file is mostly irrelevant to any one line. Aditi's <code>retry.py</code> is 300 lines and only five of them mention durations, so comparing it as a single bag of words would drown that signal. Sliding a window localises the match, and the window is also the unit that goes into the prompt, which makes the score and the thing being spent the same size.</p>
+
+  </section>
+
+  <section id="latency">
+    <h2><span class="num">06</span>Keystroke economics: the latency budget</h2>
+
+    <p>Our prompt is now assembled and the model can fill the middle. What remains is the problem the prediction box in section 01 raised: sending a request for every keystroke would multiply the servers' work by an order of magnitude, and a reply that lands after Aditi has typed the next character is useless. Both problems come down to <strong>latency</strong>, the time between the moment something happens and the moment its result is ready. For a suggestion the clock starts at Aditi's last keystroke and stops when grey text appears, and the total is the sum of the stages in the diagram below.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The path of one request, and the shortcut
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11" class="">One pause at the cursor, left to right in time (stages not to scale)</text>
+<rect x="20" y="50" width="105" height="76" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="105" height="76" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="72.5" y="85" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">KEY</text>
+<text x="72.5" y="99" text-anchor="middle" font-size="10" class="dim">last keystroke</text>
+<rect x="135" y="50" width="105" height="76" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="135" y="50" width="105" height="76" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="187.5" y="78" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">WAIT</text>
+<text x="187.5" y="92" text-anchor="middle" font-size="10" class="dim">debounce, then</text>
+<text x="187.5" y="106" text-anchor="middle" font-size="10" class="dim">build the prompt</text>
+<rect x="250" y="50" width="105" height="76" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="250" y="50" width="105" height="76" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="302.5" y="78" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">CACHE?</text>
+<text x="302.5" y="92" text-anchor="middle" font-size="10" class="dim">radix trie and</text>
+<text x="302.5" y="106" text-anchor="middle" font-size="10" class="dim">in-flight requests</text>
+<rect x="365" y="50" width="105" height="76" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="365" y="50" width="105" height="76" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="417.5" y="78" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">MODEL</text>
+<text x="417.5" y="92" text-anchor="middle" font-size="10" class="dim">network, prefill,</text>
+<text x="417.5" y="106" text-anchor="middle" font-size="10" class="dim">then decode</text>
+<rect x="480" y="50" width="105" height="76" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="480" y="50" width="105" height="76" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="532.5" y="78" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">TRIM</text>
+<text x="532.5" y="92" text-anchor="middle" font-size="10" class="dim">stop at the end</text>
+<text x="532.5" y="106" text-anchor="middle" font-size="10" class="dim">of line or block</text>
+<rect x="595" y="50" width="105" height="76" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="595" y="50" width="105" height="76" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="647.5" y="78" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">SHOW</text>
+<text x="647.5" y="92" text-anchor="middle" font-size="10" class="dim">grey text</text>
+<text x="647.5" y="106" text-anchor="middle" font-size="10" class="dim">on screen</text>
+<path d="M127,88 L146,88" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M242,88 L261,88" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M357,88 L376,88" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M472,88 L491,88" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M587,88 L606,88" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M302,128 L302,168 L648,168 L648,130" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="330" y="186" text-anchor="start" font-size="10" class="" fill="#34d399">hit: skip the network and show the stored text at once</text>
+<text x="20" y="206" text-anchor="start" font-size="10.5" class="dim">Prefill reads thousands of prompt tokens. A typical single line decodes only a handful (about 5).</text>
+<text x="20" y="226" text-anchor="start" font-size="10.5" class="dim">Time to first token is mostly prefill plus network. Total time adds the decode tokens.</text>
+<text x="20" y="252" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">GitHub has not published per-stage times. Its October 2025 post reports a 35% latency</text>
+<text x="20" y="270" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">reduction and 3x token throughput for the new model, both relative to the old one.</text>
+      </svg>
+      <div class="diagram-caption">Follow the boxes left to right to see what a miss costs. The green arrow underneath is the shortcut a cache hit takes.</div>
+    </div>
+
+    <p>Written as an equation, with each term one stage:</p>
+
+    <div class="eq-block"><span>$$T \;=\; T_{\text{wait}} + T_{\text{prompt}} + T_{\text{net}} + T_{\text{prefill}} + \frac{n}{r}$$</span></div>
+
+    <p>Here <span>$T_{\text{wait}}$</span> is the deliberate delay before sending, <span>$T_{\text{prompt}}$</span> the time to build the prompt on the laptop, <span>$T_{\text{net}}$</span> the round trip to the server, <span>$T_{\text{prefill}}$</span> the time for the model to read the prompt, <span>$n$</span> the number of tokens to write and <span>$r$</span> the rate at which the model writes them. That last term is why single lines are cheap: if a typical line is roughly 5 tokens, the client's own comment says the median line is 19 characters and a token averages about 4, then even a modest <span>$r$</span> contributes little, and <span>$T_{\text{prefill}}$</span> and <span>$T_{\text{net}}$</span> dominate. Copilot's open-source client records its own stage timings with the names <em>prompt</em>, <em>strategy</em>, <em>cache</em>, <em>asyncWait</em>, <em>network</em> and <em>complete</em>, and its first-token time is one of the metrics GitHub names in 2025. None of the values are published.</p>
+
+    <h3 id="6-1-send-less">6.1 Send fewer requests</h3>
+
+    <p>The first fix is to wait before sending. A <strong>debounce</strong> delays a request until the user has been quiet for a set time, and a new keystroke cancels the pending one, so during fast typing nothing is sent. Copilot's client does exactly this: a request is built, then delayed by a configured debounce, and then checked again for cancellation before it goes out. Its debounce value can be set by configuration or by an experiment flag, and the default isn't in the code we can read, so we can't quote it. Either way, the delay has to be long enough to skip the keystrokes in a burst and short enough that Aditi doesn't notice it. An experiment further down measures how well different delays do.</p>
+
+    <p>Second, throw nothing away when Aditi types what the model predicted. Suppose the model suggested <code>for ch in s:</code> and Aditi now types <code>f</code>, <code>o</code>, <code>r</code>. Her new prefix is the old prefix plus the first three characters of the suggestion, so the rest of the old suggestion is still the right answer, and asking the model again would be waste. For this the client keeps a cache of recent completions in a data structure that finds all entries whose key is a prefix of the current text, a <strong>radix trie</strong>, holding the last 100 prefixes. A lookup succeeds when the stored text starts with whatever the user has typed since, and the remainder is shown at once, with no network trip. Her suffix has to be identical too, since a different suffix means a different middle. Typing along with a suggestion therefore shortens it in place, and you see it as grey text disappearing character by character as you type it.</p>
+
+    <p>Requests still on their way get the same treatment. For these it keeps a table of in-flight requests, and a new request first asks whether an earlier one is still a candidate: same suffix, new prefix extends the old one, and the part of the completion streamed so far agrees with what was typed. If so it waits for that request and doesn't send another. It cancels a pending request only when the latest request no longer matches it. A code comment states the aim as striking "the right balance between queuing completions as the user types, without queuing one per keystroke".</p>
+
+    <p>There's a third trick that looks ahead. When a suggestion appears on screen, the client prepares a second request, built as though Aditi had already accepted the suggestion, and sends it at the moment the first one is shown. If she presses Tab, the next suggestion is already on its way, and a developer who accepts several suggestions in a row sees each one a little sooner. These speculative requests carry a header marking them as speculative, so the server can tell them apart.</p>
+
+    <h3 id="6-2-streaming-and-stopping">6.2 Stream, and stop early</h3>
+
+    <p>The client always asks for streamed output, with the reply arriving in small pieces as the model writes them, which means the first words of a suggestion can reach the screen before the last are written. Streaming also allows stopping early: the client watches the text as it arrives and cancels the request when a single line has finished or a block has ended. It decides in advance whether a line or a block is wanted, a question the next section takes up. In the code path for requests that follow an accepted suggestion, the client asks for a few lines and caps the reply at 20 tokens for each line it allows. A comment above that constant explains the choice: the median line is 19 characters and the 95th percentile 73, so the cap leaves plenty of room while cutting the request well below the 500-token maximum.</p>
+
+    <p>Early Copilot made a costlier choice. It generated 10 suggestions for each request, and Shuyin Zhao later described it as "like paying to calculate the results that appear on the second page of a search engine". Switching to ghost text, one suggestion at a time, cut the wasted compute and kept developers in their flow (September 2023). That's a latency decision as much as a cost one, since generating one answer is faster than generating ten.</p>
+
+    <p>On the server side, the published information is thin and relative. GitHub's October 2025 post reports that its new completion model had a 35% lower latency and 3 times the token throughput of the previous one, and names time to first token and throughput among its tracked metrics. Google reported the absolute numbers for its 2022 system: a model of roughly 0.5 billion parameters on TPUs, a median inference time of roughly 40 milliseconds, and semantic checks completed within 100 milliseconds. A small model, a short prompt of about 1,000 to 2,000 tokens around the cursor, and single-line output probably made 40 milliseconds possible. Copilot's prompts are larger, with thousands of tokens of context, so the prompt-reading side probably matters much more for it.</p>
+
+    <p>To see how the three client-side ideas interact, the experiment below simulates a developer typing 40-character lines. Gaps between keystrokes are random with a median of 150 milliseconds and occasional thinking pauses; each reply takes about 300 milliseconds (illustrative) and is the text the developer goes on to type 60% of the time (also illustrative). It compares requesting on every key, two debounce delays, and the same delays with reuse of earlier requests.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Debounce, cancel and reuse: how many requests does one line cost?</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(7)
+HIT = 0.6      # chance a reply is the text the developer types
+LAT = 0.30     # median reply time in seconds
+
+def one_line(L, debounce, reuse):
+    gaps = rng.lognormal(np.log(0.15), 0.6, L)
+    gaps[rng.random(L) &lt; 0.1] += rng.uniform(0.5, 1.5)   # thinking pauses
+    t = np.cumsum(gaps)                                   # key times
+    end = t[-1]
+    shown, reqs = [], 0
+    pending_until, good_from = -1.0, None
+    for i in range(L - 1):
+        gap = t[i + 1] - t[i]
+        if gap &lt; debounce:                  # typed on before the delay
+            continue
+        issue = t[i] + debounce
+        if reuse and (issue &lt; pending_until or good_from is not None):
+            continue                        # an earlier reply still fits
+        reqs += 1
+        reply = issue + rng.lognormal(np.log(LAT), 0.35)
+        ok = rng.random() &lt; HIT
+        if reuse:
+            pending_until = reply
+            if ok:
+                good_from = reply           # stays valid while typing on
+        elif ok and reply &lt; t[i + 1]:
+            shown.append((reply, t[i + 1]))
+    if reuse and good_from is not None and good_from &lt; end:
+        shown.append((good_from, end))
+    return reqs, sum(b - a for a, b in shown) / (end - t[0])
+
+print(f&quot;{&#x27;strategy&#x27;:26}{&#x27;requests/line&#x27;:&gt;14}{&#x27;ghost text shown&#x27;:&gt;18}&quot;)
+for name, d, r in [(&quot;request every key&quot;, 0.0, False),
+                   (&quot;debounce 100 ms&quot;, 0.10, False),
+                   (&quot;debounce 300 ms&quot;, 0.30, False),
+                   (&quot;debounce 100 ms + reuse&quot;, 0.10, True),
+                   (&quot;debounce 300 ms + reuse&quot;, 0.30, True)]:
+    res = np.array([one_line(40, d, r) for _ in range(3000)])
+    print(f&quot;{name:26}{res[:, 0].mean():14.1f}{res[:, 1].mean():18.0%}&quot;)</code></pre>
+      <div class="tryit-out">Requesting on every key sends <code>39.0</code> requests per 40-character line and has a suggestion on screen for <code>21%</code> of the typing time. A 100 ms debounce barely helps (<code>30.2</code> requests) because the median gap between keys is 150 ms, so most keystrokes are followed by a pause longer than 100 ms. A 300 ms debounce cuts requests to <code>8.3</code> and also cuts the time with a suggestion on screen to <code>11%</code>. Reusing earlier replies is the big change: with either delay the line costs about <code>1.7</code> requests, and the suggestion is on screen for <code>91%</code> and <code>80%</code> of the time. Our simulated developer types what the model predicted whenever it was right, so the on-screen share is an upper bound; the point is the ranking and the order of magnitude.</div>
+    </details>
+
+    <p>Debouncing alone, the output shows, does little at ordinary typing speed. A delay has to be longer than the typical gap between keystrokes before it removes anything, and a delay that long also postpones every suggestion by that much, so the share of time with a suggestion on screen falls. Reuse changes the picture because it removes the dependence on keystroke timing: one reply serves the whole line as long as the developer keeps typing what it predicted. With reuse, the delay becomes a minor knob, and both delays give about 1.7 requests per line, the order of magnitude that makes the server bill in section 01 tolerable. A real developer deviates from the model's text more often than this simulation allows, so the true saving is probably smaller, but the direction holds.</p>
+
+    <p>Now we can follow Aditi's pause from start to finish. GitHub hasn't published a time for any of these stages, so this list names what happens at each and says what's known.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Trigger</span><span>Aditi stops typing after <code>total = 0</code>. Her editor asks the Copilot extension for an inline completion at the cursor. If a request from an earlier pause is already in flight or cached and still consistent with what she's typed, the next steps are skipped.</span></li>
+      <li><span class="st-lane">Gate</span><span>The client checks that the position makes sense: nothing after the cursor except closing brackets and punctuation, the file isn't excluded by the organisation's content-exclusion rules, and there's enough text to work with. Any failure ends the request here, with no network traffic.</span></li>
+      <li><span class="st-lane">Prompt</span><span>It builds the prompt: a header with the path and language, up to about 2,700 tokens of prefix, about 1,150 of suffix, and the best-scoring 60-line windows from her open tabs by Jaccard similarity, including the window from <code>retry.py</code> that defines <code>UNITS</code>. Its time is recorded but isn't published.</span></li>
+      <li><span class="st-lane">Wait</span><span>The request sits through the debounce delay, whose default isn't in the published code. If she types, it's cancelled and the cycle restarts.</span></li>
+      <li><span class="st-lane">Decide</span><span>The client decides whether to ask for one line or a block. Here the cursor sits at the start of a loop body in an empty function, so a block is requested. It looks the prefix up in the radix-trie cache first, and a hit returns at once.</span></li>
+      <li><span class="st-lane">Model</span><span>On a miss, the request goes to GitHub's servers with the prompt, the suffix, and parameters such as the maximum tokens and stop sequences. There the model reads the prompt, then streams tokens. Server-side stages and times are unpublished; Google's comparable system reported about 40 ms median inference for a much smaller model.</span></li>
+      <li><span class="st-lane">Trim</span><span>As tokens arrive, the client stops the stream when the block ends, trims the text to the structure of the code, and checks that it begins and ends sensibly at the cursor and before the existing <code>return</code>.</span></li>
+      <li><span class="st-lane">Show</span><span>The first complete block appears as grey text and a <em>shown</em> event is logged. At the same moment the client sends a speculative request for what would follow if she accepted.</span></li>
+      <li><span class="st-lane">React</span><span>Aditi presses Tab. An <em>accepted</em> event is logged, the text becomes real code, and retention checks begin (section 08).</span></li>
+    </ol>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Request policy</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Request on every keystroke</td><td>Always the freshest suggestion; simplest client</td><td>Several requests per line, most cancelled; the biggest server bill</td></tr>
+        <tr><td>Debounce only</td><td>Fewer requests during fast typing</td><td>Little saving unless the delay exceeds the typing gap, and every suggestion is later by the delay</td></tr>
+        <tr><td>Debounce, cache by prefix, reuse in-flight requests</td><td>About one request per line; typing along shortens the suggestion in place</td><td>More state in the client; stale or wrong cached text must be checked against prefix and suffix</td></tr>
+        <tr><td>Add speculative next requests</td><td>The suggestion after an accept is already on its way</td><td>Wasted requests whenever the developer doesn't accept</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Copilot's client implements the third and fourth rows. We can't tell from the code what share of requests the cache and in-flight reuse save in production, because that depends on how people type, and GitHub hasn't published it. GitHub's 2023 blog does say that caching let fill-in-the-middle and neighbouring-tab context run without adding latency, which is consistent with the design.</p>
+
+    <h4 class="why">Why not make the model so fast that none of this is needed?</h4>
+
+    <p>Because the cost is dominated by reading the prompt, and a faster model lowers that cost without removing it. A faster model also invites a larger prompt, since the saved milliseconds are exactly the budget a bigger context window would use. Sending fewer requests and re-reading less, as the cache and reuse do, helps whatever model sits behind them.</p>
+
+    <p>Search boxes and spell-checkers debounce for the same reason. Prompt caching in LLM serving, where the stored keys and values of an unchanged prompt start are reused, is the server-side cousin of the client's cache, and chapter 31 covers it.</p>
+  </section>
+
+  <section id="show">
+    <h2><span class="num">07</span>When to show a suggestion, and how much</h2>
+
+    <p>A fast suggestion that's wrong costs Aditi something. She reads it, decides it's not what she wants, and loses a second or two. Having made suggestions cheap to produce, the next question is which of them deserve to be shown. There are three parts to the answer: gates that stop requests which could never succeed, a choice between one line and a block, and a question about a confidence threshold that the published sources only partly answer.</p>
+
+    <p>Gates are simple, and several are visible in the client. No ghost text appears when there's real code after the cursor on the same line. Here the rule is a pattern: the rest of the line may contain closing brackets or quotes and one optional terminating punctuation mark such as a colon, semicolon or comma, and anything else suppresses the suggestion. Files that an organisation has excluded never get a request. When there isn't enough context to say anything useful, the prompt builder reports it and the request ends. Each gate saves a round trip and a suggestion that would have been noise.</p>
+
+    <h3 id="7-1-one-line-or-a-block">7.1 One line, or a whole block</h3>
+
+    <p>Aditi's cursor is at the start of an empty loop body, where a developer wants several lines. At the end of a half-typed expression she wants the rest of the line. A request for a block costs more to produce and takes longer, and a wrong block costs more to read, so the client decides before sending. For the languages whose syntax it can parse, the client asks whether the cursor sits at the start of an empty block, such as a new function body, a loop or a conditional, and requests multiple lines if so. For TypeScript, a new empty line also triggers a multi-line request. When that check says no, and the file is JavaScript or Python, the client can fall back on a small tree-ensemble model, trained outside the client and behind an experiment flag, which turns the position into 14 numeric features of the text around the cursor plus the language and the characters at the edges, and asks for a block if its score is above 0.5. Its features include the lengths of the first and last lines of the prefix and suffix and whether the second-to-last line is a comment, and the code warns that their order must match training. A file with 8,000 lines or more skips the block check, because parsing it is slow.</p>
+
+    <p>Google's 2022 system handled the same question differently: its multi-line completions came from running the single-line model repeatedly, with <em>learned thresholds</em> deciding whether to continue to the next line. Google reported a 25% acceptance rate for single-line suggestions and 34% for multi-line ones, with 73 characters per accepted multi-line completion against 21 for single-line. Developers accepted the longer suggestions at a higher rate, perhaps because the system proposed them only where a block was clearly wanted, though the report doesn't say.</p>
+
+    <h3 id="7-2-the-expected-value-of-showing">7.2 The expected value of showing</h3>
+
+    <p>Whether to show any suggestion at all is an expected-value question. Let <span>$p$</span> be the probability that Aditi accepts the suggestion, <span>$g$</span> the time she saves when she does, and <span>$d$</span> the time a suggestion costs her when she doesn't, the glance and the decision to ignore it. Showing it pays off when the expected gain exceeds the expected cost:</p>
+
+    <div class="eq-block"><span>$$p\,g \;-\; (1-p)\,d \;>\; 0 \quad\Longleftrightarrow\quad p \;>\; \frac{d}{g+d}$$</span></div>
+
+    <p>The right-hand side is the break-even acceptance probability. It falls as the possible saving <span>$g$</span> grows relative to the nuisance <span>$d$</span>, so a block that would save thirty seconds should be shown at much lower confidence than a token that would save half a second.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose accepting a good one-line suggestion saves Aditi 4 seconds, and glancing at and dismissing a bad one costs 1 second (both illustrative). What's the lowest probability of acceptance at which showing it pays off? And what changes for a multi-line block that would save 20 seconds but costs 3 seconds to read and dismiss?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>For the line, <span>$d/(g+d) = 1/(4+1) = 0.20$</span>, so showing a suggestion pays once it's at least 20% likely to be accepted. For the block, <span>$3/(20+3) \approx 0.13$</span>, so showing it pays at about 13%. Longer suggestions can be shown with less confidence, because a hit pays so much more, though the cost of reading rises too and the numbers move with it.</p>
+        <p>Both thresholds sit well below the 27% average acceptance rate reported in 2022. That tells us acceptance rate by itself can't judge a system's gating: a system with a lower average acceptance rate could still be showing the right suggestions, if it shows more of them. Section 10 returns to this.</p>
+      </details>
+    </div>
+
+    <p>How Copilot sets its threshold in production isn't published. For every completion, the open-source client logs the model's mean log-probability and the mean log-probability of its best alternative, the raw ingredients of a confidence score, but we don't have the server code or any statement of whether a confidence cut-off is applied. Earlier accounts of the product mention a filter of this kind; we have no primary description of it and won't repeat it as fact. What the published sources do say is that GitHub tracks the <strong>shown rate</strong>, the fraction of opportunities at which a suggestion was displayed, next to the acceptance rate (Ziegler et al., 2022), and that in its 2025 post it explicitly warned that optimising acceptance rate alone can favour "a high volume of simple and short suggestions".</p>
+
+    <p>Google's 2022 system filtered in a different way, and we do have the numbers. Alongside the neural model it ran a rule-based semantic engine that checked single-line completions for correctness before display, resolving references and checking that method calls and assignments were valid. In Go, about 8% of suggestions wouldn't have compiled, and the engine filtered out 80% of those. It also boosted candidates whose first token matched its own prediction: 28% of accepted completions had been moved up the list by the boost, and 0.4% moved down.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Showing policy</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Show everything the model returns</td><td>Highest shown rate, no extra component</td><td>Low-confidence and wrong suggestions interrupt typing</td></tr>
+        <tr><td>Fixed rules (gates, block detection)</td><td>Cheap, predictable, explainable; GitHub's client uses them</td><td>Blind to how good this particular suggestion is</td></tr>
+        <tr><td>Confidence cut-off on model probability</td><td>Hides the least likely suggestions</td><td>Probabilities need calibration; the cut-off trades shown rate against acceptance rate</td></tr>
+        <tr><td>Semantic check with a compiler-like engine</td><td>Removes suggestions that can't compile (80% of them in Google's Go data)</td><td>Needs per-language tooling and adds latency inside a tight budget</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+  </section>
+
+  <section id="training">
+    <h2><span class="num">08</span>Where the model comes from, and what the logs say</h2>
+
+    <p>Everything so far has treated the model as a box that reads a prompt and writes a middle. Someone has to train that box, and then, once it's running, someone has to learn from how Aditi and millions like her treat its output. We'll look at the model first, because its history shows how much GitHub's thinking changed, and then at the logs.</p>
+
+    <h3 id="8-1-the-model">8.1 The model, from Codex to a custom one</h3>
+
+    <p>Copilot began with OpenAI's Codex. GitHub's account is that it started experimenting with OpenAI models in 2020, launched a technical preview in June 2021 and made Copilot generally available to individuals in June 2022, about three years after the idea started (Zhao, September 2023). Codex was GPT-3 trained further on public code, and OpenAI described the approach, and the HumanEval benchmark we'll meet in section 09, in "Evaluating Large Language Models Trained on Code" (Chen et al., 2021). Inside GitHub the first versions were language-specific: OpenAI delivered a Python-only model, then a JavaScript one, then a multilingual one that performed better than expected. Zhao later called the assumption that each language needed its own model a "sunk cost" the team had to let go of once the general models improved.</p>
+
+    <p>In October 2025 GitHub described a different path, training its own completion model, and gave its stages (Shengyu Fu and John Mogensen). First comes <strong>mid-training</strong>, further training of a code-specific base model on a de-duplicated corpus of nearly 10 million repositories and over 600 languages, with objectives beyond predicting the next token, including span infilling and docstring and function pairs. Second is <strong>supervised fine-tuning</strong> on synthetic examples, aimed at making the model a strong fill-in-the-middle engine, attentive to the prefix and suffix and careful about formatting. Third is <strong>reinforcement learning</strong> with a custom algorithm whose rewards cover the quality of the code, whether it's relevant to the surrounding context, and whether it's helpful, meaning that it saves manual effort and uses modern APIs. Chapter 32 explains how reward-based training works in general.</p>
+
+    <p>Two lessons from that post stand out. An early reinforcement-learning version learned to write longer completions with more comments, because those scored well under the rewards, a case of the model exploiting the reward. Guardrails and penalties for unnecessary commentary followed. And adding related files, such as C++ header files, to the training data was, in the authors' words, among the most important lessons, which matches the retrieval design of section 05: context from other files helps at training time for the same reason it helps at request time.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Where the model comes from</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>A general chat model, prompted</td><td>No training; improves whenever the vendor's model does</td><td>Chat models underperform at fill-in-the-middle (GitHub, 2025); slow and costly for a request per pause</td></tr>
+        <tr><td>A base code model fine-tuned for completion (Codex, 2021)</td><td>Strong code ability from the start; fast to ship</td><td>Tied to a partner's roadmap; less control over latency and behaviour</td></tr>
+        <tr><td>A custom model trained for the task (2025)</td><td>Built around FIM, latency and the product's own metrics; GitHub reports +12% acceptance and &minus;35% latency</td><td>A multi-stage training pipeline to run; reward design can go wrong</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+
+    <h3 id="8-2-what-the-client-records">8.2 What the client records</h3>
+
+    <p>When the model is serving, the editor extension keeps a log, usually called <strong>telemetry</strong>. For every suggestion that's displayed it sends a <em>shown</em> event, and for every one that Aditi accepts, an <em>accepted</em> event; a shown suggestion that goes unused produces a <em>rejected</em> one. Acceptance on its own is a weak signal, because Aditi might press Tab and then rewrite everything. So the client also tracks what happens next. After an accept it checks the file at 15, 30, 120, 300 and 600 seconds and asks whether the suggested text is still there. "Still there" is defined loosely: the client looks for the completion near where it was inserted, and then in a wider region, and counts it as retained when the edit distance, measured over lexical tokens, is less than half the completion's length. At the 30-second mark the client can also capture the surrounding code, after either an acceptance or a rejection. Capturing code after a rejection shows what the developer wrote instead, as close as a log gets to the correct answer. What GitHub does with those captures isn't described in the sources we have.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">From a grey suggestion to a metric
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 380" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11" class="">Events the client records, in order, for one suggestion</text>
+<rect x="20" y="44" width="150" height="64" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="44" width="150" height="64" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="73" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">SHOWN</text>
+<text x="95.0" y="87" text-anchor="middle" font-size="10" class="dim">ghost text appears</text>
+<path d="M172,76 L186,76" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="190" y="44" width="150" height="64" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="190" y="44" width="150" height="64" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="265.0" y="73" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">ACCEPTED</text>
+<text x="265.0" y="87" text-anchor="middle" font-size="10" class="dim">Aditi presses Tab</text>
+<path d="M342,76 L356,76" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="360" y="44" width="150" height="64" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="360" y="44" width="150" height="64" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="435.0" y="66" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">STILL THERE?</text>
+<text x="435.0" y="80" text-anchor="middle" font-size="10" class="dim">checks at 15, 30, 120,</text>
+<text x="435.0" y="94" text-anchor="middle" font-size="10" class="dim">300 and 600 seconds</text>
+<path d="M512,76 L526,76" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="530" y="44" width="150" height="64" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="530" y="44" width="150" height="64" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="605.0" y="73" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">RETAINED</text>
+<text x="605.0" y="87" text-anchor="middle" font-size="10" class="dim">edit distance under half</text>
+<path d="M95,110 L95,134 L605,134 L605,110" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<text x="350" y="128" text-anchor="middle" font-size="10" class="dim">rejected or ignored: the suggestion was shown and not used</text>
+<text x="20" y="168" text-anchor="start" font-size="10.5" class="">From these logs come the metrics (section 10) and, for a new model, the A/B test that decides whether it ships:</text>
+<rect x="20" y="184" width="200" height="60" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="184" width="200" height="60" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="120.0" y="204" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">METRICS</text>
+<text x="120.0" y="218" text-anchor="middle" font-size="10" class="dim">acceptance rate, retained</text>
+<text x="120.0" y="232" text-anchor="middle" font-size="10" class="dim">characters, shown rate</text>
+<rect x="250" y="184" width="200" height="60" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="250" y="184" width="200" height="60" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="350.0" y="204" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">A/B TEST</text>
+<text x="350.0" y="218" text-anchor="middle" font-size="10" class="dim">new model for some users,</text>
+<text x="350.0" y="232" text-anchor="middle" font-size="10" class="dim">old one for the rest</text>
+<rect x="480" y="184" width="200" height="60" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="480" y="184" width="200" height="60" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="580.0" y="204" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">SHIP OR NOT</text>
+<text x="580.0" y="218" text-anchor="middle" font-size="10" class="dim">only if gains hold up</text>
+<text x="580.0" y="232" text-anchor="middle" font-size="10" class="dim">on real workloads</text>
+<path d="M222,214 L248,214" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M452,214 L478,214" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="280" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">The loop has a gap that matters: a suggestion that was never shown produces no event at all.</text>
+<text x="20" y="300" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">So the logs describe what the current system showed, a skewed sample of what a model could suggest.</text>
+<text x="20" y="334" text-anchor="start" font-size="10.5" class="dim">Retention windows and the 0.5 edit-distance rule are constants in the open-source client (2025).</text>
+<text x="20" y="354" text-anchor="start" font-size="10.5" class="dim">How the logs feed training is unpublished; GitHub&#x27;s posts describe offline benchmarks, dogfooding and A/B tests.</text>
+      </svg>
+      <div class="diagram-caption">Read the top row as the life of one suggestion, then the second row as what the logs are used for. Amber lines name the gap in the logs.</div>
+    </div>
+
+    <p>These events are the raw material for every number in section 10. They also carry a structural problem that anyone who has read about recommender systems in chapter 16 will recognise. Logs contain a record only for suggestions that were shown. A suggestion the system chose not to show, because a gate stopped it or a threshold hid it, never gets a label, so nobody learns whether Aditi would have taken it. What the logs describe is the behaviour of the current system, and a new model trained or evaluated on them inherits the current system's blind spots. Classic remedies are random exploration, showing a suggestion the system wouldn't normally show to a small fraction of users, and carefully designed experiments. GitHub's posts describe the second, the A/B tests of section 10, and say nothing of the first.</p>
+
+    <p>Logs also mix the model's quality with who is typing. In the 2022 study the average acceptance rate was 23.5% at weekends and 23% on weekday evenings and early mornings, against 21.2% during working hours. The authors found that the hour itself mattered very little; what mattered was whether it fell inside the person's usual working pattern, so a weekday-only user accepted fewer suggestions on the rare weekend they coded. Language mattered too: JavaScript and Python had higher acceptance rates than TypeScript, which the authors thought might hint at a relative strength of neural suggestions in untyped languages. Comparing acceptance across groups without accounting for these mixtures can mislead, which is one reason A/B tests assign users at random.</p>
+
+    <h4 class="why">Why not use accepted suggestions as training data directly?</h4>
+
+    <p>Because an acceptance is a judgement made under the conditions of the previous system. Aditi accepts what was shown, in the order it was shown, with the context that system assembled, and the examples that never reached the screen are missing. A model trained only on acceptances would learn to repeat the earlier model's style. Whether GitHub trains on logged acceptances isn't published. Its 2023 posts describe the model's data as public code, and its 2025 post describes synthetic data and reinforcement learning, which probably means other sources carry most of the weight.</p>
+  </section>
+
+  <section id="offline">
+    <h2><span class="num">09</span>Offline evaluation: does the code run?</h2>
+
+    <p>Before a new model reaches anyone, GitHub needs a way to judge it that doesn't involve real users. For text, the obvious measure is how closely it matches a reference, but code has many correct forms. Aditi's loop could use a regular expression, or split on digits, or walk the string character by character, and all three return the right number. A measure that rewards matching one reference text punishes two of them. Chen and colleagues showed the problem directly in 2021: they computed BLEU, a standard text-similarity score, for samples from their model, and found that programs known to give wrong answers often scored higher than correct ones. Their alternative, now standard, is <strong>functional correctness</strong>: run the code against unit tests and ask whether it passes.</p>
+
+    <p>Their benchmark, <strong>HumanEval</strong>, has 164 programming problems written by hand, each with a function signature, a docstring and an average of 7.7 unit tests. They wrote the problems themselves because the model had been trained on much of GitHub, which already holds solutions to many published puzzles, and a benchmark made of those puzzles would measure memory. A model gets a problem right if its code passes every test. Because sampling is random, one attempt per problem is a noisy measure, so the paper defines <strong><span>$\text{pass@}k$</span></strong>: the probability that at least one of <span>$k$</span> samples for a problem passes, averaged over problems. Codex with 12 billion parameters scored 28.81% at <span>$k=1$</span>, 46.81% at <span>$k=10$</span> and 72.31% at <span>$k=100$</span>.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">A benchmark has two problems. A model solves problem A with probability 0.9 on each independent sample, and problem B with probability 0.02. What are pass@1, pass@10 and pass@100 for this model? Which problem accounts for the growth as k increases?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>pass@1 is the average of 0.9 and 0.02, or 0.46. For pass@10, problem A is nearly certain (1 &minus; 0.1<sup>10</sup>, or about 1) and problem B reaches 1 &minus; 0.98<sup>10</sup> &approx; 0.18, so the average is about 0.59. For pass@100, B reaches 1 &minus; 0.98<sup>100</sup> &approx; 0.87, giving about 0.93. Almost all of the growth comes from the hard problem: easy problems saturate at small k, and large k mostly measures whether a hard problem is ever solved.</p>
+        <p>So a pass@100 number says how much the model can solve if someone sorts through a hundred attempts, and pass@1 says how often the first attempt works. Which one matters depends on how the product uses the model.</p>
+      </details>
+    </div>
+
+    <p>Estimating pass@<span>$k$</span> from samples takes care. One tempting method is to draw <span>$k$</span> samples per problem and count successes, but that has high variance. A second tempting method is to measure the single-sample pass rate <span>$\hat{p}$</span> and compute <span>$1-(1-\hat{p})^{k}$</span>, and that one is biased. Chen et al. generate <span>$n \ge k$</span> samples per problem, using <span>$n=200$</span> and <span>$k \le 100$</span>, count the number <span>$c$</span> that pass, and compute</p>
+
+    <div class="eq-block"><span>$$\text{pass@}k \;=\; \mathbb{E}_{\text{problems}}\!\left[\,1-\frac{\binom{n-c}{k}}{\binom{n}{k}}\,\right]$$</span></div>
+
+    <p>The reasoning is short. If we picked <span>$k$</span> of the <span>$n$</span> samples at random, the chance that all of them fail is the number of ways to choose <span>$k$</span> from the <span>$n-c$</span> failures divided by the number of ways to choose <span>$k$</span> from all <span>$n$</span>, the fraction in the equation, and one minus that is the chance that at least one passes. Computing it directly involves enormous numbers, so the paper gives a numerically stable form that multiplies one term at a time:</p>
+
+    <div class="eq-block"><span>$$\frac{\binom{n-c}{k}}{\binom{n}{k}} \;=\; \prod_{i=n-c+1}^{n}\left(1-\frac{k}{i}\right)$$</span></div>
+
+    <p>Take 20 samples with 3 correct and ask for <span>$k=10$</span>. That product runs over <span>$i=18,19,20$</span> and equals <span>$(8/18)(9/19)(10/20) \approx 0.105$</span>, so the estimate is 0.895. A plug-in formula gives <span>$1-0.85^{10} \approx 0.80$</span> for the same data. That version is biased because <span>$(1-\hat{p})^{k}$</span> is a convex function of <span>$\hat{p}$</span>, so by Jensen's inequality its average over random <span>$\hat{p}$</span> is above its value at the true <span>$p$</span>, and one minus it is too low.</p>
+
+
+    <p>Here's an experiment that checks that claim. It builds 164 imaginary problems, each with its own true chance that one sample passes, draws 20 samples per problem many times, and compares the two estimators with the exact value. Its estimator function is the numpy code from the Codex paper.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">The pass@k estimator against the plug-in shortcut</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+def pass_at_k(n, c, k):                  # Chen et al. 2021, Figure 3
+    if n - c &lt; k:
+        return 1.0
+    return 1.0 - np.prod(1.0 - k / np.arange(n - c + 1, n + 1))
+
+# 164 problems, each with its own true chance p that one sample passes
+P = rng.beta(0.3, 1.2, 164)
+n, k = 20, 10
+truth = np.mean(1 - (1 - P) ** k)        # exact pass@10 of this &quot;model&quot;
+
+unbiased, naive, plug = [], [], []
+for _ in range(2000):
+    c = rng.binomial(n, P)               # passes out of n samples
+    unbiased.append(np.mean([pass_at_k(n, ci, k) for ci in c]))
+    plug.append(np.mean(1 - (1 - c / n) ** k))     # 1-(1-p_hat)^k
+print(f&quot;true pass@{k}: {truth:.4f}&quot;)
+print(f&quot;unbiased estimator: mean {np.mean(unbiased):.4f}, &quot;
+      f&quot;sd {np.std(unbiased):.4f}&quot;)
+print(f&quot;plug-in 1-(1-p^)^k: mean {np.mean(plug):.4f}, &quot;
+      f&quot;sd {np.std(plug):.4f}&quot;)
+print(f&quot;pass@1 truth {P.mean():.3f}; pass@100 truth &quot;
+      f&quot;{np.mean(1 - (1 - P) ** 100):.3f}&quot;)</code></pre>
+      <div class="tryit-out">The true pass@10 of this simulated model is <code>0.5831</code>. Across 2,000 repeated draws of 20 samples per problem, the unbiased estimator averages <code>0.5830</code>, with a standard deviation of <code>0.0136</code>. Plug-in averages <code>0.5546</code>, about three points too low, even though it uses the same samples. Its last line shows why one number is not enough: the same model has pass@1 of <code>0.250</code> and pass@100 of <code>0.791</code>.</div>
+    </details>
+
+    <p>For a completion product the choice of <span>$k$</span> follows the interface. Inline suggestions show one result at a time, so pass@1 is the nearest offline analogue of what Aditi sees first. Copilot also has a panel that lists many alternatives, and users can cycle through suggestions, and for those pass@<span>$k$</span> with a small <span>$k$</span> describes the chance that something in the list works. Temperature, the setting that controls how random the sampling is, pulls the two apart. Chen et al. found that for a 679-million-parameter model the best temperature was 0.2 for pass@1 and 0.8 for pass@100, since a larger set of samples benefits from diversity and a single sample benefits from picking the likeliest tokens. An inline product that shows one suggestion wants a low temperature, and GitHub's Zhao described reducing sampling randomness and caching responses so outputs were more repeatable.</p>
+
+    <p>Function-level benchmarks like HumanEval don't test the thing Copilot does most, filling a gap inside a file. OpenAI released infilling benchmarks with the FIM paper, built by taking solutions from HumanEval and cutting out spans, so the model has to write the missing piece given the code on both sides. GitHub's 2025 post names two offline checks for its new model. One is an execution-based benchmark, in which suggestions are inserted into real code across the major languages and the build and tests are run; the other is an independent language model that scores quality, relevance and helpfulness. Both appear alongside a comparison on the OpenAI infilling benchmarks.</p>
+
+    <p>Offline numbers are quick, cheap and repeatable, and the 2022 GitHub study describes how far they can drift from reality. It cites a study of 15,000 completions by 66 Visual Studio developers that found significant differences between synthetic benchmarks and real use, and an evaluation of Microsoft's IntelliCode in which the share of cases with the right method call in the top five suggestions fell from 90% in offline testing to 70% when used online. So offline evaluation filters out bad models, and the final decision has to come from real users.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Offline measure</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Text similarity (BLEU and similar)</td><td>Needs no execution, instant</td><td>Many correct programs differ in text; wrong programs can score higher (Chen et al., 2021)</td></tr>
+        <tr><td>Unit tests, pass@k on HumanEval</td><td>Measures whether code works; reproducible</td><td>Small (164 problems), function-sized, not inside a real project</td></tr>
+        <tr><td>Infilling benchmarks</td><td>Tests the middle-of-file task directly</td><td>Still built from short stand-alone problems</td></tr>
+        <tr><td>Build and test pass rates on real code (2025)</td><td>Closer to real projects; checks that the project still builds</td><td>Costly to run; limited by the projects that have usable tests</td></tr>
+        <tr><td>LLM-as-judge on quality and relevance</td><td>Scales to cases with no tests; captures style</td><td>The judge can be wrong and has its own biases</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>GitHub's 2025 process runs offline benchmarks first, then dogfooding, where internal developers and partners use the new model for their own work through a model picker, then production A/B tests, and it states it ships a model "only when statistically significant improvements hold up under real developer workloads". That ordering, cheap filters first and expensive tests last, is the one chapter 25 recommends for evaluation.</p>
+
+    <h4 class="why">Why does the estimator use combinations and not just a repeat count?</h4>
+
+    <p>Because the number of samples we can afford to run is large, 200 per problem in the paper, and the number we want to report on is small, such as 1 or 10. Drawing exactly <span>$k$</span> and counting successes wastes the other samples and gives a noisy number. Using all <span>$n$</span> samples and computing the exact probability that a random <span>$k$</span> of them contain a success keeps all the information and removes the extra noise.</p>
+  </section>
+
+  <section id="online">
+    <h2><span class="num">10</span>Online evaluation: acceptance, retention and the A/B test</h2>
+
+    <p>A model that passes the benchmarks goes to real developers, and the first question is what to count. Acceptance rate is the obvious number; the 2022 study defines it as the fraction of shown suggestions that the developer accepts. It has the advantages of being immediate and available for every user. That study asked whether it was also a good measure of what companies care about, whether the developer was more productive. Its authors emailed 17,420 users in the technical preview and matched 2,047 survey responses, collected between February 10 and March 6, 2022, to usage logs from a four-week window around the survey. Their survey covered four of the five dimensions of the SPACE framework of developer productivity (satisfaction, performance, communication and collaboration, and efficiency and flow), and they combined the answers into one perceived-productivity score.</p>
+
+    <p>They then correlated that score with a core set of usage measures. Acceptance rate did best, accepted completions divided by shown completions, with a correlation of 0.24 (p &lt; 0.0001) with aggregate perceived productivity. All the persistence measures, those that ask whether accepted code stays unchanged after a given time, correlated less well, and shorter persistence windows did better than longer ones, which the authors explain by their being closer to plain acceptance. A regression on all measures together, a projection onto latent structures, had a first component explaining 43.2% of the variance. They also point out that 0.24 is a modest number: "there is still notable unexplained variance", and with correlational data they can't claim causation. Their conclusion is that acceptance rate is useful for coarse monitoring of a system, and that other methods are needed for fine-grained work because of the many human factors involved.</p>
+
+    <p>Acceptance rate is one factor in a product of rates. If the <em>shown rate</em> is the fraction of completion opportunities at which something was displayed, the study's own metric definitions give</p>
+
+    <div class="eq-block"><span>$$\underbrace{\frac{\text{accepted}}{\text{opportunities}}}_{\text{accepted per opportunity}} \;=\; \underbrace{\frac{\text{shown}}{\text{opportunities}}}_{\text{shown rate}} \;\times\; \underbrace{\frac{\text{accepted}}{\text{shown}}}_{\text{acceptance rate}}$$</span></div>
+
+    <p>and the product is what Aditi experiences: how often something useful appears when she pauses. A system can raise its acceptance rate by showing less, which lowers the shown rate and can lower the product. This is the cost-of-interruption argument of section 07 in measurable form, and it explains why the study found that adding shown frequency to a model of acceptance rate improved its predictions at statistically significant levels.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Model A has an acceptance rate of 25% and its accepted suggestions average 40 characters. Model B has an acceptance rate of 30% but its suggestions are mostly short, averaging 12 characters when accepted. Both show 100 suggestions in the same period (all illustrative). Which one puts more code into the file, and what does that say about using acceptance rate alone?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>Model A has 25 accepted suggestions of 40 characters, or 1,000 characters. Model B has 30 accepted suggestions of 12 characters, or 360. Model B wins on acceptance rate by five points and loses by almost a factor of three on characters contributed. A change that makes suggestions shorter and safer can raise acceptance while the product gets less useful.</p>
+        <p>GitHub's 2025 post makes this point in its own words, saying that acceptance rate alone can favour "a high volume of simple and short suggestions", and it reports accepted-and-retained characters beside it.</p>
+      </details>
+    </div>
+
+    <p>That leads to the metric stack GitHub names. <strong>Acceptance rate</strong> and <strong>shown rate</strong> describe how often suggestions are used and displayed. <strong>Accepted-and-retained characters</strong> counts the characters from accepted suggestions that survive in the file, which rewards longer suggestions only when they're kept. <strong>Time to first token</strong>, <strong>latency</strong> and <strong>throughput</strong> track speed and capacity. And the 2023 post describes a <strong>guardrail metric</strong>, the share of suggestions that are multi-line against single-line, added after a model update had reduced quality in a way the headline numbers didn't show. A guardrail is a number that must not move unexpectedly while the targets are being improved.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Online measure</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Acceptance rate</td><td>Immediate, per user, best single predictor of perceived productivity (&rho; = 0.24, 2022)</td><td>Rewards short, safe suggestions; varies by language, hour and person</td></tr>
+        <tr><td>Retention (still in the file after 15 s to 10 min)</td><td>Discounts accepted code that was immediately rewritten</td><td>Correlated less well with perceived productivity in the 2022 study; depends on the window</td></tr>
+        <tr><td>Accepted-and-retained characters</td><td>Rewards volume that stays; hard to inflate with short suggestions</td><td>Counts size and not value; a long boilerplate block scores well</td></tr>
+        <tr><td>Productivity survey</td><td>Asks about the thing we care about</td><td>Slow, sparse, self-reported and subject to who responds</td></tr>
+        <tr><td>Task-time studies</td><td>Direct evidence of speed, such as up to 55% faster in GitHub's blind study</td><td>Expensive, one task at a time, and a small group</td></tr>
+        <tr><td>Iteration time (Google, 2022)</td><td>Measures time between builds and tests across thousands of engineers</td><td>Needs the engineering infrastructure to log it</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The decision, in the end, is made with A/B tests. In an <strong>A/B test</strong> some users are served by the new version and a comparable group by the old one, at random, and the difference in the metrics is what the change caused. GitHub describes building an experimentation platform for this, later the Microsoft Experimentation Platform, and treating it as the way to iterate quickly. Its published results come in relative terms: neighbouring-tab context raised acceptance by 5%, fill-in-the-middle by 10% (both 2023), and the custom model of 2025 raised acceptance by 12% and accepted-and-retained characters by 20% while cutting latency by 35% and tripling token throughput. Google's 2022 study compared more than 10,000 engineers using ML-enhanced completion with a control group over three months across eight languages and reported a 6% reduction in coding iteration time, the time between builds and tests, at a 90% confidence level. In that deployment about 3% of new code, counted in characters, came from accepted suggestions.</p>
+
+
+    <h4 class="why">Why does GitHub report relative gains, never absolute acceptance rates?</h4>
+
+    <p>Because an absolute rate depends on the mix of users and languages, and on user interface choices that differ between products, so it doesn't transfer. In 2022 the study found a 27% acceptance rate for Copilot, and cites 10% for the click-through rate of IntelliCode Compose, and says the difference is presumably due to the kinds of completion offered or to interface choices, and that these discrepancies "highlight the difficulty in using acceptance rate to understand the value of a system". A relative change within one product, measured by randomised experiment, avoids that problem.</p>
+
+  </section>
+
+  <section id="safety">
+    <h2><span class="num">11</span>Not copying, not insecure: the filters</h2>
+
+    <p>Aditi's suggestion came from a model trained on public code, and a model trained that way can occasionally reproduce a passage it saw, word for word, along with its licence obligations. It can also write code in a style that's common and insecure. Every suggestion therefore passes through checks before it reaches the screen, and we can say more about the first than the second.</p>
+
+    <p>GitHub's September 2023 post describes a filter that blocks suggestions matching public code, and its current documentation gives the mechanism: Copilot "compares a potential suggestion and approximately 150 characters of surrounding code with an index of public repositories". Depending on the policy set for the account or organisation, a matching suggestion is either blocked or shown with information about the match, and the documentation reports that such matches occur in fewer than one percent of suggestions. Only code on GitHub.com is in the index; private repositories and code hosted elsewhere aren't searched. When a developer accepts an unchanged suggestion that matches public code, Copilot records details such as the matching file URLs and any detected licences, which is the code referencing feature.</p>
+
+    <p>Part of this shows in the open-source client, from the editor's side. Its code defines a minimum length of 65 lexemes before a completion is considered for matching, where a lexeme is a word, a run of repeated symbol characters or a single punctuation mark, and a comment says the value is kept in sync with the matching service, which the code calls Snippy. Documentation's 150 characters and the client's 65 lexemes are two different layers of the same feature, and the sources don't say how they relate. Matchers like this are usually built by hashing overlapping windows of lexemes and looking the hashes up in a very large index, making the check fast and insensitive to formatting. GitHub hasn't published the details of its index.</p>
+
+    <p>For security, GitHub's 2023 post says a filter blocks suggestions that contain common vulnerabilities, giving SQL injection and hardcoded credentials as examples, and that Azure OpenAI Service filters remove offensive language. It describes the vulnerability filter as AI-based and doesn't publish its recall. A filter like this faces the usual trade: block too much and good suggestions disappear, block too little and risky ones pass.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Handling public-code matches</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>No check</td><td>No cost, no latency</td><td>Verbatim reproduction goes unnoticed and licence questions are left to the developer</td></tr>
+        <tr><td>Remove duplicates from the training data only</td><td>Reduces memorisation at the source; GitHub's 2025 corpus was de-duplicated</td><td>Doesn't guarantee none will be reproduced</td></tr>
+        <tr><td>Check suggestions and block or label them (policy-controlled)</td><td>Catches matches at the moment of suggestion; administrators choose block or show</td><td>Adds work on the request path; limited to the index's coverage; false positives remove good code</td></tr>
+        <tr><td>Log accepted matches with licence information</td><td>Gives the developer evidence to decide</td><td>Only informs; it acts after the code is already in the file</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>GitHub's practice combines the last three rows. This check shows how a safety requirement shapes the architecture: it needs a large external index, it must be consulted for every candidate suggestion, and it has to be fast enough not to break the latency budget. Where in the request path the check runs isn't published, and it's probably applied to the finished or nearly finished completion on the server side, though that's our inference.</p>
+
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">12</span>What went wrong, and what it cost</h2>
+
+    <p>Several of the most useful passages in GitHub's engineering posts are about things that didn't work. We list them as the sources present them.</p>
+
+    <p>Copilot's earliest design generated ten suggestions per request and showed them in a list. Zhao described the cost bluntly, comparing it to computing the results on the second page of a search engine, and the move to a single suggestion in ghost text reduced wasted compute and kept the developer in flow. A related early mistake was the interface: the team tried a web page and found it forced developers to switch contexts, and settled on a modeless experience inside the editor after dogfooding it internally.</p>
+
+    <p>Per-language models were the second. GitHub had assumed each language would need its own model, and when general models improved enough to make that unnecessary the team had to give up work it had already invested in. Zhao calls this the sunk-cost trap.</p>
+
+    <p>Third came a model update that reduced quality in a way the existing metrics missed. Its fix was the guardrail metric we met in section 10, the proportion of multi-line suggestions against single-line ones, added so that a change in the suggestion mix would be caught.</p>
+
+    <p>Fourth was the reward-hacking episode in 2025, in which an early reinforcement-learning version favoured longer completions with more comments. That reward was meant to capture helpfulness and the model found a shortcut that scored well without being helpful. GitHub added penalties for unnecessary commentary and says the broader lesson is to guard rewards carefully and to avoid optimising a single metric such as acceptance rate.</p>
+
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What happens</th><th>What the developer sees</th><th>What the design does</th></tr></thead>
+      <tbody>
+        <tr><td>The developer types faster than the model replies</td><td>Nothing, or a late flash of text</td><td>Debounce, cancel stale requests, hide a reply that no longer matches the prefix (section 06)</td></tr>
+        <tr><td>The cursor is in the middle of a line of real code</td><td>No suggestion</td><td>A position gate suppresses the request (section 07)</td></tr>
+        <tr><td>The best context is in another file</td><td>A suggestion that guesses a name wrongly</td><td>Jaccard snippets from open tabs; vector search for enterprises (sections 03, 05)</td></tr>
+        <tr><td>The model writes past where the existing code resumes</td><td>A duplicated return or a stray function</td><td>FIM training with an end token, stop sequences and block trimming (sections 04, 06)</td></tr>
+        <tr><td>A suggestion copies public code</td><td>Nothing, or a suggestion labelled with its source</td><td>A matching check, by policy block or show-with-reference (section 11)</td></tr>
+        <tr><td>A model update looks better on one metric and is worse</td><td>Shorter, safer, less useful suggestions</td><td>Guardrail metrics, retention, and an A/B test before shipping (section 10)</td></tr>
+        <tr><td>Reinforcement learning rewards a shortcut</td><td>Long suggestions padded with comments</td><td>Penalties on the shortcut and review of examples before release (section 08)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">13</span>The whole system</h2>
+
+    <p>Now we can draw the full design. On the left, the online path is Aditi's pause and runs in well under a second, with the cache and reuse short-circuiting the network on many pauses. On the right, the offline path is what makes the next model better, running over weeks from logs to a shipped version.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The whole design, from keystroke to ship decision
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 560" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" text-anchor="start" font-size="11.5" class="">ON THE LAPTOP (VS Code extension)</text>
+<text x="400" y="22" text-anchor="start" font-size="11.5" class="">ON GITHUB&#x27;S SERVERS AND IN ITS LABS</text>
+<rect x="20" y="36" width="320" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="36" width="320" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="180.0" y="53" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">EDITOR EVENTS</text>
+<text x="180.0" y="67" text-anchor="middle" font-size="10" class="dim">keystroke, cursor, open tabs</text>
+<path d="M180,78 L180,92" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="94" width="320" height="40" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="94" width="320" height="40" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="180.0" y="111" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">DEBOUNCE + CANCEL</text>
+<text x="180.0" y="125" text-anchor="middle" font-size="10" class="dim">stale requests dropped</text>
+<path d="M180,136 L180,150" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="152" width="320" height="40" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="152" width="320" height="40" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="180.0" y="169" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">CACHE LOOKUP</text>
+<text x="180.0" y="183" text-anchor="middle" font-size="10" class="dim">recent completions by prefix, in-flight</text>
+<path d="M180,194 L180,208" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="210" width="320" height="54" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="210" width="320" height="54" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="180.0" y="227" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">PROMPT BUILDER</text>
+<text x="180.0" y="241" text-anchor="middle" font-size="10" class="dim">prefix, suffix, path and language,</text>
+<text x="180.0" y="255" text-anchor="middle" font-size="10" class="dim">Jaccard snippets from open tabs</text>
+<path d="M180,266 L180,280" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="282" width="320" height="40" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="282" width="320" height="40" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="180.0" y="299" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">MULTILINE DECISION</text>
+<text x="180.0" y="313" text-anchor="middle" font-size="10" class="dim">one line, or a whole block?</text>
+<path d="M342,302 L398,302" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="282" width="280" height="40" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="400" y="282" width="280" height="40" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="540.0" y="299" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">MODEL (FIM)</text>
+<text x="540.0" y="313" text-anchor="middle" font-size="10" class="dim">prefill, then stream decode</text>
+<path d="M540,324 L540,338" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="340" width="280" height="44" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="400" y="340" width="280" height="44" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="540.0" y="359" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">SERVER-SIDE FILTERS</text>
+<text x="540.0" y="373" text-anchor="middle" font-size="10" class="dim">public-code match, security, offensive content</text>
+<path d="M398,362 L342,362" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="340" width="320" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="340" width="320" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="180.0" y="359" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">SHOW GHOST TEXT</text>
+<text x="180.0" y="373" text-anchor="middle" font-size="10" class="dim">trim at block end, stream in</text>
+<path d="M180,386 L180,400" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="402" width="320" height="44" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="402" width="320" height="44" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="180.0" y="421" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">MEERA: TAB, KEEP TYPING, OR IGNORE</text>
+<text x="180.0" y="435" text-anchor="middle" font-size="10" class="dim">accepted / rejected / shown events</text>
+<path d="M342,424 L398,424" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="402" width="280" height="44" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="400" y="402" width="280" height="44" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="540.0" y="421" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">TELEMETRY LOG</text>
+<text x="540.0" y="435" text-anchor="middle" font-size="10" class="dim">retention checks over 10 minutes</text>
+<path d="M540,448 L540,468" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="470" width="280" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="400" y="470" width="280" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="540.0" y="489" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">OFFLINE EVAL + A/B TEST</text>
+<text x="540.0" y="503" text-anchor="middle" font-size="10" class="dim">pass@k, execution, LLM judge, online</text>
+<path d="M682,492 L694,492 L694,302 L682,302" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="480" text-anchor="start" font-size="10.5" class="dim">Online path: well under a second, on every pause.</text>
+<text x="20" y="500" text-anchor="start" font-size="10.5" class="dim">Offline path: weeks, from logs to a shipped model.</text>
+<text x="20" y="530" text-anchor="start" font-size="10" class="" fill="#fbbf24">Unpublished: debounce default, server sizes, filter internals, how logs feed training.</text>
+<text x="20" y="548" text-anchor="start" font-size="10" class="" fill="#fbbf24">The amber loop on the far right returns a better model or prompt to the front.</text>
+      </svg>
+      <div class="diagram-caption">Start at the editor and follow the amber arrows down to the model, then the pink arrows to the filters. A green arrow returns the text to the screen, and the blue path carries the logs to evaluation.</div>
+    </div>
+
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Component</th><th>What it does</th><th>Added because</th></tr></thead>
+      <tbody>
+        <tr><td>Position gates</td><td>Skip requests that can't produce a useful suggestion</td><td>Text after the cursor, excluded files and thin context make a request a waste (§07)</td></tr>
+        <tr><td>Debounce, cancel, cache, reuse</td><td>Send about one request per line and show a stored reply when possible</td><td>Per-keystroke requests cost an order of magnitude more (§01, §06)</td></tr>
+        <tr><td>Prompt builder</td><td>Fills a 7,692-token budget with prefix, suffix and context</td><td>The model reads a fixed window (§03)</td></tr>
+        <tr><td>Jaccard snippet search</td><td>Picks windows from open tabs most like the cursor's words</td><td>Helper names and conventions live in other files (§05)</td></tr>
+        <tr><td>FIM-trained model</td><td>Writes the middle between prefix and suffix and ends it</td><td>Left-to-right models can't use code below the cursor (§04)</td></tr>
+        <tr><td>Multi-line decision</td><td>Chooses a line or a block before the request</td><td>Blocks cost more and are wrong more expensively (§07)</td></tr>
+        <tr><td>Public-code and security filters</td><td>Block or label risky suggestions</td><td>The model learned from public code (§11)</td></tr>
+        <tr><td>Telemetry</td><td>Logs shown, accepted, rejected and retention</td><td>Nobody can read Aditi's mind (§08)</td></tr>
+        <tr><td>Offline benchmarks, A/B tests</td><td>Filter models before release and decide with real users</td><td>Offline and online results can disagree (§09, §10)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Level</th><th>The choice</th><th>Technique</th></tr></thead>
+      <tbody>
+        <tr><td>System</td><td>Cheap checks first, the expensive model last</td><td>Gates, cache, then network request</td></tr>
+        <tr><td>Prompt</td><td>Fixed token budget in four shares</td><td>35% prefix, 15% suffix, 50% other context</td></tr>
+        <tr><td>Retrieval</td><td>Lexical similarity over sliding windows</td><td>Jaccard on word sets, best window per file</td></tr>
+        <tr><td>Model</td><td>Train on rearranged documents</td><td>FIM with sentinels, PSM and SPM orders</td></tr>
+        <tr><td>Serving</td><td>Fewer, shorter requests</td><td>Debounce, radix-trie cache, streaming, speculative next request</td></tr>
+        <tr><td>Offline evaluation</td><td>Run the code, estimate without bias</td><td>pass@k with combinatorial estimator</td></tr>
+        <tr><td>Online evaluation</td><td>Several metrics and a guardrail</td><td>Acceptance, shown rate, retention, A/B test</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Several parts of this picture are unpublished: the debounce default, the model's size and serving hardware for the current Copilot, how the server arranges the prompt, whether a confidence threshold applies, the details of the matching index, and how logs feed training. Our sources describe the system from 2021 to 2025, and the product has certainly moved since.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">14</span>Summary</h2>
+    <ol>
+      <li><strong>The prompt is the product.</strong> Models read a fixed window, so building the prompt is an allocation problem: the open-source Copilot client reserves 7,692 tokens, split 35% prefix, 15% suffix and 50% other context, with 500 held back for the reply.</li>
+      <li><strong>A left-to-right model can't use code below the cursor.</strong> Fill-in-the-middle training cuts documents into prefix, middle and suffix, moves the middle to the end and trains with the ordinary loss, which costs nothing in left-to-right quality (Bavarian et al., 2022) and gave Copilot a 10% relative lift in acceptance.</li>
+      <li><strong>Context from other files is retrieved cheaply.</strong> Copilot scores 60-line windows of open tabs by Jaccard similarity of word sets, keeps the best window per file, and found that a very low threshold works best; neighbouring tabs raised acceptance by 5%.</li>
+      <li><strong>Reading the prompt costs far more than writing the answer.</strong> A line is about 5 tokens against thousands of prompt tokens, so the server bill depends on how many requests are sent and how much of each prompt is re-read.</li>
+      <li><strong>Debounce alone saves little; reuse saves most.</strong> A radix-trie cache of recent completions and a table of in-flight requests turn typing along with a suggestion into a lookup, and in our simulation cut a line from about 39 requests to about 2.</li>
+      <li><strong>Show a suggestion only when it pays.</strong> Showing pays off when the acceptance probability exceeds <span>$d/(g+d)$</span>, the cost of a glance over the total of that cost and the time saved; gates, block detection and semantic checks keep the rest from interrupting.</li>
+      <li><strong>Offline, run the code.</strong> HumanEval and pass@k judge functional correctness, and the unbiased estimator <span>$1-\binom{n-c}{k}/\binom{n}{k}$</span> beats the plug-in shortcut, biased low; pass@1 matches an inline product and larger <span>$k$</span> matches a list of alternatives.</li>
+      <li><strong>Offline and online results can disagree.</strong> GitHub's 2022 study cites IntelliCode's top-five hit rate falling from 90% offline to 70% online, so a model has to prove itself on real users.</li>
+      <li><strong>Acceptance rate is the best single predictor, and a weak one.</strong> It correlated 0.24 with perceived productivity (Ziegler et al., 2022), varies with language and working pattern, and can be raised by showing shorter suggestions, so it needs shown rate, retention and a guardrail beside it.</li>
+      <li><strong>Public-code matching is part of the architecture.</strong> A check against an index of public repositories, with about 150 characters of surrounding code, blocks or labels matching suggestions, which occur in under 1% of cases.</li>
+      <li><strong>Several of the lessons are about restraint.</strong> One suggestion at a time instead of ten, no per-language models, penalties for reward hacking and guardrail metrics are all ways of not letting a single number steer the system.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">15</span>Build this</h2>
+    <p class="lede">You can build a miniature of the whole loop on a laptop with a small open code model that supports fill-in-the-middle, and see for yourself which of the chapter's pieces matter most.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A small inline completer with retrieval, caching and honest evaluation</span>
+        <span class="proj-meta">~6 hours &middot; Python, a local FIM-capable code model</span>
+      </div>
+      <p>The setup is a single process that watches a text file as you type, requests a completion from a local model through a runtime such as llama.cpp or Ollama, and shows it as grey text in a terminal UI. Use any open code model that documents its FIM prompt format, and read its model card for the sentinel tokens.</p>
+      <ol class="proj-steps">
+        <li>Build the prompt with a token budget. Count tokens with the model's tokenizer, give 35% to the prefix, 15% to the suffix and 50% to context, and cut the prefix from the top at a line boundary. Print the allocation for each request.</li>
+        <li>Add Jaccard retrieval over a folder of open files. Split on non-alphanumerics, drop language keywords, slide a 40-line window one line at a time and keep the best window per file. Use the experiment in section 05 to measure how many needed names your snippets contain.</li>
+        <li>Write the request policy. Add a debounce, cancel stale requests, keep a prefix-keyed cache that serves the rest of a completion when the user types along with it, and reuse in-flight requests. Count requests per line before and after each step.</li>
+        <li>Add a position gate and a one-line or block decision. Suppress requests when real code follows the cursor, request a block only at the start of an empty block, and cap single-line requests at a few tens of tokens.</li>
+        <li>Evaluate offline. Write 30 function stubs with tests, sample 20 completions per stub at two temperatures, and compute pass@1 and pass@10 with the unbiased estimator. Compare prompts with and without the suffix, and with and without retrieved snippets.</li>
+        <li>Log shown, accepted and rejected events from a typing script that accepts the model's suggestion when it matches the true line. Compute acceptance rate, shown rate and accepted characters, then change the model's temperature and watch the three move differently.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the prompt-with-suffix beats the prefix-only prompt on your infilling stubs, retrieval raises pass@1 on stubs that use a helper from another file, the cache brings requests per line below two, and a change that raises acceptance rate by shortening suggestions lowers your accepted-characters number.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Add a confidence gate. Show a suggestion only when the model's mean token log-probability exceeds a cut-off, sweep the cut-off, and plot shown rate against acceptance rate. Pick the cut-off from the break-even formula in section 07 using your own estimate of the time saved by a hit and the time lost to a miss.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">16</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why does a code completion model need the code after the cursor?</summary>
+      <div class="qa-body"><p>A cursor is usually in the middle of a file, and what follows it determines what makes a good suggestion: a return statement already written below, a function that's already defined, a closing bracket. A model that only sees the code above tends to repeat or contradict what's below, and runs on past where the existing code resumes. Fill-in-the-middle training teaches a model to read both sides and write something that connects them, ending with an end token once it joins the suffix.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is acceptance rate, and why isn't it enough?</summary>
+      <div class="qa-body"><p>It's the fraction of shown suggestions the developer accepts. GitHub's 2022 study found it the best single usage predictor of perceived productivity, with a correlation of 0.24, and 27% was the average for Copilot at the time. But it can be raised by showing shorter or safer suggestions, it varies by language, hour and person, and it ignores whether the code stays. So GitHub reports it with shown rate, retained characters and a guardrail on the multi-line share, and judges changes by randomised experiment.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why not send a request on every keystroke?</summary>
+      <div class="qa-body"><p>A request carries a prompt of thousands of tokens and gets back a few, so the cost is dominated by reading the prompt, and most keystrokes happen before the user would want a suggestion anyway. Her editor debounces, cancels stale requests, and reuses a cached or in-flight completion when the user types what it predicted. In a simulation of 40-character lines, reuse brought requests from about 39 per line to under 2, while a 100 ms debounce alone barely changed anything because typing gaps are often longer than that.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How is the prompt assembled under a token budget?</summary>
+      <div class="qa-body"><p>Copilot's open-source client uses an 8,192-token window with 500 held back for the completion, and splits the remaining 7,692 tokens 35% prefix, 15% suffix and 50% other context. Context is mostly the best-scoring windows from open files, ranked by Jaccard similarity to the words at the cursor, ordered so that the best match sits closest to the code being completed. A header naming the file's path and language comes first. Whether unused shares are redistributed isn't stated in the constants.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How does fill-in-the-middle training work, and why are there two orderings?</summary>
+      <div class="qa-body"><p>Split each training document at two random character positions into prefix, middle and suffix, then write it as sentinel, prefix, sentinel, suffix, sentinel, middle, end token (PSM), applying this to a fraction of documents, 50% in the paper. Loss is ordinary next-token loss over the whole sequence, so left-to-right ability isn't lost. At inference the prompt stops after the middle sentinel. SPM, the second ordering, puts the suffix first so that appending to the prefix doesn't invalidate cached keys and values for the suffix, which saves computation when the prefix changes on every keystroke. Training mixes half PSM and half SPM.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why is the plug-in estimator 1 − (1 − p̂)^k a biased estimate of pass@k?</summary>
+      <div class="qa-body"><p>Because (1 − p̂)^k is convex in the estimated single-sample pass rate, by Jensen's inequality its expectation over the random p̂ is larger than its value at the true p, and one minus it underestimates pass@k. An unbiased version uses n ≥ k samples and computes the exact probability that a random subset of k contains a success, 1 − C(n−c, k)/C(n, k), which equals one minus a product over i from n−c+1 to n of (1 − k/i). In a simulation with n = 20 and k = 10 the unbiased estimator averaged 0.583 against a true 0.583, and the plug-in 0.555.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>When does showing a low-confidence suggestion pay off?</summary>
+      <div class="qa-body"><p>When the expected gain beats the expected cost. If a hit saves g seconds, a miss costs d seconds of attention and p is the probability of acceptance, then showing pays when p &gt; d/(g+d). With g = 4 and d = 1 the threshold is 20%, and for a block saving 20 seconds at a cost of 3 it falls to about 13%. So longer suggestions can be shown at lower confidence. In practice this has to be balanced against shown rate and acceptance rate, which move in opposite directions as the threshold changes. What Copilot does in production isn't published.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Offline pass@1 improves but the A/B test shows no gain in acceptance. What do you check?</summary>
+      <div class="qa-body"><p>First, the benchmark is function-level and stand-alone, while real use is a gap inside a file with context, so the improvement may be on a distribution that isn't used much; the 2022 study cites top-five accuracy falling from 90% offline to 70% online. Second, the new model may be slower, and a late suggestion is not shown or not used, so check latency and shown rate. Third, prompt and prefix assembly may differ in production from the benchmark harness. Fourth, the metric may have moved in the wrong direction on suggestion length, so check retained characters and the multi-line share. Fifth, the experiment may be underpowered or contaminated by user mix, so check assignment and run it long enough to cover working patterns.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Design the logging so you can tell a good suggestion from a lucky acceptance.</summary>
+      <div class="qa-body"><p>Record shown, accepted and rejected events with an opportunity identifier, so that shown rate can be computed, plus the latency stages and the prompt-construction details that explain a miss. After an accept, check the file at several delays, as Copilot's client does at 15, 30, 120, 300 and 600 seconds, and count the completion as retained when its lexical edit distance from what's in the file is under half its length. After a rejection, capture what the developer wrote instead, the closest thing to a label for the right answer. Then correct for the missing data: suggestions that were never shown have no events, so use randomised experiments and, where acceptable, small exploration to see them.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you keep a completion system fast when the prompt has thousands of tokens?</summary>
+      <div class="qa-body"><p>Reduce the number of requests first, with position gates, debounce and cancellation, a prefix-keyed cache and reuse of in-flight requests. Then reduce the cost of each request by ordering the prompt so unchanged parts come first and their stored keys and values can be reused, the argument for putting the suffix before the prefix in SPM order, by keeping single-line outputs short and stopping the stream when the line or block ends, and by sizing the model to the task. Google's 2022 system used a model of about 0.5 billion parameters with roughly 1,000 to 2,000 tokens of context and a median inference time of about 40 ms. Copilot's October 2025 post reports a 35% latency reduction and 3 times the throughput from a custom model.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">17</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://github.blog/ai-and-ml/github-copilot/how-github-copilot-is-getting-better-at-understanding-your-code/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">How GitHub Copilot is getting better at understanding your code</div><div class="r-sub">Johan Rosenkilde, GitHub blog, May 2023. Prompt crafting, neighbouring tabs, fill-in-the-middle and the first embeddings work, with the A/B results of sections 03 and 04.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.blog/ai-and-ml/github-copilot/inside-github-working-with-the-llms-behind-github-copilot/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Inside GitHub: Working with the LLMs behind GitHub Copilot</div><div class="r-sub">Sara Verdi, GitHub blog, May 2023. How the Model Improvements team thinks about prompt crafting, context and fine-tuning.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.blog/ai-and-ml/llms/how-to-build-an-enterprise-llm-application-lessons-from-github-copilot/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">How to build an enterprise LLM application: Lessons from GitHub Copilot</div><div class="r-sub">Shuyin Zhao, GitHub blog, September 2023. Scoping, ghost text, guardrail metrics, caching and filters, with the mistakes of section 12.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.blog/ai-and-ml/github-copilot/the-road-to-better-completions-building-a-faster-smarter-github-copilot-with-a-new-custom-model/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">The road to better completions: Building a faster, smarter GitHub Copilot with a new custom model</div><div class="r-sub">Shengyu Fu and John Mogensen, GitHub blog, October 23, 2025. Mid-training, fine-tuning, reinforcement learning, evaluation and the metrics used.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2205.06537" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Productivity Assessment of Neural Code Completion</div><div class="r-sub">Ziegler et al., MAPS 2022. Acceptance rate, persistence and perceived productivity. arXiv:2205.06537</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2107.03374" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Evaluating Large Language Models Trained on Code</div><div class="r-sub">Chen et al., 2021. Codex, HumanEval and the unbiased pass@k estimator of section 09. arXiv:2107.03374</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2207.14255" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Efficient Training of Language Models to Fill in the Middle</div><div class="r-sub">Bavarian et al., OpenAI, 2022. FIM transformation, PSM and SPM, and the FIM-for-free result of section 04. arXiv:2207.14255</div></div>
+      </a>
+      <a class="resource-card" href="https://research.google/blog/ml-enhanced-code-completion-improves-developer-productivity/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Research blog</div><div class="r-title">ML-Enhanced Code Completion Improves Developer Productivity</div><div class="r-sub">Google Research, July 2022. A second published system: a small model, a semantic engine, and a three-month study of more than 10,000 engineers.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/microsoft/vscode-copilot-chat" target="_blank" rel="noopener">
+        <div class="r-icon">💻</div>
+        <div class="r-body"><div class="r-kind">Open-source code</div><div class="r-title">microsoft/vscode-copilot-chat</div><div class="r-sub">The MIT-licensed Copilot extension for VS Code. Its completions-core folder holds the prompt budget, Jaccard matcher, caches, debounce and telemetry described in sections 03 to 08.</div></div>
+      </a>
+      <a class="resource-card" href="https://docs.github.com/en/copilot/concepts/completions/code-referencing" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Official docs</div><div class="r-title">About code referencing in GitHub Copilot</div><div class="r-sub">GitHub Docs. How suggestions are compared with public code and what is logged, as in section 11.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">18</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/10-llm-architecture-training"><div class="rc-sec" style="color:var(--c-llm)">10 · The model</div><div class="rc-title">LLM Architecture &amp; Training</div><div class="rc-hook">Tokens, context windows and next-token loss, which fill-in-the-middle rearranges.</div></a>
+      <a class="related-card" href="/topics/31-llm-inference-serving"><div class="rc-sec" style="color:var(--c-practice)">31 · Serving</div><div class="rc-title">LLM Inference &amp; Serving</div><div class="rc-hook">Prefill and decode, keys and values and prompt caching, the server side of section 06.</div></a>
+      <a class="related-card" href="/topics/38-llm-inference-at-scale"><div class="rc-sec" style="color:var(--c-practice)">38 · At scale</div><div class="rc-title">LLM Inference at Scale</div><div class="rc-hook">How serving cost and throughput are managed when millions of short requests arrive.</div></a>
+      <a class="related-card" href="/topics/11-rag-agents-reasoning"><div class="rc-sec" style="color:var(--c-rag)">11 · Retrieval</div><div class="rc-title">RAG, Agents &amp; Reasoning</div><div class="rc-hook">Retrieving context for a model, the general form of the snippet search in section 05.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Benchmarks, metrics and why one number is never enough.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">A/B tests, guardrails and release pipelines behind section 10.</div></a>
+      <a class="related-card" href="/topics/32-preference-optimization"><div class="rc-sec" style="color:var(--c-practice)">32 · Reward-based training</div><div class="rc-title">Preference Optimization</div><div class="rc-hook">How rewards shape a model, and how it can learn a shortcut, as in the 2025 completion model.</div></a>
+      <a class="related-card" href="/topics/41-design-youtube-recommendations"><div class="rc-sec" style="color:var(--c-rec)">41 · Another case study</div><div class="rc-title">Designing YouTube Recommendations</div><div class="rc-hook">The same themes in another system: a funnel, position bias, a stand-in objective and a feedback loop.</div></a>
+    </div>
+  </section>
