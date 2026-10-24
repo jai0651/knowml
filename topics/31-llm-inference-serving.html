@@ -196,36 +196,31 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   <div class="topic-header">
     <div class="th-top"><span class="th-chip" style="--c:var(--c-practice)">Hands-on</span><span class="th-num">Chapter 31</span></div>
     <h1>LLM Inference &amp; <span class="th-grad">Serving</span></h1>
-    <p class="dek">One model, one GPU, many users. Everything that makes that hard comes from a single fact: the two halves of a request want opposite things from the hardware.</p>
+    <p class="dek">Follow a short chat question and a 30,000-token paste through one GPU server, and learn why prefill and decode need different treatment and how batching, chunked prefill and prefix caching keep both users happy.</p>
     <div class="meta-row">
-      <span class="th-pill"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>24 min read</span>
+      <span class="th-pill"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>14 min read</span>
       <span class="th-pill">Assumes: KV cache (08), roofline &amp; arithmetic intensity (23)</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#two-phases"><span class="tn">01</span>The two phases, and why everything follows</a></li><li><a href="#lifecycle"><span class="tn">02</span>The request lifecycle, end to end</a></li><li><a href="#metrics"><span class="tn">03</span>The four numbers that define a serving system</a></li><li><a href="#math"><span class="tn">04</span>The math: why batching is the only lever during decode</a></li><li><a href="#scheduler"><span class="tn">05</span>The scheduler: continuous batching and chunked prefill</a></li><li><a href="#caching"><span class="tn">06</span>Prompt caching: the cheapest win available</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#engines"><span class="tn">08</span>The engines, and how to choose</a></li><li><a href="#tradeoffs"><span class="tn">09</span>What breaks</a></li><li><a href="#in-the-wild"><span class="tn">10</span>Where you meet this in the wild</a></li><li><a href="#interview"><span class="tn">11</span>Interview questions</a></li><li><a href="#resources"><span class="tn">12</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">13</span>Related pages</a></li><li><a href="#techmap-embed"><span class="tn">·</span>Other techniques for this problem</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#two-phases"><span class="tn">01</span>Reading the prompt, then writing the answer</a></li><li><a href="#lifecycle"><span class="tn">02</span>One request, start to finish</a></li><li><a href="#metrics"><span class="tn">03</span>Four numbers that say whether a server is good</a></li><li><a href="#math"><span class="tn">04</span>Why batching is the lever during decode</a></li><li><a href="#scheduler"><span class="tn">05</span>The scheduler: continuous batching and chunked prefill</a></li><li><a href="#caching"><span class="tn">06</span>Prompt caching: skipping work that's already done</a></li><li><a href="#summary"><span class="tn">07</span>Summary</a></li><li><a href="#build"><span class="tn">08</span>Build this</a></li><li><a href="#engines"><span class="tn">09</span>The engines, and how to choose</a></li><li><a href="#tradeoffs"><span class="tn">10</span>What breaks</a></li><li><a href="#in-the-wild"><span class="tn">11</span>Where you meet this in the wild</a></li><li><a href="#interview"><span class="tn">12</span>Interview questions</a></li><li><a href="#resources"><span class="tn">13</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">14</span>Related pages</a></li><li><a href="#techmap-embed"><span class="tn">·</span>Other techniques for this problem</a></li></ol></nav>
   </div>
 
   <section id="tldr">
-    <div class="tldr">
-      <div class="tldr-label">TL;DR</div>
-      <p>Every request runs in two phases. <strong>Prefill</strong> reads the whole prompt in one parallel forward pass and saturates GPU compute. <strong>Decode</strong> then emits tokens one at a time, and each step re-reads every weight to produce a single token, so it is starved of work and limited by memory bandwidth.</p>
-      <p>That asymmetry sets everything else. Prefill decides <strong>time to first token</strong>; decode decides <strong>inter-token latency</strong>. Batching barely helps prefill and is the only thing that helps decode. The whole discipline is scheduling work so neither phase stalls the other, which is what continuous batching, chunked prefill and prefix caching each attack from a different angle.</p>
-      <p>One sentence for an interview: serving an LLM is a scheduling problem wrapped around a memory-bandwidth problem, and the batch size is the dial that connects them.</p>
-    </div>
+    <p>Picture a chat app running a 7B-parameter model on one GPU. You type a short question and the answer streams back a word at a time. At the same moment, someone else has pasted a 30,000-token document into the same app and asked for a summary. Both requests go through the same model on the same card, and somehow both have to feel fast.</p>
+
+    <p>That turns out to be hard, and the difficulty comes from how a language model produces text. It first reads your whole prompt, and then it writes the answer one token at a time (a <strong>token</strong> is a word or a piece of a word), feeding each new token back in to get the next. The reading step can chew through thousands of tokens at once. The writing step does a sliver of work per token, over and over. Those two steps put opposite demands on the hardware, and a server that treats them as the same job wastes most of the GPU or makes someone wait.</p>
+
+    <p>This chapter follows our two users through the server. We'll split a request into its two phases, define the four numbers people use to say whether a server is any good, and work out with a short piece of arithmetic why the number of requests handled together is the dial that matters most. Then we'll see how a scheduler keeps that dial high without letting the long prompt freeze the short question, and how a server avoids redoing work that many requests share. It assumes you know what a KV cache is (chapter 08) and have met the roofline idea (chapter 23), though we'll restate both as we go.</p>
   </section>
 
   <section id="two-phases">
-    <h2><span class="num">01</span>The two phases, and why everything follows</h2>
-    <p class="lede">Read this section properly and the rest of the page is mostly consequences.</p>
+    <h2><span class="num">01</span>Reading the prompt, then writing the answer</h2>
 
-    <p>A request arrives as a prompt. The server turns it into tokens, then runs the model twice in two very different ways.</p>
+    <p>When the long document arrives, the server first turns the text into token IDs. Then it runs the model in two quite different ways. The first is <strong>prefill</strong>: the whole prompt goes through the model in a single <strong>forward pass</strong> (one trip from input to output through every layer). All 30,000 tokens are known in advance, so they can be processed side by side, and the pass ends by producing the first token of the answer.</p>
 
-    <ul>
-      <li><em class="term">Prefill</em> processes the entire prompt in a single forward pass. Every token is available at once, so they all go through the model in parallel. It ends by producing the first output token.</li>
-      <li><em class="term">Decode</em> produces every token after the first, one per forward pass. Each pass takes the single token just generated and appends to the <strong>KV cache</strong> built during prefill.</li>
-    </ul>
+    <p>The second is <strong>decode</strong>, which produces every later token, one per forward pass. Each pass takes the single token that was just generated and runs it through the model. To avoid recomputing the earlier tokens every time, the model keeps the <strong>KV cache</strong>, the keys and values that attention computed for each earlier token in each layer. Prefill fills the cache for the prompt, and every decode step adds one more entry per layer.</p>
 
-    <p>The two look similar in code. They behave nothing alike on hardware.</p>
+    <p>In code the two phases look almost the same, since both are the model's forward function. On the hardware they behave nothing alike, and the picture below shows why. In both phases the model's weights have to be read out of the GPU's memory to be used, and the weights of a 7B model take up about 14 GB (7 billion numbers at two bytes each). What differs is how much arithmetic each read pays for.</p>
 
     <div class="diagram">
       <div class="diagram-title">Prefill vs decode — same weights, opposite hardware profile
@@ -289,137 +284,125 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
         <text x="485" y="283" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">bandwidth-bound</text>
         <text x="485" y="299" text-anchor="middle" font-size="10" class="dim">1 token of work per weight load</text>
       </svg>
-      <div class="diagram-caption">The indigo box is the same weights in both halves, and it is read in full on <em>every</em> pass. Prefill amortises that read across all 6 prompt tokens at once, so the arithmetic units stay busy. Decode pays the identical read to produce one token, then pays it again — which is why it is starved of work, and why adding more concurrent requests is nearly free during decode and nearly useless during prefill.</div>
+      <div class="diagram-caption">The indigo box is the same set of weights in both halves, and it is read in full on every pass. Prefill spreads that read across all 6 prompt tokens at once, so the arithmetic units stay busy. Decode pays the identical read to produce one token, then pays it again, which leaves the arithmetic units starved of work. It also means adding more concurrent requests is nearly free during decode and nearly useless during prefill.</div>
     </div>
 
-    <p>Prefill has thousands of tokens to multiply against each loaded weight, so the GPU's arithmetic units stay busy. Decode has <em>one</em> token per request. It reads the entire model out of memory to compute a single token's worth of arithmetic, then does it again.</p>
-    <p>The Sarathi-Serve authors put it plainly: prefill iterations "saturate GPU compute", while decode iterations have "low compute utilization" because each one processes only a single token per request.</p>
+    <p>Prefill has thousands of tokens to multiply against each weight once it's been loaded, so the GPU's arithmetic units stay busy, and we call it <strong>compute-bound</strong>: the arithmetic is what limits its speed. Decode has one token per request. It reads the entire model out of memory to do one token's worth of arithmetic, and then does it again for the next token. Its speed is limited by how fast memory can deliver the weights, a limit called <strong>memory bandwidth</strong>, so decode is <strong>bandwidth-bound</strong>. The authors of Sarathi-Serve, a serving system we'll meet in section 05, put it the same way: prefill iterations "saturate GPU compute", while decode iterations have "low compute utilization" because each one processes only a single token per request.</p>
 
-    <div class="callout callout-teach">
-      <div class="callout-label">The sentence that makes it click</div>
-      <p>Decode is not slow because the model is big. Decode is slow because you are moving a large model through the memory bus to do a tiny amount of arithmetic with it. Adding more requests to the same pass costs almost nothing, because the weights are already in flight.</p>
-    </div>
-
-    <p>That last observation is the entire economics of LLM serving. Batching is close to free during decode, and nearly useless during prefill.</p>
+    <h4 class="why">If decode is so wasteful, why is it slow?</h4>
+    <p>Decode isn't slow because the model is big. It's slow because we move a large model across the memory bus to do a tiny amount of arithmetic with it. The weights are in flight anyway, so asking the same pass to serve more requests costs almost nothing extra. That last point is where the economics of LLM serving come from: batching requests together is close to free during decode and nearly useless during prefill. We'll make this precise in section 04, but first we should follow a request through the server and then ask how to measure whether the server is doing well.</p>
   </section>
 
   <section id="lifecycle">
-    <h2><span class="num">02</span>The request lifecycle, end to end</h2>
-    <p class="lede">Follow one request through a modern server. Each stage below exists because of something in section 01.</p>
+    <h2><span class="num">02</span>One request, start to finish</h2>
+
+    <p>Take the short question from our chat app and follow it through. Each stage exists because of what we just saw about the two phases.</p>
 
     <ol>
-      <li><strong>Tokenize.</strong> The prompt becomes token IDs. Cheap, but it decides your real input length, which is what you are billed and rate-limited on.</li>
-      <li><strong>Admission.</strong> The scheduler decides whether there is room. Room means KV cache blocks as well as weights, and the cache is usually what runs out first.</li>
-      <li><strong>Prefill.</strong> It runs one forward pass over the whole prompt, populates the KV cache for every prompt token, and emits token one.</li>
+      <li><strong>Tokenize.</strong> The text becomes token IDs. This is cheap, but it fixes your real input length, and that's what you're billed and rate-limited on.</li>
+      <li><strong>Admission.</strong> The scheduler, the part of the server that decides what runs next, checks whether there's room. Room means space for the KV cache as well as for the weights, and the cache is usually what runs out first.</li>
+      <li><strong>Prefill.</strong> One forward pass over the whole prompt fills the KV cache for every prompt token and emits token one.</li>
       <li><strong>Decode loop.</strong> One forward pass per token. Each pass reads the whole model and appends one entry per layer to the cache.</li>
-      <li><strong>Eviction.</strong> The request finishes or is cancelled, and its cache blocks return to the pool for the next request.</li>
+      <li><strong>Eviction.</strong> When the request finishes or is cancelled, its cache blocks go back to the pool for the next request to use.</li>
     </ol>
 
-    <p>Two things about this list are worth pausing on.</p>
+    <p>Two things in that list deserve a pause. First, the KV cache belongs to one request and grows with every token, so it isn't a fixed overhead you pay once. On long conversations it routinely exceeds the size of the model weights, and chapter <a href="./23-efficient-ai-systems.html">23</a> spends a long time on managing it.</p>
 
-    <p>First, the KV cache is <em>per request</em> and grows with every token. It is not a fixed overhead you pay once. On long conversations it routinely exceeds the size of the model weights, which is why page <a href="./23-efficient-ai-systems.html">23</a> spends so long on managing it.</p>
-
-    <p>Second, steps 3 and 4 compete. A server running both is constantly choosing whether to admit a new request's prefill or advance the decodes already in flight. That choice is the scheduler, and section 04 is about what happens when it chooses badly.</p>
+    <p>Second, steps 3 and 4 compete. A server handling many users is constantly choosing between starting a new request's prefill and advancing the decodes already in flight, and our 30,000-token paste is exactly the kind of request that makes that choice painful. We'll come back to what the scheduler does about it in section 05. First we need a way to say what a good choice looks like, which means measuring.</p>
   </section>
 
   <section id="metrics">
-    <h2><span class="num">03</span>The four numbers that define a serving system</h2>
-    <p class="lede">Almost every argument about inference is an argument about which of these four you are optimising, and which you are quietly sacrificing.</p>
+    <h2><span class="num">03</span>Four numbers that say whether a server is good</h2>
 
-    <ul>
-      <li><em class="term">Time to first token</em> (TTFT). This is how long the user waits before anything appears. Prefill dominates it, so it grows with prompt length, and it decides whether a chat interface feels alive.</li>
-      <li><em class="term">Inter-token latency</em> (ITL), also called time per output token. The gap between successive tokens once streaming starts. Dominated by decode, and roughly flat per token. It sets the perceived reading speed.</li>
-      <li><em class="term">Throughput</em>. This is the total tokens per second across all concurrent requests, and it decides your cost per million tokens.</li>
-      <li><em class="term">Goodput</em>. This is throughput counting <em>only</em> the requests that met their latency target. A server can post excellent throughput while failing every user, and goodput exposes that.</li>
-    </ul>
+    <p>Suppose someone tells you their server is fast. Fast for whom? A person watching the short question stream in and a company summarising a million documents overnight care about different things, and four measurements capture the difference.</p>
 
-    <p>The first three are in direct tension. Raising concurrency raises throughput, because decode batches get fuller. It also raises TTFT and ITL, because each request waits behind more work. There is no setting that maximises all of them.</p>
+    <p><strong>Time to first token</strong> (TTFT) is how long the user waits before anything appears. Prefill dominates it, so it grows with prompt length, and it decides whether a chat interface feels alive. <strong>Inter-token latency</strong> (ITL), also called time per output token, is the gap between successive tokens once streaming starts. Decode dominates it, and it's roughly flat from one token to the next. It sets the reading speed the user perceives. <strong>Throughput</strong> is the total number of tokens per second across all concurrent requests, and it decides your cost per million tokens. And <strong>goodput</strong> is throughput counting only the requests that met their latency target. A server can post excellent throughput while failing every user, and goodput exposes that.</p>
 
-    <div class="callout callout-teach">
-      <div class="callout-label">Why "how fast is it" is not a question</div>
-      <p>A single tokens-per-second figure is meaningless without saying whether it was measured at batch size 1 or 256. At batch 1 you get the best possible ITL and terrible throughput. At batch 256 you get the reverse. Benchmarks that quote one number have chosen a point on that curve and not told you which.</p>
-    </div>
+    <p>The first three pull against each other. Raising concurrency, the number of requests in flight together, raises throughput, because decode batches get fuller. It also raises TTFT and ITL, because each request now waits behind more work. No setting maximises all three, so almost every argument about inference comes down to an argument about which one you're optimising and which one you're quietly giving up.</p>
 
-    <p>The practical version: pick a latency budget first, then find the highest throughput that stays inside it. Goodput measures exactly this, which is why the DistServe authors built their system around optimising it and not raw throughput.</p>
+    <h4 class="why">Why can't I just ask how many tokens per second it does?</h4>
+    <p>Because a single tokens-per-second figure means little until you know whether it was measured with a batch of 1 or a batch of 256. At batch 1 you get the best possible ITL and terrible throughput. At batch 256 you get the reverse. A benchmark that quotes one number has picked a point on that curve without telling you which. The practical way to work is to set a latency budget first and then find the highest throughput that stays inside it. That's what goodput measures, and the DistServe authors built their system around goodput and not raw throughput.</p>
+
+    <p>All of this hangs on the claim that batching helps decode and not prefill. Let's check that claim with arithmetic.</p>
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The math: why batching is the only lever during decode</h2>
-    <p class="lede">One short derivation explains why every serving system is built around keeping the batch full.</p>
+    <h2><span class="num">04</span>Why batching is the lever during decode</h2>
 
-    <p>Take a model with <span>$P$</span> parameters stored in FP16, so two bytes each. Consider one decode step with a batch of <span>$B$</span> requests. Ignore the KV cache for a moment and count only the weights.</p>
+    <p>Take a model with <span>$P$</span> parameters stored in FP16, so two bytes each. Consider one decode step with a batch of <span>$B$</span> requests, meaning <span>$B$</span> requests whose next tokens are computed together in one pass. We'll ignore the KV cache for a moment and count only the weights.</p>
 
-    <p><strong>Bytes moved.</strong> Every weight is read once, whatever the batch size:</p>
+    <p>First, count the bytes moved. Every weight is read once per pass, whatever the batch size:</p>
 
     <div class="eq-block"><span>$$\text{bytes} = 2P$$</span></div>
 
-    <p><strong>Arithmetic performed.</strong> A forward pass costs roughly two floating-point operations per parameter per token, and there are <span>$B$</span> tokens in flight, one per request:</p>
+    <p>Next, count the arithmetic. A forward pass costs roughly two floating-point operations per parameter per token (a <strong>FLOP</strong> is one addition or multiplication of decimal numbers), and there are <span>$B$</span> tokens in flight, one per request:</p>
 
     <div class="eq-block"><span>$$\text{FLOPs} = 2PB$$</span></div>
 
-    <p>The ratio of those two is the <em class="term">arithmetic intensity</em>, the quantity page <a href="./23-efficient-ai-systems.html">23</a> uses to place an operation on the roofline:</p>
+    <p>The ratio of the two is the <strong>arithmetic intensity</strong>, the number of operations you get for each byte you pay to move. It's the quantity chapter <a href="./23-efficient-ai-systems.html">23</a> uses to place an operation on the roofline, the chart that says whether a given job is limited by memory or by arithmetic:</p>
 
     <div class="eq-block"><span>$$\text{intensity} = \frac{2PB}{2P} = B$$</span></div>
 
     <p class="eq-explain">The model size cancels, and decode's arithmetic intensity equals the batch size.</p>
 
-    <p>This small result carries the whole section. A 7B model and a 70B model sit at the <em>same</em> point on the roofline during decode. Only concurrency moves you along it.</p>
+    <p>That small result carries the section. A 7B model and a 70B model sit at the same point on the roofline during decode (for the 70B model the weights are 140 GB, ten times the 14 GB we computed earlier, but the arithmetic grows by the same factor). Only concurrency moves you along it. A modern datacentre accelerator has a <strong>ridge point</strong>, the intensity at which a job stops being bandwidth-bound and becomes compute-bound, in the hundreds of FLOPs per byte. At batch 1 the intensity is 1, so you're running at a small fraction of the hardware's arithmetic capability, and no amount of kernel optimisation changes that. The way out is more requests in the same pass. You can compute your own ridge point with the project in chapter <a href="./23-efficient-ai-systems.html">23</a>, and it's better to do that than to trust a number from a blog post.</p>
 
-    <p>A modern datacentre accelerator has a ridge point in the hundreds of FLOPs per byte, so at batch 1 you are running at a small fraction of the hardware's arithmetic capability, and no amount of kernel optimisation changes that. The only way out is more requests in the same pass. Compute your own ridge point with the project on page <a href="./23-efficient-ai-systems.html">23</a> and do not trust a number from a blog post.</p>
-
-    <p>Prefill sits at the opposite end. A prompt of <span>$L$</span> tokens gives intensity of roughly <span>$LB$</span>, and <span>$L$</span> is in the thousands, so prefill is compute-bound almost immediately. So one long prompt can occupy the GPU completely.</p>
+    <p>Prefill sits at the opposite end. A prompt of <span>$L$</span> tokens gives an intensity of roughly <span>$LB$</span>, and <span>$L$</span> is in the thousands, so prefill is compute-bound almost immediately. One long prompt can occupy the GPU completely, and that's the problem our 30,000-token paste causes. So batching is what we want, and we also have to keep any one request from hogging a batch. Both are the scheduler's job.</p>
   </section>
 
   <section id="scheduler">
     <h2><span class="num">05</span>The scheduler: continuous batching and chunked prefill</h2>
-    <p class="lede">Two ideas, each fixing a way the naive scheduler wastes the machine.</p>
 
     <h3>Continuous batching</h3>
 
-    <p>The obvious way to batch is to collect requests, run them together, and return when all are done. It fails badly here, because generation lengths differ wildly. One request wanting 2,000 tokens holds the whole batch hostage while nine requests that finished at 50 tokens sit idle in it.</p>
+    <p>The obvious way to batch is to collect a group of requests, run them together and return when all of them are done. That fails badly for generation, because lengths differ wildly. One request that wants 2,000 tokens holds the whole batch hostage while nine requests that finished at 50 tokens sit idle in it, producing nothing.</p>
 
-    <p><em class="term">Continuous batching</em>, introduced as iteration-level scheduling in the Orca paper, schedules per <em>step</em> and not per request. After every decode step the scheduler drops finished requests and admits waiting ones. The batch works like a revolving door and is not a fixed cohort.</p>
-
-    <p>It is the largest throughput win in modern serving, and it is why a naive <code>model.generate()</code> loop is not a serving system.</p>
+    <p>The fix is to schedule per step and not per request. After every decode step the scheduler drops the requests that have finished and admits waiting ones, so the batch works like a revolving door, not a fixed group. This is <strong>continuous batching</strong>, introduced as iteration-level scheduling in the Orca paper. It's the largest throughput win in modern serving, and it's why a naive <code>model.generate()</code> loop isn't a serving system.</p>
 
     <h3>Chunked prefill</h3>
 
-    <p>Continuous batching leaves one problem unsolved. Prefill and decode still contend for the same GPU, and prefill is the bigger, greedier job.</p>
+    <p>Continuous batching leaves our other problem untouched. Prefill and decode still compete for the same GPU, and prefill is the bigger, greedier job. When the 30,000-token prompt arrives, its prefill occupies the device for one long step, and every request already streaming stalls for that whole time. The short question's answer freezes mid-sentence because somebody else pasted a document. This is <strong>head-of-line blocking</strong>, and it shows up as an ITL spike that has nothing to do with the affected users' own requests.</p>
 
-    <p>When a request arrives with a 30,000-token prompt, its prefill occupies the device for a long single step. Every request already streaming stalls for that entire duration. Users see their output freeze mid-sentence because somebody else pasted a document. This is <em class="term">head-of-line blocking</em>, and it shows up as an ITL spike unrelated to the affected users' own requests.</p>
+    <p>The answer is <strong>chunked prefill</strong>, from the Sarathi-Serve paper. It splits a long prefill into fixed-size pieces and interleaves them with the ongoing decodes. Each scheduler step then carries one chunk of prefill plus all the decodes, so no single step is long enough to starve anyone.</p>
 
-    <p><em class="term">Chunked prefill</em>, from the Sarathi-Serve paper, splits a long prefill into fixed-size pieces and interleaves them with ongoing decodes. Each scheduler step carries one chunk of prefill plus all the decodes, so no single step is long enough to starve anyone.</p>
+    <h4 class="why">Does chunking make the long prompt faster?</h4>
+    <p>No. It makes prefill interruptible, and it pays for that with a little total throughput in exchange for a large cut in worst-case latency. The Sarathi-Serve paper is titled "Taming Throughput-Latency Tradeoff" for this reason: the technique doesn't remove the tradeoff, it gives you a knob to set it deliberately.</p>
 
-    <div class="callout callout-teach">
-      <div class="callout-label">The tradeoff it makes explicit</div>
-      <p>Chunking does not make prefill faster. It makes prefill <em>interruptible</em>, trading a little total throughput for a large reduction in worst-case latency. Sarathi-Serve is titled "Taming Throughput-Latency Tradeoff" for exactly this reason: the technique does not remove the tradeoff, it gives you a knob to set it deliberately.</p>
-    </div>
-
-    <p>A related idea takes the separation further. <strong>Prefill/decode disaggregation</strong> runs the two phases on different GPUs entirely, so neither can interfere with the other, at the cost of shipping the KV cache between them. DistServe is the reference design, and it optimises goodput and not raw throughput.</p>
+    <p>A related idea takes the separation further. <strong>Prefill/decode disaggregation</strong> runs the two phases on different GPUs entirely, so neither can interfere with the other, at the cost of shipping the KV cache between them. DistServe is the reference design, and it optimises goodput. So far every trick has been about scheduling work well. The cheapest saving of all is not doing the work.</p>
   </section>
 
   <section id="caching">
-    <h2><span class="num">06</span>Prompt caching: the cheapest win available</h2>
-    <p class="lede">Most production traffic re-sends the same prefix thousands of times. Prefill computes it from scratch every time unless you stop it.</p>
+    <h2><span class="num">06</span>Prompt caching: skipping work that's already done</h2>
 
-    <p>A system prompt, a few-shot block, a long document being asked about repeatedly, an agent loop replaying its own history each turn. In all of these the first several thousand tokens are byte-identical across requests. Prefill is deterministic, so their KV cache entries are identical too.</p>
+    <p>Think about what the chat app's requests have in common. A system prompt, a few-shot block, a long document being asked about repeatedly, an agent loop replaying its own history each turn: in all of these, the first several thousand tokens are byte-identical across requests. Prefill is deterministic, so their KV cache entries come out identical too, and computing them from scratch every time is waste.</p>
 
-    <p><em class="term">Prefix caching</em> keeps those entries and reuses them. A cache hit skips the prefill work for the shared prefix entirely, which cuts TTFT directly and frees compute for everyone else.</p>
+    <p><strong>Prefix caching</strong> keeps those entries and reuses them. A cache hit skips the prefill work for the shared prefix entirely, which cuts TTFT directly and frees compute for everyone else.</p>
 
-    <p>SGLang generalised this as <strong>RadixAttention</strong>, storing cached prefixes in a radix tree so requests share the longest prefix they have in common and do not need an exact match. It is the main reason SGLang does well on agent and few-shot workloads, where every request in a batch shares a long head and differs only in the tail.</p>
+    <p>SGLang generalised this as <strong>RadixAttention</strong>. It stores cached prefixes in a radix tree, a tree in which requests share the path of tokens they have in common, so a request reuses the longest prefix it has in common with anything cached and doesn't need an exact match. It's the main reason SGLang does well on agent and few-shot workloads, where every request in a batch shares a long head and differs only in the tail.</p>
 
-    <p>Two properties are worth remembering, because they explain the API design you see from model providers:</p>
+    <p>Two properties explain the API design you see from model providers. First, caching only works on a prefix. Reuse stops at the first differing token, because every entry after that point depended on it, so putting a timestamp at the top of your system prompt invalidates everything below it. Second, it's a memory-for-compute trade. Cached prefixes occupy the same pool of memory the active requests need, so caching too aggressively reduces how many requests you can run at once.</p>
 
-    <ul>
-      <li><strong>It only works on a prefix.</strong> Cache reuse stops at the first differing token, because every entry after that point depended on it. Putting a timestamp at the top of your system prompt invalidates everything below it.</li>
-      <li><strong>It is a memory-for-compute trade.</strong> Cached prefixes occupy the same pool the active requests need, so caching too aggressively reduces how many requests you can run at once.</li>
-    </ul>
+    <p>The practical consequence is a prompt-ordering rule: put the stable content first and the variable content last. That means static instructions, then retrieved documents, then the user's turn. Reversing that order can cost you every cache hit you would otherwise have got. With these pieces in hand, we can collect what the chapter has established.</p>
+  </section>
 
-    <p>The practical consequence is a prompt-ordering rule: put the stable content first and the variable content last. Static instructions, then retrieved documents, then the user's turn. Reversing that order can cost every cache hit you would otherwise have got.</p>
+  <section id="summary">
+    <h2><span class="num">07</span>Summary</h2>
+    <ol>
+      <li><strong>Every request has two phases.</strong> Prefill reads the whole prompt in one parallel forward pass and emits the first token, and decode then emits one token per pass.</li>
+      <li><strong>Prefill is compute-bound and decode is bandwidth-bound.</strong> Prefill has thousands of tokens for each weight it loads, while decode reads the whole model to produce one token per request.</li>
+      <li><strong>Prefill decides time to first token and decode decides inter-token latency.</strong> TTFT grows with prompt length, and ITL stays roughly flat per token.</li>
+      <li><strong>Throughput, latency and goodput pull against each other.</strong> Raising concurrency raises throughput and also raises TTFT and ITL, so any benchmark number needs its batch size.</li>
+      <li><strong>Goodput counts only requests that met their latency target,</strong> so it's a better thing to optimise than raw throughput.</li>
+      <li><strong>Decode's arithmetic intensity equals the batch size.</strong> The model size cancels, so a 7B and a 70B model sit at the same roofline point, and only concurrency moves you along it.</li>
+      <li><strong>Continuous batching schedules per step.</strong> Finished requests leave and waiting ones join after every decode step, so short requests don't sit idle behind long ones.</li>
+      <li><strong>Chunked prefill makes a long prefill interruptible.</strong> It stops one long prompt from freezing everyone's output, and it costs a little throughput.</li>
+      <li><strong>Disaggregation puts prefill and decode on different GPUs,</strong> so they can't interfere, at the cost of shipping the KV cache between them.</li>
+      <li><strong>Prefix caching skips shared prefill work.</strong> It only works on an exact prefix, so stable content goes first in the prompt, and it trades memory for compute.</li>
+    </ol>
   </section>
 
   <section id="build">
-    <h2><span class="num">07</span>Build this</h2>
+    <h2><span class="num">08</span>Build this</h2>
     <p class="lede">The throughput-latency frontier is the one thing on this page you should not take on trust. It takes an afternoon to draw yours.</p>
 
     <div class="project">
@@ -442,7 +425,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="engines">
-    <h2><span class="num">08</span>The engines, and how to choose</h2>
+    <h2><span class="num">09</span>The engines, and how to choose</h2>
     <p class="lede">There are four serious options, and they target different workloads and do not compete as implementations of the same thing.</p>
 
     <div class="wild-grid">
@@ -473,7 +456,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">09</span>What breaks</h2>
+    <h2><span class="num">10</span>What breaks</h2>
     <p class="lede">Failures in serving are rarely a crash. They are a latency number quietly going wrong for reasons that are not in your logs.</p>
 
     <ul>
@@ -487,7 +470,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="in-the-wild">
-    <h2><span class="num">10</span>Where you meet this in the wild</h2>
+    <h2><span class="num">11</span>Where you meet this in the wild</h2>
     <p class="lede">The same four numbers, weighted differently, produce very different systems.</p>
 
     <div class="wild-grid">
@@ -511,7 +494,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="interview">
-    <h2><span class="num">11</span>Interview questions</h2>
+    <h2><span class="num">12</span>Interview questions</h2>
 
     <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What are prefill and decode, and why does the distinction matter?</summary>
       <div class="qa-body"><p>Prefill processes the entire input prompt in one parallel forward pass and produces the first output token. Decode then generates each subsequent token in its own pass. The distinction matters because they have opposite hardware profiles: prefill has many tokens per weight load and saturates compute, while decode has one token per request per pass and is limited by memory bandwidth. Almost every serving optimisation targets one phase or the other, so naming the phase is the first step in any performance discussion.</p></div>
@@ -547,7 +530,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="resources">
-    <h2><span class="num">12</span>Go deeper</h2>
+    <h2><span class="num">13</span>Go deeper</h2>
     <div class="resource-grid">
       <a class="resource-card" href="https://bbycroft.net/llm" target="_blank" rel="noopener">
         <div class="r-icon">🔧</div>
@@ -619,7 +602,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </section>
 
   <section id="related">
-    <h2><span class="num">13</span>Related pages</h2>
+    <h2><span class="num">14</span>Related pages</h2>
     <div class="related-grid">
       <a class="related-card" href="./23-efficient-ai-systems.html"><div class="rc-sec" style="color:var(--c-efficient)">23 · The theory behind this</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">PagedAttention, FlashAttention, speculative decoding and the roofline, in mechanism-level detail.</div></a>
       <a class="related-card" href="./30-running-models-locally.html"><div class="rc-sec" style="color:var(--c-practice)">30 · The single-user case</div><div class="rc-title">Running Models Locally</div><div class="rc-hook">Same arithmetic, one user. Start there if you are sizing a machine rather than a service.</div></a>
@@ -694,7 +677,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=ebc461d5"></script>
+<script defer src="../assets/js/search-data.js?v=e71ce427"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>

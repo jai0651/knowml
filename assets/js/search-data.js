@@ -4882,10 +4882,60 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Little data, a lot of knowledge",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#little-data-a-lot-of-knowledge",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Four ways to treat a rotated molecule",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#four-ways-to-treat-a-rotated-molecule",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
     "title": "Invariance and equivariance, precisely",
     "parentTitle": "19 · Scientific & Structured AI",
     "section": "Embodied & Frontier",
     "url": "topics/19-scientific-structured-ai.html#equivariance",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Two kinds of \"unchanged\"",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#two-kinds-of-unchanged",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "The cheap route: throw the pose away",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#the-cheap-route-throw-the-pose-away",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Keeping the geometry: equivariant networks",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#keeping-the-geometry-equivariant-networks",
     "tags": [],
     "summary": "",
     "color": "var(--c-sci)"
@@ -4902,10 +4952,40 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "When the bias stops paying for itself",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#when-the-bias-stops-paying-for-itself",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
     "title": "Molecules: graphs, point clouds and forces",
     "parentTitle": "19 · Scientific & Structured AI",
     "section": "Embodied & Frontier",
     "url": "topics/19-scientific-structured-ai.html#molecules",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Two ways to describe a molecule",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#two-ways-to-describe-a-molecule",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Learned interatomic potentials",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#learned-interatomic-potentials",
     "tags": [],
     "summary": "",
     "color": "var(--c-sci)"
@@ -4942,6 +5022,26 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Putting the equation in the loss",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#putting-the-equation-in-the-loss",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Where PINNs go wrong",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#where-pinns-go-wrong",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
     "title": "Neural operators: learning the solver, not the solution",
     "parentTitle": "19 · Scientific & Structured AI",
     "section": "Embodied & Frontier",
@@ -4962,10 +5062,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The same shape, in two other fields",
+    "title": "Searching for the equation itself",
     "parentTitle": "19 · Scientific & Structured AI",
     "section": "Embodied & Frontier",
-    "url": "topics/19-scientific-structured-ai.html#the-same-shape-in-two-other-fields",
+    "url": "topics/19-scientific-structured-ai.html#searching-for-the-equation-itself",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Two other fields with the same shape",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#two-other-fields-with-the-same-shape",
     "tags": [],
     "summary": "",
     "color": "var(--c-sci)"
@@ -4976,6 +5086,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "19 · Scientific & Structured AI",
     "section": "Embodied & Frontier",
     "url": "topics/19-scientific-structured-ai.html#loop",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-sci)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "19 · Scientific & Structured AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/19-scientific-structured-ai.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-sci)"
@@ -5012,7 +5132,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Three sensors, one traffic cone",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
     "url": "topics/20-3d-spatial-autonomous-driving.html#intuition",
@@ -5022,10 +5142,30 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "The math: from a 3D point to a pixel",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#timeline",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#math",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-3d)"
+  },
+  {
+    "kind": "section",
+    "title": "Intrinsics and extrinsics",
+    "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
+    "section": "Embodied & Frontier",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#intrinsics-and-extrinsics",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-3d)"
+  },
+  {
+    "kind": "section",
+    "title": "Epipolar geometry, stereo and depth",
+    "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
+    "section": "Embodied & Frontier",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#epipolar-geometry-stereo-and-depth",
     "tags": [],
     "summary": "",
     "color": "var(--c-3d)"
@@ -5042,26 +5182,6 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Camera geometry: intrinsics, extrinsics, and why multi-camera needs both",
-    "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
-    "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#camera-geometry-intrinsics-extrinsics-and-why-multi-camera-needs-both",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-3d)"
-  },
-  {
-    "kind": "section",
-    "title": "Epipolar geometry, stereo, and depth",
-    "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
-    "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#epipolar-geometry-stereo-and-depth",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-3d)"
-  },
-  {
-    "kind": "section",
     "title": "SLAM and visual-inertial odometry",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
@@ -5072,20 +5192,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "3D object detection: camera-based and LiDAR-based",
+    "title": "3D object detection from LiDAR and from cameras",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#3d-object-detection-camera-based-and-lidar-based",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#3d-object-detection-from-lidar-and-from-cameras",
     "tags": [],
     "summary": "",
     "color": "var(--c-3d)"
   },
   {
     "kind": "section",
-    "title": "BEV representations: one shared top-down frame",
+    "title": "Bird's-eye-view representations",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#bev-representations-one-shared-top-down-frame",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#bird-s-eye-view-representations",
     "tags": [],
     "summary": "",
     "color": "var(--c-3d)"
@@ -5102,10 +5222,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "NeRF, Gaussian splatting, and scene reconstruction",
+    "title": "Sensor fusion: camera, LiDAR and radar together",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#nerf-gaussian-splatting-and-scene-reconstruction",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#sensor-fusion-camera-lidar-and-radar-together",
     "tags": [],
     "summary": "",
     "color": "var(--c-3d)"
@@ -5122,16 +5242,6 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Sensor fusion: camera, LiDAR, and radar together",
-    "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
-    "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#sensor-fusion-camera-lidar-and-radar-together",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-3d)"
-  },
-  {
-    "kind": "section",
     "title": "Trajectory prediction and motion planning",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
@@ -5142,37 +5252,27 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "End-to-end autonomous driving, and world models for simulation",
+    "title": "Closed-loop evaluation, and simulating from real drives",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#end-to-end-autonomous-driving-and-world-models-for-simulation",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#closed-loop-evaluation-and-simulating-from-real-drives",
     "tags": [],
     "summary": "",
     "color": "var(--c-3d)"
   },
   {
     "kind": "section",
-    "title": "Closed-loop evaluation for driving",
+    "title": "End-to-end driving",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#closed-loop-evaluation-for-driving",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#end-to-end-driving",
     "tags": [],
     "summary": "",
     "color": "var(--c-3d)"
   },
   {
     "kind": "section",
-    "title": "The math",
-    "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
-    "section": "Embodied & Frontier",
-    "url": "topics/20-3d-spatial-autonomous-driving.html#math",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-3d)"
-  },
-  {
-    "kind": "section",
-    "title": "Why BEV/occupancy, and why modular over end-to-end",
+    "title": "Why BEV and occupancy, and why modular over end-to-end",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
     "url": "topics/20-3d-spatial-autonomous-driving.html#why",
@@ -5182,7 +5282,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what breaks",
+    "title": "Complexity, failure modes and what breaks",
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
     "url": "topics/20-3d-spatial-autonomous-driving.html#tradeoffs",
@@ -5196,6 +5296,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
     "section": "Embodied & Frontier",
     "url": "topics/20-3d-spatial-autonomous-driving.html#what-shows-up-in-production",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-3d)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "20 · 3D, Spatial AI & Autonomous Driving",
+    "section": "Embodied & Frontier",
+    "url": "topics/20-3d-spatial-autonomous-driving.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-3d)"
@@ -5222,7 +5332,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "A policy, and the constraint behind everything else",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
     "url": "topics/21-robotics-embodied-ai.html#intuition",
@@ -5232,17 +5342,37 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "What goes in and what comes out",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#timeline",
+    "url": "topics/21-robotics-embodied-ai.html#what-goes-in-and-what-comes-out",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "The robot learning stack, piece by piece",
+    "title": "Why data is the scarce thing",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#why-data-is-the-scarce-thing",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "Joint angles and where the gripper ends up",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#joint-angles-and-where-the-gripper-ends-up",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "The classical stack, and the part of it that stays",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
     "url": "topics/21-robotics-embodied-ai.html#architecture",
@@ -5252,10 +5382,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Classical control still runs the last mile: PID, LQR, MPC",
+    "title": "Four stages in a loop",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#classical-control-still-runs-the-last-mile-pid-lqr-mpc",
+    "url": "topics/21-robotics-embodied-ai.html#four-stages-in-a-loop",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "Classical control still runs the last mile",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#classical-control-still-runs-the-last-mile",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
@@ -5272,107 +5412,107 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Sim-to-real and domain randomization",
+    "title": "Practicing the mug in simulation",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#sim-to-real-and-domain-randomization",
+    "url": "topics/21-robotics-embodied-ai.html#sim-to-real",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "Imitation learning and behavioral cloning: the compounding error problem",
+    "title": "What simulation buys, and what it costs",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#imitation-learning-and-behavioral-cloning-the-compounding-error-problem",
+    "url": "topics/21-robotics-embodied-ai.html#what-simulation-buys-and-what-it-costs",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "Diffusion policies: actions as the thing being denoised",
+    "title": "Domain randomization",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#diffusion-policies-actions-as-the-thing-being-denoised",
+    "url": "topics/21-robotics-embodied-ai.html#domain-randomization",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "Vision-language-action (VLA) models: actions as tokens",
+    "title": "Copying a demonstrator, and how copying goes wrong",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#vision-language-action-vla-models-actions-as-tokens",
+    "url": "topics/21-robotics-embodied-ai.html#imitation",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "Robot foundation models and cross-embodiment learning",
+    "title": "Behavioral cloning",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#robot-foundation-models-and-cross-embodiment-learning",
+    "url": "topics/21-robotics-embodied-ai.html#behavioral-cloning",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "Language-conditioned manipulation, navigation, and mobile manipulation",
+    "title": "Compounding error",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#language-conditioned-manipulation-navigation-and-mobile-manipulation",
+    "url": "topics/21-robotics-embodied-ai.html#compounding-error",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "Humanoid learning and tactile sensing",
+    "title": "Two patches: DAgger and action chunking",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#humanoid-learning-and-tactile-sensing",
+    "url": "topics/21-robotics-embodied-ai.html#two-patches-dagger-and-action-chunking",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "World models as learned simulators, and hierarchical planning",
+    "title": "Diffusion policies: when there's more than one right answer",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#world-models-as-learned-simulators-and-hierarchical-planning",
+    "url": "topics/21-robotics-embodied-ai.html#diffusion",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "Safety, uncertainty, and recovery",
+    "title": "The two-grasp problem",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#safety-uncertainty-and-recovery",
+    "url": "topics/21-robotics-embodied-ai.html#the-two-grasp-problem",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "Open-loop vs. closed-loop evaluation",
+    "title": "Denoising actions instead of images",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
-    "url": "topics/21-robotics-embodied-ai.html#open-loop-vs-closed-loop-evaluation",
+    "url": "topics/21-robotics-embodied-ai.html#denoising-actions-instead-of-images",
     "tags": [],
     "summary": "",
     "color": "var(--c-robot)"
   },
   {
     "kind": "section",
-    "title": "The core objective",
+    "title": "The two objectives side by side",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
     "url": "topics/21-robotics-embodied-ai.html#math",
@@ -5382,7 +5522,97 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why not just imitate, and why not just collect more real data",
+    "title": "Borrowing the internet: vision-language-action models",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#vla",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "Actions as tokens",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#actions-as-tokens",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "One policy for many robot bodies",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#one-policy-for-many-robot-bodies",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "Language, navigation and mobile manipulation",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#language-navigation-and-mobile-manipulation",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "Humanoids and the sense of touch",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#humanoids-and-the-sense-of-touch",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "Putting the pieces together: planning, safety and evaluation",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#system",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "World models and the hierarchy",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#world-models-and-the-hierarchy",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "Safety, uncertainty and recovery",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#safety-uncertainty-and-recovery",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "Open-loop and closed-loop evaluation",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#open-loop-and-closed-loop-evaluation",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "Which fix goes with which problem",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
     "url": "topics/21-robotics-embodied-ai.html#why",
@@ -5412,6 +5642,26 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Where things stand in 2026",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#where-things-stand-in-2026",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "21 · Robotics & Embodied AI",
+    "section": "Embodied & Frontier",
+    "url": "topics/21-robotics-embodied-ai.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-robot)"
+  },
+  {
+    "kind": "section",
     "title": "Watch action chunking take the jitter out of a reach",
     "parentTitle": "21 · Robotics & Embodied AI",
     "section": "Embodied & Frontier",
@@ -5432,7 +5682,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The trade you are making",
+    "title": "Two ways to spend a real interaction",
     "parentTitle": "22 · World Models",
     "section": "Embodied & Frontier",
     "url": "topics/22-world-models.html#trade",
@@ -5522,6 +5772,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Summary",
+    "parentTitle": "22 · World Models",
+    "section": "Embodied & Frontier",
+    "url": "topics/22-world-models.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-world)"
+  },
+  {
+    "kind": "section",
     "title": "Plot the imagination-horizon curve and find where it turns over",
     "parentTitle": "22 · World Models",
     "section": "Embodied & Frontier",
@@ -5562,7 +5822,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Two ways a GPU can be slow",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
     "url": "topics/23-efficient-ai-systems.html#intuition",
@@ -5572,110 +5832,40 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "Two limits, measured in different units",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#timeline",
+    "url": "topics/23-efficient-ai-systems.html#two-limits-measured-in-different-units",
     "tags": [],
     "summary": "",
     "color": "var(--c-efficient)"
   },
   {
     "kind": "section",
-    "title": "Architecture: the modern serving stack, end to end",
+    "title": "Compute-bound and memory-bound",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#architecture",
+    "url": "topics/23-efficient-ai-systems.html#compute-bound-and-memory-bound",
     "tags": [],
     "summary": "",
     "color": "var(--c-efficient)"
   },
   {
     "kind": "section",
-    "title": "Training-time efficiency: splitting the model across devices",
+    "title": "Why training looks different, and what batching does",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#training-parallelism",
+    "url": "topics/23-efficient-ai-systems.html#why-training-looks-different-and-what-batching-does",
     "tags": [],
     "summary": "",
     "color": "var(--c-efficient)"
   },
   {
     "kind": "section",
-    "title": "ZeRO / FSDP: sharding what data parallelism used to duplicate",
+    "title": "Why generating text waits on memory",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#zero-fsdp",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-efficient)"
-  },
-  {
-    "kind": "section",
-    "title": "Mixed precision: doing arithmetic in fewer bits",
-    "parentTitle": "23 · Efficient AI & Systems",
-    "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#mixed-precision",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-efficient)"
-  },
-  {
-    "kind": "section",
-    "title": "Inference-time efficiency: where most interview questions land",
-    "parentTitle": "23 · Efficient AI & Systems",
-    "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#inference-stack",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-efficient)"
-  },
-  {
-    "kind": "section",
-    "title": "KV cache growth (the direct callback to page 08)",
-    "parentTitle": "23 · Efficient AI & Systems",
-    "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#kv-cache-growth-the-direct-callback-to-page-08",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-efficient)"
-  },
-  {
-    "kind": "section",
-    "title": "PagedAttention",
-    "parentTitle": "23 · Efficient AI & Systems",
-    "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#pagedattention",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-efficient)"
-  },
-  {
-    "kind": "section",
-    "title": "Continuous batching",
-    "parentTitle": "23 · Efficient AI & Systems",
-    "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#continuous-batching",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-efficient)"
-  },
-  {
-    "kind": "section",
-    "title": "FlashAttention",
-    "parentTitle": "23 · Efficient AI & Systems",
-    "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#flashattention",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-efficient)"
-  },
-  {
-    "kind": "section",
-    "title": "Speculative decoding",
-    "parentTitle": "23 · Efficient AI & Systems",
-    "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#speculative-decoding",
+    "url": "topics/23-efficient-ai-systems.html#why",
     "tags": [],
     "summary": "",
     "color": "var(--c-efficient)"
@@ -5692,10 +5882,150 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why memory bandwidth, not FLOPs, dominates LLM inference",
+    "title": "Serving many users: the KV cache and what's built around it",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#why",
+    "url": "topics/23-efficient-ai-systems.html#inference-stack",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "The KV cache grows with every token",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#the-kv-cache-grows-with-every-token",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "PagedAttention: no memory reserved in advance",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#pagedattention-no-memory-reserved-in-advance",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "Continuous batching: no waiting for stragglers",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#continuous-batching-no-waiting-for-stragglers",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "FlashAttention: no wasted traffic inside attention",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#flashattention-no-wasted-traffic-inside-attention",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "Speculative decoding: fewer sequential steps",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#speculative-decoding-fewer-sequential-steps",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "Putting the serving stack together",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#architecture",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "Moving fewer bytes: quantization, distillation, pruning",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#compression",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "Mixed precision: doing arithmetic in fewer bits",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#mixed-precision",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "Training: splitting the model across devices",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#training-parallelism",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "Data parallelism: split the batch",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#data-parallelism-split-the-batch",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "Tensor parallelism: split each matrix",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#tensor-parallelism-split-each-matrix",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "Pipeline parallelism: split the layers",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#pipeline-parallelism-split-the-layers",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "Expert parallelism: split the experts",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#expert-parallelism-split-the-experts",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
+    "title": "ZeRO and FSDP: sharding what data parallelism duplicates",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#zero-fsdp",
     "tags": [],
     "summary": "",
     "color": "var(--c-efficient)"
@@ -5706,16 +6036,6 @@ window.SEARCH_INDEX = [
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
     "url": "topics/23-efficient-ai-systems.html#tradeoffs",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-efficient)"
-  },
-  {
-    "kind": "section",
-    "title": "Compression: quantization, distillation, pruning",
-    "parentTitle": "23 · Efficient AI & Systems",
-    "section": "Systems, Safety & Interview",
-    "url": "topics/23-efficient-ai-systems.html#compression",
     "tags": [],
     "summary": "",
     "color": "var(--c-efficient)"
@@ -5742,6 +6062,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Summary",
+    "parentTitle": "23 · Efficient AI & Systems",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/23-efficient-ai-systems.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-efficient)"
+  },
+  {
+    "kind": "section",
     "title": "Measure your GPU's roofline with one matmul",
     "parentTitle": "23 · Efficient AI & Systems",
     "section": "Systems, Safety & Interview",
@@ -5762,7 +6092,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Why a working model goes stale",
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
     "url": "topics/24-mlops.html#intuition",
@@ -5772,20 +6102,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "The production ML lifecycle as a loop",
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
-    "url": "topics/24-mlops.html#timeline",
+    "url": "topics/24-mlops.html#architecture",
     "tags": [],
     "summary": "",
     "color": "var(--c-mlops)"
   },
   {
     "kind": "section",
-    "title": "Architecture: the production ML lifecycle as a loop",
+    "title": "Judging a candidate: golden sets, offline and online metrics",
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
-    "url": "topics/24-mlops.html#architecture",
+    "url": "topics/24-mlops.html#evaluation",
     "tags": [],
     "summary": "",
     "color": "var(--c-mlops)"
@@ -5812,17 +6142,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Evaluation: golden sets, and offline vs online metrics",
-    "parentTitle": "24 · ML Engineering & MLOps",
-    "section": "Systems, Safety & Interview",
-    "url": "topics/24-mlops.html#evaluation",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-mlops)"
-  },
-  {
-    "kind": "section",
-    "title": "Why this design",
+    "title": "Two design choices people question",
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
     "url": "topics/24-mlops.html#why",
@@ -5836,6 +6156,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "24 · ML Engineering & MLOps",
     "section": "Systems, Safety & Interview",
     "url": "topics/24-mlops.html#failure-modes",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-mlops)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "24 · ML Engineering & MLOps",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/24-mlops.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-mlops)"
@@ -5862,7 +6192,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Why one score isn't enough",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
     "url": "topics/25-evaluation-reliability-safety.html#intuition",
@@ -5872,17 +6202,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
-    "parentTitle": "25 · Evaluation, Reliability & Safety",
-    "section": "Systems, Safety & Interview",
-    "url": "topics/25-evaluation-reliability-safety.html#timeline",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-eval)"
-  },
-  {
-    "kind": "section",
-    "title": "The landscape: five questions, five toolkits",
+    "title": "Five questions, five toolkits",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
     "url": "topics/25-evaluation-reliability-safety.html#landscape",
@@ -5942,17 +6262,17 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The reference-based metrics you will be asked to name",
+    "title": "The reference-based metrics you'll be asked to name",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
-    "url": "topics/25-evaluation-reliability-safety.html#the-reference-based-metrics-you-will-be-asked-to-name",
+    "url": "topics/25-evaluation-reliability-safety.html#the-reference-based-metrics-you-ll-be-asked-to-name",
     "tags": [],
     "summary": "",
     "color": "var(--c-eval)"
   },
   {
     "kind": "section",
-    "title": "The math that's load-bearing here",
+    "title": "The math behind the checks",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
     "url": "topics/25-evaluation-reliability-safety.html#math",
@@ -5972,10 +6292,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Complexity, failure modes, and what breaks",
+    "title": "Failure modes of the tools themselves",
     "parentTitle": "25 · Evaluation, Reliability & Safety",
     "section": "Systems, Safety & Interview",
     "url": "topics/25-evaluation-reliability-safety.html#failure-modes",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-eval)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "25 · Evaluation, Reliability & Safety",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/25-evaluation-reliability-safety.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-eval)"
@@ -6002,7 +6332,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Spending compute when you know the question",
     "parentTitle": "26 · 2026 Frontier Map",
     "section": "Systems, Safety & Interview",
     "url": "topics/26-frontier-2026.html#intuition",
@@ -6012,7 +6342,17 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "How much can repeated attempts buy?",
+    "parentTitle": "26 · 2026 Frontier Map",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/26-frontier-2026.html#how-much-can-repeated-attempts-buy",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-frontier)"
+  },
+  {
+    "kind": "section",
+    "title": "Where this came from",
     "parentTitle": "26 · 2026 Frontier Map",
     "section": "Systems, Safety & Interview",
     "url": "topics/26-frontier-2026.html#timeline",
@@ -6092,6 +6432,26 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Best-of-N with a verifier",
+    "parentTitle": "26 · 2026 Frontier Map",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/26-frontier-2026.html#best-of-n-with-a-verifier",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-frontier)"
+  },
+  {
+    "kind": "section",
+    "title": "Sparse routing (Mixture-of-Experts)",
+    "parentTitle": "26 · 2026 Frontier Map",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/26-frontier-2026.html#sparse-routing-mixture-of-experts",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-frontier)"
+  },
+  {
+    "kind": "section",
     "title": "Why this direction",
     "parentTitle": "26 · 2026 Frontier Map",
     "section": "Systems, Safety & Interview",
@@ -6106,6 +6466,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "26 · 2026 Frontier Map",
     "section": "Systems, Safety & Interview",
     "url": "topics/26-frontier-2026.html#failure-modes",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-frontier)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "26 · 2026 Frontier Map",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/26-frontier-2026.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-frontier)"
@@ -6222,6 +6592,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Summary",
+    "parentTitle": "27 · Interview Mastery",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/27-interview-mastery.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-interview)"
+  },
+  {
+    "kind": "section",
     "title": "Where to practice",
     "parentTitle": "27 · Interview Mastery",
     "section": "Systems, Safety & Interview",
@@ -6242,7 +6622,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "What a GPU gives up, and what it gets for it",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
     "url": "topics/28-gpu-architecture-cuda-distributed.html#intuition",
@@ -6252,17 +6632,17 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "Arithmetic per byte moved",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
-    "url": "topics/28-gpu-architecture-cuda-distributed.html#timeline",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#intensity",
     "tags": [],
     "summary": "",
     "color": "var(--c-gpu)"
   },
   {
     "kind": "section",
-    "title": "Architecture: from the code you write to the silicon that runs it",
+    "title": "From the code you write to the silicon that runs it",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
     "url": "topics/28-gpu-architecture-cuda-distributed.html#architecture",
@@ -6272,7 +6652,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The memory hierarchy: where page 23's bandwidth story physically lives",
+    "title": "The memory hierarchy: where chapter 23's bandwidth story physically lives",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
     "url": "topics/28-gpu-architecture-cuda-distributed.html#memory",
@@ -6472,6 +6852,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Summary",
+    "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
+    "section": "Systems, Safety & Interview",
+    "url": "topics/28-gpu-architecture-cuda-distributed.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-gpu)"
+  },
+  {
+    "kind": "section",
     "title": "Write a naive transpose kernel, then profile your way out of it",
     "parentTitle": "28 · GPU Architecture, CUDA & Distributed Training",
     "section": "Systems, Safety & Interview",
@@ -6522,16 +6912,6 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Starting hyperparameters",
-    "parentTitle": "29 · Fine-tuning LLMs in Practice",
-    "section": "Hands-on",
-    "url": "topics/29-finetuning-llms.html#starting-hyperparameters",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-practice)"
-  },
-  {
-    "kind": "section",
     "title": "The memory arithmetic, line by line",
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
@@ -6556,16 +6936,6 @@ window.SEARCH_INDEX = [
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
     "url": "topics/29-finetuning-llms.html#lora-math",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-practice)"
-  },
-  {
-    "kind": "section",
-    "title": "Why a low rank is enough",
-    "parentTitle": "29 · Fine-tuning LLMs in Practice",
-    "section": "Hands-on",
-    "url": "topics/29-finetuning-llms.html#why-a-low-rank-is-enough",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
@@ -6622,10 +6992,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The unglamorous checklist",
+    "title": "What quality means",
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
-    "url": "topics/29-finetuning-llms.html#the-unglamorous-checklist",
+    "url": "topics/29-finetuning-llms.html#what-quality-means",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
@@ -6662,16 +7032,6 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Three failures, and how each announces itself",
-    "parentTitle": "29 · Fine-tuning LLMs in Practice",
-    "section": "Hands-on",
-    "url": "topics/29-finetuning-llms.html#three-failures-and-how-each-announces-itself",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-practice)"
-  },
-  {
-    "kind": "section",
     "title": "Catastrophic forgetting, and what helps",
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
@@ -6692,6 +7052,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Summary",
+    "parentTitle": "29 · Fine-tuning LLMs in Practice",
+    "section": "Hands-on",
+    "url": "topics/29-finetuning-llms.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
     "title": "Now write it yourself",
     "parentTitle": "29 · Fine-tuning LLMs in Practice",
     "section": "Hands-on",
@@ -6702,7 +7072,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "What everybody asks first",
+    "title": "What fills the card",
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
     "url": "topics/30-running-models-locally.html#the-question",
@@ -6772,6 +7142,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Summary",
+    "parentTitle": "30 · Running Models Locally",
+    "section": "Hands-on",
+    "url": "topics/30-running-models-locally.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
     "title": "Now write it yourself",
     "parentTitle": "30 · Running Models Locally",
     "section": "Hands-on",
@@ -6782,7 +7162,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The two phases, and why everything follows",
+    "title": "Reading the prompt, then writing the answer",
     "parentTitle": "31 · LLM Inference & Serving",
     "section": "Hands-on",
     "url": "topics/31-llm-inference-serving.html#two-phases",
@@ -6792,7 +7172,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The request lifecycle, end to end",
+    "title": "One request, start to finish",
     "parentTitle": "31 · LLM Inference & Serving",
     "section": "Hands-on",
     "url": "topics/31-llm-inference-serving.html#lifecycle",
@@ -6802,7 +7182,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The four numbers that define a serving system",
+    "title": "Four numbers that say whether a server is good",
     "parentTitle": "31 · LLM Inference & Serving",
     "section": "Hands-on",
     "url": "topics/31-llm-inference-serving.html#metrics",
@@ -6812,7 +7192,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The math: why batching is the only lever during decode",
+    "title": "Why batching is the lever during decode",
     "parentTitle": "31 · LLM Inference & Serving",
     "section": "Hands-on",
     "url": "topics/31-llm-inference-serving.html#math",
@@ -6852,10 +7232,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Prompt caching: the cheapest win available",
+    "title": "Prompt caching: skipping work that's already done",
     "parentTitle": "31 · LLM Inference & Serving",
     "section": "Hands-on",
     "url": "topics/31-llm-inference-serving.html#caching",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "31 · LLM Inference & Serving",
+    "section": "Hands-on",
+    "url": "topics/31-llm-inference-serving.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
@@ -6912,7 +7302,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why supervised fine-tuning is not enough",
+    "title": "Why supervised fine-tuning can't tell the two answers apart",
     "parentTitle": "32 · Preference Optimization: RLHF, DPO & GRPO",
     "section": "Hands-on",
     "url": "topics/32-preference-optimization.html#why",
@@ -6922,7 +7312,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "The bargain: move toward what people prefer, but not far",
     "parentTitle": "32 · Preference Optimization: RLHF, DPO & GRPO",
     "section": "Hands-on",
     "url": "topics/32-preference-optimization.html#intuition",
@@ -6986,6 +7376,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "32 · Preference Optimization: RLHF, DPO & GRPO",
     "section": "Hands-on",
     "url": "topics/32-preference-optimization.html#rlvr",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "32 · Preference Optimization: RLHF, DPO & GRPO",
+    "section": "Hands-on",
+    "url": "topics/32-preference-optimization.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
@@ -7142,6 +7542,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Summary",
+    "parentTitle": "33 · Model Atlas: Language Models",
+    "section": "Model Atlas",
+    "url": "topics/33-model-atlas-language.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-atlas)"
+  },
+  {
+    "kind": "section",
     "title": "The fifty-prompt bake-off",
     "parentTitle": "33 · Model Atlas: Language Models",
     "section": "Model Atlas",
@@ -7272,6 +7682,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Summary",
+    "parentTitle": "34 · Model Atlas: Speech & Audio",
+    "section": "Model Atlas",
+    "url": "topics/34-model-atlas-speech-audio.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-atlas)"
+  },
+  {
+    "kind": "section",
     "title": "Your own WER, and the denoiser that made it worse",
     "parentTitle": "34 · Model Atlas: Speech & Audio",
     "section": "Model Atlas",
@@ -7332,10 +7752,60 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Describing is not locating",
+    "parentTitle": "35 · Model Atlas: Vision & Generative Media",
+    "section": "Model Atlas",
+    "url": "topics/35-model-atlas-vision-generative.html#describing-is-not-locating",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-atlas)"
+  },
+  {
+    "kind": "section",
     "title": "Detection and segmentation",
     "parentTitle": "35 · Model Atlas: Vision & Generative Media",
     "section": "Model Atlas",
     "url": "topics/35-model-atlas-vision-generative.html#detection",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-atlas)"
+  },
+  {
+    "kind": "section",
+    "title": "Closed-set detectors",
+    "parentTitle": "35 · Model Atlas: Vision & Generative Media",
+    "section": "Model Atlas",
+    "url": "topics/35-model-atlas-vision-generative.html#closed-set-detectors",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-atlas)"
+  },
+  {
+    "kind": "section",
+    "title": "Open-vocabulary detectors",
+    "parentTitle": "35 · Model Atlas: Vision & Generative Media",
+    "section": "Model Atlas",
+    "url": "topics/35-model-atlas-vision-generative.html#open-vocabulary-detectors",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-atlas)"
+  },
+  {
+    "kind": "section",
+    "title": "Promptable segmenters",
+    "parentTitle": "35 · Model Atlas: Vision & Generative Media",
+    "section": "Model Atlas",
+    "url": "topics/35-model-atlas-vision-generative.html#promptable-segmenters",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-atlas)"
+  },
+  {
+    "kind": "section",
+    "title": "Scoring a detector",
+    "parentTitle": "35 · Model Atlas: Vision & Generative Media",
+    "section": "Model Atlas",
+    "url": "topics/35-model-atlas-vision-generative.html#scoring-a-detector",
     "tags": [],
     "summary": "",
     "color": "var(--c-atlas)"
@@ -7386,6 +7856,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "35 · Model Atlas: Vision & Generative Media",
     "section": "Model Atlas",
     "url": "topics/35-model-atlas-vision-generative.html#reading-benchmarks",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-atlas)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "35 · Model Atlas: Vision & Generative Media",
+    "section": "Model Atlas",
+    "url": "topics/35-model-atlas-vision-generative.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-atlas)"
@@ -7502,10 +7982,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why it is not settled",
+    "title": "Why it isn't settled",
     "parentTitle": "36 · The Millennium Prize Problems",
     "section": "Grand Challenges",
-    "url": "topics/36-millennium-prize-problems.html#why-it-is-not-settled",
+    "url": "topics/36-millennium-prize-problems.html#why-it-isn-t-settled",
     "tags": [],
     "summary": "",
     "color": "var(--c-challenge)"
@@ -7536,6 +8016,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "36 · The Millennium Prize Problems",
     "section": "Grand Challenges",
     "url": "topics/36-millennium-prize-problems.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-challenge)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "36 · The Millennium Prize Problems",
+    "section": "Grand Challenges",
+    "url": "topics/36-millennium-prize-problems.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-challenge)"
@@ -7646,6 +8136,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "37 · AI in Industry: What It Solves",
     "section": "Grand Challenges",
     "url": "topics/37-ai-in-industry.html#pick",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-challenge)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "37 · AI in Industry: What It Solves",
+    "section": "Grand Challenges",
+    "url": "topics/37-ai-in-industry.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-challenge)"
@@ -7806,6 +8306,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "LLM Inference at Scale",
     "section": "Site",
     "url": "topics/38-llm-inference-at-scale.html#goodput",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-practice)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "LLM Inference at Scale",
+    "section": "Site",
+    "url": "topics/38-llm-inference-at-scale.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-practice)"
@@ -8062,6 +8572,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Summary",
+    "parentTitle": "Real-Time Voice AI",
+    "section": "Site",
+    "url": "topics/39-realtime-voice-ai.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
     "title": "Instrument one turn, then move exactly one number",
     "parentTitle": "Real-Time Voice AI",
     "section": "Site",
@@ -8142,7 +8662,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Guidance costs double, and nobody says so",
+    "title": "Guidance doubles the count",
     "parentTitle": "Diffusion & Video Inference",
     "section": "Site",
     "url": "topics/40-diffusion-video-inference.html#cfg",
@@ -8262,16 +8782,6 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Find the step floor and the cache ceiling, then measure what you lost",
-    "parentTitle": "Diffusion & Video Inference",
-    "section": "Site",
-    "url": "topics/40-diffusion-video-inference.html#build",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-genai)"
-  },
-  {
-    "kind": "section",
     "title": "Serving diffusion, and why it is not LLM serving",
     "parentTitle": "Diffusion & Video Inference",
     "section": "Site",
@@ -8296,6 +8806,26 @@ window.SEARCH_INDEX = [
     "parentTitle": "Diffusion & Video Inference",
     "section": "Site",
     "url": "topics/40-diffusion-video-inference.html#in-the-wild",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Find the step floor and the cache ceiling, then measure what you lost",
+    "parentTitle": "Diffusion & Video Inference",
+    "section": "Site",
+    "url": "topics/40-diffusion-video-inference.html#build",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
