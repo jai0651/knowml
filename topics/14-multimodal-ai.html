@@ -196,48 +196,39 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(r&&r.name===
   <div class="topic-header">
     <div class="th-top"><span class="th-chip" style="--c:var(--c-multimodal)">Generative &amp; Multimodal</span><span class="th-num">Chapter 14</span></div>
     <h1>Multimodal <span class="th-grad">AI</span></h1>
-    <p class="dek">This page pulls the earlier ones together: it shows how vision, language, audio, and video models get wired into one system that perceives, reasons, and generates across modalities.</p>
+    <p class="dek">Follow one photo-and-question example through the three decisions behind a multimodal system: a shared embedding space, where the modalities fuse, and whether to adapt a pretrained model or train natively.</p>
     <div class="meta-row">
-      <span class="th-pill"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>24 min read</span>
+      <span class="th-pill"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>18 min read</span>
       <span class="th-pill">Assumes: CLIP &amp; vision foundation models (06), attention (08), generative models (12), speech &amp; audio (13)</span>
     </div>
     <div class="th-actions"><a class="th-start" href="#tldr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start reading</a><button class="th-done" type="button" data-mark-done><span class="th-done-ic"></span><span class="th-done-lbl">Mark as complete</span></button></div>
-    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Intuition</a></li><li><a href="#timeline"><span class="tn">02</span>Timeline</a></li><li><a href="#architecture"><span class="tn">03</span>Architecture: where modalities meet</a></li><li><a href="#math"><span class="tn">04</span>The equations</a></li><li><a href="#why"><span class="tn">05</span>Why this architecture</a></li><li><a href="#tradeoffs"><span class="tn">06</span>Tradeoffs, and what breaks</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
+    <nav class="th-toc" aria-label="In this chapter"><div class="th-toc-label">In this chapter</div><ol><li><a href="#intuition"><span class="tn">01</span>Making an image and a sentence comparable</a></li><li><a href="#architecture"><span class="tn">02</span>Where the modalities meet</a></li><li><a href="#math"><span class="tn">03</span>The equations</a></li><li><a href="#why"><span class="tn">04</span>Why cross-attention became the default</a></li><li><a href="#tradeoffs"><span class="tn">05</span>What it costs and what breaks</a></li><li><a href="#summary"><span class="tn">06</span>Summary</a></li><li><a href="#build"><span class="tn">07</span>Build this</a></li><li><a href="#interview"><span class="tn">08</span>Interview questions</a></li><li><a href="#resources"><span class="tn">09</span>Go deeper</a></li><li><a href="#practice-problems"><span class="tn">·</span>Now write it yourself</a></li><li><a href="#related"><span class="tn">10</span>Related pages</a></li></ol></nav>
   </div>
 
   <section id="tldr">
-    <div class="tldr">
-      <div class="tldr-label">TL;DR</div>
-      <p>This page introduces no new modality-specific math. It is the synthesis page. How pixels become tokens is 06. How attention works is 08. How diffusion and autoregressive generation work is 12. How speech gets encoded is 13.</p>
-    <p>Multimodal AI is the layer on top: how you combine models that already work well within one modality into a single system that reasons across all of them. Three decisions do almost all of the work. <strong>Fusion</strong>, meaning where in the network the modalities meet.</p>
-    <p><strong>Shared embedding spaces</strong> built by contrastive learning, which is how you make different modalities' representations directly comparable in the first place. It also covers <strong>adapter-based versus native multimodal</strong>, which is whether you bolt a pretrained encoder onto an existing LLM or train everything jointly from raw tokens. One sentence for an interview: multimodal AI is mostly a fusion and systems problem and brings no new kind of math.</p>
-    </div>
+    <p>Picture a photo of a dog on a beach, and the question "What is the dog holding?" You answer it by looking at the photo, and the question tells you where to look: at the dog's mouth, not at the sky. For a model to do the same, it has to connect a few words of text to one particular patch of the picture. That's harder than it sounds, because the two don't have anything in common. An image is a grid of pixel intensities, a sentence is a sequence of <strong>token</strong> ids (a token is a word or a piece of a word), and there's no shared coordinate system between a grid of brightness values and a list of integers.</p>
+
+    <p>This chapter is about how to connect them, and it introduces no new modality-specific math. How pixels become tokens is chapter 06, how attention works is 08, how diffusion and autoregressive generation work is 12, and how speech gets encoded is 13. Multimodal AI is the layer on top: how you combine models that already work well inside one modality into a single system that reasons across all of them.</p>
+
+    <p>Three decisions do almost all of the work, and we'll make them in order while following the dog photo through each. First, how do you get an image and a sentence into one <strong>shared embedding space</strong>, where their vectors can be compared directly? The answer is contrastive learning. Second, where in the network do the modalities meet? That's the question of <strong>fusion</strong>. Third, do you bolt a pretrained image encoder onto an existing language model (the <strong>adapter</strong> approach), or train everything jointly from raw tokens (the <strong>native multimodal</strong> approach)?</p>
+
+    <p>By the end you'll be able to say, in one sentence, why multimodal AI is mostly a fusion and systems problem, and why it brings no new kind of math.</p>
   </section>
 
   <section id="intuition">
-    <h2><span class="num">01</span>Intuition</h2>
-    <p class="lede">Every modality speaks a different native language — so the first problem multimodal AI solves is translation, and fusion comes after.</p>
-    <p>An image, as data, is a grid of pixel intensities. A sentence is a sequence of discrete token ids. There is no shared coordinate system connecting them. You can't take a dot product between a pixel grid and a token sequence and expect it to mean anything.</p>
+    <h2><span class="num">01</span>Making an image and a sentence comparable</h2>
 
-    <p>So before you can combine them, you have to translate both into a common space where distance and similarity are meaningful <em>across</em> modalities. An image of a dog and the sentence "a photo of a dog" should land near each other. An image of a cat should land far from that sentence. It shouldn't matter that one started as pixels and the other as text.</p>
-    <p>This is the self-supervised contrastive recipe from 03, generalized across modalities, in four steps:</p>
+    <h3>Translating both into one space</h3>
+    <p>Before the question about the dog can mean anything to a model, the photo and the words have to be translated into the same kind of thing. The usual choice is a vector, a list of numbers, and the aim is a space where distance means similarity across modalities. A photo of a dog and the sentence "a photo of a dog" should land near each other, and a photo of a cat should land far from that sentence. It shouldn't matter that one started as pixels and the other as text. Vectors that live in a space like this are called <strong>embeddings</strong>.</p>
 
-    <ul>
-      <li>Take a large batch of <strong>matched pairs</strong>: image and caption, audio clip and transcript, video and description.</li>
-      <li>Run each half of every pair through <strong>its own encoder</strong>.</li>
-      <li><strong>Project</strong> both into the same dimensional space.</li>
-      <li>Train with a loss that pulls the embeddings of true pairs together while pushing every other combination in the batch apart.</li>
-    </ul>
+    <p>How do you train an encoder to produce such vectors? The recipe is the self-supervised contrastive one from chapter 03, applied across modalities. You collect a large batch of <strong>matched pairs</strong>: an image and its caption, an audio clip and its transcript, a video and its description. Each half of every pair goes through its own encoder, and both outputs are projected to the same number of dimensions. Then comes the loss, which pulls the embeddings of the true pairs together and pushes every other combination in the batch apart. Pairs are the only supervision, and nobody has to label anything.</p>
 
-    <p><strong>CLIP</strong> (<a href="https://arxiv.org/abs/2103.00020" target="_blank" rel="noopener">Radford et al., 2021</a>) did exactly this for image-text, and it is the reference implementation almost everyone means by "contrastive multimodal alignment". 06 covers the full derivation and training details.</p>
+    <p><strong>CLIP</strong> (<a href="https://arxiv.org/abs/2103.00020" target="_blank" rel="noopener">Radford et al., 2021</a>) did exactly this for images and text, and it's the reference implementation people usually mean by "contrastive multimodal alignment". Chapter 06 has the full derivation and the training details. What matters here is that the recipe doesn't care which modalities it's given. Swap in an audio encoder for the image encoder and you get audio-text alignment, and swap in a video encoder and you get video-text alignment. Everything stays the same except the encoder that produces each half of the pair.</p>
 
-    <p>Swap in an audio encoder in place of the image encoder and you get audio-text alignment. Swap in a video encoder and you get video-text alignment. The loss stays the same, and only the encoder that produces each half of the pair changes.</p>
-    <p>Once that shared space exists, it becomes the common language every downstream multimodal system relies on. <strong>Retrieval</strong> becomes a nearest-neighbor search across modalities: find the image whose embedding is closest to this text query. <strong>Zero-shot classification</strong> becomes comparing an image embedding against a handful of candidate label embeddings and picking the closest one.</p>
+    <h3>What the shared space gives you</h3>
+    <p>Once that space exists, a few useful things become one-liners. <strong>Retrieval</strong> turns into a nearest-neighbour search across modalities: find the image whose embedding is closest to this text query. <strong>Zero-shot classification</strong> means comparing an image embedding against a handful of candidate label embeddings and picking the closest. And the space is the raw material for the next section, because you can't usefully combine two modalities' representations until you've made them comparable.</p>
 
-    <p>It also becomes the raw material that fusion operates on, which is the subject of the next section. You can't usefully combine two modalities' representations until you have first made those representations comparable.</p>
-  
-
-    <p>Multimodal models put images and text into the same vector space, so that a matching pair lands close together. Here the vectors are hand-picked, two numbers each, to show the matching step.</p>
+    <p>Here's the matching step with hand-picked vectors, two numbers each, so that you can see it work. You might think of the first number as "how furry" and the second as "how many wheels". The code builds three image vectors and three caption vectors, and <code>norm</code> divides every row by its length. After that, a plain matrix product gives the <strong>cosine similarity</strong> between every image and every caption. That's the dot product of two vectors once their lengths are set to one, so it measures only the angle between them. <code>argmax(axis=1)</code> then picks, for each image, the caption with the highest score.</p>
 
     <details class="tryit" open>
       <summary class="tryit-head">
@@ -255,33 +246,15 @@ def norm(a): return a / np.linalg.norm(a, axis=1, keepdims=True)
 sim = norm(images) @ norm(texts).T          # cosine similarity
 print(np.round(sim, 2))
 print(&quot;best caption per image:&quot;, [names[i] for i in sim.argmax(axis=1)])</code></pre>
-      <div class="tryit-out"><strong>Each image's highest score is against its own caption.</strong> The diagonal of the printed matrix is <code>0.99</code>, <code>0.99</code> and <code>0.98</code>, and the off-diagonal entries are lower, such as <code>0.11</code> for the dog against the car. The third image, half furry and half wheeled, picks &quot;robot dog&quot; at <code>0.98</code>, ahead of &quot;dog&quot; and &quot;car&quot; at <code>0.71</code> each. Real models learn these vectors from data, and here they were hand-picked.</div>
+      <div class="tryit-out"><strong>Each image's highest score is against its own caption.</strong> The diagonal of the printed matrix is <code>0.99</code>, <code>0.99</code> and <code>0.98</code>, and the off-diagonal entries are lower, such as <code>0.11</code> for the dog against the car. Image three, half furry and half wheeled, picks &quot;robot dog&quot; at <code>0.98</code>, ahead of &quot;dog&quot; and &quot;car&quot; at <code>0.71</code> each. Real models learn these vectors from data, and here they were hand-picked.</div>
     </details>
-  </section>
 
-  <section id="timeline">
-    <h2><span class="num">02</span>Timeline</h2>
-    <div class="bia">
-      <div class="bia-box">
-        <div class="bia-label">Before</div>
-        <p>Through the 2010s vision, language and audio were separate fields, and multimodal systems glued independent unimodal models together with hand-written rules for combining their scores, which was brittle and blind to interactions below the final prediction.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box innovation">
-        <div class="bia-label">Innovation</div>
-        <p>CLIP-style contrastive alignment (2021) trained an image encoder and a text encoder into a shared space with one loss, and the encoder + projector + LLM recipe (2022–2023) bolted a pretrained vision encoder onto a pretrained LLM through a small trainable projector at a fraction of the cost.</p>
-      </div>
-      <div class="bia-arrow">→</div>
-      <div class="bia-box">
-        <div class="bia-label">After</div>
-        <p>Today adapter-based VLMs inherit improvements from better encoders and LLMs, natively multimodal models train jointly across modalities at much higher cost, and cross-modal generation and multimodal agents push toward systems that perceive, reason and act in one loop.</p>
-      </div>
-    </div>
+    <p>What to notice is the diagonal of that matrix, where each image meets its own caption. Those scores are the highest in their rows, and the third image, half furry and half wheeled, lands closest to "a photo of a robot dog". A real model learns vectors like these from millions of pairs, and the only difference here is that we picked them by hand. So now we can ask which caption goes with which picture. Can we do more? Our dog question needs the model to use the image while it's writing an answer, and that's a question about where the two streams of information meet.</p>
   </section>
 
   <section id="architecture">
-    <h2><span class="num">03</span>Architecture: where modalities meet</h2>
-    <p>Once you have per-modality representations, you have to decide where in the network they meet. This is the <em class="term">fusion</em> taxonomy, and it is the most consequential architectural decision in a multimodal system. It trades off how much cross-modal interaction the model can learn against how expensive and inflexible the resulting system becomes.</p>
+    <h2><span class="num">02</span>Where the modalities meet</h2>
+    <p>Once you have a representation for each modality, you have to decide where in the network they come together. This is the <em class="term">fusion</em> taxonomy, and it's the most consequential architectural choice in a multimodal system, because it trades off how much cross-modal interaction the model can learn against how expensive and inflexible the system becomes. There are three places to merge, and the table lays them side by side.</p>
 
     <div class="tbl-wrap">
       <table class="cmp">
@@ -293,19 +266,14 @@ print(&quot;best caption per image:&quot;, [names[i] for i in sim.argmax(axis=1)
       </table>
     </div>
 
-    <p>The tradeoff moves in a straight line with how early you merge.</p>
+    <p>The tradeoff moves in a straight line with how early you merge. Start at the early end. With <strong>early fusion</strong>, a single joint model sees the raw signal from both modalities from its first layer, so nothing about their interaction is ever forced through a bottleneck, and in principle it can learn the finest cross-modal correlations. What it costs is that you're training the whole thing jointly, so you can't reuse a pretrained unimodal encoder. And it's inflexible: add a third modality, or swap in a better vision encoder, and you're often retraining from scratch.</p>
 
-    <p><strong>Early fusion</strong> can, in principle, learn the finest-grained cross-modal correlations. A single joint model sees raw signal from both modalities from layer one, so nothing about their interaction is ever forced through a bottleneck.</p>
-    <p>But it is expensive, because you are training the whole thing jointly and can't just reuse a pretrained unimodal encoder. And it is inflexible: add a third modality, or swap in a better vision encoder, and you are often retraining from scratch.</p>
+    <p><strong>Late fusion</strong> sits at the other end. You plug in any pretrained image model and any pretrained text model, then train a small combination layer on top, which makes it cheap and modular. What you lose is fine-grained interaction. By the time the two outputs are combined, the low-level detail that would have made them useful together is gone.</p>
 
-    <p><strong>Late fusion</strong> is the opposite. It is cheap and modular: you plug in any pretrained image model and any pretrained text model, then train a small combination layer on top. But it misses fine-grained interaction entirely, because by the time the two modalities' outputs are combined, all the low-level detail that made them useful together is already gone.</p>
+    <h4 class="why">Why can't late fusion answer a question about one word and one pixel region?</h4>
+    <p>Take our dog question. Answering it depends on relating one specific word, "holding", to one specific region of the image, the patch around the dog's mouth. Late fusion structurally can't do that, because the word and the pixels never appear in the same computation. Each side has already boiled itself down to a final score before the other side gets a say. Early fusion can do it, but at the price we just saw.</p>
 
-    <div class="callout callout-teach">
-      <span class="callout-label">The question that separates the two</span>
-      <p>Suppose answering a question depends on relating one specific word to one specific pixel region.</p>
-      <p>Late fusion <strong>structurally cannot do it</strong>, because the word and the pixel never appear in the same computation.</p>
-    </div>
-    <p><strong>Intermediate fusion</strong>, specifically cross-attention fusion, is the compromise that won for most systems built since 2022. Here is what it looks like as data flows through one block:</p>
+    <p><strong>Intermediate fusion</strong>, and specifically <strong>cross-attention fusion</strong>, is the compromise that won for most systems built since 2022. Each modality keeps its own pretrained encoder, which turns it into a sequence of tokens. Then, partway through the network, the tokens of one modality (usually text) look at the tokens of the others using the attention from chapter 08. In our example, the word "holding" would send out a query, and the image patches would answer with keys and values. Here's one block of it in the diagram.</p>
 
     <div class="diagram">
       <div class="diagram-title">Intermediate (cross-attention) fusion — one shared block, three modality streams
@@ -353,40 +321,32 @@ print(&quot;best caption per image:&quot;, [names[i] for i in sim.argmax(axis=1)
 
         <text x="360" y="30" text-anchor="middle" font-size="10.5" fill="#4f8cff">↑ repeats for N blocks</text>
       </svg>
-      <div class="diagram-caption">Each modality has its own encoder producing its own tokens. Inside the shared transformer, the primary stream (here, text) queries into the other modalities' tokens via cross-attention: Q from text, K and V from image and audio. The result then rejoins the residual stream and continues through the same block pattern as any transformer (see 08). Self-attention within each modality typically happens inside its own encoder before this point. What's shown is the fusion step itself.</div>
+      <div class="diagram-caption">Each modality has its own encoder producing its own tokens. Inside the shared transformer, the primary stream (here, text) queries into the other modalities' tokens through cross-attention: Q from text, K and V from image and audio. It rejoins the residual stream and continues through the same block pattern as any transformer (see 08). Self-attention within each modality typically happens inside its own encoder before this point, so what's shown is the fusion step itself.</div>
     </div>
 
-    <h3>The recipe, generalized beyond vision</h3>
-    <p>06 covers the dominant VLM recipe in depth. A pretrained vision encoder produces a sequence of patch embeddings. A small trainable <strong>projector</strong> maps those into the same dimensional space the LLM's token embeddings live in. The LLM, usually pretrained and often frozen or only lightly fine-tuned, then treats the projected image tokens exactly like any other tokens in its context, attending over them with the self-attention machinery it already has.</p>
+    <p>Maybe the quickest way to read the diagram is to look at where the arrows go. Each encoder sends its tokens up into the cross-attention box, with the text supplying the queries and the image and audio tokens supplying the keys and values. That output then rejoins the residual stream and goes through the usual feed-forward layer, and the whole pattern repeats for N blocks before the language-model head predicts the next token.</p>
 
-    <p>The same recipe generalizes directly to every other modality. An audio encoder plus a projector feeding an LLM gives you a speech-language model, using the identical architecture and identical training logic. <strong>Only the pretrained encoder at the bottom changes.</strong></p>
+    <h3>The adapter recipe, and other modalities</h3>
+    <p>A close cousin of cross-attention fusion is the recipe chapter 06 covers in depth for vision-language models. A pretrained vision encoder produces a sequence of patch embeddings. A small trainable <strong>projector</strong> maps those into the same dimensional space the LLM's token embeddings live in. Meanwhile the LLM, usually pretrained and often frozen or only lightly fine-tuned, then treats the projected image tokens exactly like any other tokens in its context, and attends over them with the self-attention machinery it already has.</p>
 
-    <p>Training usually happens in two stages either way: an alignment stage that teaches the projector to map the new modality into the LLM's space, then instruction tuning on multimodal task data. This is a training-recipe detail and adds no new architecture.</p>
+    <p>Nothing in this recipe is specific to images. An audio encoder plus a projector feeding an LLM gives you a speech-language model, with the identical architecture and training logic, and only the pretrained encoder at the bottom changes. Training usually happens in two stages either way: an alignment stage that teaches the projector to map the new modality into the LLM's space, then instruction tuning on multimodal task data. That's a training-recipe detail, and it adds no new architecture.</p>
 
-    <h3>Native multimodal tokenization: the alternative to bolt-on adapters</h3>
-    <p>The adapter recipe above always has a <strong>seam</strong>. A pretrained encoder is trained on its own objective, then adapted afterward to work inside an LLM it never saw during its own pretraining.</p>
+    <h3>Native multimodal tokenization</h3>
+    <p>The adapter recipe always has a <strong>seam</strong>. A pretrained encoder is trained on its own objective, and only afterward is it adapted to work inside an LLM it never saw during its own pretraining. Can the seam be removed, maybe?</p>
 
-    <p><strong>Native multimodal tokenization</strong> removes that seam. Every modality is converted into tokens from the start, where the encoder-then-project design converts later. Text stays as subword tokens, images are chopped into patch tokens or discrete codes from a learned image tokenizer, and audio is chopped into frame tokens. All of it is interleaved into one shared sequence that a single transformer is trained on jointly, with no separate modality-specific pretraining stage bolted on afterward.</p>
+    <p><strong>Native multimodal tokenization</strong> does that by converting every modality into tokens from the start, where the encoder-then-project design converts later. Text stays as subword tokens, images are chopped into patch tokens or discrete codes from a learned image tokenizer, and audio is chopped into frame tokens. All of it is interleaved into one shared sequence, and a single transformer is trained on that sequence jointly, with no separate modality-specific pretraining stage bolted on afterward.</p>
 
-    <p>The real tradeoff cuts both ways:</p>
-
-    <ul>
-      <li><strong>The upside.</strong> A natively multimodal model can, in principle, learn richer cross-modal reasoning, because nothing about how it represents an image was ever optimized for a different, unimodal objective first. Every parameter was trained with the other modalities in the loop from day one.</li>
-      <li><strong>The cost.</strong> You give up reusing a great pretrained unimodal encoder and improving it independently. You are training the whole stack jointly, which is dramatically more expensive and harder to get right, and a bad tokenization choice for one modality can hurt every other modality sharing the same model.</li>
-    </ul>
+    <p>The tradeoff cuts both ways. On the upside, a natively multimodal model can in principle learn richer cross-modal reasoning, because nothing about how it represents an image was ever optimised for a different, unimodal objective first. Every parameter was trained with the other modalities in the loop from day one. On the downside, you give up reusing a great pretrained unimodal encoder and improving it independently. You're training the whole stack jointly, and that's dramatically more expensive and harder to get right. A bad tokenization choice for one modality can hurt every other modality sharing the model.</p>
 
     <h3>Cross-modal generation and multimodal reasoning</h3>
-    <p>Two more categories are worth naming explicitly, since interviewers use these exact terms.</p>
+    <p>Two more terms come up constantly, so it helps to separate them from everything above. <strong>Cross-modal generation</strong> is any system that generates in one modality conditioned on another: text-to-image, text-to-audio, text-to-video, image-to-video, speech-to-speech. None of these needs new generative machinery. They reuse the diffusion and autoregressive techniques from chapter 12 (see <a href="https://jalammar.github.io/illustrated-stable-diffusion/" target="_blank" rel="noopener">The Illustrated Stable Diffusion</a> for the mechanics of the text-to-image case), conditioned on an embedding from a different modality's encoder in place of, or in addition to, a text prompt.</p>
 
-    <p><strong>Cross-modal generation</strong> is any system that generates in one modality conditioned on another: text-to-image, text-to-audio, text-to-video, image-to-video, speech-to-speech. None of these needs new generative machinery, since they reuse the diffusion and autoregressive techniques from 12 (see <a href="https://jalammar.github.io/illustrated-stable-diffusion/" target="_blank" rel="noopener">The Illustrated Stable Diffusion</a> for the mechanics of the text-to-image case specifically), just conditioned on an embedding from a different modality's encoder in place of, or in addition to, a text prompt.</p>
-
-    <p><strong>Multimodal chain-of-thought</strong>, or visual reasoning, is a different thing from generation. It is about how a model reasons over an image or video it is already looking at. The naive approach captions the image once, in text, then reasons purely over that caption, so every downstream reasoning step is blind to the actual image and can only be as good as that first, one-shot caption.</p>
-    <p>Real multimodal reasoning re-attends to the image, or to specific regions of it, or specific moments in a video, at each reasoning step. This is the same cross-attention pattern as the diagram above, invoked repeatedly during reasoning and not once at the input.</p>
+    <p><strong>Multimodal chain-of-thought</strong>, or visual reasoning, is about something else: how a model reasons over an image or video it's already looking at. A naive approach captions the image once, in text, and then reasons purely over that caption. Every later step is blind to the actual image and can only be as good as that first, one-shot caption. Real multimodal reasoning re-attends to the image, or to specific regions of it, or to specific moments in a video, at each reasoning step. That's the same cross-attention pattern as in the diagram, invoked repeatedly during reasoning and not once at the input. Is cross-attention the same formula we met in chapter 08? Let's check.</p>
   </section>
 
   <section id="math">
-    <h2><span class="num">04</span>The equations</h2>
-    <p>Cross-attention is not a new mechanism. It is the identical formula from 08, with one detail changed: where each matrix comes from.</p>
+    <h2><span class="num">03</span>The equations</h2>
+    <p>Cross-attention isn't a new mechanism. It's the identical formula from chapter 08, with one detail changed, and that's where each matrix comes from.</p>
     <div class="eq-block">
       <span>$$\text{CrossAttention}(Q_{\text{text}}, K_{\text{image}}, V_{\text{image}}) = \text{softmax}\!\left(\frac{Q_{\text{text}} K_{\text{image}}^{\top}}{\sqrt{d_k}}\right)V_{\text{image}}$$</span>
     </div>
@@ -395,28 +355,25 @@ print(&quot;best caption per image:&quot;, [names[i] for i in sim.argmax(axis=1)
       <li><span class="sym">K_image, V_image</span> linear projections of the modality being attended over, here image patch tokens. Same role as K and V in 08, just sourced from a different sequence than Q.</li>
       <li><span class="sym">everything else</span> the dot product, the <span>$\sqrt{d_k}$</span> scaling, the row-wise softmax, the weighted sum over V. All identical to self-attention in every detail. The only thing that changed is that Q and K/V no longer come from the same sequence.</li>
     </ul>
-    <p>Cross-attention fusion is architecturally cheap to add because it is a new <strong>wiring pattern</strong> and needs no new operation. Any transformer block that already has self-attention can grow a second attention sub-layer where Q still comes from the primary modality's residual stream, but K and V are swapped in from a different modality's encoder output.</p>
+    <p>That makes cross-attention fusion cheap to add, because it's a new <strong>wiring pattern</strong> and needs no new operation. Any transformer block that already has self-attention can grow a second attention sub-layer, where Q still comes from the primary modality's residual stream but K and V come from a different modality's encoder output. It works for any pair of modalities (text querying image, text querying audio, video querying text) without changing the math.</p>
 
-    <p>This mechanism is all that the diagram above shows, and it swaps in for any pair of modalities (text querying image, text querying audio, video querying text) without changing the math at all.</p>
-    <p>The contrastive alignment loss that builds the shared embedding space in the first place (03, 06) is the same InfoNCE-style objective regardless of which two modalities you are aligning. Maximize the similarity <span>$\text{sim}(a_i,b_i)/\tau$</span> of a true pair relative to every mismatched pair in the batch, symmetrically in both directions.</p>
-
-    <p>Swap in an audio encoder and a text encoder in place of an image encoder and a text encoder, and the loss itself doesn't change. See 06 for the full derivation, which would read the same here with different variable names.</p>
+    <p>The other equation in the chapter is the one behind the shared space from section 01. That contrastive alignment loss (chapters 03 and 06) is the same InfoNCE-style objective whichever two modalities you align, and it maximises the similarity <span>$\text{sim}(a_i,b_i)/\tau$</span> of a true pair relative to every mismatched pair in the batch, symmetrically in both directions. Put an audio encoder and a text encoder where the image encoder and text encoder were, and the loss doesn't change. Chapter 06 has the full derivation, which would read the same here with different variable names. So if the math is shared, why did one fusion choice end up so dominant?</p>
   </section>
 
   <section id="why">
-    <h2><span class="num">05</span>Why this architecture</h2>
-    <p>Why did intermediate fusion, specifically cross-attention, become the default over pure early or pure late fusion for most systems? <strong>Cost and reuse.</strong></p>
+    <h2><span class="num">04</span>Why cross-attention became the default</h2>
+    <p>A short history explains most of it. Through the 2010s, vision, language and audio were separate fields, and multimodal systems glued independent unimodal models together with hand-written rules for combining their scores. That was brittle, and it was blind to any interaction below the final prediction. CLIP-style contrastive alignment (2021) then trained an image encoder and a text encoder into a shared space with a single loss. From 2022 to 2023, the encoder, projector and LLM recipe bolted a pretrained vision encoder onto a pretrained LLM through a small trainable projector, at a fraction of the cost of training everything together. Today adapter-based VLMs inherit improvements from better encoders and LLMs, natively multimodal models train jointly across modalities at much higher cost, and cross-modal generation and multimodal agents push toward systems that perceive, reason and act in one loop.</p>
 
-    <p>Cross-attention fusion lets you start from two or more already-excellent pretrained unimodal models: a vision encoder trained on huge amounts of image data, an LLM trained on huge amounts of text. Then you add a comparatively small number of new parameters, the cross-attention layers or the projector, to connect them.</p>
+    <p>The reason the intermediate lane became the default comes down to cost and reuse. Cross-attention fusion lets you start from two or more already-excellent pretrained unimodal models, such as a vision encoder trained on huge amounts of image data and an LLM trained on huge amounts of text. Then you add a comparatively small number of new parameters, the cross-attention layers or the projector, to connect them. You get most of the benefit of early fusion's fine-grained interaction, since a text token can attend directly to a specific image patch mid-network, before any prediction is made. And you pay closer to late fusion's training cost, since you're mostly fine-tuning a small bridge and not training two giant encoders jointly from scratch.</p>
 
-    <p>You get most of the benefit of early fusion's fine-grained interaction, since a text token can attend directly to a specific image patch mid-network, before any prediction is made. And you pay closer to late fusion's training cost, since you are mostly fine-tuning a small bridge and not training two giant encoders jointly from scratch.</p>
-    <p>This is the accuracy-versus-cost sweet spot. Early fusion's ceiling is higher in principle, but almost nobody can afford to pay for it from scratch for every new modality combination. Late fusion is cheap but structurally incapable of fine-grained cross-modal reasoning. Cross-attention fusion is the point on that curve where most production systems land.</p>
-
-    <p>Native multimodal tokenization is the closest thing to deliberately paying for early fusion's ceiling. It is rarer for that reason, and mostly pursued by teams with the budget to train large joint models from scratch and not adapt existing ones.</p>
+    <h4 class="why">If early fusion has the higher ceiling, why doesn't everyone use it?</h4>
+    <p>Because almost nobody can afford it from scratch for every new modality combination. Late fusion is cheap but structurally incapable of fine-grained cross-modal reasoning, and early fusion is powerful but expensive, so cross-attention fusion is probably the point on that accuracy-versus-cost curve where most production systems land. Native multimodal tokenization is the closest thing to deliberately paying for early fusion's ceiling, so it's probably rarer, and mostly pursued by teams with the budget to train large joint models from scratch instead of adapting existing ones. Both lanes are active and shipping today. Adapter-based VLMs remain more common because they're cheaper to build and let you reuse best-in-class unimodal encoders as those keep improving independently, while natively multimodal models are the harder, more expensive bet, made by teams aiming for tighter cross-modal reasoning than an adapter can provide. Neither has definitively displaced the other, so treat any claim that one has fully replaced the other as an overclaim.</p>
   </section>
 
   <section id="tradeoffs">
-    <h2><span class="num">06</span>Tradeoffs, and what breaks</h2>
+    <h2><span class="num">05</span>What it costs and what breaks</h2>
+    <p>We've seen that each fusion choice buys something and charges for it. Here are the three side by side, on the three things you'll end up caring about: how good the interaction is, what it costs to train, and how easily you can swap parts.</p>
+
     <div class="tbl-wrap">
       <table class="cmp">
         <thead><tr><th></th><th>Early fusion</th><th>Late fusion</th><th>Intermediate / cross-attention fusion</th></tr></thead>
@@ -429,28 +386,36 @@ print(&quot;best caption per image:&quot;, [names[i] for i in sim.argmax(axis=1)
     </div>
 
     <h3>Failure modes</h3>
-    <ul>
-      <li><strong>Grounding failures.</strong> A model describes something plausible-sounding but not present in the input. Language priors learned from huge amounts of text pretraining are strong, and a fluent, wrong description often reads just as convincingly as a correct one. It is the most common real complaint about VLMs in production.</li>
-      <li><strong>Temporal inconsistency.</strong> Video generation and video understanding both have to maintain consistency across time that image models never had to deal with. An object's identity, appearance, and position have to stay coherent across dozens or hundreds of frames. Both generative and discriminative video-language models still struggle with this over long clips.</li>
-      <li><strong>Evaluation is hard.</strong> Unlike a text benchmark where you can check an answer string, checking a multimodal answer means checking several harder-to-automate things at once: perception (did it correctly perceive what's in the input), grounding (does a specific claim correspond to a specific part of the image or video, not just sound plausible), reasoning (given correct perception, is the inference valid), generation quality (for cross-modal generation tasks), and temporal/spatial consistency (for video specifically). A single benchmark number rarely captures all five, which is why real multimodal evaluation usually needs several benchmarks plus a human or rubric-based check for grounding specifically.</li>
-    </ul>
+    <p>The first failure is <strong>grounding</strong>. A model describes something plausible-sounding that isn't in the input, perhaps a dog holding a frisbee when the photo shows a stick. Language priors learned from huge amounts of text pretraining are strong, and a fluent, wrong description reads just as convincingly as a correct one. It's probably the most common real complaint about VLMs in production.</p>
 
-    <div class="callout callout-warn">
-      <span class="callout-label">Common misconception</span>
-      <p>"The model looked at the image, described it, then reasoned about the description — so it did visual reasoning." Captioning once and then reasoning over that caption is not the same thing as multimodal reasoning.</p>
-    <p>Every error in that first, one-shot caption propagates uncorrected through every later step, because the model never looks back at the actual image. Real multimodal chain-of-thought re-attends to the image, or a specific region or moment in it, at each reasoning step. Not just once, up front, before reasoning goes blind.</p>
-    </div>
+    <p>The second is <strong>temporal inconsistency</strong>. Video generation and video understanding both have to maintain consistency across time, which image models never had to deal with. An object's identity, appearance and position have to stay coherent across dozens or hundreds of frames, and both generative and discriminative video-language models still struggle with this over long clips.</p>
 
-    <div class="callout callout-status">
-      <span class="callout-label">2026 status</span>
-      <p>Both lanes from the timeline are active and shipping today. Adapter-based VLMs remain more common because they're cheaper to build and let you reuse best-in-class unimodal encoders as those keep improving independently.</p>
-    <p>Natively multimodal models trained jointly from the start are the harder, more expensive bet, made by teams aiming for tighter cross-modal reasoning than an adapter can provide. Neither has definitively displaced the other. Treat any claim that one has fully replaced the other as an overclaim.</p>
-    </div>
+    <p>The third is that <strong>evaluation is hard</strong>. On a text benchmark you can check an answer string, but checking a multimodal answer means checking several harder-to-automate things at once. There's perception (did it correctly perceive what's in the input), grounding (does a specific claim correspond to a specific part of the image or video, and not just sound plausible), and reasoning (given correct perception, is the inference valid). Cross-modal generation adds generation quality, and video adds temporal and spatial consistency. A single benchmark number rarely captures all five, so real multimodal evaluation usually needs several benchmarks plus a human or rubric-based check for grounding specifically.</p>
+
+    <h4 class="why">Doesn't captioning the image and then reasoning about the caption count as visual reasoning?</h4>
+    <p>It's a common misconception that it does, and it's probably the easiest one to fall into. Captioning once and then reasoning over that caption isn't the same thing as multimodal reasoning. Every error in that first, one-shot caption propagates uncorrected through every later step, because the model never looks back at the actual image. Real multimodal chain-of-thought re-attends to the image, or a specific region or moment in it, at each reasoning step, and doesn't do it only once, up front, before reasoning goes blind.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">06</span>Summary</h2>
+    <ol>
+      <li><strong>Modalities start with nothing in common.</strong> An image is a grid of pixel intensities and a sentence is a sequence of token ids, so they have to be translated into a shared space before they can be compared.</li>
+      <li><strong>Contrastive learning builds that space.</strong> Matched pairs go through separate encoders, and a loss pulls true pairs together and pushes all other combinations in the batch apart. CLIP did this for image-text.</li>
+      <li><strong>The same loss works for any pair of modalities.</strong> Only the encoder changes, so audio-text and video-text alignment use the same recipe.</li>
+      <li><strong>The shared space powers retrieval and zero-shot classification,</strong> and it's the raw material that fusion works on.</li>
+      <li><strong>Fusion is where the modalities meet:</strong> at the input (early), at the end (late), or partway through with cross-attention (intermediate). Merging earlier gives richer interaction and a higher cost.</li>
+      <li><strong>Late fusion can't relate one word to one image region,</strong> because the two never appear in the same computation.</li>
+      <li><strong>Cross-attention is the same formula as self-attention</strong> with Q from one modality and K and V from another. It's a wiring pattern and needs no new operation.</li>
+      <li><strong>Adapters reuse pretrained parts.</strong> A pretrained encoder plus a small projector feeding an LLM works for images, audio or anything else, and only the encoder changes.</li>
+      <li><strong>Native multimodal models remove the seam</strong> by tokenizing every modality from the start and training one transformer jointly. They can reason more richly across modalities and cost far more to train.</li>
+      <li><strong>Cross-modal generation reuses diffusion and autoregressive methods</strong> from chapter 12, conditioned on another modality's embedding.</li>
+      <li><strong>Real visual reasoning re-attends to the image at each step.</strong> Captioning once and reasoning over the caption passes every captioning error on to every later step. Grounding, temporal consistency and evaluation are where multimodal systems still break.</li>
+    </ol>
   </section>
 
   <section id="build">
     <h2><span class="num">07</span>Build this</h2>
-    <p class="lede">Cross-attention is the same formula as section 04, wired differently. What the formula cannot show you is a single word picking out the patch it belongs to.</p>
+    <p class="lede">Cross-attention is the same formula as section 03, wired differently. What the formula cannot show you is a single word picking out the patch it belongs to.</p>
 
     <div class="project">
       <div class="proj-head">
@@ -462,7 +427,7 @@ print(&quot;best caption per image:&quot;, [names[i] for i in sim.argmax(axis=1)
       <ol class="proj-steps">
         <li>Draw the dataset with NumPy. Each 64×64 image gets two solid shapes of different colours in two random quadrants. The caption is a template string: <code>"a red square and a blue circle"</code>. A few thousand images is plenty.</li>
         <li>Cut each image into a 4×4 grid of 16 patches and push each patch through one linear layer. On the text side, an embedding table plus one small transformer block. Keep both towers deliberately small.</li>
-        <li>Write the cross-attention layer <strong>by hand</strong> from the equation in section 04. Q from the text tokens, K and V from the patch tokens, <code>softmax(QKᵀ/√d_k)V</code>. Avoid <code>nn.MultiheadAttention</code>.</li>
+        <li>Write the cross-attention layer <strong>by hand</strong> from the equation in section 03. Q from the text tokens, K and V from the patch tokens, <code>softmax(QKᵀ/√d_k)V</code>. Avoid <code>nn.MultiheadAttention</code>.</li>
         <li>Pool the fused text tokens and score the pair with a linear head. Train it to separate true image-caption pairs from pairs made by shuffling the captions within a batch. A few minutes on CPU.</li>
         <li>Keep the attention weights from that layer for one pair. For each caption word, reshape its 16 weights into a 4×4 grid and draw it over the image.</li>
         <li>Now break it deliberately by re-initialising the text tower randomly, freezing it, retraining everything else on the same data, and plot the same words again.</li>
@@ -611,7 +576,7 @@ print(&quot;best caption per image:&quot;, [names[i] for i in sim.argmax(axis=1)
   </div>
 </div>
 
-<script defer src="../assets/js/search-data.js?v=c663b9b2"></script>
+<script defer src="../assets/js/search-data.js?v=ebc461d5"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <script defer src="../assets/js/app.js?v=d47166f5"></script>

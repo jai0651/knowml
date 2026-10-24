@@ -1672,7 +1672,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Two ways to learn without labels",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
     "url": "topics/03-unsupervised-self-supervised.html#intuition",
@@ -1682,17 +1682,27 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "Finding structure that's already there",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
-    "url": "topics/03-unsupervised-self-supervised.html#timeline",
+    "url": "topics/03-unsupervised-self-supervised.html#finding-structure-that-s-already-there",
     "tags": [],
     "summary": "",
     "color": "var(--c-unsup)"
   },
   {
     "kind": "section",
-    "title": "Architecture: how the data flows",
+    "title": "Inventing the label",
+    "parentTitle": "03 · Unsupervised & Self-Supervised",
+    "section": "Foundations",
+    "url": "topics/03-unsupervised-self-supervised.html#inventing-the-label",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-unsup)"
+  },
+  {
+    "kind": "section",
+    "title": "From clusters to learned representations",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
     "url": "topics/03-unsupervised-self-supervised.html#architecture",
@@ -1702,10 +1712,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Classical clustering: k-means, k-medoids, hierarchical, DBSCAN",
+    "title": "Clustering with k-means and its relatives",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
-    "url": "topics/03-unsupervised-self-supervised.html#classical-clustering-k-means-k-medoids-hierarchical-dbscan",
+    "url": "topics/03-unsupervised-self-supervised.html#clustering-with-k-means-and-its-relatives",
     "tags": [],
     "summary": "",
     "color": "var(--c-unsup)"
@@ -1722,17 +1732,17 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Dimensionality reduction: PCA, ICA, NMF, spectral methods",
+    "title": "Dimensionality reduction",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
-    "url": "topics/03-unsupervised-self-supervised.html#dimensionality-reduction-pca-ica-nmf-spectral-methods",
+    "url": "topics/03-unsupervised-self-supervised.html#dimensionality-reduction",
     "tags": [],
     "summary": "",
     "color": "var(--c-unsup)"
   },
   {
     "kind": "section",
-    "title": "Autoencoders, denoising autoencoders, and VAEs",
+    "title": "Autoencoders, denoising autoencoders and VAEs",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
     "url": "topics/03-unsupervised-self-supervised.html#autoencoders-denoising-autoencoders-and-vaes",
@@ -1742,10 +1752,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Self-supervised learning: manufacturing a task, then solving it with an encoder",
+    "title": "Self-supervised learning: inventing a task, then solving it with an encoder",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
-    "url": "topics/03-unsupervised-self-supervised.html#self-supervised-learning-manufacturing-a-task-then-solving-it-with-an-encoder",
+    "url": "topics/03-unsupervised-self-supervised.html#self-supervised-learning-inventing-a-task-then-solving-it-with-an-encoder",
     "tags": [],
     "summary": "",
     "color": "var(--c-unsup)"
@@ -1792,7 +1802,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Failure modes, evaluation, and what breaks",
+    "title": "Failure modes, evaluation and what breaks",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
     "url": "topics/03-unsupervised-self-supervised.html#tradeoffs",
@@ -1812,10 +1822,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Curse of dimensionality, for distance-based methods specifically",
+    "title": "Reading t-SNE and UMAP plots",
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
-    "url": "topics/03-unsupervised-self-supervised.html#curse-of-dimensionality-for-distance-based-methods-specifically",
+    "url": "topics/03-unsupervised-self-supervised.html#reading-t-sne-and-umap-plots",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-unsup)"
+  },
+  {
+    "kind": "section",
+    "title": "Curse of dimensionality, for distance-based methods",
+    "parentTitle": "03 · Unsupervised & Self-Supervised",
+    "section": "Foundations",
+    "url": "topics/03-unsupervised-self-supervised.html#curse-of-dimensionality-for-distance-based-methods",
     "tags": [],
     "summary": "",
     "color": "var(--c-unsup)"
@@ -1826,6 +1846,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "03 · Unsupervised & Self-Supervised",
     "section": "Foundations",
     "url": "topics/03-unsupervised-self-supervised.html#why-unsupervised-evaluation-is-hard",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-unsup)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "03 · Unsupervised & Self-Supervised",
+    "section": "Foundations",
+    "url": "topics/03-unsupervised-self-supervised.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-unsup)"
@@ -1972,7 +2002,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "A small filter, slid across the image",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#intuition",
@@ -1982,77 +2012,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
-    "parentTitle": "05 · CNNs & Vision Foundations",
-    "section": "Neural Nets & Vision",
-    "url": "topics/05-cnn-vision-foundations.html#timeline",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-vision)"
-  },
-  {
-    "kind": "section",
-    "title": "Architecture: how the data flows",
-    "parentTitle": "05 · CNNs & Vision Foundations",
-    "section": "Neural Nets & Vision",
-    "url": "topics/05-cnn-vision-foundations.html#architecture",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-vision)"
-  },
-  {
-    "kind": "section",
-    "title": "Pooling vs. strided convolution — two ways to downsample",
-    "parentTitle": "05 · CNNs & Vision Foundations",
-    "section": "Neural Nets & Vision",
-    "url": "topics/05-cnn-vision-foundations.html#pooling-vs-strided-convolution-two-ways-to-downsample",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-vision)"
-  },
-  {
-    "kind": "section",
-    "title": "The historical arc: LeNet → AlexNet → VGG → Inception → ResNet",
-    "parentTitle": "05 · CNNs & Vision Foundations",
-    "section": "Neural Nets & Vision",
-    "url": "topics/05-cnn-vision-foundations.html#the-historical-arc-lenet-alexnet-vgg-inception-resnet",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-vision)"
-  },
-  {
-    "kind": "section",
-    "title": "Beyond ResNet: the efficiency-focused lineage",
-    "parentTitle": "05 · CNNs & Vision Foundations",
-    "section": "Neural Nets & Vision",
-    "url": "topics/05-cnn-vision-foundations.html#beyond-resnet-the-efficiency-focused-lineage",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-vision)"
-  },
-  {
-    "kind": "section",
-    "title": "Detection and segmentation: two families of task heads",
-    "parentTitle": "05 · CNNs & Vision Foundations",
-    "section": "Neural Nets & Vision",
-    "url": "topics/05-cnn-vision-foundations.html#detection-and-segmentation-two-families-of-task-heads",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-vision)"
-  },
-  {
-    "kind": "section",
-    "title": "Named applications worth recognizing",
-    "parentTitle": "05 · CNNs & Vision Foundations",
-    "section": "Neural Nets & Vision",
-    "url": "topics/05-cnn-vision-foundations.html#named-applications-worth-recognizing",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-vision)"
-  },
-  {
-    "kind": "section",
-    "title": "The equations",
+    "title": "Counting output sizes and weights",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#math",
@@ -2072,7 +2032,27 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this architecture",
+    "title": "Stacking layers into a network",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#architecture",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "Pooling versus strided convolution: two ways to downsample",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#pooling-versus-strided-convolution-two-ways-to-downsample",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "Going deeper: why residual connections",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#why",
@@ -2082,7 +2062,77 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs and what breaks",
+    "title": "How the architectures got here",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#timeline",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "From LeNet to ResNet, one question at a time",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#from-lenet-to-resnet-one-question-at-a-time",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "After ResNet: the efficiency lineage",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#after-resnet-the-efficiency-lineage",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "Finding objects and labelling pixels",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#heads",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "Object detection",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#object-detection",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "Segmentation",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#segmentation",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "Other tasks built the same way",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#other-tasks-built-the-same-way",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "What each choice costs",
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#tradeoffs",
@@ -2096,6 +2146,26 @@ window.SEARCH_INDEX = [
     "parentTitle": "05 · CNNs & Vision Foundations",
     "section": "Neural Nets & Vision",
     "url": "topics/05-cnn-vision-foundations.html#failure-modes",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "Built-in assumptions: a head start and a ceiling",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#built-in-assumptions-a-head-start-and-a-ceiling",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-vision)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "05 · CNNs & Vision Foundations",
+    "section": "Neural Nets & Vision",
+    "url": "topics/05-cnn-vision-foundations.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-vision)"
@@ -2162,7 +2232,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "A photo as a sentence of patches",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
     "url": "topics/06-modern-vision-foundation-models.html#intuition",
@@ -2172,7 +2242,37 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "Why not feed in the pixels?",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#why-not-feed-in-the-pixels",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "Cutting a tiny image into patches",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#cutting-a-tiny-image-into-patches",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "Getting rid of the fixed list of labels",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#getting-rid-of-the-fixed-list-of-labels",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "Three papers in three years",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
     "url": "topics/06-modern-vision-foundation-models.html#timeline",
@@ -2182,10 +2282,40 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Architecture: how the data flows",
+    "title": "Following the photo through each model",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
     "url": "topics/06-modern-vision-foundation-models.html#architecture",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "ViT: patches in, a class out",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#vit-patches-in-a-class-out",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "CLIP: two encoders and a table of similarities",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#clip-two-encoders-and-a-table-of-similarities",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "SAM: encode once, prompt many times",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#sam-encode-once-prompt-many-times",
     "tags": [],
     "summary": "",
     "color": "var(--c-visionfm)"
@@ -2262,10 +2392,80 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "From the whole image to a region",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#from-the-whole-image-to-a-region",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "From a photo to a clip",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#from-a-photo-to-a-clip",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "From a photo to a scene",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#from-a-photo-to-a-scene",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "From perception to action",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#from-perception-to-action",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
     "title": "Vision-language models: encoder + projector + LLM",
     "parentTitle": "06 · Modern Vision Foundation Models",
     "section": "Neural Nets & Vision",
     "url": "topics/06-modern-vision-foundation-models.html#vlm",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "Bolting a vision encoder onto a language model",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#bolting-a-vision-encoder-onto-a-language-model",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "Bolt-on or native?",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#bolt-on-or-native",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-visionfm)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "06 · Modern Vision Foundation Models",
+    "section": "Neural Nets & Vision",
+    "url": "topics/06-modern-vision-foundation-models.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-visionfm)"
@@ -3062,7 +3262,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Handing the model the right page",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
     "url": "topics/11-rag-agents-reasoning.html#intuition",
@@ -3072,17 +3272,17 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "Scoring how close two texts are",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#timeline",
+    "url": "topics/11-rag-agents-reasoning.html#math",
     "tags": [],
     "summary": "",
     "color": "var(--c-rag)"
   },
   {
     "kind": "section",
-    "title": "Architecture: how the data flows",
+    "title": "From a pile of documents to a grounded answer",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
     "url": "topics/11-rag-agents-reasoning.html#architecture",
@@ -3092,90 +3292,50 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The RAG pipeline, end to end",
+    "title": "Preparing the documents",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#the-rag-pipeline-end-to-end",
+    "url": "topics/11-rag-agents-reasoning.html#preparing-the-documents",
     "tags": [],
     "summary": "",
     "color": "var(--c-rag)"
   },
   {
     "kind": "section",
-    "title": "Dense vs. sparse retrieval, and why hybrid usually wins",
+    "title": "Answering a question",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#dense-vs-sparse-retrieval-and-why-hybrid-usually-wins",
+    "url": "topics/11-rag-agents-reasoning.html#answering-a-question",
     "tags": [],
     "summary": "",
     "color": "var(--c-rag)"
   },
   {
     "kind": "section",
-    "title": "Rerankers: why a second, more expensive pass",
+    "title": "Dense and sparse retrieval, and why hybrid usually wins",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#rerankers-why-a-second-more-expensive-pass",
+    "url": "topics/11-rag-agents-reasoning.html#dense-and-sparse-retrieval-and-why-hybrid-usually-wins",
     "tags": [],
     "summary": "",
     "color": "var(--c-rag)"
   },
   {
     "kind": "section",
-    "title": "Smarter retrieval: query rewriting, HyDE, and Graph RAG",
+    "title": "Rerankers, a second and more expensive pass",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#smarter-retrieval-query-rewriting-hyde-and-graph-rag",
+    "url": "topics/11-rag-agents-reasoning.html#rerankers-a-second-and-more-expensive-pass",
     "tags": [],
     "summary": "",
     "color": "var(--c-rag)"
   },
   {
     "kind": "section",
-    "title": "Agent architecture: planner, executor, memory, tools",
+    "title": "When the question is a bad search query",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#agent-architecture-planner-executor-memory-tools",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-rag)"
-  },
-  {
-    "kind": "section",
-    "title": "Tool use / function calling",
-    "parentTitle": "11 · RAG, Agents & Reasoning",
-    "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#tool-use-function-calling",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-rag)"
-  },
-  {
-    "kind": "section",
-    "title": "Multi-agent systems: when they help, when they're overhead",
-    "parentTitle": "11 · RAG, Agents & Reasoning",
-    "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#multi-agent-systems-when-they-help-when-they-re-overhead",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-rag)"
-  },
-  {
-    "kind": "section",
-    "title": "Agent memory: three tiers",
-    "parentTitle": "11 · RAG, Agents & Reasoning",
-    "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#agent-memory-three-tiers",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-rag)"
-  },
-  {
-    "kind": "section",
-    "title": "Reflection, self-critique, and code-execution agents",
-    "parentTitle": "11 · RAG, Agents & Reasoning",
-    "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#reflection-self-critique-and-code-execution-agents",
+    "url": "topics/11-rag-agents-reasoning.html#when-the-question-is-a-bad-search-query",
     "tags": [],
     "summary": "",
     "color": "var(--c-rag)"
@@ -3192,6 +3352,66 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "When the answer isn't in any document",
+    "parentTitle": "11 · RAG, Agents & Reasoning",
+    "section": "Generative & Multimodal",
+    "url": "topics/11-rag-agents-reasoning.html#agents",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rag)"
+  },
+  {
+    "kind": "section",
+    "title": "The loop",
+    "parentTitle": "11 · RAG, Agents & Reasoning",
+    "section": "Generative & Multimodal",
+    "url": "topics/11-rag-agents-reasoning.html#the-loop",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rag)"
+  },
+  {
+    "kind": "section",
+    "title": "What \"calling a tool\" means",
+    "parentTitle": "11 · RAG, Agents & Reasoning",
+    "section": "Generative & Multimodal",
+    "url": "topics/11-rag-agents-reasoning.html#what-calling-a-tool-means",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rag)"
+  },
+  {
+    "kind": "section",
+    "title": "The pieces of an agent",
+    "parentTitle": "11 · RAG, Agents & Reasoning",
+    "section": "Generative & Multimodal",
+    "url": "topics/11-rag-agents-reasoning.html#the-pieces-of-an-agent",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rag)"
+  },
+  {
+    "kind": "section",
+    "title": "Checking its own work, and writing code",
+    "parentTitle": "11 · RAG, Agents & Reasoning",
+    "section": "Generative & Multimodal",
+    "url": "topics/11-rag-agents-reasoning.html#checking-its-own-work-and-writing-code",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rag)"
+  },
+  {
+    "kind": "section",
+    "title": "One agent or several",
+    "parentTitle": "11 · RAG, Agents & Reasoning",
+    "section": "Generative & Multimodal",
+    "url": "topics/11-rag-agents-reasoning.html#one-agent-or-several",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rag)"
+  },
+  {
+    "kind": "section",
     "title": "Orchestration frameworks",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
@@ -3202,17 +3422,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The one equation",
-    "parentTitle": "11 · RAG, Agents & Reasoning",
-    "section": "Generative & Multimodal",
-    "url": "topics/11-rag-agents-reasoning.html#math",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-rag)"
-  },
-  {
-    "kind": "section",
-    "title": "Why this approach",
+    "title": "Why not the simpler alternatives",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
     "url": "topics/11-rag-agents-reasoning.html#why",
@@ -3222,7 +3432,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs, evaluation, and what breaks",
+    "title": "What it costs, how to measure it, and what breaks",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
     "url": "topics/11-rag-agents-reasoning.html#tradeoffs",
@@ -3252,6 +3462,26 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Prompt injection",
+    "parentTitle": "11 · RAG, Agents & Reasoning",
+    "section": "Generative & Multimodal",
+    "url": "topics/11-rag-agents-reasoning.html#prompt-injection",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rag)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "11 · RAG, Agents & Reasoning",
+    "section": "Generative & Multimodal",
+    "url": "topics/11-rag-agents-reasoning.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rag)"
+  },
+  {
+    "kind": "section",
     "title": "Break retrieval and watch the answers stay confident",
     "parentTitle": "11 · RAG, Agents & Reasoning",
     "section": "Generative & Multimodal",
@@ -3272,7 +3502,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Two older ways to make a cat",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
     "url": "topics/12-generative-models.html#intuition",
@@ -3282,30 +3512,30 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Generative vs. discriminative: what separates them",
+    "title": "Telling classes apart versus making new examples",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
-    "url": "topics/12-generative-models.html#generative-vs-discriminative-what-separates-them",
+    "url": "topics/12-generative-models.html#telling-classes-apart-versus-making-new-examples",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
   },
   {
     "kind": "section",
-    "title": "Autoregressive generation — the idea from page 10, generalized",
+    "title": "The first attempt: one piece at a time",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
-    "url": "topics/12-generative-models.html#autoregressive-generation-the-idea-from-page-10-generalized",
+    "url": "topics/12-generative-models.html#the-first-attempt-one-piece-at-a-time",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
   },
   {
     "kind": "section",
-    "title": "VAEs: compress, then regularize the compression",
+    "title": "VAEs: compress the photo, then tidy the compression",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
-    "url": "topics/12-generative-models.html#vaes-compress-then-regularize-the-compression",
+    "url": "topics/12-generative-models.html#vaes-compress-the-photo-then-tidy-the-compression",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
@@ -3322,30 +3552,50 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Diffusion: learn to un-shred a photo, one small step at a time",
+    "title": "Diffusion: un-shred the photo one step at a time",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
-    "url": "topics/12-generative-models.html#diffusion-learn-to-un-shred-a-photo-one-small-step-at-a-time",
+    "url": "topics/12-generative-models.html#diffusion-idea",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "Destroy a photo, then learn to undo a little of it",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
-    "url": "topics/12-generative-models.html#timeline",
+    "url": "topics/12-generative-models.html#destroy-a-photo-then-learn-to-undo-a-little-of-it",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
   },
   {
     "kind": "section",
-    "title": "Architecture: how the data flows",
+    "title": "How the data flows",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
     "url": "topics/12-generative-models.html#architecture",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "What the denoising network looks like",
+    "parentTitle": "12 · Generative Models",
+    "section": "Generative & Multimodal",
+    "url": "topics/12-generative-models.html#what-the-denoising-network-looks-like",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Steering it with a prompt or a pose",
+    "parentTitle": "12 · Generative Models",
+    "section": "Generative & Multimodal",
+    "url": "topics/12-generative-models.html#steering-it-with-a-prompt-or-a-pose",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
@@ -3356,6 +3606,46 @@ window.SEARCH_INDEX = [
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
     "url": "topics/12-generative-models.html#math",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Jumping straight to any noise level",
+    "parentTitle": "12 · Generative Models",
+    "section": "Generative & Multimodal",
+    "url": "topics/12-generative-models.html#jumping-straight-to-any-noise-level",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "The VAE loss, which diffusion inherits",
+    "parentTitle": "12 · Generative Models",
+    "section": "Generative & Multimodal",
+    "url": "topics/12-generative-models.html#the-vae-loss-which-diffusion-inherits",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "The diffusion loss",
+    "parentTitle": "12 · Generative Models",
+    "section": "Generative & Multimodal",
+    "url": "topics/12-generative-models.html#the-diffusion-loss",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Sampling: walking back from static",
+    "parentTitle": "12 · Generative Models",
+    "section": "Generative & Multimodal",
+    "url": "topics/12-generative-models.html#sampling-walking-back-from-static",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
@@ -3392,10 +3682,30 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Evaluating generative models",
+    "title": "Two other families",
     "parentTitle": "12 · Generative Models",
     "section": "Generative & Multimodal",
-    "url": "topics/12-generative-models.html#evaluating-generative-models",
+    "url": "topics/12-generative-models.html#two-other-families",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "How do you know the samples are good?",
+    "parentTitle": "12 · Generative Models",
+    "section": "Generative & Multimodal",
+    "url": "topics/12-generative-models.html#how-do-you-know-the-samples-are-good",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-genai)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "12 · Generative Models",
+    "section": "Generative & Multimodal",
+    "url": "topics/12-generative-models.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-genai)"
@@ -3512,7 +3822,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "From sound to a spectrogram, and the problem it leaves",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
     "url": "topics/13-speech-audio.html#intuition",
@@ -3522,77 +3832,37 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "What the microphone gives us",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
-    "url": "topics/13-speech-audio.html#timeline",
+    "url": "topics/13-speech-audio.html#what-the-microphone-gives-us",
     "tags": [],
     "summary": "",
     "color": "var(--c-speech)"
   },
   {
     "kind": "section",
-    "title": "Architecture: how the pipeline evolved",
+    "title": "Looking at frequencies",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
-    "url": "topics/13-speech-audio.html#architecture",
+    "url": "topics/13-speech-audio.html#looking-at-frequencies",
     "tags": [],
     "summary": "",
     "color": "var(--c-speech)"
   },
   {
     "kind": "section",
-    "title": "The ASR pipeline, one generation at a time",
+    "title": "The problem the spectrogram leaves open",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
-    "url": "topics/13-speech-audio.html#the-asr-pipeline-one-generation-at-a-time",
+    "url": "topics/13-speech-audio.html#the-problem-the-spectrogram-leaves-open",
     "tags": [],
     "summary": "",
     "color": "var(--c-speech)"
   },
   {
     "kind": "section",
-    "title": "Self-supervised speech representations",
-    "parentTitle": "13 · Speech & Audio",
-    "section": "Generative & Multimodal",
-    "url": "topics/13-speech-audio.html#self-supervised-speech-representations",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-speech)"
-  },
-  {
-    "kind": "section",
-    "title": "Text-to-speech runs a parallel arc, in reverse",
-    "parentTitle": "13 · Speech & Audio",
-    "section": "Generative & Multimodal",
-    "url": "topics/13-speech-audio.html#text-to-speech-runs-a-parallel-arc-in-reverse",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-speech)"
-  },
-  {
-    "kind": "section",
-    "title": "The rest of the speech stack, briefly",
-    "parentTitle": "13 · Speech & Audio",
-    "section": "Generative & Multimodal",
-    "url": "topics/13-speech-audio.html#the-rest-of-the-speech-stack-briefly",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-speech)"
-  },
-  {
-    "kind": "section",
-    "title": "Chaining it into a real-time voice agent",
-    "parentTitle": "13 · Speech & Audio",
-    "section": "Generative & Multimodal",
-    "url": "topics/13-speech-audio.html#chaining-it-into-a-real-time-voice-agent",
-    "tags": [],
-    "summary": "",
-    "color": "var(--c-speech)"
-  },
-  {
-    "kind": "section",
-    "title": "The equation, stated in words first",
+    "title": "CTC: summing over every alignment",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
     "url": "topics/13-speech-audio.html#math",
@@ -3602,7 +3872,57 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this beat the alternatives",
+    "title": "Fixing what CTC leaves out: attention, RNN-T and the Conformer",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#architecture",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Treating transcription like translation",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#treating-transcription-like-translation",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Keeping the language model and streaming together",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#keeping-the-language-model-and-streaming-together",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Building a better listener",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#building-a-better-listener",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Choosing between CTC, RNN-T and attention",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#tradeoffs",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Scale and unlabeled audio: Whisper and wav2vec 2.0",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
     "url": "topics/13-speech-audio.html#why",
@@ -3612,10 +3932,70 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs and what breaks",
+    "title": "Running it backwards: text to speech",
     "parentTitle": "13 · Speech & Audio",
     "section": "Generative & Multimodal",
-    "url": "topics/13-speech-audio.html#tradeoffs",
+    "url": "topics/13-speech-audio.html#tts",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Two models, not one",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#two-models-not-one",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "The models around the edges",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#stack",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Chaining it into a real-time voice agent",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#agent",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Interrupting the agent",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#interrupting-the-agent",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Where this is heading",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#where-this-is-heading",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-speech)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "13 · Speech & Audio",
+    "section": "Generative & Multimodal",
+    "url": "topics/13-speech-audio.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-speech)"
@@ -3692,7 +4072,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Making an image and a sentence comparable",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
     "url": "topics/14-multimodal-ai.html#intuition",
@@ -3702,17 +4082,27 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "Translating both into one space",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
-    "url": "topics/14-multimodal-ai.html#timeline",
+    "url": "topics/14-multimodal-ai.html#translating-both-into-one-space",
     "tags": [],
     "summary": "",
     "color": "var(--c-multimodal)"
   },
   {
     "kind": "section",
-    "title": "Architecture: where modalities meet",
+    "title": "What the shared space gives you",
+    "parentTitle": "14 · Multimodal AI",
+    "section": "Generative & Multimodal",
+    "url": "topics/14-multimodal-ai.html#what-the-shared-space-gives-you",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-multimodal)"
+  },
+  {
+    "kind": "section",
+    "title": "Where the modalities meet",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
     "url": "topics/14-multimodal-ai.html#architecture",
@@ -3722,20 +4112,20 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The recipe, generalized beyond vision",
+    "title": "The adapter recipe, and other modalities",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
-    "url": "topics/14-multimodal-ai.html#the-recipe-generalized-beyond-vision",
+    "url": "topics/14-multimodal-ai.html#the-adapter-recipe-and-other-modalities",
     "tags": [],
     "summary": "",
     "color": "var(--c-multimodal)"
   },
   {
     "kind": "section",
-    "title": "Native multimodal tokenization: the alternative to bolt-on adapters",
+    "title": "Native multimodal tokenization",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
-    "url": "topics/14-multimodal-ai.html#native-multimodal-tokenization-the-alternative-to-bolt-on-adapters",
+    "url": "topics/14-multimodal-ai.html#native-multimodal-tokenization",
     "tags": [],
     "summary": "",
     "color": "var(--c-multimodal)"
@@ -3762,7 +4152,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Why this architecture",
+    "title": "Why cross-attention became the default",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
     "url": "topics/14-multimodal-ai.html#why",
@@ -3772,7 +4162,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Tradeoffs, and what breaks",
+    "title": "What it costs and what breaks",
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
     "url": "topics/14-multimodal-ai.html#tradeoffs",
@@ -3786,6 +4176,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "14 · Multimodal AI",
     "section": "Generative & Multimodal",
     "url": "topics/14-multimodal-ai.html#failure-modes",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-multimodal)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "14 · Multimodal AI",
+    "section": "Generative & Multimodal",
+    "url": "topics/14-multimodal-ai.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-multimodal)"
@@ -3812,7 +4212,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Intuition",
+    "title": "Learning from a score at the end",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
     "url": "topics/15-reinforcement-learning.html#intuition",
@@ -3822,17 +4222,27 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Timeline",
+    "title": "Feedback that comes late",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
-    "url": "topics/15-reinforcement-learning.html#timeline",
+    "url": "topics/15-reinforcement-learning.html#feedback-that-comes-late",
     "tags": [],
     "summary": "",
     "color": "var(--c-rl)"
   },
   {
     "kind": "section",
-    "title": "The agent-environment loop, and the vocabulary built on it",
+    "title": "Trying new things or repeating what works",
+    "parentTitle": "15 · Reinforcement Learning",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/15-reinforcement-learning.html#trying-new-things-or-repeating-what-works",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rl)"
+  },
+  {
+    "kind": "section",
+    "title": "The loop and its vocabulary",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
     "url": "topics/15-reinforcement-learning.html#architecture",
@@ -3842,17 +4252,37 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The MDP formalism",
+    "title": "States, actions and the policy",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
-    "url": "topics/15-reinforcement-learning.html#the-mdp-formalism",
+    "url": "topics/15-reinforcement-learning.html#states-actions-and-the-policy",
     "tags": [],
     "summary": "",
     "color": "var(--c-rl)"
   },
   {
     "kind": "section",
-    "title": "Value functions, Q-functions, and advantage",
+    "title": "A Markov decision process",
+    "parentTitle": "15 · Reinforcement Learning",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/15-reinforcement-learning.html#a-markov-decision-process",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rl)"
+  },
+  {
+    "kind": "section",
+    "title": "Why later rewards count for less",
+    "parentTitle": "15 · Reinforcement Learning",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/15-reinforcement-learning.html#why-later-rewards-count-for-less",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rl)"
+  },
+  {
+    "kind": "section",
+    "title": "Value functions, Q-functions and advantage",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
     "url": "topics/15-reinforcement-learning.html#value-functions-q-functions-and-advantage",
@@ -3862,7 +4292,7 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "The Bellman equation, and PPO's clipped objective",
+    "title": "The Bellman equation, policy gradients and PPO's clip",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
     "url": "topics/15-reinforcement-learning.html#math",
@@ -3872,10 +4302,30 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "PPO's clipped surrogate objective, conceptually",
+    "title": "The Bellman equation: credit one step at a time",
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
-    "url": "topics/15-reinforcement-learning.html#ppo-s-clipped-surrogate-objective-conceptually",
+    "url": "topics/15-reinforcement-learning.html#the-bellman-equation-credit-one-step-at-a-time",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rl)"
+  },
+  {
+    "kind": "section",
+    "title": "Skipping the values: policy gradients",
+    "parentTitle": "15 · Reinforcement Learning",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/15-reinforcement-learning.html#skipping-the-values-policy-gradients",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rl)"
+  },
+  {
+    "kind": "section",
+    "title": "PPO's clipped surrogate objective",
+    "parentTitle": "15 · Reinforcement Learning",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/15-reinforcement-learning.html#ppo-s-clipped-surrogate-objective",
     "tags": [],
     "summary": "",
     "color": "var(--c-rl)"
@@ -3906,6 +4356,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "15 · Reinforcement Learning",
     "section": "Decision & Retrieval Systems",
     "url": "topics/15-reinforcement-learning.html#where-training-breaks",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rl)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "15 · Reinforcement Learning",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/15-reinforcement-learning.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-rl)"
@@ -4042,6 +4502,16 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
+    "title": "Summary",
+    "parentTitle": "16 · Recommenders, Ranking & Search",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/16-recommenders-ranking-search.html#summary",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-rec)"
+  },
+  {
+    "kind": "section",
     "title": "Simulate the feedback loop until your catalogue collapses",
     "parentTitle": "16 · Recommenders, Ranking & Search",
     "section": "Decision & Retrieval Systems",
@@ -4102,10 +4572,10 @@ window.SEARCH_INDEX = [
   },
   {
     "kind": "section",
-    "title": "Baselines are not a formality",
+    "title": "Baselines come before models",
     "parentTitle": "17 · Time Series & Forecasting",
     "section": "Decision & Retrieval Systems",
-    "url": "topics/17-time-series-forecasting.html#baselines-are-not-a-formality",
+    "url": "topics/17-time-series-forecasting.html#baselines-come-before-models",
     "tags": [],
     "summary": "",
     "color": "var(--c-ts)"
@@ -4186,6 +4656,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "17 · Time Series & Forecasting",
     "section": "Decision & Retrieval Systems",
     "url": "topics/17-time-series-forecasting.html#backtesting",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-ts)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "17 · Time Series & Forecasting",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/17-time-series-forecasting.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-ts)"
@@ -4336,6 +4816,16 @@ window.SEARCH_INDEX = [
     "parentTitle": "18 · Graph ML",
     "section": "Decision & Retrieval Systems",
     "url": "topics/18-graph-ml.html#beyond",
+    "tags": [],
+    "summary": "",
+    "color": "var(--c-graph)"
+  },
+  {
+    "kind": "section",
+    "title": "Summary",
+    "parentTitle": "18 · Graph ML",
+    "section": "Decision & Retrieval Systems",
+    "url": "topics/18-graph-ml.html#summary",
     "tags": [],
     "summary": "",
     "color": "var(--c-graph)"
