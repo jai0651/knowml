@@ -1,0 +1,418 @@
+---
+title: "Model Atlas: Speech & Audio"
+dek: "Follow one support call through the chain of models behind a voice product, and learn which open models fit each stage, how to read their accuracy and latency numbers, and where the licences get in the way."
+readingTime: "~20 min"
+prereqs: "speech basics (13)"
+group: "Model Atlas"
+label: "Chapter 34"
+description: "Transcription, streaming ASR, text to speech, voice isolation, source separation and noise suppression are five different problems with five different model families. The 2026 shortlist for each, and the metrics — WER, RTFx, DNSMOS, SI-SDR, DER — that rank them."
+---
+<section id="tldr">
+    <p>Picture a customer phones a support line and says, "My account number is 4417." A voice agent has to hear that, work out what to say back, and start speaking, all before the silence on the line starts to feel awkward. Behind that one exchange there isn't a single model. There's a chain of them: one to clean up the sound, one to notice when the caller has stopped talking, one to turn the speech into text, a language model to decide on a reply, and one to turn the reply back into speech. This chapter is a catalogue of the open models that fill each of those slots, as of 6 September 2026, and we'll use that support call to see why each slot needs its own kind of model.</p>
+
+    <p>Two numbers decide most of the choices. <strong>Word error rate</strong> (WER) measures how many words a transcriber gets wrong, and <strong>latency</strong> measures how long the system takes to respond. They pull against each other. A model that waits for the whole sentence before it commits to a word makes fewer mistakes, but the caller has to wait for it.</p>
+
+    <p>A third constraint turns up more often in audio than anywhere else in machine learning, and it's the licence. Several of the best-sounding open speech models are free for research only, so the model that wins a listening test is frequently not the one you're allowed to ship.</p>
+
+    <p>One caution before the tables. Speech leaderboards turn over faster than language-model ones, because the top of the board is separated by fractions of a percentage point. Treat the tables here as a way to build a shortlist, and check it against the live leaderboards in the "Go deeper" section. The structure of the pipeline and the definitions of the metrics will outlast any ranking.</p>
+  </section>
+
+  <section id="pipeline">
+    <h2><span class="num">01</span>The pipeline, and where the milliseconds go</h2>
+
+    <p>Let's follow the account number through the chain, one stage at a time. The caller's voice arrives from the microphone, and a first model, a <strong>denoiser</strong>, tries to remove background sound such as traffic or a fan. A <strong>voice activity detector</strong> (VAD) then marks which stretches of audio contain speech at all. Speech goes to <strong>ASR</strong>, short for automatic speech recognition, which turns audio into text. A large language model (LLM) reads that text and writes a reply, and a <strong>TTS</strong> model, for text to speech, turns the reply into audio that plays back to the caller.</p>
+
+    <div class="mental-flow">
+      <div class="mf-step">mic in</div><div class="mf-arrow">→</div>
+      <div class="mf-step">denoise / isolate</div><div class="mf-arrow">→</div>
+      <div class="mf-step">VAD</div><div class="mf-arrow">→</div>
+      <div class="mf-step">ASR</div><div class="mf-arrow">→</div>
+      <div class="mf-step">LLM</div><div class="mf-arrow">→</div>
+      <div class="mf-step">TTS</div><div class="mf-arrow">→</div>
+      <div class="mf-step">speaker out</div>
+    </div>
+
+    <p>Every stage is optional except the one your product is named after, and every stage you add costs time. In conversation, people start to read a gap as hesitation somewhere around 300 milliseconds, so the whole chain has to fit inside roughly that budget. It's worth seeing where the time goes in the support call.</p>
+
+    <p>First comes <strong>endpointing</strong>, which means deciding that the caller has finished speaking, and it often takes 200 to 500 ms on its own, and it's usually the largest single item. Next comes ASR finalisation. A streaming recogniser has already emitted most of the words while the caller was still talking, so what's left to pay is the emission delay and not the length of the whole utterance. Then the language model takes its turn, and the cost there is the time to first token, which chapter <a href="/topics/31-llm-inference-serving">31</a> covers in full. After that comes TTS, where the cost is the time to the first chunk of audio and not the time to finish the sentence, since streaming synthesis starts speaking before it has planned the whole utterance. Last is the network and the jitter buffer, both small and constant and easy to forget until you deploy outside your office.</p>
+
+    <h4 class="why">Why does the agent feel slow when the LLM is fast?</h4>
+    <p>Teams often chase a faster language model when the lag the caller feels is the wait to be sure that a sentence has ended. Shortening that wait makes the agent cut people off mid-thought, and lengthening it makes the agent feel slow, so no model upgrade removes the trade. It's a product decision that happens to look like a hyperparameter. The systems that feel best work around it: they start generating a reply from a partial transcript and cancel it if the caller keeps talking.</p>
+
+    <p>That leaves each stage with its own choice of model. We'll go through them in the order the audio meets them, but a simpler place to start is the transcription stage, when nobody is waiting on it.</p>
+  </section>
+
+  <section id="batch-stt">
+    <h2><span class="num">02</span>Batch transcription: the accuracy tier</h2>
+
+    <p>Suppose the support line has recorded ten thousand hours of old calls, and you want them all as text. Nobody is waiting on any one call, so the only things that matter are how accurate the transcripts are and how fast the whole pile gets through. Speed here is usually quoted as <strong>RTFx</strong>, the inverse real-time factor, meaning how many seconds of audio the model transcribes per second of compute. An RTFx of 100 means an hour of audio takes 36 seconds.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model</th><th>Size</th><th>Licence</th><th>Languages</th><th>Notable numbers</th></tr></thead>
+      <tbody>
+        <tr><td>Parakeet TDT 0.6B v3</td><td>600M</td><td>CC-BY-4.0</td><td>25 European</td><td>6.34% avg WER, RTFx 3,333; LibriSpeech test-clean 1.93%</td></tr>
+        <tr><td>Whisper large-v3</td><td>1.55B</td><td>MIT</td><td>99</td><td>The multilingual baseline; RTFx around 69</td></tr>
+        <tr><td>Whisper large-v3-turbo</td><td>809M</td><td>MIT</td><td>99</td><td>Distilled decoder, several times faster than v3</td></tr>
+        <tr><td>Canary Qwen 2.5B</td><td>2.5B</td><td>CC-BY-4.0</td><td>English</td><td>5.63% avg WER, RTFx 418</td></tr>
+        <tr><td>Voxtral Small</td><td>—</td><td>Apache 2.0</td><td>multilingual</td><td>Most accurate open-weight system on Artificial Analysis, 2.8% AA-WER</td></tr>
+        <tr><td>Granite Speech 5.0 470M TurboCTC</td><td>470M</td><td>Apache 2.0</td><td>English</td><td>Conformer CTC, non-autoregressive, built for edge</td></tr>
+        <tr><td>Qwen3-ASR-1.7B</td><td>1.7B</td><td>Apache 2.0</td><td>multilingual</td><td>LLM-decoder ASR, one of the most-downloaded open models</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>One architectural line splits this table, and it explains most of the numbers. Nearly every model here has two halves. An <strong>encoder</strong>, usually a <strong>Conformer</strong> (a network that combines attention with convolution, covered in chapter <a href="/topics/13-speech-audio">13</a>), turns the audio into a sequence of features. A <strong>decoder</strong> then turns those features into words, and there are two families of decoder.</p>
+
+    <p>One family is the LLM decoder, as in Canary Qwen, Voxtral and Qwen3-ASR. It writes the transcript token by token, the way a chatbot writes a reply, so it brings real knowledge of language. When the audio is ambiguous, say "to", "too" or "two", it can pick the word that fits the sentence. This family gives the lowest error rates, and because every token needs its own pass through a language model, it's also the slow one.</p>
+
+    <p>CTC and TDT decoders, used by Parakeet and Granite, make up the other family. They read the words off the encoder's output in a single pass, without generating one token at a time, and that makes them very fast. Parakeet's RTFx of 3,333 against Whisper large-v3's 69 is a gap of about 48 times on the same hardware. The price is a little accuracy, because nothing in the decoder can apply knowledge of how sentences go.</p>
+
+    <p>For the ten thousand hours of calls that gap is the whole decision. At an RTFx of 3,000 the job takes about three and a half hours of compute, so it fits in an afternoon. At an RTFx of 70 it takes about 143 hours, which is nearly six days. Whisper remains the default starting point for a different reason that has nothing to do with accuracy. It covers 99 languages under an MIT licence, so when you don't know in advance which languages will show up, nothing else is as safe a first choice.</p>
+
+    <p>Once a model has produced a transcript, we need some way to say how good it is, and the number everyone quotes is WER. It's more slippery than it looks.</p>
+  </section>
+
+  <section id="reading-wer">
+    <h2><span class="num">03</span>Reading word error rate</h2>
+
+    <p>You'll find the same system scoring 2.8% on one public leaderboard and 6.3% on another. Neither number is wrong, and seeing why is the difference between using these figures and being misled by them. Start from the definition. <em class="term">Word error rate</em> is the edit distance between the model's transcript and a reference transcript, divided by the length of the reference:</p>
+
+    <div class="eq-block"><span>$$\text{WER} = \frac{S + D + I}{N}$$</span></div>
+
+    <p class="eq-explain">Here S counts substitutions (a wrong word in place of a right one), D counts deletions (a word the model missed), I counts insertions (a word it added that nobody said), and N is the number of words in the reference. Because insertions count, WER can exceed 100%.</p>
+
+    <p>Simple as the formula looks, three choices sit underneath every published WER, and changing any of them can move the number by more than the gap between two competing models.</p>
+
+    <p>One is which datasets are averaged. An average over read audiobooks flatters every system, and an average that includes telephone speech, accented speech and meeting cross-talk doesn't. That's why the Open ASR Leaderboard averages across roughly a dozen datasets and reports separate English, long-form and multilingual tracks.</p>
+
+    <p>Another is text normalisation. Before scoring, both transcripts are lowercased, stripped of punctuation, and have numbers and contractions rewritten into a standard form. An aggressive normaliser forgives real errors and a strict one punishes cosmetic ones, and Whisper ships a famously aggressive one.</p>
+
+    <p>The last is long-form handling. A model with a 30-second window has to cut a two-hour recording into chunks, and the errors that appear where chunks meet come from the chunking code and not from the model.</p>
+
+    <h4 class="why">Is WER even the number your product needs?</h4>
+    <p>Probably not. Go back to the support call. Getting the word "the" wrong costs nothing, but getting the account number wrong costs a support ticket. For most applications the words that matter are a small set of names, product codes, amounts and addresses, and WER weighs them the same as every other word. So measure <strong>entity error rate</strong> on the terms your callers say. A system with a worse overall WER and better proper-noun accuracy is the better system for you, and no leaderboard will tell you which one that is.</p>
+
+    <p>There's one more gap to keep in mind. Benchmark audio is recorded near a microphone in a quiet room, while your caller may be in a car with a second person talking over them. Expect real-world WER to be a multiple of the published figure and not a small increment above it. So far we've assumed the whole recording is available. When a person is waiting, that assumption breaks, and the next section is about what happens then.</p>
+  </section>
+
+  <section id="streaming">
+    <h2><span class="num">04</span>Streaming ASR: the latency tier</h2>
+
+    <p>On the live call, the agent can't wait for the caller to finish the whole conversation before it starts listening. A batch model sees the full utterance before it commits to any word. A <strong>streaming</strong> model has to emit words as the audio arrives, so it decides using the audio so far plus a small window of future audio. That window is the <em class="term">emission delay</em>, also called right context, and it's the single dial that sets the trade between accuracy and speed. A wider window gives the model more to go on and makes the transcript later.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model</th><th>Size</th><th>Licence</th><th>Delay</th><th>Notable numbers</th></tr></thead>
+      <tbody>
+        <tr><td>Voxtral Mini 4B Realtime</td><td>3.4B LM + 970M encoder</td><td>Apache 2.0</td><td>240 ms – 2.4 s, configurable</td><td>At 480 ms: 8.72% FLEURS, 7.35% GigaSpeech, 5.05% Meanwhile long-form</td></tr>
+        <tr><td>Nemotron streaming (int4)</td><td>0.67 GB quantised</td><td>open weights</td><td>0.56 s algorithmic</td><td>8.20% avg streaming WER across eight benchmarks, runs on CPU</td></tr>
+        <tr><td>VibeVoice-ASR-Streaming 1.5B / 7B</td><td>1.5B / 7B</td><td>MIT</td><td>streaming</td><td>Speaker-attributed transcription with hotword support, 10 languages</td></tr>
+        <tr><td>Parakeet TDT 0.6B v3</td><td>600M</td><td>CC-BY-4.0</td><td>chunked</td><td>Same weights as the batch entry, run with a chunked context window</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Voxtral Mini Realtime shows the dial more clearly than any other model, because it exposes it directly. The same weights run anywhere from 240 milliseconds to 2.4 seconds of delay, and Mistral reports that at 480 milliseconds it matches leading offline systems. Below that, accuracy starts to pay for the speed.</p>
+
+    <h4 class="why">Can't we just run Whisper on short chunks?</h4>
+    <p>It's the common workaround, and it's tempting. You slice the audio into windows and run a batch model on each one, and the output arrives progressively, so it looks like streaming. It isn't, and two things give it away. Your latency floor is the chunk length, so a two-second chunk means a two-second delay no matter how fast the GPU is. And every boundary risks cutting a word in half, so accuracy degrades in a way that a natively streaming model doesn't suffer. Chunked Whisper is fine for a prototype, and it's the wrong thing to ship as a real-time feature.</p>
+
+    <p>Nemotron's row deserves a second look, because it points at where this field is heading. A quantised model of 0.67 GB reaches 8.2% streaming WER with half a second of delay and runs on a CPU. (Quantised means its numbers are stored with fewer bits, which chapter <a href="/topics/23-efficient-ai-systems">23</a> explains.) Real-time transcription no longer needs a GPU or a network round trip, and that changes what's possible on a phone.</p>
+
+    <p>That covers the listening half of the call. The agent also has to answer out loud, and synthesis has to be judged in a different way from transcription.</p>
+  </section>
+
+  <section id="tts">
+    <h2><span class="num">05</span>Text to speech</h2>
+
+    <p>Synthesis is judged by ear, so its metrics are unusual. Four of them are objective, and the fifth is the one that decides adoption.</p>
+
+    <p>Start with <em class="term">time to first audio</em> (TTFA), the delay before the first sample plays. It's the speech version of time to first token, and it's what makes a voice agent feel responsive. Next is the <em class="term">real-time factor</em> (RTF), the seconds of compute spent per second of audio produced. A value below 1.0 means the model is faster than real time, so a single stream keeps up. Third comes intelligibility: transcribe the generated audio with a good ASR model and compute WER against the text you asked for, which catches mispronounced and dropped words without a human listening. Fourth is speaker similarity, the cosine similarity between speaker embeddings of a reference clip and the cloned voice. It's the number that matters for voice cloning. Last is the <strong>human preference Elo</strong>, built from blind A/B votes on which of two samples sounds better. It's the only metric that tracks whether people will accept the voice.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model</th><th>Size</th><th>Licence</th><th>Latency</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Breeze TTS 2</td><td>3B</td><td>Research / non-commercial</td><td>&lt;40 ms TTFA, RTF 0.32 on H100</td><td>English and Chinese, voice cloning, top open-weight Elo on the Artificial Analysis speech arena</td></tr>
+        <tr><td>Fish Audio S2 Pro</td><td>5B (4B slow AR + 400M fast AR)</td><td>Research / non-commercial</td><td>~100 ms TTFA, RTF 0.195 on H200</td><td>80+ languages, RVQ codec with 10 codebooks at ~21 Hz</td></tr>
+        <tr><td>Kokoro-82M</td><td>82M</td><td>Apache 2.0</td><td>very fast, CPU-capable</td><td>StyleTTS 2 with an ISTFTNet vocoder, 8 languages and 54 voices, no cloning</td></tr>
+        <tr><td>VoxCPM2</td><td>2B</td><td>open weights</td><td>—</td><td>Widely used open synthesis model</td></tr>
+        <tr><td>OmniVoice (k2-fsa)</td><td>0.6B</td><td>open weights</td><td>—</td><td>From the Kaldi lineage, built for deployment</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>This table shows the same kind of architectural split we saw in ASR. <strong>Autoregressive codec models</strong> like Fish Audio S2 Pro predict discrete audio tokens one after another, much as a language model predicts words. They sound the most natural, especially on emotion and emphasis, and they cost the most to run. <strong>Non-autoregressive models</strong> like Kokoro produce the audio in a fixed number of passes, which makes them dramatically cheaper.</p>
+
+    <p>Fish Audio's dual-autoregressive design is a neat way to cut the cost of the first kind. The codec describes each moment of audio with several codebooks, and a 4B model predicts only the primary semantic codebook while a 400M model fills in the nine residual ones. Here the expensive network runs at the low rate, and the cheap one handles the detail.</p>
+
+    <h4 class="why">If the best-sounding model is free to download, why not use it?</h4>
+    <p>Because the licence may forbid it. The two best-sounding open-weight TTS models in the table are both research and non-commercial. Breeze TTS 2 requires a paid subscription for commercial use, and Fish Audio S2 Pro requires a separate commercial licence. If you need a permissive licence, the field narrows sharply, and Kokoro's 82M parameters under Apache 2.0 become much more interesting than its position on any Elo board suggests. Check the licence before you fall in love with a demo.</p>
+
+    <p>Every TTS deployment needs one more thing that most teams postpone. Voice cloning from a few seconds of reference audio is now routine, which makes <strong>consent and provenance</strong> an engineering requirement as well as a policy one. Keep a record of which reference clip authorised which voice.</p>
+
+    <p>Back at the front of the chain, the caller's audio arrived with noise on it, and so far we've said little about what to do with it. That turns out to be three different problems.</p>
+  </section>
+
+  <section id="isolation">
+    <h2><span class="num">06</span>Isolation, separation and noise suppression</h2>
+
+    <p>People use these three terms interchangeably, but they're different problems with different inputs, different outputs and different metrics. Naming yours correctly narrows the model list right away, so it helps to have all three in front of you.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card">
+        <div class="wild-head"><strong>Noise suppression</strong></div>
+        <p>One speaker plus non-speech noise goes in, and clean speech comes out. Think of traffic, keyboards, fans and room tone behind our caller. It has to be causal, meaning it can't wait for future audio, and cheap enough to run on every frame of audio on a laptop or a phone.</p>
+        <p class="reach reach-yes">RNNoise, DeepFilterNet 2 and 3, DPDFNet, FRCRN, MossFormer2-SE.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Source separation</strong></div>
+        <p>A mixture of several sources goes in, and one stream per source comes out. Two people talking over each other fits, and so does a song split into vocals, drums, bass and other.</p>
+        <p class="reach reach-yes">BS-RoFormer and Mel-Band RoFormer for music, SepFormer and MossFormer2 for speech.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Target speaker extraction</strong></div>
+        <p>A mixture plus a short enrolment clip of one person goes in, and that person's voice alone comes out. It's the right framing when you know whose voice you want and don't care about the rest, such as our caller with a television talking behind them.</p>
+        <p class="reach reach-yes">ClearerVoice-Studio's target-speaker models, including versions cued by lip video.</p>
+      </div>
+    </div>
+
+    <h3 id="the-metrics">The metrics</h3>
+
+    <p>Each problem has its own way of being scored. For separation, the standard metric is <em class="term">SI-SDR</em>, the scale-invariant signal-to-distortion ratio in decibels, usually reported as an improvement over the unprocessed mixture and written SI-SDRi. Its older, scale-dependent cousin, plain SDR, is still what music separation reports, and a system at 9 to 12 dB average SDR there is state of the art.</p>
+
+    <p>Two further scores, PESQ and STOI, measure perceived quality and intelligibility, but both need the clean reference recording. That makes them fine for benchmarks and useless in production, where there's no clean reference. For that case there's <em class="term">DNSMOS P.835</em>, a model that predicts human opinion ratings without a reference and reports three numbers: signal quality, background intrusiveness and overall quality. The Deep Noise Suppression Challenge standardised on it, and you can run it on live audio.</p>
+
+    <p>On music separation the RoFormer family is the current answer. BS-RoFormer won the Sound Demixing Challenge separation track, and a version trained only on the standard MUSDB18HQ data reaches roughly 9.8 dB average SDR, rising to about 12 dB with extra training data. Mel-Band RoFormer improves on it further on vocals and drums.</p>
+
+    <h4 class="why">Will cleaning the audio first always help transcription?</h4>
+    <p>It's natural to assume so, and often it doesn't. Enhancement models are trained to maximise perceptual quality, and removing noise aggressively also removes speech detail that a human ear doesn't miss and an ASR model relies on. Clean-sounding audio can still give a higher word error rate. Modern ASR models were trained on noisy audio and are already robust to a great deal of it. So if your pipeline's output is a transcript and no human listens to the audio, run the denoiser against no denoiser and compare the WER before you assume it helps. Often it doesn't.</p>
+
+    <p>Once the audio is clean enough, the transcript raises a question that transcription alone doesn't answer. In a recording with several people, who said each line?</p>
+  </section>
+
+  <section id="diarization">
+    <h2><span class="num">07</span>Diarization and speaker attribution</h2>
+
+    <p>Take a recording of the support call with a second agent joining halfway through. A transcript of the words isn't enough, because you also need to know which of the three people said each one. <strong>Diarization</strong> works out who spoke when, using a separate model from the transcriber, and it's where multi-speaker transcripts usually fall apart.</p>
+
+    <p>It's scored with the <em class="term">diarization error rate</em> (DER), which sums three failures: speech the system missed, non-speech it labelled as speech, and speech attributed to the wrong speaker. It's computed against a reference with a small tolerance around each boundary. The open default is pyannote. Its community-1 pipeline under CC-BY-4.0 improves on the earlier 3.1 release across the standard sets, for example 11.7% against 12.2% DER on AISHELL-4 and 20.3% against 24.5% on AliMeeting.</p>
+
+    <p>Read those numbers next to the ASR table, and something jumps out. A good transcriber is at a few percent error while a good diarizer is at eleven to twenty. Knowing who spoke is much harder than knowing what was said, and two structural problems explain most of the gap.</p>
+
+    <p>One is overlapped speech. When two people talk at once, a scheme that gives every frame of audio exactly one speaker label can't be right, and meeting recordings are full of overlap, and that's why meeting DER is roughly double telephone DER. Another is speaker counting. A diarizer usually has to infer how many people are present, and a wrong count scrambles every label after it. It's a discrete decision, so there's no graceful way to be slightly wrong.</p>
+
+    <p>One alternative to running two models is a <em class="term">speaker-attributed ASR</em> model, which emits words and speaker labels together, as VibeVoice-ASR-Streaming does. Modelling both jointly avoids the problem of aligning two separate outputs, though the field of models to choose from is much smaller.</p>
+
+    <p>We now have a part for every slot in the chain, and one question about how to connect them is still open: do we need all those slots at all?</p>
+  </section>
+
+  <section id="s2s">
+    <h2><span class="num">08</span>Voice agents: cascaded or speech-to-speech</h2>
+
+    <p>Everything so far assumed the chain of ASR, then a text LLM, then TTS. That design is called <strong>cascaded</strong>. Each part can be swapped independently, and every intermediate is a readable string, so you can log the transcript, apply text-level guardrails, and use any language model you like. It has two costs. Three models run in series, which adds latency, and tone, emotion and emphasis don't survive the trip through a transcript.</p>
+
+    <p>Another design is a <strong>speech-to-speech</strong> model, one model that takes audio in and emits audio out with no text in the middle. It can hear hesitation and laughter and respond in kind. Kyutai's <strong>Moshi</strong> demonstrated full-duplex conversation, meaning it can listen and speak at the same time, at roughly 200 ms, and it runs on a single GPU. LiquidAI's LFM2.5-Audio-1.5B does something similar at 1.5B parameters, pairing a 1.2B backbone with a 115M FastConformer encoder.</p>
+
+    <p>These two designs fail in opposite ways. In practice, enterprise deployments still lean cascaded, because auditability and control usually outrank naturalness. Speech-to-speech wins where the interaction is the product and interruption handling matters more than a transcript. Many teams run both, using speech-to-speech for the conversation and a parallel ASR pass purely for logging and analytics.</p>
+
+    <p>Whichever you pick, <strong>turn-taking</strong> is where voice products fail. Barge-in (the caller interrupting the agent), endpointing and backchannel handling (the "mm-hm" that signals listening) are engineering problems in the transport layer. They don't come with a model card, so budget time for them.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">09</span>Summary</h2>
+    <ol>
+      <li><strong>An audio product is a pipeline of specialists.</strong> Denoising, voice activity detection, transcription, synthesis and separation are separate models, and the strongest in each slot comes from a different lab.</li>
+      <li><strong>The endpointer is usually the real source of lag.</strong> Deciding the caller has stopped talking often costs 200 to 500 ms, and shortening it makes the agent interrupt people, so it's a product decision and not a model upgrade.</li>
+      <li><strong>Batch ASR splits by decoder.</strong> LLM decoders give the lowest WER and are slow, while CTC and TDT decoders like Parakeet are roughly 48 times faster than Whisper large-v3 at some cost in accuracy.</li>
+      <li><strong>A WER figure depends on three choices:</strong> which datasets are averaged, how the text is normalised, and how long recordings are chunked. Compare numbers only when all three match.</li>
+      <li><strong>Measure the words your product needs.</strong> Entity error rate on names, numbers and product terms can rank models differently from WER.</li>
+      <li><strong>Streaming trades accuracy for emission delay.</strong> Voxtral Mini Realtime exposes the dial from 240 ms to 2.4 s, and chunked Whisper is not streaming because its latency floor is the chunk length.</li>
+      <li><strong>TTS is judged on five things:</strong> time to first audio, real-time factor, intelligibility, speaker similarity and human preference Elo. Autoregressive codec models sound best and non-autoregressive ones are cheaper.</li>
+      <li><strong>Licences decide the shortlist.</strong> The best-sounding open TTS models are research-only, which makes Kokoro-82M under Apache 2.0 a serious option.</li>
+      <li><strong>Noise suppression, source separation and target speaker extraction are different problems</strong> with different metrics, and a denoiser can raise ASR error even while the audio sounds cleaner.</li>
+      <li><strong>Diarization is much harder than transcription.</strong> DER sits at eleven to twenty percent because of overlapped speech and speaker counting, and speaker-attributed ASR models avoid aligning two outputs.</li>
+      <li><strong>Cascaded and speech-to-speech agents fail in opposite ways.</strong> Cascaded gives auditability and swappable parts and loses prosody, while speech-to-speech keeps it and gives up the transcript, and turn-taking needs engineering in either case.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">10</span>Build this</h2>
+    <p class="lede">Published WER on read audiobooks tells you almost nothing about your telephone audio. Two hours of measurement replaces a month of guessing.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Your own WER, and the denoiser that made it worse</span>
+        <span class="proj-meta">~3 hours · 30 minutes of your own audio</span>
+      </div>
+      <p>Measure three ASR models on audio that looks like yours, then test the assumption that cleaning the audio first helps. The second half is the part that surprises people.</p>
+      <ol class="proj-steps">
+        <li>Collect 30 minutes of real audio and transcribe it by hand, carefully. This is the only tedious step, and it makes everything after it meaningful.</li>
+        <li>Run three models from different architecture families: Whisper large-v3-turbo, Parakeet TDT 0.6B v3, and one streaming model. Record wall-clock time as well as output.</li>
+        <li>Score WER twice, once with a standard normaliser and once with no normalisation at all. The gap between the two numbers is what normalisation is worth.</li>
+        <li>Score an <strong>entity error rate</strong> over just the names, numbers and product terms. Compare the ranking to the WER ranking.</li>
+        <li>Now run a denoiser such as DeepFilterNet over the same audio and re-run all three models on the cleaned version.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> your three models rank differently on entity error rate than they do on WER. That inversion is the whole argument for measuring the thing your product cares about, and it shows up on most real corpora.</div>
+      <div class="proj-stretch"><strong>What the denoiser step teaches.</strong> On reasonably clean input, enhancement usually leaves WER flat or slightly worse, because the model was already robust to that noise and the denoiser removed speech detail along with it. On bad input it helps a lot. Finding the SNR where the crossover happens for your audio tells you whether to run the extra stage at all, and that is a real infrastructure saving.</div>
+    </div>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">11</span>What breaks</h2>
+    <p class="lede">Audio systems fail in ways that never appear in a benchmark table.</p>
+
+    <ul>
+      <li><strong>Benchmark audio is not your audio.</strong> Published WER comes from clean, close-miked, mostly read speech. Telephone bandwidth, accents, cross-talk and background music each cost you more than the gap between any two models on the board.</li>
+      <li><strong>Normalisation hid the errors you care about.</strong> Aggressive normalisation forgives number formatting and casing, so a system that writes dates and amounts badly can still post an excellent score.</li>
+      <li><strong>Chunk boundaries eat words.</strong> Any long-form pipeline built from a fixed-window model loses words at the seams, and no model change fixes what is a chunking bug.</li>
+      <li><strong>The denoiser hurt the transcript.</strong> Enhancement optimises perceptual quality and does not optimise downstream recognition, so measure both.</li>
+      <li><strong>Diarization collapsed on overlap.</strong> Two people talking at once breaks the one-speaker-per-frame assumption, and the resulting speaker count error corrupts every label after it.</li>
+      <li><strong>The licence forbids the product.</strong> Several of the best open TTS and separation models are research-only. It is the most common late-stage surprise in audio work.</li>
+      <li><strong>Latency was measured on an idle GPU.</strong> A TTS model at RTF 0.2 alone can exceed 1.0 under concurrency, at which point the audio stutters. Load-test the whole chain and avoid testing each stage separately.</li>
+    </ul>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">12</span>Pick by use case</h2>
+    <p class="lede">Six shapes, and the stack each one implies.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card">
+        <div class="wild-head"><strong>Meeting notes and call analytics</strong></div>
+        <p>This case is batch, long-form and multi-speaker. Accuracy and speaker labels matter and latency does not, and diarization quality will be your ceiling before transcription quality is.</p>
+        <p class="reach reach-yes">Parakeet or Whisper for the words, pyannote community-1 for the speakers, or a speaker-attributed model for both.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Live captions</strong></div>
+        <p>Human reading in real time. A native streaming model with a sub-second delay, and a display strategy that tolerates the model revising a word it already showed.</p>
+        <p class="reach reach-yes">Voxtral Mini Realtime at 480 ms, or the quantised Nemotron streaming model if it has to run on CPU.</p>
+        <p class="reach reach-no">Chunked Whisper is the wrong choice.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Phone voice agent</strong></div>
+        <p>The full chain under a 300 ms conversational budget, over 8 kHz telephone audio that every benchmark ignores. Endpointing and barge-in decide whether it feels human.</p>
+        <p class="reach reach-yes">Streaming ASR plus a fast LLM plus streaming TTS, or a speech-to-speech model if auditability permits.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Bulk archive transcription</strong></div>
+        <p>Ten thousand hours, nobody waiting. RTFx is the only metric that affects the invoice, and a roughly 48-fold throughput difference dwarfs a one-point WER difference.</p>
+        <p class="reach reach-yes">A CTC or TDT model such as Parakeet, batched hard.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Cleaning up recordings</strong></div>
+        <p>This is podcast or video post-production. A human is the consumer, so perceptual metrics are the right ones and aggressive enhancement is fine.</p>
+        <p class="reach reach-yes">DeepFilterNet for noise, a RoFormer separator to pull voice away from music.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>On-device, no network</strong></div>
+        <p>Fixed memory, no round trip, privacy as the requirement. This tier became usable in 2026, having been a compromise before it.</p>
+        <p class="reach reach-yes">Quantised streaming ASR under a gigabyte, Kokoro-82M for synthesis, DeepFilterNet for noise.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">13</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is word error rate and what are its limitations?</summary>
+      <div class="qa-body"><p>Word error rate is the sum of substitutions, deletions and insertions divided by the number of words in the reference transcript, so it is an edit distance normalised by length. Because insertions are counted, it can exceed 100%. Its limitations are that it treats every word as equally important, when in practice names, numbers and product terms carry nearly all the value, and that it is highly sensitive to text normalisation choices such as casing, punctuation and number formatting. Two published figures for the same model can differ by several points purely from the datasets averaged and the normaliser applied.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is the difference between noise suppression, source separation and target speaker extraction?</summary>
+      <div class="qa-body"><p>Noise suppression takes one speaker plus non-speech noise and returns clean speech, so the output is a single stream and the model is usually small and causal for real-time use. Source separation takes a mixture of several sources and returns one stream per source, which is the framing used for splitting two overlapping speakers or splitting a song into instrument stems. Target speaker extraction takes a mixture plus a short enrolment clip of one person and returns only that person's voice, which sidesteps the problem of deciding how many sources are present. They use different metrics too: DNSMOS and PESQ for enhancement, SI-SDR improvement for separation.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does a streaming ASR model have higher error rate than a batch one, and what is the dial?</summary>
+      <div class="qa-body"><p>Because it has less context. A batch model conditions on the entire utterance, including audio that comes after the word it is deciding, while a streaming model must commit using only past audio plus a short window of future audio. That window is the emission delay or right context, and it is the dial: widening it raises accuracy and raises latency in direct proportion. Systems that expose it, such as Voxtral Mini Realtime with its 240 millisecond to 2.4 second range, let you sit anywhere on that curve, and around half a second is where several models report parity with offline transcription.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why do CTC and TDT decoders have such enormous throughput advantages over LLM decoders?</summary>
+      <div class="qa-body"><p>Because they are not autoregressive over text. A CTC decoder produces a frame-level output in a single pass and decodes greedily, so the cost is one encoder forward pass over the audio. An LLM decoder generates the transcript token by token, each step requiring a forward pass through a language model, which is the same memory-bandwidth-bound decode loop that limits text generation. The result is a throughput gap measured in one to two orders of magnitude, with Parakeet-class models reaching inverse real-time factors in the thousands against double digits for Whisper large-v3. The trade is accuracy, since the language model decoder repairs ambiguous audio using linguistic context that CTC has no mechanism to apply.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Your voice agent feels sluggish but the LLM's time to first token is 200 ms. Where would you look?</summary>
+      <div class="qa-body"><p>At the endpointer first. Deciding that the user has finished speaking commonly costs 200 to 500 milliseconds on its own and is usually the largest single item in the budget, yet it is invisible in any model-level metric. After that, check time to first audio from the TTS rather than total synthesis time, since a streaming synthesiser should start speaking long before the sentence is planned. Then check whether the ASR is genuinely streaming or is chunked, because a chunked pipeline has a hard latency floor equal to the chunk length. The transport and jitter buffer are worth ruling out last.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Adding a state-of-the-art denoiser in front of your ASR made accuracy worse. Explain.</summary>
+      <div class="qa-body"><p>Because the denoiser and the recogniser are optimising different objectives. Enhancement models are trained against perceptual targets such as DNSMOS or PESQ, which reward suppressing anything that sounds like interference. That suppression removes low-energy speech detail, particularly consonant onsets and fricatives, which a human listener does not miss but an acoustic model uses. Meanwhile modern ASR models were trained on large volumes of noisy audio and are already robust to moderate noise, so the enhancement gives them nothing to gain and something to lose. The practical rule is to A/B the denoiser at several signal-to-noise ratios and find the crossover point, below which it helps and above which it hurts.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Compare cascaded and speech-to-speech voice architectures.</summary>
+      <div class="qa-body"><p>A cascaded system runs ASR, then a text model, then TTS. Every intermediate is a readable string, so you can log it, filter it, apply text-level guardrails, and swap any component independently. The costs are latency from three serial models and information loss, since prosody, emotion and hesitation do not survive the transcript. A speech-to-speech model consumes and emits audio directly, preserving that information and handling interruption naturally, with full-duplex open models such as Moshi demonstrating roughly 200 millisecond turnaround. Its costs are controllability and auditability: there is no transcript to inspect unless you run a separate ASR pass, and the field of available models is much smaller. Regulated deployments generally choose cascaded for that reason, and some run both, using speech-to-speech for the interaction and a parallel ASR pass purely for logs.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why is diarization error rate so much higher than word error rate, and what drives it?</summary>
+      <div class="qa-body"><p>Because the task has a harder structure. Transcription maps audio to a word sequence and modern systems reach a few percent error, while diarization must additionally decide how many distinct speakers exist and assign every frame to one of them. Two failure modes dominate. Overlapped speech breaks the assumption of one speaker per frame, which is why meeting corpora score roughly double what telephone corpora do. And speaker counting is a discrete decision with no graceful degradation, since getting the count wrong permutes or merges labels across the entire recording. Strong open pipelines sit in the eleven to twenty percent range on standard sets, against a few percent for transcription on comparable audio, and the gap is structural rather than a matter of model quality.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">14</span>Go deeper</h2>
+    <p class="dek">The live boards and the papers behind the metrics.</p>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://huggingface.co/spaces/hf-audio/open_asr_leaderboard" target="_blank" rel="noopener">
+        <div class="r-icon">📊</div>
+        <div class="r-body"><div class="r-kind">Leaderboard</div><div class="r-title">Open ASR Leaderboard</div><div class="r-sub">WER and RTFx across a dozen datasets, with separate English, long-form and multilingual tracks. The board to shortlist a transcriber from.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2510.06961" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Open ASR Leaderboard: Reproducible and Transparent Evaluation</div><div class="r-sub">86 systems across 12 datasets, and the finding that LLM decoders win on WER while CTC and TDT win on throughput — arXiv:2510.06961</div></div>
+      </a>
+      <a class="resource-card" href="https://artificialanalysis.ai/speech-to-text" target="_blank" rel="noopener">
+        <div class="r-icon">📊</div>
+        <div class="r-body"><div class="r-kind">Leaderboard</div><div class="r-title">Artificial Analysis — Speech to Text</div><div class="r-sub">Open and closed systems side by side, with price per thousand minutes. Note that its WER definition differs from the Open ASR board's.</div></div>
+      </a>
+      <a class="resource-card" href="https://artificialanalysis.ai/text-to-speech/leaderboard" target="_blank" rel="noopener">
+        <div class="r-icon">📊</div>
+        <div class="r-body"><div class="r-kind">Leaderboard</div><div class="r-title">Artificial Analysis — Speech Arena</div><div class="r-sub">Blind listening votes scored as Elo, filterable to open-weight models. The only honest way to rank synthesis quality.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2212.04356" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Robust Speech Recognition via Large-Scale Weak Supervision</div><div class="r-sub">Radford et al. — the Whisper paper, and the argument that scale of weak supervision beats architecture tuning — arXiv:2212.04356</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2309.02612" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Music Source Separation with Band-Split RoPE Transformer</div><div class="r-sub">Lu et al. — BS-RoFormer, winner of the SDX23 separation track — arXiv:2309.02612</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2310.01809" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Mel-Band RoFormer for Music Source Separation</div><div class="r-sub">Wang et al. — mel-scaled sub-bands, and better vocals and drums than BS-RoFormer — arXiv:2310.01809</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2506.19398" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">ClearerVoice-Studio</div><div class="r-sub">Enhancement, separation, super-resolution and target speaker extraction in one toolkit, with pretrained FRCRN and MossFormer models — arXiv:2506.19398</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/Rikorose/DeepFilterNet" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">DeepFilterNet</div><div class="r-sub">Real-time full-band noise suppression small enough for embedded devices. The default open denoiser.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/pyannote/pyannote-audio" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">pyannote.audio</div><div class="r-sub">The open diarization default: segmentation, embedding and clustering as one pipeline.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/kyutai-labs/moshi" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">Moshi</div><div class="r-sub">Kyutai's full-duplex speech-to-speech model and the Mimi codec underneath it. The reference open implementation of real-time conversation.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2005.13981" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">The INTERSPEECH 2020 Deep Noise Suppression Challenge</div><div class="r-sub">Where the DNS datasets and the subjective testing framework behind DNSMOS come from — arXiv:2005.13981</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">15</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/13-speech-audio"><div class="rc-sec" style="color:var(--c-speech)">13 · The mechanisms</div><div class="rc-title">Speech &amp; Audio</div><div class="rc-hook">CTC, Conformers, codecs and how a spectrogram becomes text. Read this if the architecture names above are unfamiliar.</div></a>
+      <a class="related-card" href="/topics/33-model-atlas-language"><div class="rc-sec" style="color:var(--c-atlas)">33 · Previous in this series</div><div class="rc-title">Model Atlas: Language Models</div><div class="rc-hook">The LLM in the middle of your voice pipeline, and how to choose it.</div></a>
+      <a class="related-card" href="/topics/35-model-atlas-vision-generative"><div class="rc-sec" style="color:var(--c-atlas)">35 · Next in this series</div><div class="rc-title">Model Atlas: Vision &amp; Generative Media</div><div class="rc-hook">VLMs, OCR, detection, and image and video generation.</div></a>
+      <a class="related-card" href="/topics/14-multimodal-ai"><div class="rc-sec" style="color:var(--c-multimodal)">14 · Going multimodal</div><div class="rc-title">Multimodal AI</div><div class="rc-hook">How audio gets projected into a language model's embedding space in the first place.</div></a>
+      <a class="related-card" href="/topics/31-llm-inference-serving"><div class="rc-sec" style="color:var(--c-practice)">31 · The latency half</div><div class="rc-title">LLM Inference &amp; Serving</div><div class="rc-hook">Where the model turn's time to first token comes from, and how to shrink it.</div></a>
+      <a class="related-card" href="/topics/23-efficient-ai-systems"><div class="rc-sec" style="color:var(--c-efficient)">23 · Making it fit</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Quantisation and distillation, which are what put a streaming recogniser under a gigabyte.</div></a>
+    </div>
+  </section>

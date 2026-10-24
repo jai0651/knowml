@@ -1,0 +1,591 @@
+---
+title: "Time Series & Forecasting"
+dek: "Follow a bakery's daily sales through the one rule that sets forecasting apart from other regression, and learn how to split, transform, model and score a series so that a good score means something."
+readingTime: "~26 min"
+prereqs: "linear regression (02), sequence models (07)"
+group: "Decision & Retrieval Systems"
+label: "Chapter 17"
+description: "Forecasting is regression with one constraint: every training row must predate every test row. Stationarity and differencing, ARIMA and ETS, lag features and gradient-boosted trees, DeepAR, N-BEATS, TFT and PatchTST, forecasting foundation models, and rolling-origin backtesting that leakage cannot fake."
+---
+<section id="tldr">
+    <p>Picture a bakery that has written down how many loaves it sold every day for the past two years. Its owner wants to know how many to bake next week and has asked you for a forecast. The shop is made up, but the problem is the one every forecast starts from: you've observed numbers in time order, and you want the ones that haven't happened yet.</p>
+
+    <p>That sounds like the supervised learning from chapter 02. Make each row describe one day, with what the previous few days sold and which day of the week it is. Make the target that day's sales, fit a regression, and measure the error on held-out rows. We'll end up doing most of that. One thing is different, though, and it changes how everything gets split, scored and trusted: the rows have an order, and the future only ever comes after the past. With ordinary tabular data you can shuffle the rows before splitting and nothing changes. Here, shuffling lets the model peek at the answers.</p>
+
+    <p>We'll start with that, because it explains why the rest of the chapter looks the way it does. First comes the evaluation problem and how much error it can hide. Then we'll look at what to do to a series so a model fitted on the past can survive a future with a different level (<strong>stationarity</strong> and <strong>differencing</strong>), at the cheap baselines every model has to beat, and at the classical models that came out of that work. After those we'll turn the series into a table so gradient-boosted trees can use it, look at deep and pretrained forecasters, make the forecasts admit what they don't know, and finish with <strong>rolling-origin backtesting</strong>, the evaluation that doesn't let the future leak in.</p>
+
+    <p>We'll keep the bakery in mind throughout, mostly through one question: how many loaves will we sell next Tuesday? One warning to carry along. In forecasting, the thing that breaks is rarely the model. It's usually a feature that quietly knew the answer, and the usual tell is a validation score that looks too good.</p>
+  </section>
+
+  <section id="no-shuffle">
+    <h2><span class="num">01</span>The constraint that makes this a different subject</h2>
+
+    <p>Let's begin with how we'd normally test a bakery model. In chapter 02 you split the rows into a training set and a test set at random, fit on the first and measured the error on the second. <em class="term">Random k-fold cross-validation</em> is the same idea repeated: cut the rows into k groups chosen at random and let each group take a turn as the test set. This works for ordinary data because the rows are exchangeable: a row's position tells you nothing. The house in row 900 has no special relationship to the house in row 901, so shuffling before you split costs nothing.</p>
+
+    <p>Daily sales aren't like that. Day <span>$t$</span> and day <span>$t+1$</span> are the same bakery one day apart, and they probably sold almost the same amount. If a random split puts Tuesday in the training set and Wednesday in the test set, then predicting Wednesday probably takes very little skill: you only have to guess something close to Tuesday. Here is what that looks like on 40 days. At the top, eight days are held out at random. Underneath, the days are cut by date, three times, with the cut moving forward each time.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The same 40 observations, split two ways
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 380" xmlns="http://www.w3.org/2000/svg">
+        <text x="30" y="28" font-size="11" font-weight="700" fill="#f472b6">RANDOM k-FOLD — WHAT ORDINARY CV DOES</text>
+
+        <rect x="60" y="44" width="13" height="20" rx="2" fill="#f472b6"/>
+        <rect x="75" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="90" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="105" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="120" y="44" width="13" height="20" rx="2" fill="#f472b6"/>
+        <rect x="135" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="150" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="165" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="180" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="195" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="210" y="44" width="13" height="20" rx="2" fill="#f472b6"/>
+        <rect x="225" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="240" y="44" width="13" height="20" rx="2" fill="#f472b6"/>
+        <rect x="255" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="270" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="285" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="300" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="315" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="330" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="345" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="360" y="44" width="13" height="20" rx="2" fill="#f472b6" class="pulse-node"/>
+        <rect x="375" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="390" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="405" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="420" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="435" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="450" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="465" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="480" y="44" width="13" height="20" rx="2" fill="#f472b6"/>
+        <rect x="495" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="510" y="44" width="13" height="20" rx="2" fill="#f472b6"/>
+        <rect x="525" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="540" y="44" width="13" height="20" rx="2" fill="#f472b6"/>
+        <rect x="555" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="570" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="585" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="600" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="615" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="630" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="645" y="44" width="13" height="20" rx="2" fill="#818cf8" opacity="0.45"/>
+
+        <path d="M351,86 L351,70" stroke="#34d399" stroke-width="1.6" fill="none"/>
+        <path d="M382,86 L382,70" stroke="#34d399" stroke-width="1.6" fill="none"/>
+        <path d="M351,86 L382,86" stroke="#34d399" stroke-width="1.6" fill="none"/>
+        <text x="366" y="102" text-anchor="middle" font-size="9.5" fill="#34d399">both neighbours of this</text>
+        <text x="366" y="114" text-anchor="middle" font-size="9.5" fill="#34d399">test point are in train</text>
+        <text x="366" y="126" text-anchor="middle" font-size="9.5" class="dim">one of them is the future</text>
+
+        <line x1="30" y1="146" x2="670" y2="146" stroke="rgba(255,255,255,.14)" stroke-width="1"/>
+
+        <text x="30" y="176" font-size="11" font-weight="700" fill="#34d399">ROLLING ORIGIN — WHAT FORECASTING NEEDS</text>
+
+        <text x="52" y="204" text-anchor="end" font-size="9.5" class="dim">fold 1</text>
+        <rect x="60" y="192" width="300" height="16" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="360" y="192" width="30" height="16" rx="2" fill="#fbbf24" opacity="0.35"/>
+        <rect x="390" y="192" width="90" height="16" rx="2" fill="#f472b6"/>
+
+        <text x="52" y="234" text-anchor="end" font-size="9.5" class="dim">fold 2</text>
+        <rect x="60" y="222" width="390" height="16" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="450" y="222" width="30" height="16" rx="2" fill="#fbbf24" opacity="0.35"/>
+        <rect x="480" y="222" width="90" height="16" rx="2" fill="#f472b6"/>
+
+        <text x="52" y="264" text-anchor="end" font-size="9.5" class="dim">fold 3</text>
+        <rect x="60" y="252" width="480" height="16" rx="2" fill="#818cf8" opacity="0.45"/>
+        <rect x="540" y="252" width="30" height="16" rx="2" fill="#fbbf24" opacity="0.35"/>
+        <rect x="570" y="252" width="90" height="16" rx="2" fill="#f472b6"/>
+
+        <path d="M360,286 L360,300 M450,286 L450,300 M540,286 L540,300" stroke="#fbbf24" stroke-width="1.2" fill="none" opacity="0.7"/>
+        <text x="450" y="314" text-anchor="middle" font-size="9.5" fill="#fbbf24">the forecast origin moves forward, never back</text>
+
+        <path d="M60,338 L660,338" stroke="#9a9aa8" stroke-width="1.6" fill="none" class="flow-line"/>
+        <text x="670" y="342" font-size="9.5" class="dim">t</text>
+
+        <rect x="60" y="356" width="11" height="11" rx="2" fill="#818cf8" opacity="0.45"/>
+        <text x="78" y="365" font-size="9.5" class="dim">train</text>
+        <rect x="118" y="356" width="11" height="11" rx="2" fill="#fbbf24" opacity="0.35"/>
+        <text x="136" y="365" font-size="9.5" class="dim">gap (embargo)</text>
+        <rect x="224" y="356" width="11" height="11" rx="2" fill="#f472b6"/>
+        <text x="242" y="365" font-size="9.5" class="dim">test</text>
+        <text x="300" y="365" font-size="9.5" class="dim">Top: 8 of 40 points held out at random. Bottom: three honest origins.</text>
+      </svg>
+      <div class="diagram-caption">Look at the pulsing cell in the top strip. It's a test point whose immediate neighbours on both sides are training points, so a model only has to interpolate between two nearly identical values. In the bottom half no test point has a training point to its right. That's the only difference between the two designs, and it's usually worth several times the error.</div>
+    </div>
+
+    <p>That bottom half is called <em class="term">rolling-origin evaluation</em>. Its <strong>forecast origin</strong> is the day we pretend is "today". Everything up to it is training data, the test days all come after it, and then we move the origin forward and repeat. A yellow strip marks a gap, called an <strong>embargo</strong>, left between the end of training and the start of the test window. We'll see in section 10 when it's needed.</p>
+
+    <p>That random split in the top half leaks the answer in three different ways, and they stack. One is <strong>temporal leakage</strong>: training rows dated after the test rows, so the model has already seen the level, the regime and the shocks it's being asked to predict. Another is <strong>leakage through smoothness</strong>. Even if no training row were from the future, a neighbouring row carries almost the same target, and any model that averages nearby points gets the answer handed to it. Last comes <strong>preprocessing leakage</strong>: a scaler, an imputer or a target encoder fitted on the whole series before splitting, so the test period's statistics end up inside the transform.</p>
+
+    <p>None of this is hypothetical, so let's measure it. Our code builds a series that drifts upward and cycles, with a little noise. It turns the series into a table where each row holds the previous three values, called <strong>lags</strong>, and the target is the value that follows them. For the model we write a 3-nearest-neighbours regressor by hand: for each test row it finds the three training rows whose lags are closest and averages their targets. We use it because any model that averages nearby points behaves this way. <code>mae</code> is the mean absolute error, the average size of the miss. We then score the same model twice, once on a shuffled 80/20 split (<code>rng.permutation</code>) and once on a split where the last 20% of days are the test set (<code>order[:cut]</code> against <code>order[cut:]</code>).</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Score the same model twice — shuffled, then honestly</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+n = 300                                 # a drifting, cyclical series:
+t = np.arange(n)                        # the level in month 300 is not
+y = .05 * t + np.sin(t / 6) + rng.normal(0, .1, n)   # the month-1 level
+
+L = 3                                   # three lags, the standard setup
+X = np.stack([y[L-1-k : n-1-k] for k in range(L)], 1)
+target = y[L:]
+
+def mae(tr, te, k=3):                   # 3-NN: any model that averages
+    d = ((X[te][:, None] - X[tr][None]) ** 2).sum(-1)   # nearby points
+    nn = np.argsort(d, 1)[:, :k]                        # behaves this way
+    return np.abs(target[tr][nn].mean(1) - target[te]).mean()
+
+order = np.arange(len(target))
+cut = int(.8 * len(target))
+shuffled = rng.permutation(order)       # the ordinary k-fold split
+print("X", X.shape, "target", target.shape)
+a = mae(shuffled[:cut], shuffled[cut:])
+b = mae(order[:cut], order[cut:])       # every test point after train
+print("shuffled CV MAE %.3f" % a)
+print("rolling-origin  %.3f   (%.1fx worse)" % (b, b / a))</code></pre>
+      <div class="tryit-out"><strong>Same data, same model, same metric: <code>0.195</code> against <code>0.993</code>.</strong> Shuffling reports an error <code>5.1x</code> smaller, and no line of the code is a bug you could find by reading it. Every test row had a near-twin in the training set. Ship the model that scored <code>0.195</code> and production will hand you <code>0.993</code>, and that is the number you should have been optimising all along.</div>
+    </details>
+
+    <h4 class="why">Why does a careful-looking pipeline still leak?</h4>
+    <p>People rarely shuffle on purpose. They call a generic splitter, or run a hyperparameter search with a default <code>cv=5</code>, and the shuffle happens inside a library. Being careful isn't a dependable defence against that. A structural one is: use only splitters that cut by date, so that no code path exists that could shuffle. Scikit-learn's <code>TimeSeriesSplit</code> is the minimum version of this.</p>
+
+    <p>With an honest split in hand, we can ask what to fit. The first obstacle is that the series won't hold still. Our bakery grows, so a model that learned what a typical day looks like in year one is probably describing the wrong level in year two.</p>
+  </section>
+
+  <section id="stationarity">
+    <h2><span class="num">02</span>Stationarity, and why differencing is the first move</h2>
+
+    <p>A model fitted on the past is only useful if the past and the future are the same kind of thing. Stationarity is the formal version of that hope. A series is <em class="term">weakly stationary</em> when three things hold: its mean doesn't depend on when you measure it, its variance (the average squared distance from the mean) doesn't either, and the covariance between two points depends only on the <strong>lag</strong>, the number of steps between them, and not on where in the series they sit. That last property is about <strong>autocorrelation</strong>, how strongly a series moves together with a shifted copy of itself.</p>
+
+    <p>Almost no interesting series is stationary as recorded. Sales grow and prices wander. Classically, you transform the series until what's left is stationary, fit a model there, then undo the transform on the forecast. <em class="term">Differencing</em> is the main transform: replace each value with the change since the previous value.</p>
+
+    <div class="eq-block"><span>$$\nabla y_t = y_t - y_{t-1}, \qquad \nabla_m y_t = y_t - y_{t-m}$$</span></div>
+
+    <p class="eq-explain">The first removes a trend. Its second form, <em>seasonal differencing</em> with period <span>$m$</span>, removes a repeating annual or weekly pattern.</p>
+
+    <p>For the bakery, the first form turns "sold more than a year ago" into "sold a bit more than yesterday", and a steady climb becomes a roughly constant number. With <span>$m=7$</span> the second form compares each Tuesday with the Tuesday before. How many ordinary differences you take is the <span>$d$</span> in ARIMA, and the number of seasonal ones is the <span>$D$</span> in SARIMA, and that's all those letters mean. We'll meet both models in section 04.</p>
+
+    <p>Let's watch differencing work. Our code builds a <strong>random walk with drift</strong>: each day adds a random step whose average is 0.3, and <code>cumsum</code> adds the steps up into a path. It's the standard example of a non-stationary series. <code>halves</code> cuts any series in two and prints the mean and variance of each half. If a series is stationary, the two halves should agree. We run it on the raw path, on the path differenced once with <code>np.diff</code>, and on the path differenced twice.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Split a series in half and watch differencing make the halves agree</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+n = 400                                 # a random walk with drift, the
+step = rng.normal(.3, 1.0, n)           # canonical non-stationary series
+y = step.cumsum()
+
+def halves(s, name):                    # same statistic, two windows
+    a, b = s[:len(s)//2], s[len(s)//2:]
+    print("%-13s mean %6.2f vs %6.2f    var %6.2f vs %6.2f"
+          % (name, a.mean(), b.mean(), a.var(), b.var()))
+
+print("y", y.shape, "   diff(y)", np.diff(y).shape, "\n")
+halves(y, "raw")                        # nothing about it holds still
+halves(np.diff(y), "differenced")       # both halves agree: stationary
+halves(np.diff(y, 2), "twice-diffed")   # variance paid, nothing gained</code></pre>
+      <div class="tryit-out"><strong>The raw halves disagree about everything.</strong> Mean <code>34.99</code> against <code>82.81</code>, variance <code>404.72</code> against <code>133.58</code>. After one difference they line up: means <code>0.31</code> and <code>0.21</code>, variances <code>0.93</code> and <code>1.05</code>. Now look at the third row. Differencing a second time roughly doubles the variance, to <code>1.79</code> and <code>2.20</code>, and buys nothing.</div>
+    </details>
+
+    <p>That third row is <em>over-differencing</em>. Once a series is stationary, more differencing only adds noise, and it's the standard way people make a forecast worse while believing they're being careful. So how do you decide how many differences you need? Two tests are used, and they're mirror images. Each has a <strong>null hypothesis</strong>, the default assumption the test tries to knock down. Of the two, the <strong>ADF test</strong> takes non-stationarity as its null, and the <strong>KPSS test</strong> takes stationarity as its null. Running both and getting agreement tells you more than running either alone.</p>
+
+    <p>One more point, because it connects back to section 01. Differencing only looks backwards: computing <span>$y_t - y_{t-1}$</span> uses nothing dated after <span>$t$</span>, so you can apply it to the whole series before splitting without leaking. Standardising is different. Subtracting the mean and dividing by the standard deviation uses statistics computed over the test period too, so fit the scaler on the training window only, exactly as you would for any other model.</p>
+
+    <p>Differencing deals with trend. Our bakery also has a weekly rhythm, and before we reach for a model it helps to see what that rhythm alone can do.</p>
+  </section>
+
+  <section id="seasonality">
+    <h2><span class="num">03</span>Decomposition, seasonality and the baseline you skipped</h2>
+
+    <p>Most series are a slow trend, a repeating cycle and a remainder. For the bakery that's gradual growth, a bump every weekend, and whatever is left on a given day. The <em class="term">additive decomposition</em> writes that as a sum:</p>
+
+    <div class="eq-block"><span>$$y_t = T_t + S_t + R_t$$</span></div>
+
+    <p class="eq-explain">A series splits into trend-cycle, seasonal and remainder components. If the seasonal swing grows with the level, use a multiplicative form instead, or take logs first and stay additive.</p>
+
+    <p>There are three common ways to do the split, in increasing order of usefulness. <strong>Classical decomposition</strong> takes a centred moving average for the trend, then averages the detrended values by season. It's simple, and it throws away the first and last few points. <strong>STL</strong> (Seasonal-trend decomposition using Loess, a method that fits many small local regressions) lets the seasonal shape drift slowly over the years and is robust to outliers, so it's probably the default to reach for. <strong>Prophet-style decomposable models</strong> treat the job as curve fitting: they fit a trend, seasonality written as a sum of sine and cosine waves (a Fourier series) and holiday effects, then forecast each piece forward.</p>
+
+    <p>Prophet deserves a fair hearing. It handles missing data, irregular sampling and holiday calendars without complaint, and an analyst can override the points where the trend bends by hand. It is a curve fit and not a stochastic process, though. It models the shape of the series and largely ignores the autocorrelation left in the remainder.</p>
+
+    <h3 id="baselines-come-before-models">Baselines come before models</h3>
+
+    <p>Decomposition suggests a cheap way to forecast the bakery: assume the cycle repeats. Three forecasts cost nothing and beat a surprising share of real models. <strong>Naive</strong> says tomorrow equals today, and it's optimal for a random walk, and more series behave like one than you'd like. <strong>Seasonal naive</strong> says this Tuesday equals last Tuesday, and it's the one to beat on anything with a weekly or annual cycle. <strong>Drift</strong> extends the straight line from the first observation to the last.</p>
+
+    <p>Report your model's error as a ratio against one of these. That ratio is what <strong>MASE</strong> (mean absolute scaled error) formalises, and it's the only error number that travels between series measured on different scales.</p>
+
+    <p>To see why it matters, let's pit a fitted model against a forecast with no parameters. We use twelve weeks of noisy daily sales with a slight upward drift and a weekend bump (the <code>season</code> array). We train on the first eight weeks and test on the last four. Our fitted model is an <strong>autoregressive</strong> one, a regression of each day on the previous 14 days of the same series, here with 14 coefficients solved by least squares (<code>np.linalg.lstsq</code>) from 42 training rows. To forecast four weeks, it predicts one day, appends that prediction to the history and uses it for the next day. That's called a <strong>recursive</strong> forecast. For <code>snaive</code>, the list comprehension picks, for each test day, the same weekday from the most recent training week.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Put a fitted AR model up against a forecast with zero parameters</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+m, n = 7, 84                            # 12 weeks of noisy daily data
+t = np.arange(n)
+season = np.array([0., 1.2, 1.0, .8, 1.4, 3.5, 3.2])
+y = 10 + .02 * t + season[t % m] + rng.normal(0, .8, n)
+tr, te = y[:56], y[56:]                 # train 8 weeks, test 4 weeks
+
+naive = np.full(te.shape, tr[-1])            # repeat the last value
+snaive = np.array([y[56 + i - m * (i // m + 1)]
+                   for i in range(len(te))]) # same weekday, last week
+p = 14                                       # AR(14) by OLS on 42 rows
+A = np.stack([tr[p-1-k : 55-k] for k in range(p)], 1)
+w = np.linalg.lstsq(A, tr[p:], rcond=None)[0]
+hist, ar = list(tr), []
+for _ in te:                                 # recursive multi-step
+    ar.append(float(w @ hist[-1:-p-1:-1])); hist.append(ar[-1])
+
+print("train", tr.shape, "test", te.shape, "AR rows", A.shape)
+base = np.abs(snaive - te).mean()
+for nm, f in [("naive", naive), ("seasonal naive", snaive),
+              ("AR(14) OLS", np.array(ar))]:
+    e = np.abs(f - te).mean()
+    print("%-15s MAE %.3f   vs snaive %.2fx" % (nm, e, e / base))</code></pre>
+      <div class="tryit-out"><strong>The zero-parameter forecast wins.</strong> Seasonal naive scores <code>0.881</code>; the fourteen-parameter AR fit scores <code>1.022</code>, or <code>1.16x</code> worse. Plain naive, which ignores the weekly cycle, scores <code>1.729</code>.</div>
+    </details>
+
+    <h4 class="why">Why does the fitted model lose to repeating last week?</h4>
+    <p>Fourteen coefficients estimated from <code>(42, 14)</code> rows is not much data, and the errors compound through 28 recursive steps, because each prediction feeds the next. Give the model two years instead of eight weeks and the AR model wins comfortably. So <code>1.022</code> means nothing until you know that <code>0.881</code> was available for free.</p>
+
+    <p>When a series is long and well behaved, though, those fitted models do earn their keep. They're worth a closer look.</p>
+  </section>
+
+  <section id="classical">
+    <h2><span class="num">04</span>The classical toolkit, in one pass</h2>
+
+    <p>ARIMA and exponential smoothing are the two families that dominated forecasting for forty years, and both are still the right answer for a single short series. Our AR(14) model is a piece of the first, so let's name its parts. An <em class="term">autoregressive</em> term regresses the series on its own past values. A <em class="term">moving average</em> term regresses it on its own past <em>errors</em>, meaning how far off the model's earlier predictions were.</p>
+
+    <div class="eq-block"><span>$$y_t = c + \sum_{i=1}^{p}\phi_i\,y_{t-i} + \sum_{j=1}^{q}\theta_j\,\varepsilon_{t-j} + \varepsilon_t$$</span></div>
+
+    <p class="eq-explain">The <span>$\phi$</span> terms are AR(<span>$p$</span>), the <span>$\theta$</span> terms are MA(<span>$q$</span>). Apply this to a <span>$d$</span>-times differenced series and you have ARIMA(<span>$p,d,q$</span>).</p>
+
+    <p>That's where the <span>$d$</span> from section 02 comes in. <strong>SARIMA</strong> adds a second copy of the same structure at the seasonal lag, written ARIMA(<span>$p,d,q$</span>)(<span>$P,D,Q$</span>)<span>$_m$</span>. That's seven numbers to choose, so automatic order selection exists: <code>auto.arima</code> and its Python equivalents search a grid of orders and keep the one with the best AICc, a score that rewards fit and penalises the number of parameters.</p>
+
+    <p>Exponential smoothing comes at the same problem from the other end. <em class="term">Simple exponential smoothing</em> forecasts a weighted average of the past in which the weights decay geometrically, so yesterday counts most and last month counts very little:</p>
+
+    <div class="eq-block"><span>$$\hat{y}_{t+1} = \alpha y_t + (1-\alpha)\hat{y}_t$$</span></div>
+
+    <p class="eq-explain">It has one parameter. Holt adds a trend component, Holt-Winters adds a seasonal one, and the <strong>ETS</strong> taxonomy enumerates the combinations of error, trend and seasonality.</p>
+
+    <p>Here are the families side by side, with Prophet from the last section for comparison.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Family</th><th>Fits</th><th>Reach for it when</th><th>Weak at</th></tr></thead>
+      <tbody>
+        <tr><td>ETS / Holt-Winters</td><td>level, trend, season</td><td>one short series, clear seasonality</td><td>covariates, long horizons</td></tr>
+        <tr><td>ARIMA / SARIMA</td><td>autocorrelation structure</td><td>stationary after differencing</td><td>many series, nonlinearity</td></tr>
+        <tr><td>State space + Kalman</td><td>latent level and slope</td><td>gaps, irregular sampling, online updates</td><td>specification effort</td></tr>
+        <tr><td>Prophet</td><td>trend + Fourier + holidays</td><td>business series, analyst overrides</td><td>autocorrelated remainders</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The third row needs a word of explanation. A <em class="term">state space model</em> splits the world into a hidden state that evolves over time, such as the bakery's true underlying level of demand, and a noisy observation of it, the number you wrote down. A <strong>Kalman filter</strong> updates its estimate of that state one observation at a time. Two properties make it valuable. Missing observations are free, because you skip the update step for that day. And the filter produces the exact likelihood, so the model can be fitted by maximum likelihood with no custom recursion needed. Most modern ETS and ARIMA implementations are state space models underneath.</p>
+
+    <p>All of this fits one series at a time. Real forecasting jobs rarely stay that small. A retailer has the bakery's loaves and thousands of other products in hundreds of stores, and for that we need a different way of setting the problem up, and it's also where leakage gets much easier to commit.</p>
+  </section>
+
+  <section id="features">
+    <h2><span class="num">05</span>Turning a series into a table</h2>
+
+    <p>Every tree and every neural network in the rest of this chapter is a regression on a feature matrix, and building that matrix is most of the job. It's a mechanical move. For each timestamp, build a row whose target is <span>$y_{t+h}$</span>, the value <span>$h$</span> steps ahead (<span>$h$</span> is the <strong>forecast horizon</strong>), and whose features use nothing dated later than <span>$t$</span>. Five kinds of feature do almost all the work.</p>
+
+    <p><strong>Lags of the target</strong> are the previous values <span>$y_t, y_{t-1}, \dots$</span> plus the seasonal lags <span>$y_{t-m}, y_{t-2m}$</span>, and they're probably the single most important family. For next Tuesday's loaves, that means this week's sales and the last few Tuesdays. <strong>Rolling statistics</strong> are the mean, standard deviation, min and max over the last 7, 28 or 90 periods, which encode level and volatility cheaply. <strong>Calendar features</strong> are day of week, week of year, month, holiday flags and days to the next holiday, all cheap and known in advance.</p>
+
+    <p>Two more kinds are covariates, which are extra series that might help predict the target. <strong>Known-future covariates</strong> are things like a planned price, a scheduled promotion or a published holiday calendar. You may use their value at <span>$t+h$</span>, because you'll know it when the time comes. <strong>Past-only covariates</strong> are observed things like weather, competitor traffic or upstream demand. You may use their value at <span>$t$</span> and no later. People get this distinction wrong more than any other, and it's the heart of multivariate forecasting.</p>
+
+    <h4 class="why">Why can't I feed in foot traffic from the day I'm forecasting?</h4>
+    <p>Say we want to forecast store sales and we have foot traffic, which correlates beautifully with sales. Feeding in the same day's foot traffic produces a stunning backtest. In production, though, you're forecasting next week, and you don't have next week's foot traffic. You'd have to forecast it first, and its forecast error would flow into yours. You can lag the covariate so that it's available, or to accept that you now have two forecasting problems.</p>
+
+    <p>Rolling windows carry the same hazard in miniature. A 7-day rolling mean centred on <span>$t$</span> includes three days after <span>$t$</span>. A 7-day mean ending at <span>$t$</span> does not. One of those is a feature and the other is the answer.</p>
+
+    <p>There's also a choice about the horizon itself. In a <strong>recursive</strong> setup you train one model for the next step and feed its own predictions back in, as the AR baseline did. That's compact, but the errors compound. In a <strong>direct</strong> setup you train a separate model for each horizon <span>$h$</span>. That avoids the compounding, at the cost of more models and no guarantee that their forecasts agree with one another.</p>
+
+    <p>Once the series is a table, we can reach for the usual champion of tables.</p>
+  </section>
+
+  <section id="trees">
+    <h2><span class="num">06</span>Gradient-boosted trees, and why they keep winning</h2>
+
+    <p>For most tabular forecasting problems with many series, LightGBM on lag features is still the model to beat. Gradient boosting handles hundreds of mixed features, learns interactions without being told, tolerates missing values and trains in minutes on a laptop.</p>
+
+    <p>Evidence comes from the M-competitions, the closest thing forecasting has to a shared benchmark. In <strong>M4</strong> (2018, 100,000 series) the pure machine-learning entries did badly. Its winner was a hybrid of exponential smoothing and a recurrent network, and second place was an ensemble of classical statistical methods. In <strong>M5</strong> (2020, Walmart sales) the picture reversed. Gradient-boosted trees on engineered features dominated the leaderboard, and the winning accuracy entry was built on LightGBM. What changed was the data: many related series, rich covariates, and series that roll up into groups.</p>
+
+    <p>Trees do need a way to tell which series a row belongs to. Series identity, category and location go in as static features, so one global model can serve thousands of series and still specialise. But trees have a limit that surprises people on growing series.</p>
+
+    <h4 class="why">Why can a tree never predict a value it hasn't seen?</h4>
+    <p>A decision tree predicts the mean of the training rows in a leaf. Outside the range of feature values it saw during training, it returns the value at the nearest edge and goes flat. On a growing series, that means every long-horizon forecast comes out too low, systematically. Fixing it means removing the trend before the tree sees it: difference the target, or model its ratio to a rolling baseline, then add the trend back afterwards. When a tree-based forecast looks oddly flat, this is probably why, so check it first. You can see the effect for yourself in the project at the end of the chapter.</p>
+
+    <p>Trees fit each feature row as a separate example. Neural networks can go further and learn from all the series together, which is the next step up.</p>
+  </section>
+
+  <section id="deep">
+    <h2><span class="num">07</span>Deep forecasting: four architectures</h2>
+
+    <p>What deep learning added here isn't a better function class. It's the <strong>global model</strong>, a single network trained across every series at once. Classical methods fit each series independently, so a series with 40 observations gets 40 observations of evidence. A global model trained on 40,000 related series learns the shape of seasonality once and shares it, and that's where the gains come from.</p>
+
+    <p>Four designs cover most of the field. <strong>DeepAR</strong> (2017) is an autoregressive recurrent network, trained across many series, that outputs the <em>parameters</em> of a probability distribution in place of a single number. Forecasts come from sampling forward, so you get uncertainty for free. <strong>N-BEATS</strong> (2019) is a deep stack of fully connected blocks with no recurrence at all. Each block emits a backcast and a forecast, and the backcast is subtracted before the next block sees the input. Basis functions can be constrained to be polynomial or sinusoidal, which makes the decomposition readable.</p>
+
+    <p>A third, the <strong>Temporal Fusion Transformer</strong> (2019), is built for the messy case where you have static covariates, known-future covariates and past-only covariates all at once, the three kinds from section 05. Variable selection networks score which inputs matter, gating layers let it skip unused capacity, and it emits quantiles directly. <strong>PatchTST</strong> (2022) chops the series into patches, embeds each patch as a token and treats every channel independently. Patching shortens the sequence and lets attention (chapter 08) see local shape instead of single points.</p>
+
+    <p>Dilated causal convolutions are the fourth family, inherited from WaveNet. They give a long receptive field with fixed-cost inference and no recurrence. Page <a href="/topics/13-speech-audio">13</a> covers that stack in its original setting.</p>
+
+    <h4 class="why">Did transformers help at all?</h4>
+    <p>In 2022, Zeng et al. asked exactly that about long-horizon benchmarks. They compared published results against <strong>DLinear</strong>, a single linear layer applied to a decomposed series, and the linear model matched or beat several transformer architectures. Attention isn't useless, and that's not the lesson. The benchmarks were weak and the simple baselines weren't being run, the same failure section 03 was about.</p>
+
+    <p>So take the ordering seriously: baseline first, trees second, and deep models once you have many related series, rich covariates and enough history to justify them. A newer option skips fitting altogether.</p>
+  </section>
+
+  <section id="foundation">
+    <h2><span class="num">08</span>Foundation models for forecasting</h2>
+
+    <p>Since 2023 several groups have pretrained a single model on very large collections of series, then used it to forecast new ones with no fitting at all. Their recipe borrows from language modelling: take a scaled window of values, turn it into tokens or patches, and train a sequence model to predict the continuation.</p>
+
+    <p>Four public examples show the range. <strong>Chronos</strong> (Amazon, 2024) scales and quantises values into a fixed vocabulary, then trains an off-the-shelf T5 on them, so the series is treated as literal text. <strong>TimesFM</strong> (Google, 2023) is a decoder-only model over input patches, with an output patch longer than the input patch so it can forecast far in one step. <strong>Moirai</strong> (Salesforce, 2024) targets the awkward parts directly: multiple frequencies, variable numbers of covariates and probabilistic output. <strong>Lag-Llama</strong> (2023) is a decoder-only transformer over lagged features, and one of the first open univariate probabilistic attempts.</p>
+
+    <p>What they buy you is a usable forecast on a new series in seconds, with no tuning. For a cold-start series, such as a new bakery item with no history, or for the long tail of series nobody has time to model, that's a real win. Two cautions apply, and both are probably worth checking before you rely on one. Zero-shot claims are only as good as the separation between the pretraining corpus and the evaluation set, and that separation is hard to audit from outside. And most of these models take the target series and little else, so any covariate you've worked hard to build has nowhere to go.</p>
+
+    <p>Treat a foundation model as a strong baseline that arrives for free. Then check whether LightGBM on your own features beats it, because on a well-understood problem it often does.</p>
+
+    <p>That completes the ladder of models: baselines, classical families, trees on lag features, global deep models and pretrained models. Two things remain, and they matter more than the choice of model. One is producing a forecast that admits what it doesn't know. Another is measuring any of it honestly.</p>
+  </section>
+
+  <section id="probabilistic">
+    <h2><span class="num">09</span>Probabilistic forecasts, quantiles and anomalies</h2>
+
+    <p>A point forecast is a decision waiting to be made badly. If the bakery bakes exactly the forecast, any miss on the low side means empty shelves and any miss on the high side means waste, and the two don't cost the same. Inventory, staffing and capacity all need a distribution, and a single number can't supply one.</p>
+
+    <p>Maybe the cheapest way to get one is <em class="term">quantile regression</em>. A quantile is a cut point: the 0.9 quantile is the value that the target falls below 90% of the time. You train the same model several times, with a different loss for each target quantile. Its <strong>pinball loss</strong> for quantile <span>$\tau$</span> is asymmetric:</p>
+
+    <div class="eq-block"><span>$$L_{\tau}(y,\hat{y}) = \max\big(\tau(y-\hat{y}),\ (\tau-1)(y-\hat{y})\big)$$</span></div>
+
+    <p class="eq-explain">At <span>$\tau=0.9$</span> under-predicting costs nine times as much as over-predicting, so the fitted value settles at the 90th percentile.</p>
+
+    <p>Whatever produces the interval, check its <strong>calibration</strong>. If your 90% interval contains the truth 62% of the time, it isn't a 90% interval. Check coverage separately at each horizon, because intervals have to widen as the horizon grows and often don't.</p>
+
+    <p>Metrics deserve the same care as the model. <strong>MAE</strong> targets the median and <strong>RMSE</strong> targets the mean, and on skewed demand data those are different forecasts, so optimising one while reporting the other is a common own goal. <strong>MAPE</strong> divides by the actual value, which means it explodes at zero and punishes over-forecasting more than under-forecasting, and intermittent demand breaks it completely. <strong>MASE</strong>, which we met in section 03, scales by the in-sample naive error, so it's comparable across series and has a clear reading: below 1 beats the naive forecast. <strong>CRPS</strong> and weighted quantile loss score the whole predictive distribution, and they're what probabilistic competitions use.</p>
+
+    <h3 id="anomaly-detection-is-forecasting-with-the-residual-kept">Anomaly detection is forecasting with the residual kept</h3>
+
+    <p>The standard construction is to forecast one step ahead, then compare. A point is anomalous when it falls far outside its own prediction interval, so everything upstream in this chapter applies, because the quality of the anomaly flag is the quality of the forecast. Two things cause most false alarms. One is seasonality the model doesn't represent, so every Monday looks like a spike. Another is historical anomalies left in the training data, which widen the intervals until nothing trips them.</p>
+
+    <p>Now we can go back to where the chapter started, with the tools to do it properly.</p>
+  </section>
+
+  <section id="backtesting">
+    <h2><span class="num">10</span>Backtesting that you can trust</h2>
+
+    <p>A backtest is a simulation of deployment, and it's only worth anything if the simulation refuses to look forward. Its method is the rolling-origin evaluation from section 01: pick an origin, train on everything before it, forecast the next <span>$h$</span> periods, score, move the origin forward, repeat. Section 01's bottom strip is the picture, and <a href="https://otexts.com/fpp3/tscv.html" target="_blank" rel="noopener">chapter 5.10 of <em>Forecasting: Principles and Practice</em></a> is the canonical write-up.</p>
+
+    <p>Four decisions sit inside that loop. First is the window: an <strong>expanding</strong> window keeps all history and assumes the old regime still applies, while a <strong>sliding</strong> window uses a fixed length and adapts faster after a structural break. Next is the horizon, which must equal the horizon you forecast in production, because a model tuned at one step ahead isn't the model you want at 28. Then there's the gap: leave an embargo between the end of training and the start of the test window whenever features use rolling statistics or labels arrive late. Last is the refit policy. Refitting at every origin is honest and slow, and refitting monthly is what you'll do in production, so backtest that instead.</p>
+
+    <p>Score per horizon and then aggregate, never the other way round. A model that's excellent at <span>$h=1$</span> and useless at <span>$h=28$</span> can show a perfectly respectable average.</p>
+
+    <p>Here are the leaks to hunt for, roughly in the order they bite. First, a shuffled split from a default <code>cv=5</code> nobody read. Next, a scaler, imputer or target encoder fitted before the split, and a rolling window that includes the current point or is centred. After those come a covariate used at <span>$t+h$</span> that isn't known at <span>$t$</span>, and feature selection or hyperparameter search run once over all the data and then "validated" on part of it. The final two are <strong>restated data</strong>, where a warehouse table was corrected later so the backtest sees numbers that didn't exist at the time, and deduplication or outlier removal performed globally before splitting. Those two are probably the hardest to catch, because nothing in the modelling code is wrong. Here the data itself is the wrong vintage.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">11</span>Summary</h2>
+    <ol>
+      <li><strong>Forecasting is regression with one constraint:</strong> every training row must predate every test row. Break it and the error you measure is interpolation, not forecasting.</li>
+      <li><strong>Neighbouring rows are near-copies.</strong> A shuffled split leaks through time, through smoothness and through preprocessing, and in our test it reported <code>0.195</code> when the honest number was <code>0.993</code>.</li>
+      <li><strong>Differencing makes a series stationary.</strong> It only looks backwards, so it's safe to apply before splitting, while scalers must be fitted on the training window.</li>
+      <li><strong>Over-differencing adds noise.</strong> One difference brought the halves of a random walk into agreement, and a second one doubled the variance.</li>
+      <li><strong>Run the free baselines first.</strong> Naive, seasonal naive and drift cost nothing, and a fitted AR(14) lost to seasonal naive on eight weeks of data, so report errors as a ratio such as MASE.</li>
+      <li><strong>ARIMA and ETS are still right for one short series.</strong> They come at it from different ends, and state space models with a Kalman filter sit underneath most modern implementations.</li>
+      <li><strong>Features must be known at forecast time.</strong> Lags, rolling windows ending at <span>$t$</span> and calendar fields are safe, a covariate observed at <span>$t+h$</span> isn't, and a centred window leaks.</li>
+      <li><strong>Gradient-boosted trees win with many related series</strong> and rich covariates, but they can't extrapolate, so difference the target on a growing series.</li>
+      <li><strong>Deep and pretrained models need a reason.</strong> Global models share seasonality across series, and DLinear's results showed how weak many benchmarks were, so climb the ladder in order and check each rung against the one below.</li>
+      <li><strong>Forecast a distribution, and check its calibration</strong> at each horizon. Pinball loss gives quantiles, and an anomaly is a point far outside its own interval.</li>
+      <li><strong>Backtest by rolling the origin forward</strong> with the production horizon, a gap and a realistic refit policy, scoring per horizon. A score that looks too good is almost always a leak.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">12</span>Build this</h2>
+    <p class="lede">The claim on this page is that leakage is worth more than modelling, and that is measurable in an afternoon.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Build one honest backtest, then break it five ways and price each break</span>
+        <span class="proj-meta">~3 hours · numpy only</span>
+      </div>
+      <p>Generate a series you fully understand, build a rolling-origin harness, and then introduce one leak at a time. You are not trying to build a good forecaster. You are producing a table of how many points of MAE each mistake is worth, on data where you know the truth.</p>
+      <ol class="proj-steps">
+        <li>Generate 2,000 points: a linear trend, a period-7 season, an AR(1) remainder, and two level shifts you place yourself. Keep the components, so you can check what any model recovers.</li>
+        <li>Write the harness. Ten rolling origins, expanding window, horizon 14, scored per horizon and then averaged. Include seasonal naive as the baseline in every fold.</li>
+        <li>Fit two models through the harness: ridge regression on lag features, and a depth-3 regression tree you write yourself. Record MASE per fold.</li>
+        <li>Now break it, one change at a time, re-running the whole harness each time: shuffle the split; fit the scaler on all the data; use a centred rolling mean; add a covariate observed at <span>$t+h$</span>; select features on the full series.</li>
+        <li>Tabulate the MASE each break reports against the honest number. Sort the table by the size of the gap.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the honest MASE sits somewhere near 1 and at least two of the broken variants report well below it. The broken runs will not look broken. They will look like progress, which is the entire problem.</div>
+      <div class="proj-stretch"><strong>What the tree adds.</strong> Run the tree on the raw target and then on the differenced target, across all ten origins. On the raw target its error grows steeply with the horizon, because it cannot predict a value above anything it saw in training. On the differenced target that growth mostly disappears. Plot both error-versus-horizon curves on one chart and the extrapolation limit becomes something you have seen rather than something you were told.</div>
+    </div>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">13</span>What breaks</h2>
+    <p class="lede">Forecasting failures are rarely a model that cannot fit. They are a number that was never measuring what you thought.</p>
+
+    <ul>
+      <li><strong>The backtest was excellent and production is not.</strong> The default outcome of a shuffled split. Nothing in the code looks wrong, and the gap only appears after deployment.</li>
+      <li><strong>A covariate was not available at forecast time.</strong> Someone joined a table on timestamp without asking when the row was written. The feature importance chart looks wonderful.</li>
+      <li><strong>The tree forecast flatlines.</strong> A growing series, no differencing, and every long-horizon prediction pinned to the top of the training range.</li>
+      <li><strong>Nobody ran seasonal naive.</strong> Six weeks of modelling to land 8% worse than repeating last Tuesday, discovered by someone else.</li>
+      <li><strong>MAPE on a series that touches zero.</strong> The metric goes to infinity, someone clips it, and the clipped version now rewards under-forecasting.</li>
+      <li><strong>Intervals that never widen.</strong> The 90% band at horizon 28 is the same width as at horizon 1, so coverage collapses exactly where the decisions are risky.</li>
+      <li><strong>A structural break mid-history.</strong> A pricing change or a pandemic sits inside the training window, and an expanding window keeps averaging over a regime that no longer exists.</li>
+      <li><strong>Restated history.</strong> The warehouse corrected last quarter's numbers. Your backtest read the corrected version, and the live model never will.</li>
+      <li><strong>Hierarchies that do not add up.</strong> Store forecasts summed do not equal the regional forecast, and the planning system needs them to.</li>
+    </ul>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">14</span>Where you meet this in the wild</h2>
+    <p class="lede">The constraint is the same everywhere, and the consequences of getting it wrong differ a lot.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card">
+        <div class="wild-head"><strong>Retail demand planning</strong></div>
+        <p>Tens of thousands of intermittent, hierarchical series with promotions and holidays attached. The forecast feeds an order that costs money whether it is too high or too low.</p>
+        <p class="reach reach-yes">Global gradient-boosted trees on lag and calendar features, quantile outputs, reconciled across the hierarchy.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Cloud capacity planning</strong></div>
+        <p>Strong daily and weekly cycles, a long-run growth trend, and sharp step changes when a large customer onboards. The cost of under-forecasting is an outage.</p>
+        <p class="reach reach-yes">Decomposition plus an upper quantile, with explicit handling of known launches.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Energy load forecasting</strong></div>
+        <p>The textbook case for known-future covariates: the weather forecast is available in advance, and temperature drives load nonlinearly.</p>
+        <p class="reach reach-yes">Models that separate past-only from known-future inputs, such as TFT, earn their complexity here.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Financial returns</strong></div>
+        <p>Prices are close to a random walk, so the naive forecast is near optimal and the signal is tiny. Leakage is fatal and not merely embarrassing, since anything profitable is arbitraged away.</p>
+        <p class="reach reach-no">Not a standard forecasting problem. Expect purged and embargoed cross-validation, and be sceptical of any strong backtest.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">15</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why can you not use ordinary k-fold cross-validation on a time series?</summary>
+      <div class="qa-body"><p>Because k-fold shuffles, which puts training rows after test rows in time and destroys the thing you are trying to measure. Forecasting means predicting values you have not observed, so an evaluation is only meaningful if every training point predates every test point. Two separate problems appear otherwise. Temporal leakage means the model has seen the future level, trend and shocks of the period it is being scored on. Leakage through smoothness means that even without explicit future rows, the immediate temporal neighbour of a test point sits in the training set and carries nearly the same value, so any model that averages nearby points is effectively interpolating rather than forecasting. The correct design is rolling-origin evaluation: pick an origin, train on everything before it, forecast the next h periods, score, then move the origin forward and repeat.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What does it mean for a series to be stationary, and why does it matter?</summary>
+      <div class="qa-body"><p>Weak stationarity means three properties do not change over time: the mean, the variance, and the covariance between two points at a given lag. It matters because classical models estimate a fixed set of parameters from history and then apply them to the future, which is only valid if the statistical structure is the same in both periods. A series with a trend fails the mean condition and a series whose swings grow with its level fails the variance condition. The standard remedies are differencing, which replaces each value with the change since the previous value and removes a trend, seasonal differencing at the seasonal period, and a log or Box-Cox transform to stabilise variance. The ADF test takes non-stationarity as its null hypothesis and KPSS takes stationarity as its null, so running both gives a more confident answer than either alone. Over-differencing is a real cost: a second difference usually inflates the variance of the residual without removing anything.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Explain ARIMA(p, d, q) and what SARIMA adds.</summary>
+      <div class="qa-body"><p>ARIMA has three parts. The AR component regresses the current value on p of its own past values. The I component is the number of times d the series has been differenced to make it stationary, so the model is fitted to the differenced series and forecasts are integrated back afterwards. The MA component regresses the current value on q of its own past forecast errors, which captures the effect of shocks that decay over a few periods. SARIMA adds a second copy of the same AR, differencing and MA structure operating at the seasonal lag m, written ARIMA(p,d,q)(P,D,Q)m, so it can capture a weekly or annual cycle without needing an enormous ordinary AR order. Orders were traditionally chosen by inspecting the ACF and PACF plots, which show where autocorrelation cuts off, but in practice automatic search by AICc over a grid of orders is the normal approach.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>You are forecasting store sales and have foot-traffic data. How should you use it?</summary>
+      <div class="qa-body"><p>The deciding question is whether the covariate is known in advance at the time you make the forecast. Foot traffic is observed, not scheduled, so at an origin of today forecasting next week you will not have next week's value. Using it contemporaneously produces an excellent backtest and a model that cannot run in production. Three options are legitimate. Lag the covariate far enough that the value you need is always available at the origin, which is usually the right answer. Forecast the covariate first and accept that its error propagates, which means your evaluation must use the forecast rather than the actual. Or drop it in favour of covariates that genuinely are known ahead, such as holidays, planned promotions and published prices. The Temporal Fusion Transformer makes this distinction explicit by taking separate inputs for known-future and past-only covariates, which is a useful discipline even if you never use that model.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why do gradient-boosted trees struggle with trending series, and what do you do about it?</summary>
+      <div class="qa-body"><p>A tree predicts the mean of the training examples in a leaf, so its output is bounded by the range of targets it saw during training. Outside the range of feature values it observed it simply returns the nearest edge value and stays flat. On a series with a persistent upward trend, every forecast beyond the training range is therefore biased low, and the bias grows with the horizon, which usually shows up as a forecast curve that goes suspiciously flat. The remedy is to remove the trend before the tree sees it: difference the target and have the model predict the change rather than the level, or divide by a rolling baseline and model the ratio, then invert the transform on the output. An alternative is to fit a simple linear or seasonal component first and let the tree model the residual. This is also the main structural reason the classical toolkit still matters, since ARIMA and ETS extrapolate trends by construction.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Design a backtest for a demand forecasting system that refits weekly and forecasts 28 days ahead.</summary>
+      <div class="qa-body"><p>Mirror production exactly. Choose origins spaced one week apart across at least a year so every season is represented, and at each origin train only on data available at that timestamp, forecast 28 days, then move forward. Refit at the weekly cadence production uses rather than at every origin, because a backtest that refits more often than the live system overstates its accuracy. Insert an embargo between the training cut and the forecast window, sized to the worst-case data latency, so late labels and boundary-spanning rolling features cannot leak. Score per horizon rather than averaging, since day 1 and day 28 are different quantities and the aggregate hides that. Use MASE so series of very different volumes can be pooled, include seasonal naive in every fold, and check quantile coverage per horizon. Finally, verify the data vintage: if the warehouse restates history, the backtest must read values as they stood at each origin, or it is measuring a system that could never have existed.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>When would you choose a deep forecasting model over gradient-boosted trees?</summary>
+      <div class="qa-body"><p>The decision is about the shape of the data, not the sophistication of the model. Deep models earn their cost when you have many related series, because one global network trained across all of them shares seasonal structure that a per-series model has too little data to estimate. That is the real contribution of DeepAR, N-BEATS and their successors. They also help when you need a full predictive distribution, when covariates are too heterogeneous for hand-built features, or when the horizon is long enough for patch-based models such as PatchTST to have something to work with. Against that, the M5 competition was won on gradient-boosted trees over engineered lag features, and the DLinear paper showed a single linear layer matching several published transformer results on long-horizon benchmarks. The defensible position is an ordering: seasonal naive first, then trees on lag features, then a global deep model only once a rolling-origin backtest shows it beats both.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Your model's 90% prediction interval only contains the actual value 62% of the time. What do you investigate?</summary>
+      <div class="qa-body"><p>Coverage that far below nominal means the model is systematically overconfident, and four causes are worth separating. First, check whether coverage is uniformly bad or degrades with horizon, because intervals that fail to widen indicate the uncertainty is not propagating accumulated error, which happens when a recursive multi-step forecast sizes its band from one-step residuals. Second, check for heteroscedastic or heavy-tailed residuals, since a Gaussian interval fitted to demand with occasional spikes is far too narrow. Third, intervals derived from in-sample residuals assume the fitted model is correct, so a structural break in the test period produces errors the interval was never sized for. Fourth, check the evaluation itself, because coverage measured on a leaked split is measured against errors that were artificially small. The remedies are fitting quantiles directly with pinball loss, calibrating width on a held-out rolling-origin period, conformal methods adapted to sequential data, and always reporting coverage per horizon.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">16</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://otexts.com/fpp3/" target="_blank" rel="noopener">
+        <div class="r-icon">📘</div>
+        <div class="r-body"><div class="r-kind">Book</div><div class="r-title">Forecasting: Principles and Practice (3rd ed)</div><div class="r-sub">Hyndman &amp; Athanasopoulos — free online, and the reference for everything in sections 02 to 04. Start here.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1704.04110" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">DeepAR: Probabilistic Forecasting with Autoregressive Recurrent Networks</div><div class="r-sub">Salinas et al. — the global probabilistic model that started the modern line — arXiv:1704.04110</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1905.10437" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">N-BEATS: Neural basis expansion analysis for interpretable time series forecasting</div><div class="r-sub">Oreshkin et al. — backcast/forecast residual blocks, no recurrence — arXiv:1905.10437</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1912.09363" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Temporal Fusion Transformers for Interpretable Multi-horizon Forecasting</div><div class="r-sub">Lim et al. — separates static, known-future and past-only covariates, and outputs quantiles — arXiv:1912.09363</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2211.14730" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">A Time Series is Worth 64 Words: Long-term Forecasting with Transformers (PatchTST)</div><div class="r-sub">Nie et al. — patching and channel independence, the design most later work copies — arXiv:2211.14730</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2205.13504" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Are Transformers Effective for Time Series Forecasting?</div><div class="r-sub">Zeng et al. — the DLinear paper from section 07. Read it before believing any long-horizon benchmark — arXiv:2205.13504</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2403.07815" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Chronos: Learning the Language of Time Series</div><div class="r-sub">Ansari et al. — quantise the values into tokens and train a T5. The clearest foundation-model recipe — arXiv:2403.07815</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2012.03854" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Review</div><div class="r-title">Forecasting: theory and practice</div><div class="r-sub">Petropoulos et al. — an encyclopaedic survey by 80-odd authors, including the M-competition evidence in section 06 — arXiv:2012.03854</div></div>
+      </a>
+      <a class="resource-card" href="https://www.kaggle.com/competitions/m5-forecasting-accuracy" target="_blank" rel="noopener">
+        <div class="r-icon">🏁</div>
+        <div class="r-body"><div class="r-kind">Competition</div><div class="r-title">M5 Forecasting — Accuracy</div><div class="r-sub">Walmart hierarchical sales. The public solution write-ups are the best available record of what gradient boosting on lag features looks like in anger.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/Nixtla/statsforecast" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">StatsForecast</div><div class="r-sub">Fast AutoARIMA, ETS and the naive baselines, with a rolling-origin cross-validation call built in. Run this before writing a model.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/401" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Exponential Moving Average (EMA) for Diffusion Model Weights</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1382" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Naive and Seasonal-Naive Forecast Baselines</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1344" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Exponential Moving Average of Model Weights</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1115" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Month-over-Month Percentage Change with LAG</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1116" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Running Total and Moving Average with Window Frames</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">17</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/07-sequence-modeling-pre-transformer"><div class="rc-sec" style="color:var(--c-sequence)">07 · The backbone</div><div class="rc-title">Sequence Modeling Pre-Transformer</div><div class="rc-hook">RNNs, LSTMs and dilated causal convolutions, which are what DeepAR and the TCN forecasters are made of.</div></a>
+      <a class="related-card" href="/topics/02-classical-ml"><div class="rc-sec" style="color:var(--c-classical)">02 · The model that wins</div><div class="rc-title">Classical Supervised ML</div><div class="rc-hook">Gradient boosting from first principles. Section 06 is that model with lag features bolted on the front.</div></a>
+      <a class="related-card" href="/topics/08-attention-transformers"><div class="rc-sec" style="color:var(--c-attention)">08 · Where patching comes from</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">Tokens, patches and causal masking, which PatchTST and the Temporal Fusion Transformer reuse directly.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Keeping it honest</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">Feature stores, point-in-time correctness and drift monitoring — the machinery that stops section 10's leaks at source.</div></a>
+    </div>
+  </section>

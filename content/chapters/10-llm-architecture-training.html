@@ -1,0 +1,493 @@
+---
+title: "LLM Architecture & Training"
+dek: "Follow one unfinished sentence, \"The capital of France is\", through a decoder-only Transformer: how it's cut into tokens, how next-token prediction alone teaches the model to complete it with \"Paris\", and how fine-tuning and preference optimization turn that completer into an assistant. Along the way you'll see what a training budget buys and what it costs to adapt and serve a model this size."
+readingTime: "~31 min"
+prereqs: "attention & transformer blocks (08), NLP pretraining history (09)"
+group: "Sequence, Attention & LLMs"
+label: "Chapter 10"
+description: "Decoder-only transformers, tokenization, the pretraining objective, Chinchilla scaling laws, SFT, RLHF vs DPO, quantization, LoRA/QLoRA, and MoE — what actually turns a next-token predictor into a usable LLM, and what to say about it in an interview."
+---
+<section id="tldr">
+    <p>Take the unfinished sentence "The capital of France is". You can finish it without thinking, and a <strong>large language model</strong> (LLM) finishes it in a way that isn't far off: it gives every possible next piece of text a probability, picks one, and "Paris" will almost certainly get the biggest share. Add the chosen piece to the sentence and ask again, and you get a whole paragraph, one piece at a time. Everything a modern assistant does is built on that single move, and this chapter follows our one sentence through the whole machine, from how it's cut into pieces to how the model that completes it gets turned into one that answers questions.</p>
+
+    <p>The idea has a short history. Before 2018, each language task had its own architecture, or at least its own fine-tuned copy with a separate output layer, even after pretrained embeddings and BERT-style fine-tuning. GPT (2018) showed that a single decoder-only Transformer, pretrained only to predict the next token (a piece of text, roughly a word), could beat task-specific models. GPT-3 (2020, 175B parameters, meaning 175 billion learned weights) needed no fine-tuning for many tasks, only a few examples written into the prompt. In 2022, InstructGPT showed that supervised fine-tuning followed by reinforcement learning from human feedback (RLHF) turns a pretrained text completer into something that follows instructions, and the Chinchilla paper showed that most large models were undertrained for their size, which changed how labs split their compute between model size and data.</p>
+
+    <p>Structurally, an LLM is the decoder half of the 2017 Transformer, stacked deep, with one tweak called <strong>causal masking</strong>, and its training objective is to predict the next token. Do that at the scale of the internet and the model ends up knowing grammar, facts and a surprising amount of reasoning. What you get is still a text completer and falls short of an assistant, so two more stages follow. <strong>Supervised fine-tuning</strong> (SFT) teaches the model to answer in the right format, and <strong>preference optimization</strong>, in the form of RLHF or DPO, teaches it which of several plausible answers people prefer. In short, an LLM is next-token prediction, scaled up and then aligned.</p>
+
+    <p>You've met attention and the Transformer block in chapter 08, and the history of pretraining in chapter 09. We'll define each term again when we use it. First we'll look at why predicting the next token is a useful thing to train on, then at how text becomes the numbers the model reads, then at the stack that reads them and the loss that trains it. After that we'll see how much model and data a training budget should buy, how the finished completer becomes an assistant, and what it costs to adapt and run something that size.</p>
+  </section>
+
+  <section id="intuition">
+    <h2><span class="num">01</span>Predicting the next token</h2>
+
+    <p>Suppose we want a program that can continue text, and we want to train it with examples. Ordinary supervised learning needs pairs of an input and the right answer, and getting people to write those pairs is slow and expensive. Look at "The capital of France is" again, though. Somewhere in a book or a web page that sentence continued with a word, and the author already wrote it. Cut any text at any point and you have an example for free: everything before the cut is the input, and the piece of text right after it is the answer. That piece is called a <strong>token</strong> (for now, think of it as a word or part of a word), and the task of guessing it is <strong>next-token prediction</strong>. Because every sentence ever written turns into training examples without anyone labelling anything, this is called free supervision.</p>
+
+    <p>It's probably easiest to see the idea with a model that doesn't need a neural network at all: it just counts, over some training text, which word followed each word. Here's code that does it for ten words of text. It splits the text into words, then walks through each pair of neighbouring words and adds one to a counter for "this word followed that one". A loop at the end divides each count by the total for that word, so the counts become probabilities.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Learn which word follows which from ten words of text</span>
+      </summary>
+<pre><code>from collections import Counter, defaultdict
+
+text = &quot;the cat sat on the mat and the cat ran&quot;.split()
+nxt = defaultdict(Counter)
+for a, b in zip(text, text[1:]):
+    nxt[a][b] += 1                      # count what follows each word
+
+for word in (&quot;the&quot;, &quot;cat&quot;):
+    total = sum(nxt[word].values())
+    probs = {w: round(c / total, 2) for w, c in nxt[word].items()}
+    print(f&quot;after &#x27;{word}&#x27;:&quot;, probs)</code></pre>
+      <div class="tryit-out">After <code>the</code>, this model gives <code>cat</code> two chances in three (<code>0.67</code>) and <code>mat</code> one in three (<code>0.33</code>), because <code>the</code> was followed by <code>cat</code> twice and <code>mat</code> once. After <code>cat</code> it splits evenly between <code>sat</code> and <code>ran</code>, at <code>0.5</code> each.</div>
+    </details>
+
+    <p>Check the output against the text. The word <code>the</code> appears three times, followed by <code>cat</code> twice and <code>mat</code> once, so the probabilities are two-thirds and one-third, and <code>cat</code> is followed once by <code>sat</code> and once by <code>ran</code>, which gives an even split. A large language model does the same job, giving a probability to every possible next token, but it uses far more context than the single previous word and a learned function in place of a lookup table. Our counting model also has a weakness we have to get past. It has seen only what's in its ten words, and it looks back exactly one word, so after <code>is</code> it would have nothing at all to say about France.</p>
+
+    <p>Why would training on such a modest-looking task teach a model anything worth having? Consider what a model needs in order to be good at it across a large and varied pile of text. To predict the token after "The capital of France is", it has to encode the fact that Paris is that capital. To predict the next line of a step-by-step derivation, it has to track the intermediate state of the problem, and mimicking the surface style of the previous line won't be enough. To predict the next token in grammatical text, it needs an implicit model of syntax. Nobody programs any of this in. It falls out as a side effect of being good at the one task the model was asked to do.</p>
+
+    <p>There's a limit to what next-token prediction gives you, though, and it matters for the rest of the chapter. A model trained this way just continues text plausibly. If you ask it a question it might answer, but it might also restate the question, or trail off into a list of similar questions, because all of those follow a question somewhere on the internet. Getting from "plausible continuation of internet text" to "a helpful answer in the right format that stops in the right place" is the job of everything after pretraining, SFT and then RLHF or DPO, and that's most of what's left in this chapter. But before any of it, we need to settle what the model reads, because it isn't words.</p>
+  </section>
+
+  <section id="tokens">
+    <h2><span class="num">02</span>What the model reads</h2>
+
+    <p>Our counting model split its text on spaces, and splitting on spaces is a poor way to cut text for a bigger model. A vocabulary of whole words has to be enormous to cover every name, typo and technical term, and the first time the model meets a word outside its list it has nothing to put in its place. An LLM reads <strong>tokens</strong> instead: chunks produced by a subword tokenizer, almost always from the BPE (byte-pair encoding) family. The recipe, in outline, is to start from individual characters or bytes and repeatedly merge the most frequent adjacent pair into a new token.</p>
+
+    <p>What comes out is a vocabulary that mixes common whole words ("the" ends up as one token) with pieces of words for anything rarer. Our five-word prompt is probably five tokens, since each word is common, while a rare word gets split into several pieces. Any string can still be represented, because you can always fall back to individual characters or bytes, so there's no "unknown token" escape hatch like the one whole-word vocabularies needed. Next, the tokenizer gives each token in the vocabulary a number, its <strong>token id</strong>, and a prompt reaches the model as a list of integers.</p>
+
+    <p>A list of integers can't go through a neural network directly, since the ids are labels and carry no meaning in their size. So the model owns an <strong>embedding table</strong>, a grid with one row per token in the vocabulary, each row a list of <span>$d_{model}$</span> learned numbers. Looking up the id of a token returns its row, and that row is the vector the rest of the model works with. If the vocabulary has <span>$V$</span> tokens, the table has shape <span>$(V, d_{model})$</span>, and it's trained like any other weight. We'll see a second table of the same size at the top of the model in the next section.</p>
+
+    <p>That table is where the size of the vocabulary starts to cost something, and it's a real design tradeoff and no free parameter to turn up. A bigger vocabulary packs more meaning into each token, so the same text becomes a shorter sequence and less compute is spent per unit of content, since attention cost grows with sequence length (chapter 08). But a bigger vocabulary costs you twice. Both the embedding table and its twin at the output scale with <span>$V \times d_{model}$</span>, and each rare token sees less training signal, because the same corpus spreads its counts across more distinct ids. A smaller vocabulary keeps those tables lean and gives every token plenty of signal, and it burns more of the context budget on ordinary text and shreds rare words, such as a chemical name or a word from a low-resource language, into many small pieces just to represent them.</p>
+
+    <p>So we can turn "The capital of France is" into a short list of vectors. What the model does with that list, and how it ends up pointing at "Paris", is the next question.</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">03</span>The decoder-only stack</h2>
+
+    <p>In chapter 08 you met two kinds of Transformer block. An <strong>encoder</strong> block is bidirectional, so every token sees every other token in both directions, and it's the BERT half. A <strong>decoder</strong> block is causal, so a token sees only itself and whatever came before it. To get an LLM in the GPT, decoder-only sense, we keep only the causal block, stack it 12 to 100 or more times, and put a vocabulary-sized output layer on top. Nothing new is needed. There's no new attention mechanism and no new normalisation trick: we delete the encoder and the cross-attention and stack the piece we already understand.</p>
+
+    <p>The causal part deserves a moment on our sentence. During training we ask the model for a prediction at every position at once: the vector at "The" should predict "capital", the one at "capital" should predict "of", and so on up to "is", whose job is to predict "Paris". If the position holding "France" could look at the token that follows it, it would just read the answer off. The fix is a <strong>causal mask</strong>. Take the block from chapter 08 (LayerNorm, multi-head self-attention, residual add, LayerNorm, feed-forward, residual add) and relabel it almost unchanged. Before the softmax in <span>$QK^\top$</span>, every score for a key position after the query position gets set to <span>$-\infty$</span>, so position <span>$i$</span> can only attend to positions <span>$\le i$</span>.</p>
+
+    <p>The diagram below shows the whole stack. Read it from the bottom: token ids become embeddings with position information added (here by RoPE, from chapter 08), the block repeats <span>$N$</span> times, and the feed-forward layer inside uses GELU or SwiGLU as its nonlinearity. Then comes a final LayerNorm and a linear projection from <span>$d_{model}$</span> back to the vocabulary size. That's the top of the model. Off to the right, the small 4×4 grid is a toy causal mask, with rows for query positions and columns for key positions. Row 0 sees only itself, row 3 sees everything before it, and that triangle is the entire difference from an encoder block.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Decoder-only stack — causal masking is the only structural addition
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 420 470" style="max-width:460px;display:block;margin:0 auto" xmlns="http://www.w3.org/2000/svg">
+        <path d="M190,456 L190,166" stroke="#24242f" stroke-width="3" fill="none"/>
+        <path d="M190,456 L190,166" stroke="#7c6cf6" stroke-width="2" fill="none" stroke-dasharray="6 8" class="flow-line"/>
+        <circle r="4" fill="#7c6cf6" class="roll" style="offset-path: path('M190,456 L190,166')"></circle>
+
+        <rect x="70" y="424" width="240" height="34" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="190" y="445" text-anchor="middle" font-size="11.5" fill="#e9e9ef">Token ids → embedding + position (RoPE)</text>
+
+        <rect x="70" y="384" width="240" height="24" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="190" y="400" text-anchor="middle" font-size="11" fill="#a3a3b2">LayerNorm</text>
+
+        <rect x="50" y="340" width="280" height="32" rx="7" fill="#14141d" stroke="#f472b6"/>
+        <text x="190" y="360" text-anchor="middle" font-size="11.5" fill="#f472b6">Masked Multi-Head Self-Attention (causal)</text>
+
+        <rect x="70" y="314" width="240" height="18" rx="6" fill="#14141d" stroke="#24242f"/>
+        <text x="190" y="327" text-anchor="middle" font-size="10" fill="#a3a3b2">+ residual add</text>
+
+        <rect x="70" y="276" width="240" height="24" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="190" y="292" text-anchor="middle" font-size="11" fill="#a3a3b2">LayerNorm</text>
+
+        <rect x="50" y="232" width="280" height="32" rx="7" fill="#14141d" stroke="#818cf8"/>
+        <text x="190" y="252" text-anchor="middle" font-size="11.5" fill="#818cf8">Feed-Forward (2 linear + GELU/SwiGLU)</text>
+
+        <rect x="70" y="206" width="240" height="18" rx="6" fill="#14141d" stroke="#24242f"/>
+        <text x="190" y="219" text-anchor="middle" font-size="10" fill="#a3a3b2">+ residual add</text>
+
+        <path d="M28,384 L28,224" stroke="#6c6c7d" stroke-width="1.5" fill="none"/>
+        <path d="M22,384 L28,384 L28,392" stroke="#6c6c7d" stroke-width="1.5" fill="none"/>
+        <path d="M22,224 L28,224 L28,216" stroke="#6c6c7d" stroke-width="1.5" fill="none"/>
+        <text x="16" y="308" text-anchor="middle" font-size="12" fill="#6c6c7d" transform="rotate(-90 16 308)">× N blocks</text>
+
+        <rect x="70" y="166" width="240" height="24" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="190" y="182" text-anchor="middle" font-size="11" fill="#a3a3b2">Final LayerNorm</text>
+
+        <rect x="50" y="118" width="280" height="32" rx="7" fill="#14141d" stroke="#34d399"/>
+        <text x="190" y="138" text-anchor="middle" font-size="11" fill="#34d399">Linear: d_model → vocab_size (often weight-tied)</text>
+
+        <rect x="70" y="76" width="240" height="26" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="190" y="93" text-anchor="middle" font-size="11" fill="#a3a3b2">Softmax → probability over next token</text>
+
+        <text x="190" y="52" text-anchor="middle" font-size="10.5" fill="#4f8cff">↑ sample next token → append → repeat</text>
+
+        <text x="365" y="308" text-anchor="middle" font-size="9.5" fill="#6c6c7d">32–120+ in</text>
+        <text x="365" y="320" text-anchor="middle" font-size="9.5" fill="#6c6c7d">real models</text>
+
+        <text x="365" y="298" text-anchor="middle" font-size="20" fill="#6c6c7d" font-weight="700">×N</text>
+
+        <g>
+          <text x="365" y="230" text-anchor="middle" font-size="9.5" fill="#f472b6" font-weight="700">causal mask</text>
+          <rect x="345" y="240" width="10" height="10" fill="#f472b6" opacity="0.85"/>
+          <rect x="357" y="240" width="10" height="10" fill="none" stroke="#3a3a46"/>
+          <rect x="369" y="240" width="10" height="10" fill="none" stroke="#3a3a46"/>
+          <rect x="381" y="240" width="10" height="10" fill="none" stroke="#3a3a46"/>
+          <rect x="345" y="252" width="10" height="10" fill="#f472b6" opacity="0.85"/>
+          <rect x="357" y="252" width="10" height="10" fill="#f472b6" opacity="0.85"/>
+          <rect x="369" y="252" width="10" height="10" fill="none" stroke="#3a3a46"/>
+          <rect x="381" y="252" width="10" height="10" fill="none" stroke="#3a3a46"/>
+          <rect x="345" y="264" width="10" height="10" fill="#f472b6" opacity="0.85"/>
+          <rect x="357" y="264" width="10" height="10" fill="#f472b6" opacity="0.85"/>
+          <rect x="369" y="264" width="10" height="10" fill="#f472b6" opacity="0.85"/>
+          <rect x="381" y="264" width="10" height="10" fill="none" stroke="#3a3a46"/>
+          <rect x="345" y="276" width="10" height="10" fill="#f472b6" opacity="0.85"/>
+          <rect x="357" y="276" width="10" height="10" fill="#f472b6" opacity="0.85"/>
+          <rect x="369" y="276" width="10" height="10" fill="#f472b6" opacity="0.85"/>
+          <rect x="381" y="276" width="10" height="10" fill="#f472b6" opacity="0.85"/>
+          <text x="365" y="300" text-anchor="middle" font-size="8.5" fill="#6c6c7d">row i sees col ≤ i</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Same residual-stream stack as 08's block diagram, repeated N times, with a final unembedding head on top. The 4×4 grid is a toy causal mask: row = query position, column = key position, filled = visible. Row 0 sees only itself; row 3 (last position) sees everything before it. That triangle is the entire difference from an encoder block.</div>
+    </div>
+
+    <div class="ref-figure">
+      <div class="rf-img-wrap"><img src="https://jalammar.github.io/images/gpt2/gpt-2-layers-2.png" alt="GPT-2 tokens flowing through all decoder blocks, one path per position" loading="lazy"></div>
+      <div class="rf-caption"><span class="rf-label">Reference figure</span>GPT-2's decoder-only stack — every token flows through all decoder blocks along its own path. Source: Jay Alammar, <a href="https://jalammar.github.io/illustrated-gpt2/" target="_blank" rel="noopener">The Illustrated GPT-2</a>.</div>
+    </div>
+    <div class="ref-figure">
+      <div class="rf-img-wrap"><img src="https://jalammar.github.io/images/gpt2/self-attention-and-masked-self-attention.png" alt="Regular self-attention compared against masked self-attention, showing future positions blocked out" loading="lazy"></div>
+      <div class="rf-caption"><span class="rf-label">Reference figure</span>Regular self-attention (left) vs. masked self-attention (right) — the exact causal-mask idea from the diagram above, drawn a different way. Source: Jay Alammar, <a href="https://jalammar.github.io/illustrated-gpt2/" target="_blank" rel="noopener">The Illustrated GPT-2</a>.</div>
+    </div>
+
+    <p>Now follow the output. That last projection turns each position's final vector into a list of <span>$V$</span> raw scores, one per token in the vocabulary, called <strong>logits</strong>, and a softmax turns the logits into a probability for every possible next token. At the position holding "is" in our sentence, we hope the probability for "Paris" is the biggest. To generate text, we pick a token from that distribution, append it to the input, and run the model again, which is the loop at the top of the diagram.</p>
+
+    <p>The projection at the top mirrors the embedding table from section 02. Where the table maps each of the <span>$V$</span> ids to a <span>$d_{model}$</span>-dimensional vector, the output projection maps a final hidden state back to a <span>$V$</span>-dimensional vector of logits, and the softmax turns that into the next-token distribution. Both matrices are the same shape transposed, so it's common to share the weights between them, a trick called <strong>weight tying</strong>. It cuts a real chunk of parameters, since these tables can be a large fraction of the total in smaller models, and it tends to regularise training, because the same vector now has to work both as what this token means going in and as what this token would mean coming out.</p>
+
+    <h4 class="why">Why decoder-only, and not the full encoder-decoder?</h4>
+
+    <p>An encoder-decoder makes sense when the input and the output are structurally different sequences with a clean split, such as a source sentence and a target sentence in translation, or a document and its summary. A general-purpose assistant has no such split. The task might be a question, a document to summarise, code to complete or half a conversation, and the boundary between prompt and completion is wherever generation happens to start, with nothing in the task itself marking it. A decoder-only model treats the prompt as a prefix of the same sequence as the completion, processed by the same weights and the same causal attention as the response. With no fixed input/output split built into the architecture, one model handles completion, question-answering, chat and code without changing shape.</p>
+
+    <p>It also fits in-context learning well. Its whole context (instructions, examples, the new query) is one sequence that the model attends to causally, so it reads a few examples immediately before it generates, and that's what GPT-3's few-shot prompting exploits. We now have an architecture with random weights, and what's left to settle is the number it should be trained to push up.</p>
+  </section>
+
+  <section id="math">
+    <h2><span class="num">04</span>The training objective</h2>
+
+    <p>At every position, the model hands us a probability for each possible next token, and training has to reward it for putting probability on the token that came next. Say the training text contains "The capital of France is Paris". At the position holding "is", the model gives "Paris" some probability <span>$p$</span>. We want <span>$p$</span> close to 1, so how should we score it? We use <span>$-\log p$</span>. That score is 0 when <span>$p=1$</span> and grows without limit as <span>$p$</span> shrinks. A model that gave "Paris" two chances in three, like our counting model did for <code>cat</code> after <code>the</code>, would score <span>$-\log(2/3) \approx 0.41$</span> on that position. Adding that up over every position in the training sequence gives the loss:</p>
+
+    <div class="eq-block">
+      <span>$$\mathcal{L}_{\text{LM}}(\theta) = -\sum_{t=1}^{T} \log P_\theta(x_t \mid x_1, \dots, x_{t-1})$$</span>
+    </div>
+
+    <p>Reading the symbols from the left, <span>$x_1 \dots x_T$</span> is the training sequence, and the same tokens serve as the input and, one position later, as the label, so no separate annotation exists or is needed. <span>$P_\theta(x_t \mid x_{&lt;t})$</span> is the probability the model assigns to the actual next token, read straight off the softmax over the vocabulary-sized logits at position <span>$t-1$</span>. Summing over <span>$t$</span> is where the causal mask pays off. Because no position can see its own answer, every position's prediction can be computed in one parallel forward pass, a setup called <strong>teacher forcing</strong>, and one sequence of length <span>$T$</span> yields <span>$T$</span> training signals for free. Minimising <span>$\mathcal{L}$</span> is the same as maximising the likelihood the model assigns to the real continuation of the text it was trained on, and nothing more exotic than that is happening during pretraining.</p>
+
+    <p>That settles what a training step does. How big the model should be, and how much text it should see, is a separate question, and it has a surprisingly precise answer.</p>
+  </section>
+
+  <section id="scaling">
+    <h2><span class="num">05</span>How much model, how much data</h2>
+
+    <p>Training compute is well approximated by <span>$C \approx 6ND$</span> FLOPs, where a FLOP is one floating-point operation, <span>$N$</span> is the parameter count (the number of learned weights) and <span>$D$</span> is the number of training tokens. That 6 comes from roughly 2 FLOPs per parameter per token on the forward pass and another 4 on the backward pass. So the budget is the product of model size and data, and for a fixed budget we have to choose how to split it.</p>
+
+    <p>Before 2022, the assumption behind most large-model training was that a bigger model is a better model, so a fixed budget went mostly into <span>$N$</span>, and the model trained on whatever <span>$D$</span> happened to fit the schedule. Hoffmann et al.'s <strong>Chinchilla</strong> paper (2022) tested that directly. They trained over 400 models across a range of sizes and token counts, and fitted how the loss depends on both under a fixed compute budget. Their finding was that loss is minimised when <span>$N$</span> and <span>$D$</span> scale together, roughly in proportion, and that works out to about 20 training tokens per parameter in their fitted regime. Maximising <span>$N$</span> alone isn't the answer.</p>
+
+    <h4 class="why">If compute is fixed, what gives?</h4>
+
+    <p>With <span>$C$</span> held fixed, it's a tradeoff in both directions. Spend the budget on a bigger model and <span>$D$</span> has to shrink, and spend it on more data and <span>$N$</span> has to shrink. Chinchilla itself was a 70B-parameter model trained on roughly four times more tokens than Gopher (280B parameters), for the same training compute. It beat Gopher, GPT-3 and other larger contemporaries trained on the older size-heavy recipe. The practical consequence is that model size and data budget aren't separable choices you can make in isolation, and a model that's big enough but starved of tokens for its size is, in Chinchilla's own framing, <strong>substantially undertrained</strong>.</p>
+
+    <p>Whatever split we choose, all of this compute goes into the same objective, so what comes out the other end is the text completer from section 01. Turning it into an assistant is a separate stage, and it's much cheaper.</p>
+  </section>
+
+  <section id="sft">
+    <h2><span class="num">06</span>From completer to assistant: SFT</h2>
+
+    <p>The whole pipeline has four stages, and the diagram below lays them out in order. <strong>Pretraining</strong> is next-token prediction on raw text, trillions of tokens of it, and it takes weeks and most of the compute budget. <strong>SFT</strong> comes next, then preference optimization, and each stage takes the model from the previous one and changes what it's optimised for. The last box, deployment, is where the weights get quantised or distilled and served, which we'll reach in section 08.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Pretrain → SFT → preference optimization → deploy
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 190" xmlns="http://www.w3.org/2000/svg">
+        <rect x="15" y="60" width="150" height="70" rx="9" fill="#14141d" stroke="#818cf8" stroke-width="1.5"/>
+        <text x="90" y="88" text-anchor="middle" font-size="12" font-weight="700" fill="#818cf8">Pretraining</text>
+        <text x="90" y="105" text-anchor="middle" font-size="9.5" fill="#a3a3b2">next-token prediction</text>
+        <text x="90" y="118" text-anchor="middle" font-size="9.5" fill="#a3a3b2">on raw text, trillions of tokens</text>
+
+        <path d="M167,95 L203,95" stroke="#7c6cf6" stroke-width="2" fill="none" class="flow-line"/>
+        <path d="M195,89 L205,95 L195,101" stroke="#7c6cf6" stroke-width="2" fill="none"/>
+
+        <rect x="207" y="60" width="150" height="70" rx="9" fill="#14141d" stroke="#f472b6" stroke-width="1.5"/>
+        <text x="282" y="88" text-anchor="middle" font-size="12" font-weight="700" fill="#f472b6">SFT</text>
+        <text x="282" y="105" text-anchor="middle" font-size="9.5" fill="#a3a3b2">instruction → response pairs</text>
+        <text x="282" y="118" text-anchor="middle" font-size="9.5" fill="#a3a3b2">curated, much smaller</text>
+
+        <path d="M359,95 L395,95" stroke="#7c6cf6" stroke-width="2" fill="none" class="flow-line"/>
+        <path d="M387,89 L397,95 L387,101" stroke="#7c6cf6" stroke-width="2" fill="none"/>
+
+        <rect x="399" y="52" width="165" height="86" rx="9" fill="#14141d" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="481" y="78" text-anchor="middle" font-size="12" font-weight="700" fill="#fbbf24">Preference optimization</text>
+        <text x="481" y="95" text-anchor="middle" font-size="9.5" fill="#a3a3b2">RLHF (reward model + PPO)</text>
+        <text x="481" y="109" text-anchor="middle" font-size="9.5" fill="#a3a3b2">or DPO (preference pairs, direct)</text>
+        <text x="481" y="123" text-anchor="middle" font-size="9.5" fill="#a3a3b2">human/AI preference judgments</text>
+
+        <path d="M566,95 L602,95" stroke="#7c6cf6" stroke-width="2" fill="none" class="flow-line"/>
+        <path d="M594,89 L604,95 L594,101" stroke="#7c6cf6" stroke-width="2" fill="none"/>
+
+        <rect x="606" y="60" width="80" height="70" rx="9" fill="#14141d" stroke="#34d399" stroke-width="1.5"/>
+        <text x="646" y="88" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">Deploy</text>
+        <text x="646" y="105" text-anchor="middle" font-size="9" fill="#a3a3b2">quantized /</text>
+        <text x="646" y="117" text-anchor="middle" font-size="9" fill="#a3a3b2">distilled, served</text>
+
+        <circle r="3.5" fill="#7c6cf6" class="roll" style="offset-path: path('M167,95 L203,95')"></circle>
+        <circle r="3.5" fill="#7c6cf6" class="roll" style="offset-path: path('M359,95 L395,95')"></circle>
+        <circle r="3.5" fill="#7c6cf6" class="roll" style="offset-path: path('M566,95 L602,95')"></circle>
+
+        <text x="90" y="160" text-anchor="middle" font-size="9" fill="#6c6c7d">weeks, most of the compute budget</text>
+        <text x="282" y="160" text-anchor="middle" font-size="9" fill="#6c6c7d">hours–days, small curated set</text>
+        <text x="481" y="160" text-anchor="middle" font-size="9" fill="#6c6c7d">days, alignment step</text>
+        <text x="646" y="160" text-anchor="middle" font-size="9" fill="#6c6c7d">serving, section 23</text>
+      </svg>
+      <div class="diagram-caption">Each stage changes what the model is optimized for, not the underlying architecture — same decoder-only stack throughout. Pretraining is where nearly all the FLOPs go; everything after it is comparatively cheap and is about shaping behavior, not adding knowledge.</div>
+    </div>
+
+    <p>A freshly pretrained model is a very good predictor of whatever plausibly follows a piece of text. Give it "What is the capital of France?" and answering is one plausible continuation, but so is restating the question, imitating a bad forum reply, or trailing off, because all of those are plausible continuations of internet text too. So we need to move the model's idea of "plausible" toward what we want. <strong>SFT</strong>, supervised fine-tuning, does that with the same next-token-prediction loss from section 04, applied to a different and much smaller curated dataset. Each example is an instruction paired with an ideal response, usually written or vetted by humans, in a consistent template, and the model is trained to predict the response tokens given the instruction.</p>
+
+    <p>Notice how little changes. There's no new architecture and no new loss, just a shift in what counts as a plausible continuation. That step alone turns a raw completer into something that reliably answers in the right format and stops in the right place. Later stages refine which of several plausible SFT-style answers people prefer, and they don't teach instruction-following from scratch. And that raises the next question: if two answers are both correct and both on-format, how does the model learn which one to give?</p>
+  </section>
+
+  <section id="preference">
+    <h2><span class="num">07</span>Learning what people prefer: RLHF and DPO</h2>
+
+    <p>Ask our assistant "What is the capital of France?" and it could reply "Paris." or it could reply with a paragraph on the city's history. Both are correct and both are well formed, so SFT, which supervises a single ideal response per instruction, has nothing more to say. People will probably differ on whether they want concise or thorough, direct or hedged, correct-but-blunt or correct-and-tactful. That's a preference and not a fact you can supervise with one correct label. Preference data usually comes as a <strong>preference pair</strong>: a prompt, with a response a person preferred and one they didn't. Two recipes turn such pairs into a better model.</p>
+
+    <p>The first is <strong>RLHF</strong>, reinforcement learning from human feedback, used for InstructGPT (2022). It starts by training a separate <strong>reward model</strong> on human-labelled comparisons ("given two responses to this prompt, which do you prefer?"), so that the reward model learns to give a number to any response. Then it runs an actual reinforcement-learning loop, using an algorithm called PPO, that updates the SFT model toward outputs with a higher reward. A <strong>KL penalty</strong> charges the model for moving its output distribution away from where SFT left it, and that holds the model close to its SFT starting point so it doesn't drift into degenerate, reward-hacking territory, where it finds outputs that score well without being better. That makes three models trained in sequence: the SFT model, a reward model trained on human preference pairs, and a policy optimised against that reward model. That last stage is a genuine RL loop, with rollouts (responses the model generates during training), a value function and clipping, and with the usual RL instability and risk of reward hacking.</p>
+
+    <p>That's a lot of machinery, and the second recipe asks whether we can skip some of it. <strong>DPO</strong>, direct preference optimization (2023), reaches the same alignment objective through a mathematical shortcut.</p>
+
+    <h4 class="why">Where does the reward model go?</h4>
+
+    <p>The optimal policy for the same KL-constrained RLHF objective has a <strong>closed form</strong>, an explicit formula, directly in terms of the reward function. Substitute that formula into the Bradley-Terry preference model (a standard way to turn two scores into the probability that one response beats the other) that was already used to train the reward model, and the reward model cancels out algebraically. What's left is a loss defined purely on the policy's own likelihoods for preferred and dispreferred responses:</p>
+
+    <div class="eq-block">
+      <span>$$\begin{aligned}\mathcal{L}_{\text{DPO}}(\pi_\theta;\pi_{\text{ref}}) = -\,\mathbb{E}_{(x,y_w,y_l)\sim D}\Big[\log \sigma\Big(\ &\beta \log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} \\[2pt] -\ &\beta \log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big)\Big]\end{aligned}$$</span>
+    </div>
+
+    <p>Here <span>$x$</span> is a prompt and <span>$(y_w, y_l)$</span> is a human-labelled preference pair, with <span>$y_w$</span> the preferred ("winning") response and <span>$y_l$</span> the dispreferred ("losing") one. <span>$\pi_\theta$</span> is the policy being trained, and <span>$\pi_{\text{ref}}$</span> is a frozen reference model, almost always the SFT checkpoint from before preference tuning starts. Each log ratio says how much more or less likely the current model makes a response compared to where it started, and that's the quantity being pushed around, since a raw probability wouldn't say anything about movement. <span>$\beta$</span> controls how hard to push. A higher <span>$\beta$</span> trusts the preference data more and allows a bigger departure from <span>$\pi_{\text{ref}}$</span>, and a lower one keeps the model closer to its starting point, and that's the same role the KL penalty plays in RLHF. The sigmoid <span>$\sigma$</span> turns the gap between how far the winning response's relative likelihood moved up and how far the losing response's moved up into a probability that this pair is correctly ordered, and the loss is binary cross-entropy on that probability against "yes, correctly ordered."</p>
+
+    <p>The net effect is to push up the relative likelihood of preferred responses and push down that of dispreferred ones, with no separate reward model and no RL rollout loop. The reward is implicit in the likelihood ratio itself, the "secretly a reward model" of the paper's title. So DPO reaches the same alignment objective in theory with one supervised-style training loop in place of the separate reward-model and PPO stages, with no reward model to maintain and no PPO rollouts. That's why DPO and its descendants spread quickly through open-source and production fine-tuning pipelines after 2023. The table puts the two side by side.</p>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>RLHF (PPO)</th><th>DPO</th></tr></thead>
+        <tbody>
+          <tr><td>Training complexity</td><td>3 stages: SFT, reward model, PPO policy optimization</td><td>2 stages: SFT, then a direct preference loss</td></tr>
+          <tr><td>Stability</td><td>Genuine RL training — sensitive to hyperparameters, can diverge or reward-hack</td><td>Supervised-style loss — generally more stable to train</td></tr>
+          <tr><td>What you need</td><td>A separate reward model plus RL infrastructure: rollouts, value function, PPO clipping</td><td>Just the preference-pair dataset and a frozen reference copy of the SFT model</td></tr>
+          <tr><td>Typical use</td><td>Frontier labs with engineering budget for more explicit control over the reward signal</td><td>Default choice for most open-source and production fine-tuning pipelines</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>With the model trained and aligned, we have the whole recipe for an assistant. What we haven't looked at is the bill: a model this size is expensive to adapt to a new task and expensive to run, and there are a few standard ways to bring those costs down.</p>
+  </section>
+
+  <section id="efficiency">
+    <h2><span class="num">08</span>Making it cheaper to adapt and run</h2>
+
+    <p>Quantization and LoRA solve two different problems, and they get conflated because they're often used together. We'll take them one at a time, then a third lever that changes the architecture, and then what happens when the model is finally serving requests.</p>
+
+    <h3 id="quantization">Quantization</h3>
+
+    <p><strong>Quantization</strong> is a deployment lever. You take an already-trained model's weights, stored in 16-bit floating point, and represent them with fewer bits: 8-bit, 4-bit, sometimes lower. That shrinks the memory footprint and often speeds up inference, at the cost of some numerical precision. It comes in two variants. <strong>Post-training quantization</strong> (PTQ) happens after training with no gradient updates, only a calibration pass to pick good quantization ranges. It's cheap, and the quality loss is usually small but uneven, since arithmetic and rare factual recall tend to degrade first. <strong>Quantization-aware training</strong> (QAT) simulates the quantization during training, so the weights adapt to the precision loss as they're learned. You get better accuracy at the target precision, and you pay for it with an actual training run.</p>
+
+    <h3 id="lora-and-qlora">LoRA and QLoRA</h3>
+
+    <p><strong>LoRA</strong> is an adaptation lever, and it does nothing for deployment. Ordinary fine-tuning updates all of a pretrained model's weights. LoRA freezes the base weight matrix <span>$W_0$</span> entirely and learns a small low-rank update alongside it, <span>$W = W_0 + BA$</span>, where <span>$B \in \mathbb{R}^{d\times r}$</span>, <span>$A \in \mathbb{R}^{r\times k}$</span>, and the rank <span>$r$</span> is tiny compared to <span>$d$</span> and <span>$k$</span>. You back-propagate into only <span>$B$</span> and <span>$A$</span>, a tiny fraction of the parameter count. That drastically cuts optimizer memory and lets you store and swap many task-specific adapters against one shared frozen base.</p>
+
+    <p><strong>QLoRA</strong> combines the two levers. It quantizes the frozen base to 4-bit to shrink memory further, then runs LoRA fine-tuning on top of that quantized base, and that's what makes fine-tuning a large model feasible on a single consumer-class GPU.</p>
+
+    <h3 id="mixture-of-experts">Mixture-of-experts</h3>
+
+    <p>A third lever goes after the feed-forward layer from section 03. In a dense Transformer, that layer runs every token through the same weights, so more parameters there means more compute for every token without exception. <strong>MoE</strong>, mixture-of-experts, breaks that coupling. It replaces the single feed-forward layer with a bank of <span>$E$</span> parallel expert feed-forward layers plus a small learned <strong>router</strong>, and for each token the router selects only the top-<span>$k$</span> experts (commonly 1 or 2) to run:</p>
+
+    <div class="eq-block">
+      <span>$$y = \sum_{i \,\in\, \text{TopK}(x)} g_i(x)\, E_i(x)$$</span>
+    </div>
+
+    <p>Here <span>$g_i(x)$</span> is the router's weight for expert <span>$i$</span> on input <span>$x$</span>, and <span>$E_i(x)$</span> is that expert's output. Only the selected experts do any compute, and the rest cost nothing for that token. A model can therefore have an enormous total parameter count spread across all its experts, while the compute per forward pass reflects only the handful activated. It costs you in training, though. Without an auxiliary load-balancing loss encouraging the router to spread tokens evenly, it collapses onto a favourite few experts, and you lose the benefit you paid to build.</p>
+
+    <h3 id="serving">Serving</h3>
+
+    <p>Two things about serving shape how you reason about training and architecture choices. The first is the <strong>KV cache</strong>, introduced in chapter 08. During autoregressive generation (the append-and-repeat loop from section 03), the model caches every past token's key and value vectors instead of recomputing attention over the whole prefix at every step. For long conversations it's often the dominant memory consumer on a serving GPU, so it's now a first-class cost of running an LLM product. Second comes <strong>batching</strong>. A serving system groups several requests together so the GPU processes them in parallel, trading a little per-request latency for much higher throughput. A deeper systems treatment (paged attention, continuous batching, tensor and pipeline parallelism, and quantization-for-serving tradeoffs) lives in chapter 23, Efficient AI &amp; Systems. This chapter covers only what you need to reason about training and architecture tradeoffs, and leaves out how to operate a serving fleet.</p>
+
+    <p>That covers the main line from raw text to a served assistant. A handful of other pieces turn up around it in practice, and it helps to know where each one fits.</p>
+  </section>
+
+  <section id="tail">
+    <h2><span class="num">09</span>Other pieces around the pipeline</h2>
+
+    <p>Each of these touches a different stage of the pipeline we just walked through, and each one is a short note on where it fits.</p>
+
+    <p><strong>Data quality, deduplication and mixture design.</strong> A pretraining corpus isn't just all the text you can find. Near-duplicate documents inflate a dataset without adding signal and push the model toward memorising repeated substrings, so deduplication is a standard pipeline step, and it measurably improves quality per token spent. Mixture design, meaning what fraction of tokens come from web text, books, code or curated sources, meaningfully shapes what the model is good at. A heavier code mixture improves structured reasoning, and that's no accident, because code text rewards tracking state precisely.</p>
+
+    <p><strong>Long-context training.</strong> A model pretrained mostly on short documents doesn't automatically use a 128k-token window well just because attention can mathematically handle it (chapter 08 covers attention sinks and mid-context dilution). Labs run dedicated long-context stages, often extending the position embeddings and training on long documents, to make the model exploit long context instead of merely tolerating it.</p>
+
+    <p><strong>Function and tool calling.</strong> This is a trained or prompted behaviour where the model emits a structured request, such as "call this API with these arguments", in place of answering purely from its own weights, and then consumes the tool's result before producing a final answer. It's what turns a text predictor into something that can look things up, run code or take actions, and it's the foundation of chapter 11 (RAG and agents).</p>
+
+    <p><strong>Structured and constrained decoding.</strong> This is an inference-time technique and changes nothing in training. Instead of hoping free-form output happens to be valid JSON, you constrain the token-by-token sampling itself so that only tokens consistent with a target grammar are ever eligible. That's a decoding-time guarantee that the output can't be unparseable, with no retraining.</p>
+
+    <p><strong>Code, multilingual and domain models.</strong> Code models are typically the same decoder-only architecture, pretrained or fine-tuned with a much heavier proportion of source code, and often trained to fill in the middle of a file as well as continue it left to right. Multilingual and domain models face the tokenization tradeoff from section 02 most acutely. A tokenizer trained mostly on English badly over-fragments other languages and specialised vocabularies such as legal text or chemistry, quietly costing context budget and quality, unless the tokenizer and the pretraining mixture are built for that domain from the start.</p>
+
+    <p><strong>Distillation, merging and pruning.</strong> Distillation trains a smaller student model to match a larger teacher's output distribution. It's a genuine training run, but it typically preserves more capability per parameter than quantizing the teacher down to the same footprint. Merging averages or interpolates the weights of several fine-tuned variants of the same base model directly, with no training, and it works surprisingly often when the variants stayed close to the same base. Pruning removes the weights or structures judged least important, usually followed by a short fine-tune to recover quality, and for modern LLMs it's the least reliably clean win of the three.</p>
+
+    <p>Every stage we've covered has a way of going wrong, and the last question is which of those failures show up in production.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">10</span>What goes wrong</h2>
+
+    <p>Two of the failures come from the preference stage in section 07, and two from the efficiency levers in section 08. Reward hacking happens when the policy finds outputs that score well on an imperfect reward model or preference signal without being better. Longer answers, hedging language and sycophantic agreement are the usual examples, because they correlate with human preference ratings even though they aren't more correct. A related problem is overfitting to a narrow annotator population. Preference data reflects the taste, culture and instructions given to whichever pool of annotators labelled it, so the aligned model inherits those biases as if they were universal, and "helpfulness" quietly comes to mean what that specific pool liked.</p>
+
+    <p>Quantization has its own cost. Lower precision trades a usually small, but uneven, amount of task accuracy for large memory and compute savings, and arithmetic and low-frequency facts tend to degrade before fluent generation does. In a mixture-of-experts model, an unregularised router collapses onto a favourite handful of experts, wasting the extra capacity and effectively shrinking the model back toward its active-parameter count. That's why MoE training adds the auxiliary load-balancing loss term from section 08.</p>
+
+    <p>As for where things stand in 2026, reasoning-focused post-training is an active, fast-moving research area. It adds extra RL or search-based training aimed specifically at multi-step problem solving, layered on top of the SFT, RLHF and DPO recipe described here, and preference-optimization variants that go beyond vanilla DPO are moving just as fast. It's probably best to treat the exact recipe used by any specific current model as a moving target. The underlying building blocks (pretraining, SFT, preference optimization, quantized deployment) are stable enough to learn thoroughly, whichever variant is fashionable this quarter.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">11</span>Summary</h2>
+
+    <ol>
+      <li><strong>Next-token prediction is free supervision.</strong> Any text cut at any point gives an input and a label, so "The capital of France is" and "Paris" come out of ordinary text with nobody labelling anything.</li>
+      <li><strong>Doing that well forces the model to learn a lot.</strong> Facts, intermediate state in a derivation and syntax all help predict the next token, and none of them are programmed in.</li>
+      <li><strong>The model reads tokens, not words.</strong> BPE merges frequent pairs into subword pieces, each piece gets an id, and an embedding table turns the id into a vector. Vocabulary size trades shorter sequences against bigger tables and less signal per rare token.</li>
+      <li><strong>An LLM is the causal half of the Transformer, stacked.</strong> Masking future scores with <span>$-\infty$</span> is the one structural change from an encoder, and a vocabulary-sized output layer, often weight-tied to the embedding table, turns the last vector into next-token logits.</li>
+      <li><strong>Decoder-only won because a prompt is just a prefix.</strong> One model handles completion, question-answering, chat and code, and few-shot examples sit in the same sequence as the query.</li>
+      <li><strong>The loss is the negative log-probability of the true next token.</strong> The causal mask lets every position be trained in parallel, so a sequence of length <span>$T$</span> gives <span>$T$</span> training signals.</li>
+      <li><strong>Size and data have to grow together.</strong> With <span>$C \approx 6ND$</span>, Chinchilla found about 20 tokens per parameter, so many earlier large models were undertrained for their size.</li>
+      <li><strong>SFT turns a completer into an answerer.</strong> It uses the same loss on a small curated set of instruction and response pairs.</li>
+      <li><strong>Preference optimization chooses between good answers.</strong> RLHF trains a reward model and runs PPO with a KL penalty, and DPO cancels the reward model out algebraically and optimizes one supervised-style loss against a frozen reference.</li>
+      <li><strong>Quantization, LoRA and MoE attack different costs.</strong> Quantization shrinks deployed weights, LoRA and QLoRA cut the cost of fine-tuning, and MoE decouples parameter count from compute per token.</li>
+      <li><strong>Each lever has a failure mode.</strong> Reward hacking, annotator bias, uneven accuracy loss from quantization and router collapse in MoE are the ones that show up in production.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">12</span>Build this</h2>
+    <p class="lede">A scaling law reads like a claim about somebody else's compute budget. Three small training runs on your own laptop turn it into a line you drew yourself.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Make a scaling line appear from three tiny GPTs</span>
+        <span class="proj-meta">~4 hours · PyTorch</span>
+      </div>
+      <p>Train the <em>same</em> decoder-only model at three sizes on one small corpus, then plot final validation loss against parameter count on log axes. The task is ordinary next-token prediction, and the samples are not the interesting part. The <strong>shape of the three points</strong> is, because that shape is section 05's scaling argument drawn from runs you can afford.</p>
+      <ol class="proj-steps">
+        <li>Take a few megabytes of plain text. Anything with consistent style works: one book, one codebase, one set of transcripts. Hold out a slice for validation.</li>
+        <li>Train a <strong>BPE tokenizer</strong> on that corpus with a small vocabulary, a few thousand merges. Print the merge list in order and read the first hundred. Watch characters assemble into common suffixes, then into whole words.</li>
+        <li>Build the decoder block <strong>by hand</strong> from the diagram in section 03: LayerNorm, masked self-attention, residual add, LayerNorm, feed-forward, residual add. Write the causal mask yourself with <code>torch.tril</code>. No <code>nn.TransformerDecoder</code>.</li>
+        <li>Train three models that differ by roughly an order of magnitude in parameter count each, varying width and depth. Same data, same number of tokens seen, same optimizer, same schedule. Only size changes.</li>
+        <li>Plot final validation loss against parameter count with <strong>both axes log-scaled</strong>. Sample a paragraph from each model and read them side by side.</li>
+        <li>Now break it deliberately. Delete the causal mask from the smallest model and retrain.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the three points sit close to a straight line on the log-log plot. The samples also get more coherent in the order the line predicts. If the largest point bends off the line, that is not a bug. A few megabytes is a very small <span>$D$</span>. You have found the size at which your corpus stops having enough signal to feed a bigger <span>$N$</span>. That is the Chinchilla tradeoff, on your own axes.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> Without the causal mask, training loss falls almost immediately to somewhere far below anything the masked runs reached, and the samples are still incoherent. The model is reading the answer. Each position can attend to the token it is being asked to predict, so it learns to copy rather than to model. A beautiful loss curve sitting next to worthless output is the clearest argument for why masking is the one structural change in section 03.</div>
+    </div>
+
+    <h3 id="where-this-runs-in-production">Where this runs in production</h3>
+    <p>A modern assistant product's pipeline maps onto this page almost exactly:</p>
+
+    <ul>
+      <li><strong>Pretraining.</strong> Web-scale next-token prediction builds the base model's broad knowledge and language competence.</li>
+      <li><strong>SFT.</strong> Curated instruction-response pairs teach it to answer on-format.</li>
+      <li><strong>Preference optimization.</strong> RLHF or DPO, using human or model-assisted preference judgments, teaches it which of several plausible answers people want.</li>
+      <li><strong>Deployment.</strong> The resulting weights are quantized, and sometimes distilled into a smaller model, to make serving affordable, with KV-cache and batching handling request-level efficiency (full treatment in 23).</li>
+    </ul>
+
+    <p>Everything sitting on top at inference time (a system prompt, tool/function-calling scaffolding, retrieval) is applied to this already-trained stack and is not baked into training. That is where 11 picks up.</p>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">13</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What's the actual training signal used to pretrain an LLM, and where do the "labels" come from?</summary>
+      <div class="qa-body"><p>Every token in a training sequence is simultaneously an input (for predicting later tokens) and a label (the correct answer for predicting it, given everything before it). Teacher forcing exploits this directly: feed the model the true previous tokens, ask it to predict the next one, compute cross-entropy against the actual next token, and repeat for every position in the sequence in parallel via the causal mask. No human labels this data — the label is just "whatever token comes next in text that already existed" — which is why pretraining can use effectively the entire scrapeable internet as its own supervision.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What's the one structural difference between the encoder blocks in 08 (BERT) and the blocks used in a GPT-style LLM?</summary>
+      <div class="qa-body"><p>Causal masking. A decoder-only block adds a mask before the softmax that sets the score for any key position after the query position to <span>$-\infty$</span>, so a token's attention output can only depend on tokens at or before it. An encoder block has no such mask — every token attends to every other token, forward and backward. Everything else — Q/K/V projections, multi-head split, residual connections, LayerNorm, the feed-forward layer — is identical.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Explain the difference between RLHF and DPO.</summary>
+      <div class="qa-body"><p>RLHF trains a separate reward model on human preference pairs, then runs PPO — an actual RL loop with rollouts, a value function, and clipping — to optimize the policy against that learned reward, with a KL penalty holding it near the SFT model. DPO skips both the reward model and the RL loop: it shows the optimal policy for that same KL-constrained objective has a closed form in terms of log-probability ratios between the trained policy and a frozen reference policy, so preference pairs can be optimized directly with one supervised-style loss. Same underlying alignment objective, reached with far less machinery and instability — at the cost of somewhat less explicit control over the reward signal.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why would you reach for LoRA instead of full fine-tuning?</summary>
+      <div class="qa-body"><p>LoRA freezes the entire pretrained weight matrix and learns a small low-rank update, <span>$W=W_0+BA$</span>, updating only <span>$B$</span> and <span>$A$</span> — orders of magnitude fewer parameters than the full model. That means far less optimizer state in memory, a much smaller checkpoint per fine-tuned task, and the ability to swap adapters in and out of one shared frozen base at serving time. Full fine-tuning still wins on raw quality ceiling when you have the compute and data to justify it; LoRA (and QLoRA, which additionally quantizes the frozen base to 4-bit) is about making adaptation cheap, not about beating full fine-tuning outright.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What does a mixture-of-experts layer change about the forward pass compared to a dense FFN?</summary>
+      <div class="qa-body"><p>A dense FFN runs every token through the same weights, so more parameters means more compute per token, always. An MoE layer replaces the single FFN with many parallel expert FFNs plus a router that picks the top-k experts (often 1 or 2) per token — only those experts do any compute for that token. This decouples total parameter count from compute-per-token: the model can have a huge total parameter count spread across experts while any single forward pass only touches a small fraction of them. The catch is the router — without a load-balancing loss it collapses onto a favorite few experts and the extra capacity goes to waste.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why do Chinchilla-style scaling laws matter for a training budget decision?</summary>
+      <div class="qa-body"><p>Because compute is the actual constraint, and Chinchilla showed loss is minimized under a fixed compute budget by scaling model size and training tokens together — roughly 20 tokens per parameter in their fitted regime — not by maximizing parameters and undertraining on whatever data fits. Pick a model twice as large as compute-optimal for your budget and you're forced to train it on fewer tokens than compute-optimal, ending up worse than a smaller model trained longer on the same budget — which is exactly what several pre-2022 large models did, by Chinchilla's own comparisons. Practically: the model-size decision and the data-budget decision aren't separable — you size the model to the compute and quality data you actually have.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>You need a 70B-quality model to run in a 15B-model's memory footprint. What are your options, and what does each cost you?</summary>
+      <div class="qa-body"><p>Quantization: compress the same weights to lower precision, cutting memory roughly 2–4x with typically small but non-uniform accuracy loss. Distillation: train a genuinely smaller model to mimic the larger model's output distribution — a real training run, but it usually preserves more capability per parameter than quantization alone. Pruning: remove weights or structures judged least important, then fine-tune to recover quality — the least reliably clean win of the three for modern LLMs. Or start over: per Chinchilla, a smaller model trained compute-optimally can beat an undertrained larger one at the same budget. In practice: quantize first since it's the cheapest and most reliable win, layer in distillation or a purpose-trained smaller model if that's not enough, and benchmark on your actual task, since accuracy loss from any of these is rarely uniform across tasks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why can pushing a preference-optimization objective too hard make a model worse, even though the reward or preference signal keeps improving?</summary>
+      <div class="qa-body"><p>The reward model (RLHF) or the implicit preference signal (DPO) is a proxy for what humans actually want, not the thing itself — and proxies can be gamed. Optimize too aggressively against a reward model, or let DPO's <span>$\beta$</span> get too permissive relative to the reference model, and the policy finds outputs that score well on the proxy — longer answers, hedging, sycophantic agreement — without those outputs being more correct or useful. That's reward hacking, and it's exactly why RLHF keeps a KL penalty (and DPO's <span>$\beta$</span> plays the same role) tethering the policy back to the reference model. Weaken that tether and gains on the training signal can actively diverge from real quality.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">14</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://jalammar.github.io/illustrated-gpt2/" target="_blank" rel="noopener">
+        <div class="r-icon">📰</div>
+        <div class="r-body"><div class="r-kind">Article</div><div class="r-title">The Illustrated GPT-2</div><div class="r-sub">Jay Alammar — the decoder-only stack, visually, block by block</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2005.14165" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Language Models are Few-Shot Learners</div><div class="r-sub">Brown et al., 2020 (GPT-3) — arXiv:2005.14165</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2203.15556" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Training Compute-Optimal Large Language Models</div><div class="r-sub">Hoffmann et al., 2022 (Chinchilla) — arXiv:2203.15556</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2203.02155" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Training language models to follow instructions with human feedback</div><div class="r-sub">Ouyang et al., 2022 (InstructGPT) — arXiv:2203.02155</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2305.18290" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Direct Preference Optimization</div><div class="r-sub">Rafailov et al., 2023 — arXiv:2305.18290</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2106.09685" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">LoRA: Low-Rank Adaptation of Large Language Models</div><div class="r-sub">Hu et al., 2021 — arXiv:2106.09685</div></div>
+      </a>
+      <a class="resource-card" href="https://www.youtube.com/watch?v=kCc8FmEb1nY" target="_blank" rel="noopener">
+        <div class="r-icon">▶</div>
+        <div class="r-body"><div class="r-kind">Video</div><div class="r-title">Let's build GPT: from scratch, in code</div><div class="r-sub">Andrej Karpathy — implement the decoder-only stack yourself</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/134" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Compute Multi-class Cross-Entropy Loss</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/263" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Implement Binary Cross-Entropy Loss</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/181" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Sampling Distribution of the Mean</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/220" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Derivative of Cross-Entropy Loss w.r.t. Logits</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/124" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Implement the Noisy Top-K Gating Function</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/229" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Sparse MoE Top-K Routing</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">15</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/08-attention-transformers"><div class="rc-sec" style="color:var(--c-attention)">08 · Prerequisite</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">The block anatomy this page assumes — causal masking is the only change.</div></a>
+      <a class="related-card" href="/topics/11-rag-agents-reasoning"><div class="rc-sec" style="color:var(--c-rag)">11 · What changed next</div><div class="rc-title">RAG, Agents &amp; Reasoning</div><div class="rc-hook">Tool calling, retrieval, and multi-step reasoning sit on top of this stack.</div></a>
+      <a class="related-card" href="/topics/23-efficient-ai-systems"><div class="rc-sec" style="color:var(--c-efficient)">23 · Serving depth</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">KV cache, paged attention, and parallelism get their full systems treatment here.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Evaluating this</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">How you measure whether alignment and scale delivered anything.</div></a>
+    </div>
+  </section>

@@ -1,0 +1,477 @@
+---
+title: "Speech & Audio"
+dek: "Follow one two-second recording of someone saying \"send the letter\" through speech recognition, back out as synthesized speech, and into a real-time voice agent."
+readingTime: "~26 min"
+prereqs: "FFT/spectral intuition (01), CTC's collapsing rule (07), attention & transformer blocks (08)"
+group: "Generative & Multimodal"
+label: "Chapter 13"
+description: "Spectrograms, CTC, Conformer, Whisper, self-supervised speech representations, neural TTS, and the real-time voice agent pipeline — explained the way you'd want it explained before an interview."
+---
+<section id="tldr">
+    <p>Say you record someone saying "send the letter". It's a two-second clip from a laptop microphone, and you'd like a program to write down those fifteen characters. Later you'd like to go the other way: hand the program the same fifteen characters and have it say them out loud. Neither job is obvious, because to a computer the recording is nothing but a long list of numbers, and nothing in that list says where one word ends and the next begins.</p>
+
+    <p>This chapter follows that one clip through three problems. First is <strong>speech recognition</strong>, turning audio into text, and it's where most of the ideas live. Second is <strong>speech synthesis</strong>, or text-to-speech, and it runs the same story in reverse. Third is joining the two with a language model to build a voice agent that you can talk to in real time, where the difficulty changes from "is the model good?" to "how long does the whole loop take?"</p>
+
+    <p>Recognition has an interesting history. For about thirty years it was a chain of separately trained parts glued together when you ran it. Then a 2006 idea called CTC let one network learn from nothing more than recordings and their transcripts, a design called the Conformer (2020) became the standard way to listen, and Whisper (2022) showed that feeding an ordinary transformer huge amounts of messy, imperfectly labeled audio could beat careful design. Today the usual recipe is self-supervised pretraining or large-scale weak supervision, and the frontier is agents that listen, think and speak back with the timing of a conversation.</p>
+
+    <p>If you want one sentence for an interview, it's this: modern speech AI is end-to-end neural networks eating what used to be separate signal-processing and language-modeling pipelines, one stage at a time. We'll build up to it by starting with what the clip looks like to a computer and what that makes hard.</p>
+  </section>
+
+  <section id="intuition">
+    <h2><span class="num">01</span>From sound to a spectrogram, and the problem it leaves</h2>
+
+    <h3 id="what-the-microphone-gives-us">What the microphone gives us</h3>
+    <p>A microphone measures air pressure many times a second, and each measurement is one number. The list of those numbers over time is called the <strong>waveform</strong>, and each number in it is a <strong>sample</strong>. Typical speech audio is recorded at 16,000 samples per second, so our two-second clip is a list of 32,000 numbers. (The sampling rate has to be at least twice the highest frequency you care about, or you lose information you can never get back. That's the sampling theorem in one sentence.)</p>
+
+    <p>If you plotted those 32,000 numbers you'd see a wiggly line, and staring at it tells you almost nothing. Two sounds that are very different to the ear can produce waveforms that look like similar squiggles. What separates a "sh" from an "ah" is which frequencies carry the energy, and raw amplitude smears that information across the whole line instead of showing it. So the first step in nearly every audio model is to compute the frequencies.</p>
+
+    <h3 id="looking-at-frequencies">Looking at frequencies</h3>
+    <p>Chapter 01's Fourier transform is the tool for this. It takes a stretch of waveform and reports how much energy sits at each frequency, as if the sound were a mix of pure tones of different pitches and it told you how loud each tone is. Here's the smallest possible test of it. The code builds one second of a pure 440 Hz tone (the note A above middle C) as 16,000 samples, runs <code>np.fft.rfft</code> (the transform for real-valued signals), and uses <code>rfftfreq</code> to label each output with its frequency in Hz. Then it asks which frequency has the most energy.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Find the pitch of a tone with a Fourier transform</span>
+      </summary>
+<pre><code>import numpy as np
+
+sr = 16000                                  # 16,000 samples per second
+t = np.arange(sr) / sr                      # one second of time stamps
+wave = np.sin(2 * np.pi * 440 * t)          # a pure 440 Hz tone
+
+spectrum = np.abs(np.fft.rfft(wave))
+freqs = np.fft.rfftfreq(len(wave), 1 / sr)
+print(&quot;samples in one second:&quot;, len(wave))
+print(&quot;loudest frequency:&quot;, freqs[spectrum.argmax()], &quot;Hz&quot;)</code></pre>
+      <div class="tryit-out">One second of a 440 Hz tone, sampled 16,000 times, comes back with a single loudest frequency of <code>440.0</code> Hz. That waveform is 16,000 numbers that look like nothing by eye, and the transform turns them into one strong component at 440 Hz. Speech recognition builds on the same step, applied to short overlapping windows of audio.</div>
+    </details>
+
+    <p>Notice what happened: 16,000 numbers that told us nothing by eye became one clear answer. Speech is harder than a single tone, because the frequencies change many times a second as we move from one sound to the next. A single transform over the whole two seconds would average all of that away and tell us which frequencies occurred but not when. So we cut the waveform into short, overlapping <strong>windows</strong> of roughly 20 to 25 milliseconds each, about as long as speech stays stable, and run the transform on every window. Each window answers "how much energy is present at each frequency, right now?"</p>
+
+    <p>Stack the answers side by side in time and you get a <strong>spectrogram</strong>. Time runs along one axis, frequency along the other, and brightness shows energy, so it's a photograph of the sound. A <strong>mel-spectrogram</strong> additionally warps the frequency axis to match how human hearing resolves pitch, with much finer resolution at low frequencies than at high ones. That also turns out to be a more efficient input for a model to learn from. Our clip, cut into frames, becomes a grid of about 200 columns, each describing a few hundredths of a second of "send the letter".</p>
+
+    <p>This is why almost every audio architecture, from the hand-built MFCC features of the classical pipeline (<strong>MFCCs</strong> are hand-engineered features approximating human auditory perception, computed for each frame) through Whisper's input features, starts from some form of spectrogram. The default is starting to shift, since models like wav2vec 2.0, which we'll meet in section 05, learn useful representations directly from the raw waveform.</p>
+
+    <h3 id="the-problem-the-spectrogram-leaves-open">The problem the spectrogram leaves open</h3>
+    <p>Now we have 200 frames and a transcript, "send the letter", 15 characters long. A speech recognizer is trained on pairs like this, so it has to learn which sounds produce which letters. The trouble is that the training data doesn't say which of the 200 frames belong to which of the 15 characters. This is the <strong>alignment problem</strong>. Different speakers say the same words at different speeds, so the boundaries shift constantly, and one speaker might spend thirty frames on the "e" in "the" while another spends five.</p>
+
+    <h4 class="why">Why not just label every frame by hand?</h4>
+    <p>You could, and for decades people effectively did. Marking where each sound starts and ends for every training example is slow, expensive and brittle, and it's exactly the kind of labeling step you'd like a neural network to make unnecessary. The older systems found a way around the problem without removing it, and it's worth seeing how, because it explains what CTC changed.</p>
+
+    <p>For about three decades, recognition meant a pipeline of separately trained parts. <strong>GMM-HMM</strong> was the classical baseline, and it had three components doing three jobs. The MFCC features described above came first. A <strong>Gaussian Mixture Model</strong> then scored how well each frame's features matched each phoneme sub-state (a <strong>phoneme</strong> is a basic unit of sound, like the "s" in "send"). A <strong>Hidden Markov Model</strong> handled the temporal sequencing, meaning which state can follow which and for how long, which was the alignment machinery. At decode time all of this was combined with a separate pronunciation lexicon and an n-gram language model (a table of how likely words are to follow each other).</p>
+
+    <p>That's three components with three different training objectives, joined by a search algorithm and never trained together against the one thing you care about, a correct transcript. Deep neural networks were the first big neural win, replacing the GMM's scores with a network's, but the HMM alignment machinery and the separately trained language model stayed where they were. So the question for the next section is whether a single network could learn from (audio, transcript) pairs alone, with the alignment worked out on its own.</p>
+  </section>
+
+  <section id="math">
+    <h2><span class="num">02</span>CTC: summing over every alignment</h2>
+
+    <p>Graves and colleagues answered that question in 2006 with <strong>CTC</strong>, short for connectionist temporal classification. It was popular in deep speech recognition from about 2014 to 2016, with Baidu's Deep Speech line of work as the canonical example. Its trick is to stop insisting on one correct alignment. Instead, the network outputs a guess at every frame, and training rewards it for every possible alignment that spells out the right transcript.</p>
+
+    <p>Here's how that works for "send the letter". At each of the 200 frames the network produces a probability for every character in the alphabet plus one extra symbol, the <strong>blank</strong>, meaning "nothing new is being said in this frame". Picking one symbol per frame gives a <strong>path</strong>, a 200-symbol string. Most paths are nonsense, but many different paths mean the same thing: spending ten frames on the "s" and ten on "e", or six on "s" and fourteen on "e", should both give the transcript starting "se". We need a rule that maps all of those paths to the same text.</p>
+
+    <p>That's the <strong>collapsing rule</strong>, which chapter 07 covers in full. Given one path, first merge adjacent repeated labels into one, then delete every blank. Take the word "letter" from our clip and write the blank as a dash. The paths <code>l-e-t-t-e-r</code> and <code>lleet-ttterr</code> both collapse to "letter", while <code>letter</code> with no blank collapses to "leter". The blank between the two t's is what stops them merging, and it's the only way CTC can write the same character twice in a row.</p>
+
+    <p>With that rule, the training objective follows. The network's probability of the correct transcript <em>y</em> is the total probability of every path that collapses to it:</p>
+    <div class="eq-block">
+      <span>$$P(y \mid x) = \sum_{\pi \,\in\, \mathcal{B}^{-1}(y)} P(\pi \mid x)$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">π</span> one specific frame-level path: a label, or the special blank symbol, chosen at every one of the T encoder frames.</li>
+      <li><span class="sym">P(π∣x)</span> the network predicts each frame's label independently given the audio x, so a path's probability is just the product of every frame's chosen-label probability.</li>
+      <li><span class="sym">ℬ(·)</span> the collapse rule: merge adjacent repeated labels into one, then drop every blank. A blank inserted between two identical labels is exactly what lets CTC output the same character twice in a row (like the two t's in "letter") without the collapse rule merging them away.</li>
+      <li><span class="sym">ℬ⁻¹(y)</span> the set of every path that collapses to the target transcript y. Summing all of their probabilities means the network never has to be told which exact frame-to-character alignment is "the" right one, only that the total probability mass over every alignment consistent with y should be high.</li>
+      <li><span class="sym">computing it</span> naively, that set is enormous. But a forward-backward dynamic program, the same family of trick as HMM forward-backward, computes the full sum and its gradient in time linear in T. You don't need to derive it in an interview; know that it's tractable and isn't brute-forced.</li>
+    </ul>
+
+    <p>Read the equation from the inside out. <span>$P(\pi \mid x)$</span> scores one path, <span>$\mathcal{B}^{-1}(y)$</span> collects every path that spells our transcript, and the sum adds their scores. Training pushes that total up, so no frame-level label is ever needed. The network is free to decide for itself that the "s" lands on frames 4 to 9, and different speakers can put it elsewhere. You'll see this in practice in the project in section 10, where the network's per-frame output turns out to be mostly blanks with narrow spikes on the letters.</p>
+
+    <h4 class="why">Why did training end-to-end beat the old pipeline?</h4>
+    <p>In the GMM-HMM pipeline, an error made by the acoustic model had no way of being corrected by a later stage, because no stage had ever been trained against the thing you care about, getting the final transcript right. Errors compounded silently down a chain of independently optimized components. CTC, and the two designs we'll meet next, fix this the same way: train the entire network directly against the real objective, so the system as a whole can compensate for weaknesses anywhere in it.</p>
+
+    <p>CTC has one assumption that costs something, though. Look at the "P(π∣x)" line above: each frame's label is chosen independently given the audio. The network can't use the characters it has already written to help decide the next one, so knowledge about language, like which letters tend to follow "th", is mostly unmodeled. That limitation drives the next section.</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">03</span>Fixing what CTC leaves out: attention, RNN-T and the Conformer</h2>
+
+    <p>CTC was originally built on recurrent networks and later on convolutional or Conformer encoders. In every case it turns audio into per-frame guesses and leaves language structure to a separate model. Two designs tried to put that language structure inside the network.</p>
+
+    <h3 id="treating-transcription-like-translation">Treating transcription like translation</h3>
+    <p><strong>Attention-based encoder-decoder</strong> recognition, the Listen-Attend-Spell family of the mid-2010s, treats transcription like translation. An encoder reads the audio into a sequence of vectors. Then a decoder, using the attention mechanism from chapter 08, generates characters or subwords one at a time and attends back over the entire encoded audio at every output step. Because the decoder conditions on its own previous outputs, it drops CTC's independence assumption, which tends to help accuracy.</p>
+
+    <p>The price is that the decoder wants to see the whole utterance before it can attend well. For our two-second clip that's fine, but for a live caption or a voice agent it means waiting for the speaker to finish before any text appears, so streaming needs extra engineering.</p>
+
+    <h3 id="keeping-the-language-model-and-streaming-together">Keeping the language model and streaming together</h3>
+    <p><strong>RNN-T</strong>, the Transducer (Graves, 2012; adopted widely for recognition from around 2017 on), was built specifically to fix that. It has three pieces: an audio encoder, a <strong>prediction network</strong> that behaves like a small language model over the labels emitted so far, and a joint network that combines the two frame by frame. Two properties follow. It only ever needs audio up to the current point, so it's naturally streaming. And because the prediction network already models dependencies between output labels, it leans less heavily on an external language model than CTC typically does. That's why RNN-T became the default recipe for on-device and other latency-sensitive streaming recognition.</p>
+
+    <h3 id="building-a-better-listener">Building a better listener</h3>
+    <p>CTC, RNN-T and attention decoders differ in how they produce text, but all of them start from an encoder that turns spectrogram frames into richer vectors. The <strong>Conformer</strong> (Gulati et al., 2020) is that encoder, not a full recognition system, and it slots into a CTC, RNN-T or attention-decoder head interchangeably. Its idea is to use two tools in the same block. <strong>Convolution</strong>, which slides a small filter along time with the same weights at every position, is excellent at local acoustic patterns, such as the shape of one phoneme, roughly independent of which frame it starts on. <strong>Self-attention</strong>, as in chapter 08, is excellent at global context, using the rest of the utterance to work out what an ambiguous or noisy sound probably was. Combining both made the Conformer the dominant encoder within a couple of years of publication. Section 11 returns to why those two tools suit the two timescales of speech.</p>
+
+    <p>So now we have three ways to produce the text and one good encoder to feed any of them. Which do you pick? The answer depends on what you're building, and the next section lays the options side by side.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">04</span>Choosing between CTC, RNN-T and attention</h2>
+
+    <p>Each of the three designs comes down to a few questions: can it produce output before the audio ends, what does it assume about how audio lines up with text, how long does it take, and does it need a separate language model to be accurate. The table answers those for each design.</p>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>CTC</th><th>RNN-T</th><th>Attention seq2seq</th></tr></thead>
+        <tbody>
+          <tr><td>Streaming-capable</td><td>Yes, with a causal encoder</td><td>Yes, natively — built for it</td><td>Not naturally — decoder wants the full encoded utterance</td></tr>
+          <tr><td>Alignment assumption</td><td>Monotonic; per-frame labels treated as independent</td><td>Monotonic; label dependencies modeled by the prediction network</td><td>None enforced — decoder can attend anywhere, which is more flexibility than speech needs</td></tr>
+          <tr><td>Typical latency</td><td>Low — single forward pass, frame-synchronous</td><td>Low — designed for incremental, on-device decoding</td><td>Higher — best accuracy historically came from seeing the whole utterance</td></tr>
+          <tr><td>Needs an external LM for best accuracy</td><td>Often — frame independence leaves output-level language structure mostly unmodeled</td><td>Less so — the prediction network already behaves like a small LM</td><td>Less so — the decoder conditions on its own previous outputs</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Reading across the table, you can see the pattern we've been following. CTC is the simplest and streams with a causal encoder (one that only looks at past frames), but it often needs an external language model fused in for its best accuracy. RNN-T streams natively and carries a language model inside, so it wins on-device and in real-time work. Attention seq2seq historically gave the best offline accuracy because the decoder can look at everything, and that same freedom is what makes streaming awkward. If you can wait for the whole recording, as with meeting transcripts, you can pick the most accurate model and ignore streaming entirely.</p>
+
+    <p>Accuracy on a benchmark is the thing models get compared on, but it hides a problem you meet as soon as you deploy one. Recognition accuracy degrades on accents, domains and languages that were underrepresented in the training data. A model can look excellent on an aggregate benchmark and still fail badly for one accent, or in a noisy room it barely saw. That's why per-subgroup error rates matter more than one blended number. That points at the training data more than at the architecture, and it brings up the biggest shift in recent years.</p>
+  </section>
+
+  <section id="why">
+    <h2><span class="num">05</span>Scale and unlabeled audio: Whisper and wav2vec 2.0</h2>
+
+    <p>Everything so far improved recognition by changing the architecture. <strong>Whisper</strong> (Radford et al., 2022) changes the axis of improvement entirely. It's a fairly ordinary encoder-decoder transformer, with no CTC and no exotic alignment trick beyond ordinary cross-attention. What's unusual is the data: roughly 680,000 hours of audio scraped from the web, paired with whatever transcripts already existed for it. That's <strong>weak supervision</strong>, since the labels aren't carefully curated, and the data spans dozens of languages and several tasks trained jointly, including transcription, translation and language identification.</p>
+
+    <h4 class="why">Why would messy data beat careful architecture?</h4>
+    <p>Careful architecture tuning historically bought accuracy on whichever benchmark or domain it was tuned against. But real-world audio has enormous unmodeled variability that any curated, clean training set under-represents by construction: accents, background noise, code-switching (switching languages mid-sentence), cheap microphones and non-native speakers. Training on hundreds of thousands of hours of diverse, messy internet audio exposes the model to that variability during training, instead of hoping it generalizes from a clean benchmark. Empirically, Whisper generalizes remarkably well zero-shot to accents, noise and languages it was never specifically tuned for. It's the lesson the LLM world learned around the same time (see 10): scale and data diversity often beat architectural cleverness for robustness. It just costs far more compute and data-collection effort to pull off.</p>
+
+    <p>Whisper still needs transcripts, even if they're weak ones. Could a model learn from audio with no transcripts at all, the way BERT learns from unlabeled text (see 03)? <strong>wav2vec 2.0</strong> (Baevski et al., 2020) does exactly that. A convolutional network first turns the raw waveform into a sequence of latent audio representations, which get <strong>quantized</strong>, meaning each is snapped to the nearest entry in a learned discrete codebook. Spans of the latent sequence are then masked, and the masked sequence goes through a transformer. At each masked position the model has to identify which quantized latent, out of a set of distractors, was there, using a <strong>contrastive loss</strong>. That's the speech analogue of BERT-style masked prediction, and no transcripts are needed during pretraining, only audio. Fine-tune the result on a comparatively small amount of labeled (audio, transcript) data afterward, and it reaches accuracy that would otherwise need far more labels from scratch.</p>
+
+    <p><strong>HuBERT</strong> takes a related route to the same goal. It clusters audio features into discrete pseudo-labels first, then trains masked prediction of those cluster assignments. The underlying bet is the same as in wav2vec 2.0: most of what a speech model needs to learn doesn't require a single transcript. Between them, self-supervised pretraining and large-scale weak supervision are now the default recipe for recognition, and they leave our clip's transcription in good shape. What about the reverse direction?</p>
+  </section>
+
+  <section id="tts">
+    <h2><span class="num">06</span>Running it backwards: text to speech</h2>
+
+    <p>Take the fifteen characters "send the letter" and ask for audio. Synthesis went through the same three eras as recognition, roughly on the same clock. <strong>Concatenative synthesis</strong> (before the 2010s) spliced together short units of pre-recorded human speech. It was intelligible but had audible seams at every splice point. <strong>Parametric synthesis</strong> replaced the recordings with a statistical model predicting acoustic parameters and fed them to a vocoder, a component that turns parameters into a waveform. It was more flexible, but it tended to sound flat and robotic, the classic "text-to-speech voice". <strong>Neural TTS</strong> (2016 onward) replaced both stages with learned models and is the reason synthetic voices now sound close to human.</p>
+
+    <h3 id="two-models-not-one">Two models, not one</h3>
+    <p>Modern neural TTS still typically uses two specialized models. The first is an <strong>acoustic model</strong>. It predicts a mel-spectrogram from text, the same kind of picture we computed from audio in section 01 but now generated. Tacotron-style systems do this autoregressively (one frame at a time, each depending on the last) with an attention mechanism, and that can occasionally skip or repeat words if the alignment goes wrong. FastSpeech-style systems instead predict a duration for each phoneme up front and generate the whole spectrogram in parallel. That's faster and structurally immune to that failure. For our clip, "the" gets a short duration and the stretched "e" in "letter" gets a longer one, and the spectrogram is laid out accordingly.</p>
+
+    <p>A second model, the <strong>vocoder</strong>, converts that mel-spectrogram into an actual waveform. WaveNet generates raw audio samples autoregressively via dilated causal convolutions, one sample at a time, with extremely high quality but slow output. HiFi-GAN generates the whole waveform in a single parallel forward pass using a GAN-based objective (a generator trained against a discriminator, as in chapter 12). That's dramatically faster, and it became the standard production vocoder.</p>
+
+    <h4 class="why">Why two models instead of one?</h4>
+    <p>Predicting a mel-spectrogram is a text-alignment and prosody problem (prosody is the rhythm, stress and intonation of speech), running at about 80 to 100 frames a second. Synthesizing the waveform means producing tens of thousands of raw amplitude samples a second that match that spectrogram. Those are different output rates and different failure modes, so specializing each model beats forcing one to do both, and it lets you swap a vocoder without retraining the acoustic model. VITS-style systems, which train a single end-to-end model for both jobs, show that the split is a good engineering default and not a hard requirement, and it's still the default for good reasons.</p>
+
+    <p>Splitting synthesis in two also makes <strong>zero-shot voice cloning</strong> straightforward. Instead of training a dedicated model per speaker, you condition the acoustic model (and sometimes the vocoder) on a speaker embedding extracted from a short reference clip. A few seconds of someone's voice is enough to synthesize new speech in that voice, with no additional training for that speaker.</p>
+
+    <p>One failure sits outside the neural models altogether. TTS mispronounces rare words, proper nouns and numbers, and part of the cause is that the input has to be turned into speakable words first. Text normalization means rewriting "$42.50", "3/14" or "Dr." as the words you'd say, and it's a real, unglamorous failure surface. Now that we can listen and speak, there are a few smaller models that sit around both.</p>
+  </section>
+
+  <section id="stack">
+    <h2><span class="num">07</span>The models around the edges</h2>
+
+    <p>Real products need more than recognition and synthesis. One group answers "who is speaking?", and it's often lumped together as "speaker stuff" even though it's three problems. <strong>Speaker identification</strong> picks one identity out of a known, enrolled set. <strong>Speaker verification</strong> is a binary same-or-different check against one claimed identity. <strong>Speaker diarization</strong> works out who spoke when across a whole recording, with no prior enrollment. The first two usually embed a few seconds of audio into a fixed-size speaker vector and compare it by similarity to an enrolled reference. Diarization instead segments the audio and clusters the segment embeddings into speaker groups. Overlapping speech breaks that segment-and-cluster assumption, because a segment can no longer be assigned cleanly to one speaker, so handling it well needs either source separation up front or a diarization model built to output more than one label at once.</p>
+
+    <p>A second group decides when to listen. <strong>Voice activity detection</strong> (VAD) is the gatekeeper in front of nearly every speech system. It's a small, fast classifier that decides, frame by frame, whether a chunk of audio contains speech at all, so a pipeline can avoid running expensive recognition on silence. It's also the first ingredient in <strong>endpointing</strong>, the decision about whether the user just finished talking or only paused. <strong>Keyword spotting</strong> is VAD's narrower cousin: an always-on, low-power model listens for one specific wake word so the rest of the system can stay asleep until it's needed, under a much tighter compute and battery budget than a full recognizer ever has.</p>
+
+    <p>Audio rarely arrives clean, and three tools address that. <strong>Speech enhancement</strong> predicts and removes noise, typically by estimating a mask over the spectrogram (which time-frequency cells are noise and which are speech) and reconstructing a cleaner waveform from the masked result. That measurably improves both perceived quality and downstream recognition accuracy. <strong>Source separation</strong> is the harder version of the same problem, for when there's no single clean target and you need to recover several overlapping signals, such as multiple speakers or speech mixed with music. <strong>Beamforming</strong> works from a microphone array, using the small timing and phase differences between microphones to boost sound arriving from one direction and suppress the rest.</p>
+
+    <p>Not all audio understanding is about words. <strong>Sound event detection</strong> identifies and timestamps non-speech events such as glass breaking, a dog barking or a smoke alarm, and <strong>audio tagging</strong> does the coarser version, labeling a whole clip. Music and general audio generation extend the generative toolkit from chapter 12 to sound, using autoregressive or diffusion-based models over learned discrete audio tokens, in the spirit of wav2vec 2.0's quantized latents, trained to produce new, coherent audio instead of recognizing existing audio. With all these pieces on the table, we can wire the main ones into something you can talk to.</p>
+  </section>
+
+  <section id="agent">
+    <h2><span class="num">08</span>Chaining it into a real-time voice agent</h2>
+
+    <p>Wire a speech recognizer, a reasoning model (a large language model, as in chapter 10) and a speech synthesizer together and you have a voice agent. Imagine our caller finishing "send the letter" and waiting for a reply. Past this point the interesting engineering problem stops being any individual model and becomes the pipeline itself, because the delay the caller feels is the sum of every stage's delay.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The real-time voice agent pipeline — latency is additive across every stage
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 920 260" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="50" cy="140" r="24" fill="none" stroke="#9a9aa8" stroke-width="2"/>
+        <text x="50" y="145" text-anchor="middle" font-size="11" font-weight="700" fill="#9a9aa8">🎙</text>
+        <text x="50" y="180" text-anchor="middle" font-size="10.5" fill="#9a9aa8">you speak</text>
+
+        <path d="M76,140 L110,140" stroke="#9a9aa8" stroke-width="2" fill="none" opacity="0.7" class="flow-line"/>
+
+        <rect x="110" y="112" width="110" height="56" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+        <text x="165" y="138" text-anchor="middle" font-size="12" font-weight="700" fill="#fbbf24">VAD</text>
+        <text x="165" y="154" text-anchor="middle" font-size="9.5" fill="#a3a3b2">speech vs. silence</text>
+        <text x="165" y="188" text-anchor="middle" font-size="10" fill="#6c6c7d">~20–50ms</text>
+
+        <path d="M220,140 L270,140" stroke="#fbbf24" stroke-width="2" fill="none" opacity="0.7" class="flow-line"/>
+
+        <rect x="270" y="112" width="130" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+        <text x="335" y="134" text-anchor="middle" font-size="12" font-weight="700" fill="#818cf8">Streaming ASR</text>
+        <text x="335" y="150" text-anchor="middle" font-size="9.5" fill="#a3a3b2">partial → final transcript</text>
+        <text x="335" y="188" text-anchor="middle" font-size="10" fill="#6c6c7d">~100–300ms</text>
+
+        <path d="M400,140 L450,140" stroke="#818cf8" stroke-width="2" fill="none" opacity="0.7" class="flow-line"/>
+
+        <rect x="450" y="112" width="140" height="56" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+        <text x="520" y="134" text-anchor="middle" font-size="12" font-weight="700" fill="#f472b6">Reasoning (LLM)</text>
+        <text x="520" y="150" text-anchor="middle" font-size="9.5" fill="#a3a3b2">generate a response</text>
+        <text x="520" y="188" text-anchor="middle" font-size="10" fill="#6c6c7d">time-to-first-token</text>
+
+        <path d="M590,140 L640,140" stroke="#f472b6" stroke-width="2" fill="none" opacity="0.7" class="flow-line"/>
+
+        <rect x="640" y="112" width="130" height="56" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+        <text x="705" y="134" text-anchor="middle" font-size="12" font-weight="700" fill="#34d399">Streaming TTS</text>
+        <text x="705" y="150" text-anchor="middle" font-size="9.5" fill="#a3a3b2">text → audio, chunk by chunk</text>
+        <text x="705" y="188" text-anchor="middle" font-size="10" fill="#6c6c7d">first chunk ~150–300ms</text>
+
+        <path d="M770,140 L816,140" stroke="#34d399" stroke-width="2" fill="none" opacity="0.7" class="flow-line"/>
+
+        <circle cx="850" cy="140" r="24" fill="none" stroke="#4f8cff" stroke-width="2" class="pulse-node"/>
+        <text x="850" y="145" text-anchor="middle" font-size="11" font-weight="700" fill="#4f8cff">🔊</text>
+        <text x="850" y="180" text-anchor="middle" font-size="10.5" fill="#4f8cff">agent speaks</text>
+
+        <path d="M850,166 C850,235 165,235 165,168" stroke="#9a9aa8" stroke-width="1.4" fill="none" stroke-dasharray="5 5" opacity="0.55" class="flow-line-rev"/>
+        <text x="505" y="252" text-anchor="middle" font-size="10.5" fill="#9a9aa8">barge-in: VAD hears new user speech mid-playback → cancel in-flight TTS/LLM, restart the loop</text>
+      </svg>
+      <div class="diagram-caption">Every millisecond figure above is illustrative, not a spec — real numbers depend entirely on your models and infra. The point is that latency is additive: shaving time off the LLM doesn't make the agent feel faster if endpointing alone eats several hundred milliseconds deciding the user is done talking, or if TTS waits for the full response text before it starts synthesizing anything.</div>
+    </div>
+
+    <p>Each stage has its own job in that latency budget. VAD gates the whole pipeline and drives endpointing, the decision that the user has finished a turn instead of merely pausing. Streaming recognition emits partial hypotheses continuously, so the "final" transcript step is fast instead of starting from nothing. The reasoning stage should start generating and streaming tokens the moment enough transcript is available, without waiting for every downstream step to settle. TTS mirrors that on the way out, streaming audio sentence by sentence as the response text arrives, instead of waiting for the entire reply before synthesizing anything. What matters for the reasoning stage is time-to-first-token and not total generation time, since the response can start being spoken before it's fully generated.</p>
+
+    <p>Because the budget is additive, a fast LLM doesn't help if endpointing alone waits an extra beat to be sure the caller is done, and a fast TTS model doesn't help if it sits idle waiting for the whole response text. Building a system that feels responsive means attacking every stage's latency at once, and pipelining each stage so it starts consuming partial output from the previous one the moment that output exists.</p>
+
+    <h3 id="interrupting-the-agent">Interrupting the agent</h3>
+    <p>Barge-in, shown as the dashed loop in the diagram, is easy to leave out and expensive to leave out. VAD has to keep listening even while the agent is talking. The instant it detects real user speech, the system needs to stop audio playback and cancel or redirect the in-flight generation. That's a full-duplex design requirement as well as a speed problem: a pipeline can hit every individual latency target and still feel broken if it can't be interrupted the way a person would be. Chain VAD, recognition, an LLM and TTS sequentially without designing for interruption, and the agent will talk over the user or ignore them. That's a full-duplex gap and not a model-quality gap.</p>
+
+    <h4 class="why">Does lower word error rate always mean a better voice agent?</h4>
+    <p>Not necessarily. <strong>Word error rate</strong> (WER) counts the substitutions, deletions and insertions in a transcript against a reference, divided by the number of reference words, and it's the field's default accuracy number. A system with excellent WER but poorly tuned endpointing, cutting people off mid-sentence or waiting too long before responding, or with no barge-in handling at all, will feel worse to talk to than one with a slightly higher error rate and well-tuned turn-taking. Once accuracy is reasonably good, latency and turn-taking usually dominate how "smart" a voice agent feels far more than the last few points of WER do.</p>
+
+    <h3 id="where-this-is-heading">Where this is heading</h3>
+    <p>Fully end-to-end speech-to-speech models, with audio in, audio out and no intermediate text, are an active frontier. Collapsing the recognition, LLM and TTS pipeline into one model can cut latency and preserve paralinguistic information (tone, emphasis, hesitation) that a text bottleneck throws away. As of 2026, though, cascaded pipelines are still the more controllable and more widely deployed default in production, mainly because each stage stays independently debuggable, swappable and auditable. Treat "speech-to-speech has already replaced cascaded pipelines" as an overclaim if you see it stated flatly.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">09</span>Summary</h2>
+    <ol>
+      <li><strong>Audio models work on spectrograms,</strong> not raw samples. Short overlapping windows of 20 to 25 milliseconds each go through a Fourier transform, and stacking the results gives energy by frequency over time.</li>
+      <li><strong>Recognition has an alignment problem.</strong> The training data doesn't say which frames belong to which characters, and speakers talk at different speeds.</li>
+      <li><strong>The classical pipeline never trained as one piece.</strong> GMM-HMM, a lexicon and an n-gram language model were joined only at decode time, so errors in one stage couldn't be corrected by another.</li>
+      <li><strong>CTC sums over every alignment.</strong> A blank symbol and a collapsing rule map many frame-level paths to one transcript, and training raises the total probability of all of them, so no frame labels are needed.</li>
+      <li><strong>RNN-T and attention encoder-decoders add the language structure CTC lacks.</strong> RNN-T streams natively, while attention decoders usually want the whole utterance.</li>
+      <li><strong>The Conformer is the standard encoder.</strong> Convolution handles local acoustic patterns and self-attention handles global context, and it works with any of the three heads.</li>
+      <li><strong>Whisper bet on data over architecture.</strong> About 680,000 hours of messy, weakly labeled multilingual audio gave robustness that careful tuning on clean benchmarks didn't.</li>
+      <li><strong>wav2vec 2.0 and HuBERT learn from audio without transcripts</strong> by predicting masked pieces, the speech version of BERT.</li>
+      <li><strong>TTS usually uses two models,</strong> an acoustic model from text to mel-spectrogram and a vocoder from spectrogram to waveform, because the two problems run at different rates and fail in different ways.</li>
+      <li><strong>A voice agent's latency adds up across VAD, ASR, the LLM and TTS.</strong> Streaming every stage and handling barge-in matter more than shaving the last bit of WER off one model.</li>
+      <li><strong>Cascaded pipelines are still the production default in 2026,</strong> while end-to-end speech-to-speech models are the active frontier.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">10</span>Build this</h2>
+    <p class="lede">CTC's sum over alignments is easy to state and hard to believe. One plot of the network's per-frame output settles it in a way no derivation can.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Watch CTC place its own alignment spikes</span>
+        <span class="proj-meta">~4 hours · PyTorch + torchaudio</span>
+      </div>
+      <p>Train a small CTC recognizer on spoken digits, transcribing each clip as the <em>spelled-out word</em>: "three", "seven", "zero". Ten words, a couple of dozen output symbols, clips under a second. The task is trivial on purpose. What you are here to look at is the per-frame output distribution, because that is where the alignment the training data never supplied shows up.</p>
+      <ol class="proj-steps">
+        <li>Get a small spoken-digit corpus, a few thousand short recordings. Label each with its spelled-out word. Your output alphabet is the handful of letters those ten words use, plus one <strong>blank</strong> symbol.</li>
+        <li>Convert each clip to a log-mel spectrogram with <code>torchaudio</code>. That is the representation from section 01, and it is the one part you should let a library handle.</li>
+        <li>Encoder: a couple of 1D convolutions and a small bidirectional GRU, then a linear layer to one logit per symbol per frame. Nothing Conformer-sized is needed: a few hundred thousand parameters is plenty.</li>
+        <li>Before training, implement the <strong>CTC forward recursion by hand</strong> for one (audio, transcript) pair. Check your log-probability against what <code>nn.CTCLoss</code> reports on that same pair. That is the marginalization in section 02, computed rather than recited.</li>
+        <li>Train with <code>nn.CTCLoss</code>. Then plot the per-frame softmax as a heatmap: symbols down one axis, frames across the other, one plot per clip.</li>
+        <li>Now break it. Delete the blank from the output alphabet and retrain, keeping everything else fixed.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the heatmap is mostly one bright blank row, punctuated by narrow spikes on the correct letters in the correct order. That spiky, mostly-silent pattern is the alignment. No frame-level label ever told the network where a letter starts, and it chose those frames itself.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> Watch what happens to "three" specifically. With no blank, every frame has to emit a real letter, so the collapse rule merges the doubled <em>e</em> with nothing to separate the two. "Three" can only ever collapse to "thre", and no amount of training fixes it. That is the two-t's-in-"letter" point from section 02, failing in front of you. The spiky structure goes with it. Given no "output nothing here" option, the model has to smear each letter across a run of frames.</div>
+    </div>
+
+    <h3 id="where-this-runs-in-production">Where this runs in production</h3>
+    <p>A caller finishes a sentence. VAD and endpointing decide whether they're done talking or only pausing. Streaming ASR, which has been emitting partial hypotheses the whole time, finalizes the transcript quickly since it isn't starting from scratch. </p>
+    <p>The reasoning stage begins generating a response. What matters here is time-to-first-token, not total generation time, since the response can start being spoken before it's fully generated. Streaming TTS begins synthesizing audio for the first sentence or chunk as soon as enough text exists, rather than waiting for the complete reply, so audio starts playing well before the LLM has finished. </p>
+    <p>The budget across the whole loop is additive: a fast LLM doesn't help if endpointing alone waits an extra beat to be sure the caller is done, and a fast TTS model doesn't help if it's sitting idle waiting for the entire response text instead of being fed sentence by sentence. </p>
+    <p>Building a system that feels responsive means attacking every stage's latency at once, rather than optimizing any one model in isolation: streaming ASR partials, low time-to-first-token, sentence-level streaming TTS, and fast, well-tuned endpointing. Pipeline each stage so it starts consuming partial output from the stage before it the moment that output exists.</p>
+  </section>
+
+  <section id="nuances">
+    <h2><span class="num">11</span>The four things that decide real speech systems</h2>
+    <p class="lede">Everything above is the standard tour. These four are what separate someone who has read about speech from someone who has shipped it.</p>
+
+    <h3 id="streaming-or-offline-the-axis-everything-else-hangs-off">Streaming or offline: the axis everything else hangs off</h3>
+    <p>The first question to ask of any speech system is not how accurate it is. It is this: <strong>can it emit output before the audio finishes?</strong></p>
+    <p>That single constraint eliminates most of the design space, because it decides what the encoder is allowed to see.</p>
+    <ul>
+      <li><strong>Causal encoder.</strong> Each frame attends only to frames before it. Zero added latency, worst accuracy. A phoneme is often only disambiguated by what comes after it.</li>
+      <li><strong>Limited lookahead.</strong> Each frame sees a bounded window of future frames, usually via chunked attention, which is the working compromise in production.</li>
+      <li><strong>Full bidirectional.</strong> Every frame sees the whole utterance. Best accuracy, and unable to stream by construction.</li>
+    </ul>
+    <p><em class="term">Lookahead</em> is the amount of future audio the model waits for before committing to an output. It is not an abstract knob. It is paid directly in wall-clock latency, and the user feels every millisecond of it.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">Why Whisper cannot stream, structurally</span>
+      <p>Whisper is not merely tuned for offline use. Its encoder has a <strong>fixed 30-second input window</strong>, with positional embeddings sized to match. Audio shorter than that is zero-padded up to 30 seconds before the model sees it.</p>
+      <p>So the model always processes a 30-second block. Transcribing an hour-long recording means sliding that window and stitching the pieces together.</p>
+      <p>It is a fine design for batch transcription of a podcast and the wrong shape for an agent that has to answer in 300 milliseconds. See the <a href="https://huggingface.co/openai/whisper-large-v3" target="_blank" rel="noopener">model card</a> for the input spec.</p>
+    </div>
+
+    <p>RNN-T sits at the opposite end, and its dominance on-device is not an accident. It consumes audio frame by frame, its memory footprint stays bounded no matter how long the utterance runs, and its prediction network supplies language-model-like behaviour without a separate LM to ship and fuse.</p>
+
+    <h3 id="why-the-conformer-s-two-halves-match-speech-s-two-structures">Why the Conformer's two halves match speech's two structures</h3>
+    <p>Speech carries information at two very different timescales, and they want different machinery.</p>
+    <ul>
+      <li><strong>Local, on the order of tens of milliseconds.</strong> Phoneme identity lives in the formant pattern of a short window. It is also translation-invariant: an /s/ is an /s/ wherever in the utterance it lands.</li>
+      <li><strong>Global, on the order of seconds.</strong> Speaker identity, prosody, and sentence-level context. Whether "read" is past or present tense may only be resolvable from a clause several words away.</li>
+    </ul>
+    <p>Convolution is the natural fit for the first. Weight sharing across time <em>is</em> the translation-invariance assumption, stated as an architecture.</p>
+    <p>Self-attention is the natural fit for the second, because it reaches any distance in one hop.</p>
+    <p>Run only a transformer and it must learn local acoustic structure from scratch, with no inductive bias pointing at it. Run only a CNN and long-range context needs a very deep stack of dilations to reach. The Conformer stops treating this as a choice.</p>
+
+    <h3 id="neural-audio-codecs-the-move-that-turned-sound-into-tokens">Neural audio codecs: the move that turned sound into tokens</h3>
+    <p>Most treatments skip this piece, and it is the reason audio joined the LLM era at all.</p>
+    <p>A language model predicts the next token from a finite vocabulary. Audio is continuous, and arrives as tens of thousands of floating-point samples per second. The two do not obviously fit together.</p>
+    <p>A <em class="term">neural audio codec</em> closes that gap: it learns to compress a waveform into a short sequence of discrete codes, and to reconstruct listenable audio from those codes alone.</p>
+    <p>The standard mechanism is <strong>residual vector quantization</strong>, and the idea is a cascade:</p>
+    <ul>
+      <li>The first codebook quantizes the encoder output. Coarse, and wrong by some residual.</li>
+      <li>The second codebook quantizes <em>that residual</em>, correcting the first stage's error.</li>
+      <li>The third corrects what is still left, and so on down the stack.</li>
+      <li>Summed back together, the stages converge on the original representation.</li>
+    </ul>
+    <p>Why a cascade and not one enormous codebook? High fidelity needs a very large number of distinct codes. A single flat codebook of that size is impractical to store, search and train. Several small codebooks compose to cover the same space.</p>
+    <p><a href="https://arxiv.org/abs/2107.03312" target="_blank" rel="noopener">SoundStream</a> (Zeghidour et al., 2021) established the pattern, running at variable bitrates from 3 kbps to 18 kbps, streamable, and fast enough for real time on a smartphone CPU. <a href="https://arxiv.org/abs/2210.13438" target="_blank" rel="noopener">EnCodec</a> (Défossez et al., 2022) followed the same RVQ recipe.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">What discrete tokens unlocked</span>
+      <p>Once audio is a sequence of discrete tokens, every trick from language modelling transfers directly: next-token prediction, scaling laws, and a shared vocabulary with text.</p>
+      <p><a href="https://arxiv.org/abs/2209.03143" target="_blank" rel="noopener">AudioLM</a> made the split explicit: take discretized activations from a masked language model pretrained on audio to carry <em>long-term structure</em>, and codec codes to carry <em>fidelity</em>. Then treat generation as a language modelling problem over that combined sequence.</p>
+      <p>This is also what makes end-to-end speech-to-speech tractable instead of aspirational. <a href="https://arxiv.org/abs/2410.00037" target="_blank" rel="noopener">Moshi</a> is a speech-text foundation model built for real-time dialogue, with no text bottleneck sitting in the middle of the loop.</p>
+    </div>
+
+    <h3 id="the-evaluation-trap-what-word-error-rate-does-not-measure">The evaluation trap: what word error rate does not measure</h3>
+    <p>WER counts substitutions, deletions and insertions against the reference, divided by the number of reference words. It is the field's default number, and it is useful. It is also narrower than most people reporting it seem to realise.</p>
+    <ul>
+      <li><strong>It usually ignores punctuation and casing.</strong> Standard WER is computed on normalized text, lowercased and stripped. "lets eat grandma" and "let's eat, Grandma" can score identically.</li>
+      <li><strong>Every word weighs the same.</strong> Dropping "not" and dropping "the" cost exactly one error each. Only one of them inverts the meaning of the sentence.</li>
+      <li><strong>It says nothing about who spoke.</strong> A perfect transcript with every speaker label wrong scores a perfect WER. Diarization has its own metric, diarization error rate, for exactly this reason.</li>
+      <li><strong>One aggregate number hides the distribution.</strong> Strong average WER is compatible with failing badly on one accent or one noise condition.</li>
+    </ul>
+    <p>The practical consequence: pick the metric that matches the thing you are shipping. For a medical or legal transcript, error rate on entities and numbers matters far more than the blended figure. For a voice agent, intent accuracy after the LLM reads the transcript is closer to the truth than WER ever gets.</p>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">12</span>Where you meet this in the wild</h2>
+    <p class="lede">Speech is unusual in that the same handful of models get deployed under wildly different constraints. The model matters less than the latency budget it has to live inside.</p>
+
+    <p>The pattern to notice is that <strong>the deployment constraint picks the architecture</strong>. Streaming or batch, on-device or cloud, general vocabulary or specialised: answer those three and the shortlist is usually down to one.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card" style="--wc:var(--c-speech)">
+        <div class="wc-domain">Real-time voice agents</div>
+        <div class="wc-what">Holding a conversation at human turn-taking speed</div>
+        <div class="wc-body">Cascaded VAD → streaming ASR → LLM → streaming TTS remains the deployed default, because each stage stays swappable and debuggable. End-to-end speech-to-speech models are the live alternative, trading that controllability for lower latency and preserved tone.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-multimodal)">
+        <div class="wc-domain">Meetings</div>
+        <div class="wc-what">Turning an hour of overlapping voices into an attributed transcript</div>
+        <div class="wc-body">Pure batch work, so the latency constraint disappears and large offline encoder-decoders win. The hard part is not transcription but diarization: overlapping speech breaks the segment-and-cluster assumption, and a segment can no longer belong to exactly one speaker.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-classical)">
+        <div class="wc-domain">Accessibility</div>
+        <div class="wc-what">Live captioning for someone who needs it to follow along</div>
+        <div class="wc-body">Streaming, and unusually unforgiving. Captions that lag by several seconds stop being useful mid-conversation. This is where the causal-versus-lookahead trade is felt directly by a person, and where punctuation quality matters far more than WER suggests.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-efficient)">
+        <div class="wc-domain">On-device</div>
+        <div class="wc-what">One always-listening model on a battery budget</div>
+        <div class="wc-body">Keyword spotting runs continuously so nothing else has to. The constraint is not accuracy but milliwatts, which rules out most of the architectures on this page. A false wake costs user trust; a missed wake costs the interaction entirely.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-rec)">
+        <div class="wc-domain">Media search</div>
+        <div class="wc-what">Making a decade of podcast audio searchable</div>
+        <div class="wc-body">ASR here is a pipeline stage, not the product. Transcribe once offline, then index the text and search that. Errors on ordinary words barely matter; errors on the proper nouns people search for matter enormously.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-nn)">
+        <div class="wc-domain">Non-speech audio</div>
+        <div class="wc-what">Detecting a machine about to fail, or glass breaking</div>
+        <div class="wc-body">Sound event detection borrows the same spectrogram front end and drops the language modelling entirely. No transcript, no vocabulary, no alignment problem. Just classification and timestamps over a stream that is mostly uneventful.</div>
+      </div>
+    </div>
+
+    <div class="reach">
+      <div class="reach-col reach-yes">
+        <div class="reach-head">Reach for a speech stack when</div>
+        <ul>
+          <li><strong>Voice is the natural interface.</strong> Hands or eyes are busy, or typing is not available to the user at all.</li>
+          <li><strong>The audio already exists and is unsearchable.</strong> Transcription converts a dead archive into something you can index, search and analyse.</li>
+          <li><strong>You need what text throws away.</strong> Tone, hesitation, emphasis and who spoke are all lost the moment audio becomes a transcript.</li>
+          <li><strong>Latency is generous.</strong> Batch transcription lets you use the largest, most robust model available and ignore the streaming constraint entirely.</li>
+        </ul>
+      </div>
+      <div class="reach-col reach-no">
+        <div class="reach-head">Look elsewhere when</div>
+        <ul>
+          <li><strong>A form field would do.</strong> For structured input, typing is faster and a dropdown has no error rate at all.</li>
+          <li><strong>Your vocabulary is mostly rare proper nouns</strong> and you have no adaptation data. Generic ASR will mangle exactly the words you care about, and headline WER will hide it.</li>
+          <li><strong>No transcription error is tolerable</strong> and there is no human in the loop to catch one.</li>
+          <li><strong>Audio cannot leave the device</strong> for privacy or regulatory reasons and you have no on-device compute budget to spend.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">13</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What's the difference between a waveform and a spectrogram, and why do most audio models use the spectrogram?</summary>
+      <div class="qa-body"><p>A waveform is amplitude over time — one number per sample. A spectrogram is energy per frequency, over time, produced by running a Fourier transform over short overlapping windows of the waveform (the short-time Fourier transform). Models learn far more easily from the spectrogram because it exposes frequency-domain structure — the stuff that actually distinguishes phonemes and pitch — directly, instead of forcing the network to rediscover that structure from raw amplitude on its own.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why does CTC solve the alignment problem in ASR?</summary>
+      <div class="qa-body"><p>Because you don't know, and the training data doesn't tell you, which audio frames correspond to which output characters — speakers vary in speed, so there's no fixed frame-to-character mapping. CTC sidesteps needing that mapping by having the network output a label (or a blank) at every frame, defining a collapsing rule (merge adjacent repeats, drop blanks) that maps many different frame-level paths to the same final transcript, and training by summing the probability over every path that collapses to the correct transcript. The network only ever needs (audio, transcript) pairs — never frame-level alignment labels.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How does wav2vec 2.0's pretraining objective work, and why is it called the BERT of speech?</summary>
+      <div class="qa-body"><p>A CNN feature encoder turns raw audio into a sequence of latent representations, which get quantized into a learned discrete codebook. Spans of that latent sequence are masked, the masked sequence goes through a transformer, and the model has to identify which quantized latent — out of a set of distractors — was actually at each masked position, using a contrastive loss. Like BERT, it learns a representation purely from unlabeled data by predicting masked content from context, letting you fine-tune on far less labeled (audio, transcript) data afterward than training from scratch would need.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does neural TTS typically use two separate models instead of one end-to-end model?</summary>
+      <div class="qa-body"><p>An acoustic model predicts a mel-spectrogram from text — a text-alignment and prosody problem running at maybe 80–100 frames a second. A vocoder converts that spectrogram into a raw waveform — tens of thousands of amplitude samples a second that have to actually match it. Different output rates, different failure modes, different enough problems that specializing each one, and being able to swap a vocoder without retraining the acoustic model, tends to beat forcing one model to do both. Single-stage systems like VITS show the split isn't mandatory, but it's still the more common production default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>CTC, RNN-T, and attention-based seq2seq are all valid ways to build a neural ASR system — how do you choose?</summary>
+      <div class="qa-body"><p>If you need streaming and low latency — on-device, real-time transcription — RNN-T is usually the strongest default, since it's built to process audio incrementally and its prediction network already captures label dependencies without leaning as hard on an external language model. CTC also streams reasonably well with a causal encoder and is simpler to implement, but often needs an external LM fused in for the best accuracy. Attention-based seq2seq historically gave the best offline accuracy by letting the decoder attend over the full utterance, but that same flexibility makes it the most awkward of the three to make truly streaming.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Design a low-latency real-time voice agent — what are the pieces, and where does the latency actually come from?</summary>
+      <div class="qa-body"><p>VAD gates the pipeline and drives endpointing — deciding the user is actually done talking, not just pausing. Streaming ASR emits partial hypotheses continuously so the final transcript is fast rather than computed from scratch. The reasoning stage should start streaming tokens as soon as it has enough transcript, and TTS should synthesize sentence by sentence as those tokens arrive rather than waiting for the full response. The latency budget is additive across every stage, so optimizing any single model in isolation — a faster LLM, say — barely moves the needle if endpointing or non-streaming TTS is the actual bottleneck. On top of that, the system needs full-duplex barge-in: VAD has to keep listening even while the agent is speaking, and detecting real user speech mid-playback needs to immediately cancel audio output and redirect the in-flight generation. Get every latency number right and skip barge-in, and the agent will still feel broken the first time someone interrupts it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why did Whisper's "scale over cleverness" approach outperform more architecturally sophisticated but narrowly-trained ASR systems on real-world robustness?</summary>
+      <div class="qa-body"><p>Curated, clean ASR training sets under-represent the variability real-world audio actually has — accents, background noise, code-switching, cheap microphones, non-native speakers. No amount of architecture tuning against a clean benchmark teaches a model to handle variability it never saw during training. Training on roughly 680,000 hours of diverse, messy, weakly-labeled real internet audio exposes the model directly to that variability, so robustness comes from what the model was trained on rather than how cleverly it was built. It's the same lesson the LLM world converged on around the same time: scale and data diversity often beat architectural sophistication for generalization, at the cost of far more compute and data-collection effort.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">14</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/2212.04356" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Robust Speech Recognition via Large-Scale Weak Supervision</div><div class="r-sub">Radford et al., 2022 — Whisper — arXiv:2212.04356</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2006.11477" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">wav2vec 2.0: A Framework for Self-Supervised Learning of Speech Representations</div><div class="r-sub">Baevski et al., 2020 — arXiv:2006.11477</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2005.08100" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Conformer: Convolution-augmented Transformer for Speech Recognition</div><div class="r-sub">Gulati et al., 2020 — arXiv:2005.08100</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">15</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/07-sequence-modeling-pre-transformer"><div class="rc-sec" style="color:var(--c-sequence)">07 · Prerequisite</div><div class="rc-title">Sequence Modeling Pre-Transformer</div><div class="rc-hook">CTC's collapsing rule and RNN-T's roots, covered before this page builds on them.</div></a>
+      <a class="related-card" href="/topics/08-attention-transformers"><div class="rc-sec" style="color:var(--c-attention)">08 · Underpins this</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">The Conformer and Whisper are both built on the same attention block.</div></a>
+      <a class="related-card" href="/topics/14-multimodal-ai"><div class="rc-sec" style="color:var(--c-multimodal)">14 · What changed next</div><div class="rc-title">Multimodal AI</div><div class="rc-hook">Audio-language models push past cascaded ASR → LLM → TTS pipelines.</div></a>
+      <a class="related-card" href="/topics/10-llm-architecture-training"><div class="rc-sec" style="color:var(--c-llm)">10 · Same playbook</div><div class="rc-title">LLM Architecture &amp; Training</div><div class="rc-hook">Whisper's scale-over-cleverness bet is trained at LLM-adjacent scale.</div></a>
+    </div>
+  </section>

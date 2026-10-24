@@ -1,0 +1,448 @@
+---
+title: "Reinforcement Learning"
+dek: "Follow a robot on a small grid as it learns from a reward that arrives long after the moves that earned it. You'll see how value functions, the Bellman equation, policy gradients and PPO each handle that delay, and how the same loop ends up under aligned language models."
+readingTime: "~26 min"
+prereqs: "probability & optimization (01), gradient descent (04)"
+group: "Decision & Retrieval Systems"
+label: "Chapter 15"
+description: "MDPs, value functions, Bellman equations, Q-learning/DQN, policy gradients, actor-critic, and PPO — the RL foundations that make RLHF make sense, and what to say about it in an interview."
+---
+<section id="tldr">
+    <p>Imagine learning chess in a world where nobody ever points at a move and says "that was a mistake." You play out a whole game of about 40 moves, and only at the very end are you told that you won or lost. Somewhere in those moves were the ones that mattered. Maybe move 12 was brilliant and move 31 threw the game away, but all you have to go on is one number, and it arrives long after the moves that earned it.</p>
+
+    <p>That's the situation of a <strong>reinforcement learning</strong> agent, a program that learns by acting in an environment and receiving a numerical <strong>reward</strong> as feedback. There's no labelled "correct action" for it to copy, only a signal like "that whole sequence of decisions was worth +8", delivered many steps after the decisions responsible. Working out which decisions deserve the credit or the blame is called <strong>credit assignment</strong>, and most of this chapter is machinery for doing it.</p>
+
+    <p>We'll build that machinery on one small example: a robot on a 5×5 grid, starting in one corner, trying to reach the goal in the opposite corner, with a pit next to the shortest route. First we'll set up the loop between the robot and its world and the vocabulary that goes with it. Then we'll see how a recursive equation lets credit travel backwards from the goal one step at a time, how a second family of methods adjusts the robot's behaviour directly instead, and how an algorithm called PPO keeps that adjustment from going wrong.</p>
+
+    <p>Here's the history in brief. Early methods (dynamic programming, tabular Q-learning, SARSA) kept a table with one value estimate per state. That's exact, but a table can't say anything about a state it hasn't seen, so inputs like raw pixels were out of reach. Mnih et al. (2013) replaced the table with a neural network, the deep Q-network, which needed a replay buffer and a target network to train stably and learned Atari games from pixels. Schulman et al.'s PPO (2017) then made policy optimization stable and simple enough to become the default. PPO is the RL algorithm inside RLHF, which chapter 10 covers for language models, and the same machinery sits under robotics control (chapter 21) and systems like AlphaGo and MuZero.</p>
+  </section>
+
+  <section id="intuition">
+    <h2><span class="num">01</span>Learning from a score at the end</h2>
+
+    <h3 id="feedback-that-comes-late">Feedback that comes late</h3>
+    <p>In supervised learning, every example comes with the right answer, so the model learns from a separate error on every prediction. Our robot has nothing like that. Nearly every step it takes earns a reward of 0, and it gets <code>+1</code> only when it finally steps into the goal. A shortest route across the grid takes eight moves (four right and four down), and a wandering robot might take dozens. When the <code>+1</code> finally arrives, which of those moves was it for? It has to work that out from the pattern of rewards it collects over many attempts.</p>
+
+    <p>So the learner here is a trial-and-error one. At each step it observes where it is, picks an action, and the world answers with a reward and a new position, and then the loop repeats. Nothing whispers the right action at each step, which makes this a different problem from supervised learning, and it's why RL needs vocabulary of its own: states, actions, rewards, policies, value functions. We'll build that vocabulary in section 2. First there's a smaller problem hiding inside the big one, probably the simplest form of the difficulty, and it's easier to see with the grid stripped away.</p>
+
+    <h3 id="trying-new-things-or-repeating-what-works">Trying new things or repeating what works</h3>
+    <p>Suppose there's only one position and three actions. You're facing three slot machines that win 20%, 50% and 80% of the time, and you don't know which is which. Every pull is an action and every payout is a reward. If you keep pulling whichever machine has paid best so far, you might lock onto a mediocre one and never find out that another is better. If you try machines at random forever, you learn the odds but never cash in on them. An agent has to balance <strong>exploration</strong> (trying something to learn about it) against <strong>exploitation</strong> (using what it already knows), and one simple way to do it is to explore with a small probability <span>$\epsilon$</span> (epsilon) and exploit otherwise. That strategy is called <strong>epsilon-greedy</strong>.</p>
+
+    <p>Below, the code compares three settings of epsilon. For each machine it keeps <code>est</code>, a running average of the payouts seen so far. On each step, <code>rng.integers(3) if rng.random() &lt; eps else est.argmax()</code> pulls a random machine with probability <code>eps</code> and otherwise pulls the one with the highest average. On the line <code>est[a] += (r - est[a]) / n[a]</code>, a machine's average is updated after a pull without storing every past payout. Notice that all the estimates start at zero, and that <code>argmax</code> on a tie picks the first machine, the 20% one.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Compare three exploration strategies on three slot machines</span>
+      </summary>
+<pre><code>import numpy as np
+
+rng = np.random.default_rng(1)
+true = np.array([0.2, 0.5, 0.8])       # win rate of 3 slot machines
+
+def run(eps, steps=5000):
+    est, n, total = np.zeros(3), np.zeros(3), 0
+    for _ in range(steps):
+        a = rng.integers(3) if rng.random() &lt; eps else est.argmax()
+        r = float(rng.random() &lt; true[a])
+        n[a] += 1
+        est[a] += (r - est[a]) / n[a]  # running average of this machine
+        total += r
+    return total / steps
+
+for eps in (0.0, 0.1, 1.0):
+    print(f&quot;epsilon {eps:.1f}: average reward {run(eps):.3f}&quot;)</code></pre>
+      <div class="tryit-out">Never exploring earns <code>0.201</code>, exploring 10% of the time earns <code>0.770</code>, and exploring all the time earns <code>0.507</code>. The purely greedy agent starts with every estimate at zero, picks machine 0, and never tries the others, so it settles for the worst machine. Random choice averages the three win rates, about <code>0.5</code>. A little exploration finds the 80% machine and then mostly plays it. The best possible average is <code>0.8</code>.</div>
+    </details>
+
+    <p>The greedy agent (epsilon 0) pulls machine 0 on the first step, and from then on its estimate for machine 0 is either zero (after losses) or above zero (after a win), while the other two stay at zero. Machine 0 is never behind, and <code>argmax</code> breaks ties in its favour, so the agent never looks at the others. It settles for the worst machine and earns about <code>0.2</code>, that machine's win rate. An agent that explores all the time pulls machines at random, so it averages the three win rates, about <code>0.5</code>. One that explores 10% of the time finds the 80% machine early and then mostly plays it, and lands at <code>0.77</code>, close to the best possible average of <code>0.8</code>. That gap is the price of the exploring it keeps doing: 90% of its pulls earn 0.8 and the other 10% are random pulls that average 0.5, and 0.9 × 0.8 + 0.1 × 0.5 = 0.77.</p>
+
+    <h4 class="why">Why not always pick the action that looks best so far?</h4>
+    <p>Because what looks best is only an estimate built from the few pulls you've made, and a greedy agent never gets the chance to correct it. An action that was never tried keeps whatever estimate it started with, and an action that got unlucky early looks bad forever. A little exploration is usually the only way an agent can find out that its estimates are wrong.</p>
+
+    <p>With slot machines the payout arrives right after the pull, so each action can be judged on its own. In the grid it can't, and that's what the next section's vocabulary is for. We'll set it up precisely, still using the robot.</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">02</span>The loop and its vocabulary</h2>
+
+    <h3 id="states-actions-and-the-policy">States, actions and the policy</h3>
+    <p>Maybe the easiest way to hold all of this is to keep the robot in mind. Every RL problem is framed the same way. An agent sits in an environment. At each time step it observes a <strong>state</strong> <span>$s$</span> (for our robot, which of the 25 cells it's standing in), chooses an <strong>action</strong> <span>$a$</span> (up, down, left or right), and the environment returns a reward <span>$r$</span> and a next state <span>$s'$</span>. Its rule for choosing actions is called its <strong>policy</strong>, written <span>$\pi(a|s)$</span>, the probability of choosing action <span>$a$</span> when in state <span>$s$</span>. This loop repeats thousands or millions of times during training, and learning means improving the policy.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The agent-environment interaction loop
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 480 380" style="max-width:560px;display:block;margin:0 auto" xmlns="http://www.w3.org/2000/svg">
+        <rect x="150" y="30" width="180" height="70" rx="10" fill="#14141d" stroke="#f472b6" stroke-width="1.6"/>
+        <text x="240" y="60" text-anchor="middle" font-size="14" font-weight="700" fill="#f472b6">Agent</text>
+        <text x="240" y="80" text-anchor="middle" font-size="10.5" fill="#a3a3b2">policy π(a|s)</text>
+
+        <rect x="150" y="280" width="180" height="70" rx="10" fill="#14141d" stroke="#4f8cff" stroke-width="1.6"/>
+        <text x="240" y="310" text-anchor="middle" font-size="14" font-weight="700" fill="#4f8cff">Environment</text>
+        <text x="240" y="330" text-anchor="middle" font-size="10.5" fill="#a3a3b2">dynamics + reward</text>
+
+        <path d="M310,100 C 400,140 400,240 310,280" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+        <circle r="4" fill="#34d399" class="roll" style="offset-path: path('M310,100 C 400,140 400,240 310,280')"></circle>
+        <text x="420" y="190" text-anchor="middle" font-size="12" fill="#34d399">action a</text>
+
+        <path d="M170,280 C 80,240 80,140 170,100" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line-slow"/>
+        <circle r="4" fill="#fbbf24" class="roll" style="offset-path: path('M170,280 C 80,240 80,140 170,100')"></circle>
+        <text x="60" y="190" text-anchor="middle" font-size="12" fill="#fbbf24">reward r, next state s'</text>
+      </svg>
+      <div class="diagram-caption">The agent observes state s, picks action a from its policy π(a|s) and sends it to the environment. It answers with a reward r and a new state s'. Repeat. Everything an RL algorithm does is an attempt to make the policy produce actions that lead to higher cumulative reward over this loop, which means the sum of all future rewards and not just the next one.</div>
+    </div>
+
+    <h3 id="a-markov-decision-process">A Markov decision process</h3>
+    <p>To reason about this loop precisely, we write it down as a <strong>Markov decision process</strong> (MDP), which has five pieces. For the robot, each piece has an obvious meaning, and we'll attach it to the list as we go.</p>
+    <ul>
+      <li><span>$S$</span>, a set of <strong>states</strong>. For the robot, the 25 cells.</li>
+      <li><span>$A$</span>, a set of <strong>actions</strong>. The four moves.</li>
+      <li><span>$P(s'|s,a)$</span>, a <strong>transition function</strong> giving the probability of landing in state <span>$s'$</span> after taking action <span>$a$</span> in state <span>$s$</span>. In a plain grid a move goes where you aimed it, and a move into a wall leaves you where you were.</li>
+      <li><span>$R(s,a,s')$</span>, a <strong>reward function</strong>. Here <code>+1</code> for entering the goal, <code>-1</code> for entering the pit and 0 otherwise.</li>
+      <li><span>$\gamma \in [0,1)$</span>, a <strong>discount factor</strong>, which we'll come to in a moment.</li>
+    </ul>
+    <p>"Markov" means the future depends only on the current state and not on the full history that led there, so the state is assumed to already summarize everything relevant. Our robot's cell is enough to decide what to do next, and it doesn't matter which path brought it there.</p>
+
+    <h3 id="why-later-rewards-count-for-less">Why later rewards count for less</h3>
+    <p>Suppose the robot can collect a reward right now, or the identical reward ten steps from now. Most of us would take it now, and there are two separate reasons for that, though you may well have only thought of one. One is uncertainty: the world between now and then might change, the episode might end early, and you might never collect the later reward at all. The other is mathematical. In a task that can run forever, with no natural end point, the sum of an infinite sequence of undiscounted rewards can grow without bound, and then there's no meaningful way to say that one policy beats another.</p>
+
+    <p>Multiplying a reward that's <span>$k$</span> steps in the future by <span>$\gamma^k$</span> handles both at once. It says that sooner is better, and as long as <span>$\gamma < 1$</span> it makes the infinite sum converge to a finite number, because the weights form a geometric series. With <span>$\gamma = 0.9$</span> (a value we'll use for the robot), the <code>+1</code> for reaching the goal is worth 1 if it's collected right away, 0.9 if one step off, 0.81 if two steps off, and 0.729 if three. Add up all the discounted rewards from some point on and you have the <strong>return</strong>.</p>
+
+    <h4 class="why">Why does the discount matter beyond keeping sums finite?</h4>
+    <p>Because it's also what carries credit backwards. A cell three steps from the goal can only be worth something to the robot if the faraway <code>+1</code> counts for something there, and the discount is what says how much. With <span>$\gamma = 0$</span> a state's worth would depend only on the very next reward, and nothing would ever propagate back from the goal. Section 7's project tries exactly that.</p>
+
+    <h3 id="value-functions-q-functions-and-advantage">Value functions, Q-functions and advantage</h3>
+    <p>With discounting in place, we can ask the question the robot needs answered: how good is it, in total and going forward, to be in this cell? That's what a <strong>value function</strong> measures. <span>$V(s)$</span> is the expected return starting from state <span>$s$</span>, assuming the agent acts optimally (or follows some fixed policy) from here on. It's a single number that summarizes the entire rest of the episode, so a cell near the goal gets a high one and a cell hemmed in beside the pit gets a lower one.</p>
+
+    <p>Sometimes we need to be more specific, about one particular first move. <span>$Q(s,a)$</span> is how good it is to take action <span>$a$</span> in state <span>$s$</span> and then act optimally afterwards. <span>$V$</span> and <span>$Q$</span> differ by exactly one decision. <span>$V(s)$</span> already assumes you'll pick the best action, while <span>$Q(s,a)$</span> fixes the first action for you and lets the value function take over afterward. Knowing <span>$Q$</span> is enough to act, since the best action in any state is <span>$\arg\max_a Q(s,a)$</span>, and that's how Q-learning gets a full control policy out of Q-values alone.</p>
+
+    <p>Putting the two together gives the <strong>advantage</strong>, <span>$A(s,a) = Q(s,a) - V(s)$</span>. It measures how much better this specific action is than what you'd get by following your usual policy in this state. A positive advantage means the action beat the state's baseline expectation, and a negative one means it underperformed. Standing next to the pit, the action that steps into it has a strongly negative advantage, and the action that steps away from it has a positive one.</p>
+
+    <p>Advantage matters in practice because policy-gradient methods use it, or an estimate of it, to decide how hard to push the policy toward or away from an action. Pushing based on raw reward is noisy, while pushing based on "better or worse than expected" is a much cleaner signal, and that's the motivation behind the actor-critic methods in section 5. But we haven't said where values come from yet. We defined <span>$V(s)$</span> as a sum over the whole future, and that's not something we can compute by looking at the grid.</p>
+  </section>
+
+  <section id="math">
+    <h2><span class="num">03</span>The Bellman equation, policy gradients and PPO's clip</h2>
+
+    <h3 id="the-bellman-equation-credit-one-step-at-a-time">The Bellman equation: credit one step at a time</h3>
+    <p>A fact about value functions gets us out, and almost every value-based algorithm leans on it, including dynamic programming, Q-learning, TD learning and DQN. From state <span>$s$</span>, the future is made of two things: the reward from the first step, and then the future from wherever that step lands you, shrunk by <span>$\gamma$</span>. So we don't need to look at the whole future to compute a value, only one step of it, if we trust our estimate for the next state. That's the <strong>Bellman equation</strong>.</p>
+    <div class="eq-block">
+      <span>$$V(s) = \mathbb{E}\big[\,r + \gamma V(s')\,\big]$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">V(s)</span> the value of the current state: the expected discounted sum of all future reward, starting here.</li>
+      <li><span class="sym">r</span> the immediate reward received for the transition out of state <span>$s$</span>.</li>
+      <li><span class="sym">γ</span> the discount factor: how much less a unit of reward is worth one step in the future, versus right now.</li>
+      <li><span class="sym">V(s')</span> the value of wherever the agent ends up next, computed by exactly the same function, applied one step later.</li>
+      <li><span class="sym">𝔼[·]</span> an expectation over the randomness in the transition (which next state you land in) and, for <span>$Q$</span>, over the policy's choice of action.</li>
+    </ul>
+    <p>In words, today's value equals the reward you get right now plus the discounted value of wherever you end up next. Here's how that plays out on the grid with <span>$\gamma = 0.9$</span>. A cell next to the goal, with the robot stepping in, has value 1 (the reward is <code>+1</code> and nothing follows). The cell before it has a reward of 0 and a next state worth 1, so its value is <span>$0 + 0.9 \times 1 = 0.9$</span>. One more step back it's <span>$0 + 0.9 \times 0.9 = 0.81$</span>, and the next is 0.729. Value spreads backwards from the goal, one cell per round of this calculation. That's perhaps easiest to believe if you try a cell yourself. It also means you never need to know the value of the entire rest of an infinite future directly. You need one step of real reward plus your own current estimate of what comes after. Section 7's project prints exactly this wave.</p>
+
+    <p>Dynamic programming applies the equation exactly, sweeping over all states, and it needs a full model of the environment to do so. When there's no such model, Q-learning and TD learning apply an approximate, sampled version of it, updating one estimate at a time from lived experience: after each real step, the estimate for <span>$V(s)$</span> is nudged toward <span>$r + \gamma V(s')$</span>, the right-hand side of the equation computed from what just happened. Section 4 compares how that behaves with waiting for the full outcome.</p>
+
+    <h3 id="skipping-the-values-policy-gradients">Skipping the values: policy gradients</h3>
+    <p>That equation is the backbone of value-based methods, and it has a limitation: the policy is only ever read off the values, with an argmax over actions. The other family takes the policy itself as the thing to learn. We make it a function with adjustable parameters <span>$\theta$</span>, such as a neural network that takes the robot's state and outputs a probability for each of the four moves, and we write it <span>$\pi_\theta(a|s)$</span>. Then we do gradient ascent on the quantity we care about, the expected return <span>$J(\theta)$</span>. A single run of the policy, the full sequence of states, actions and rewards, is called a <strong>trajectory</strong> <span>$\tau$</span>, and its return is <span>$R(\tau)$</span>.</p>
+
+    <p>There's an obstacle, though. We want the gradient of the expected return with respect to <span>$\theta$</span>, but <span>$\theta$</span> doesn't appear in the return of any given trajectory. It appears in how likely each trajectory is, and a probability isn't something you can just differentiate through when all you can do is sample. A derivation below gets around that with a short identity called the log-derivative trick, and it ends with something surprising: the unknown environment drops out of the gradient completely. Here it is in full.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">The policy gradient theorem, and why the environment drops out</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">We want to maximise expected return <span>$J(\theta) = \mathbb{E}_{\tau \sim p_\theta}\!\left[R(\tau)\right]$</span> over trajectories <span>$\tau$</span>. The obstacle is subtle: <span>$\theta$</span> does not appear in <span>$R$</span>. It appears in the <em>distribution we are averaging over</em>. Assume an episodic task and the usual regularity conditions that let us exchange a gradient and an integral.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta J(\theta) = \nabla_\theta \int p_\theta(\tau)\, R(\tau)\, d\tau = \int \nabla_\theta p_\theta(\tau)\, R(\tau)\, d\tau$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> the return <span>$R(\tau)$</span> of a fixed trajectory carries no <span>$\theta$</span>, so the gradient passes straight through it and lands only on <span>$p_\theta(\tau)$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\int \nabla_\theta p_\theta(\tau)\, R(\tau)\, d\tau \quad \text{is not an expectation}$$</span></div>
+            <div class="drv-why"><strong>Why this is the problem:</strong> <span>$\nabla_\theta p_\theta(\tau)$</span> is not a probability distribution. It does not integrate to one and it goes negative. So we cannot estimate this integral by sampling trajectories, which is the only thing we can actually do.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta p_\theta(\tau) = p_\theta(\tau)\, \nabla_\theta \log p_\theta(\tau)$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> the <em class="term">log-derivative trick</em>. Differentiating a log gives <span>$\nabla \log f = \nabla f / f$</span>. Multiply both sides by <span>$f$</span> and you have this identity. It is ordinary calculus, and it is the hinge the entire method turns on.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim p_\theta}\!\left[\nabla_\theta \log p_\theta(\tau)\, R(\tau)\right]$$</span></div>
+            <div class="drv-why"><strong>Why this rescues us:</strong> substituting step 3 puts <span>$p_\theta(\tau)$</span> back in front of the integrand. That makes it an expectation under the policy again, and expectations under the policy are exactly what rolling out the policy samples.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned}\log p_\theta(\tau) = \log p(s_0) \;&+\; \sum_t \log \pi_\theta(a_t \mid s_t) \\ &+\; \sum_t \log P(s_{t+1} \mid s_t, a_t)\end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> a trajectory's probability is the start-state probability times the policy's action probabilities times the environment's transition probabilities. Taking a log turns that product into a sum.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta \log p_\theta(\tau) = \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t)$$</span></div>
+            <div class="drv-why"><strong>Why this is the punchline:</strong> <span>$p(s_0)$</span> and <span>$P(s_{t+1} \mid s_t, a_t)$</span> belong to the environment. Neither contains <span>$\theta$</span>, so both gradients are zero and both terms vanish. Only the policy survives.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta J(\theta) = \mathbb{E}\!\left[\left(\sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t)\right) R(\tau)\right]$$</span></div>
+            <div class="drv-why"><strong>Why this is usable:</strong> every quantity here is something you have. Run the policy, record which actions it took, compute the log-probabilities it assigned them, and weight by the return you observed. That estimate is <strong>unbiased</strong>.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff">You just computed a gradient of expected reward without ever differentiating the reward, and without knowing the environment's dynamics at all. <span>$R(\tau)$</span> can be a black box. It can be discontinuous, non-differentiable, or a human clicking a thumbs-up. That is precisely why RLHF is possible: a reward model's score never has to be differentiable with respect to the sampling process that produced the text.</div>
+      </div>
+    </details>
+
+    <p>Read the final line as a recipe. Run the policy and record what happened. For every action it took, raise the log-probability of that action in proportion to the return of the whole trajectory. If the robot's run ended in the goal, every move in it gets pushed up, and if it ended in the pit, every move gets pushed down. This estimator is called <strong>REINFORCE</strong>, and it needs no model of the world and no differentiable reward.</p>
+
+    <p>It also has a problem the robot makes obvious. After a lucky run into the goal, every move gets pushed up, including the wasted ones where it bumped into a wall, because the only thing the estimator knows is the final return. Averaged over many runs the useful moves win out, but it takes a lot of runs. We say the gradient estimate has high <strong>variance</strong>: it's correct on average, but any single estimate is noisy. Standard practice is to subtract a <strong>baseline</strong> from the return, a number that depends on the state but not on the action taken. Another derivation below shows why this is safe.</p>
+
+    <h4 class="why">Why is subtracting a baseline allowed?</h4>
+    <p>You'd expect it to change the answer, but the term you subtract averages to exactly zero, so it can't move the average of the gradient. It only removes noise. That derivation spells it out, and it also shows why the natural choice of baseline is the state's own value, which turns the weight on each action into the advantage from section 2.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">Why a baseline is free, and why advantage is the right one</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">The REINFORCE estimator above is unbiased but brutally noisy. The standard fix is to subtract a <em class="term">baseline</em> <span>$b(s)$</span> from the return before weighting. That looks like it should change the answer. It does not, provided <span>$b$</span> depends on the state but never on the action. The sums below assume a discrete action space; for continuous actions every sum becomes an integral and the argument is unchanged.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned}\mathbb{E}_{a \sim \pi}&\!\left[\nabla_\theta \log \pi_\theta(a \mid s)\, b(s)\right] \\ &= b(s) \sum_a \pi_\theta(a \mid s)\, \nabla_\theta \log \pi_\theta(a \mid s)\end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> <span>$b(s)$</span> does not depend on <span>$a$</span>, so it is a constant with respect to the expectation and factors straight out.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= b(s) \sum_a \pi_\theta(a \mid s)\, \frac{\nabla_\theta \pi_\theta(a \mid s)}{\pi_\theta(a \mid s)} = b(s) \sum_a \nabla_\theta \pi_\theta(a \mid s)$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> the log-derivative trick again, run backwards this time. The <span>$\pi_\theta$</span> in front cancels the one in the denominator.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= b(s)\, \nabla_\theta \sum_a \pi_\theta(a \mid s) = b(s)\, \nabla_\theta (1) = 0$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> swap the finite sum and the gradient, which linearity permits. What is left inside is the total probability mass over all actions. That is <span>$1$</span> by definition, for every <span>$\theta$</span>. The gradient of a constant is zero.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\nabla_\theta J(\theta) = \mathbb{E}\!\left[\nabla_\theta \log \pi_\theta(a \mid s)\,\big(Q(s,a) - b(s)\big)\right]$$</span></div>
+            <div class="drv-why"><strong>Why this is now safe:</strong> the term you just subtracted has expectation exactly zero. Subtracting something with zero mean cannot shift the mean. The gradient stays unbiased for <em>any</em> action-independent <span>$b$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$b(s) = V(s) \;\Longrightarrow\; Q(s,a) - V(s) = A(s,a)$$</span></div>
+            <div class="drv-why"><strong>Why this choice:</strong> setting the baseline to the state's own value recentres the weight around zero. Better-than-usual actions get a positive push, worse-than-usual ones a negative push. Without it, in a task where all rewards are positive, every sampled action gets pushed up and learning has to rely on differences in magnitude alone.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff">Advantage is not a heuristic somebody preferred. It is the baseline-subtracted estimator that provably keeps the gradient unbiased while stripping out the variance caused by <em>which state you happened to be in</em>, leaving only the part that answers <em>was this action better than my usual behaviour here</em>. One caveat worth knowing: unbiasedness holds for any action-independent baseline, but variance reduction is not guaranteed for a bad one. <span>$V(s)$</span> is the standard choice and works well in practice, though it is not strictly the variance-minimising baseline.</div>
+      </div>
+    </details>
+
+    <p>So the policy gradient pushes each action up or down in proportion to its advantage: better than usual from this state means a push toward it, worse than usual means a push away. Raw return can't do that, because in a task where every reward is positive it pushes every sampled action up. We still haven't said how far one push should go.</p>
+
+    <h3 id="ppo-s-clipped-surrogate-objective">PPO's clipped surrogate objective</h3>
+    <p>A policy-gradient step increases the probability of actions with high advantage and decreases it for those with low advantage. To score a candidate update we compute a ratio between the new policy's probability of an action and the old policy's probability of that same action, and scale the step by that ratio times the advantage. (The old policy is the one that collected the data, and the ratio reweights that data to stand in for what the new policy would have produced.)</p>
+
+    <p>The trouble is that nothing stops a single update from moving the policy enormously if the estimated advantage is large. A policy that has moved too far in one update can collapse: it starts producing actions so different from the ones that generated the training data that learning destabilizes and never recovers. PPO's answer is to clip the ratio.</p>
+    <div class="eq-block">
+      <span>$$L^{CLIP}(\theta) = \mathbb{E}\Big[\min\big(r_t(\theta)\,A_t,\ \text{clip}(r_t(\theta),\,1-\epsilon,\,1+\epsilon)\,A_t\big)\Big]$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">r_t(θ)</span> the probability ratio between the new policy and the old policy for the action taken: how much the policy wants to shift toward or away from this action.</li>
+      <li><span class="sym">A_t</span> the estimated advantage of that action. Positive means push toward it, negative means push away.</li>
+      <li><span class="sym">clip(·, 1-ε, 1+ε)</span> caps the ratio so it can't move more than <span>$\epsilon$</span> (typically 0.1–0.2) away from 1 in either direction. The new policy is not allowed to become more than roughly 20% more or less likely to take this action in a single update.</li>
+      <li><span class="sym">min(·, ·)</span> takes the more pessimistic of the unclipped and clipped objective, which means clipping only ever removes the incentive to keep pushing once you've already moved far enough. It never creates an incentive to push further.</li>
+    </ul>
+    <p>Note that this <span>$r_t$</span> is the probability ratio, a different thing from the reward <span>$r$</span>. In one sentence, PPO takes a policy-improving step and clips it, so the new policy can't move too far from the old policy in a single update. It's a cheap, first-order stand-in for what TRPO, PPO's more complicated predecessor, enforced with an explicit and expensive constraint on how different the new and old policies are allowed to be. That constraint is measured with the KL divergence, a number that says how far apart two probability distributions are. One more derivation traces how the constraint turned into the clip, and it's frank about what was lost on the way.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">How TRPO's constraint became PPO's clip</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">This one is more argument than algebra, and it is worth saying that plainly. The clip is not derived from the constraint. It is a cheaper thing that behaves similarly, and the steps below trace why anyone would settle for that.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$L(\theta) = \mathbb{E}_{a \sim \pi_{\text{old}}}\!\left[\frac{\pi_\theta(a \mid s)}{\pi_{\text{old}}(a \mid s)} A(s,a)\right] = \mathbb{E}\!\left[r_t(\theta) A_t\right]$$</span></div>
+            <div class="drv-why"><strong>Why we need the ratio at all:</strong> the data was collected under <span>$\pi_{\text{old}}$</span>, but we want to score <span>$\pi_\theta$</span>. Importance sampling reweights each sample by how much more or less likely the new policy makes it. This is what buys you several gradient steps from one batch of rollouts instead of one.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\max_\theta\ \mathbb{E}\!\left[r_t A_t\right] \;\Longrightarrow\; r_t \to \infty \ \text{ when } A_t \gt 0$$</span></div>
+            <div class="drv-why"><strong>Why the naive version breaks:</strong> nothing in that objective bounds the ratio. Push <span>$r_t$</span> arbitrarily high and the objective keeps improving. But the importance-sampling estimate is only trustworthy while <span>$\pi_\theta$</span> stays near <span>$\pi_{\text{old}}$</span>. Optimise it hard and you leave the region where it means anything.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\max_\theta\ \mathbb{E}\!\left[r_t(\theta) A_t\right] \quad \text{subject to} \quad \mathbb{E}\!\left[D_{\mathrm{KL}}\!\left(\pi_{\text{old}} \,\|\, \pi_\theta\right)\right] \leq \delta$$</span></div>
+            <div class="drv-why"><strong>TRPO's answer:</strong> make the trust region explicit. Bound the average KL between old and new policy, so the optimiser cannot leave the region where the surrogate is valid. The cost is real: this is a constrained problem needing conjugate gradient and a line search, with curvature information from Fisher matrix-vector products.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$L^{\text{CLIP}}(\theta) = \mathbb{E}\Big[\min\big(r_t A_t,\ \operatorname{clip}(r_t, 1-\epsilon, 1+\epsilon)\, A_t\big)\Big]$$</span></div>
+            <div class="drv-why"><strong>PPO's answer:</strong> drop the constraint and flatten the objective instead. Once <span>$r_t$</span> leaves <span>$[1-\epsilon, 1+\epsilon]$</span>, the clipped branch stops changing with <span>$\theta$</span>, so its gradient is zero. No constraint solver, just a clamp on a scalar.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned}A_t \gt 0 \;&:\ \text{capped at } (1+\epsilon)A_t \\ A_t \lt 0 \;&:\ \text{floored at } (1-\epsilon)A_t\end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why the <span>$\min$</span> is load-bearing:</strong> it selects the more pessimistic of the two branches. With <span>$A_t \gt 0$</span> that caps the reward for raising <span>$r_t$</span>. With <span>$A_t \lt 0$</span> the unclipped term actually <em>grows</em> as <span>$r_t$</span> falls, so the <span>$\min$</span> is what stops the objective from paying you to drive the probability toward zero. Clipping only ever removes incentive. It never manufactures one.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>What this actually tells you, honestly.</strong> PPO does not implement a trust region. It approximates the <em>behaviour</em> of one. A bounded ratio does not imply bounded KL, and because clipping works by zeroing gradients, it removes the very corrective signal that would pull a policy back once it has escaped. TRPO's monotonic improvement guarantee does not survive the substitution. PPO won anyway, because it is a few lines of code instead of a constrained optimiser and it works nearly as well in practice. That is a fair trade, but knowing it is a trade is the part worth carrying into an interview. It is also why serious implementations still monitor KL directly and stop early when it drifts.</div>
+      </div>
+    </details>
+  </section>
+
+  <section id="why">
+    <h2><span class="num">04</span>Why bootstrapping wins, and why PPO clips</h2>
+    <p>Two questions come up constantly once you've seen these pieces, and both have clean answers. One is about the Bellman target. We said value-based methods nudge an estimate toward one real reward plus their own estimate of the next state. But that estimate is still being learned and is wrong right now, so why is building on it better than waiting to see how the episode ends?</p>
+
+    <h4 class="why">Why does using a wrong estimate beat waiting for the real return?</h4>
+    <p>The two approaches use different learning targets. <strong>Monte Carlo</strong> (the name for estimating something by sampling) waits for an entire episode to finish and uses the actual observed total reward. For the robot, that means running to the goal or the pit and looking back at what each cell led to. That target is <strong>unbiased</strong>, meaning it isn't systematically off in one direction, since it's the real quantity you're trying to estimate and not an approximation of it. It's also extremely noisy, probably more than you'd expect, because it depends on every random action and every random environment transition for the rest of the episode.</p>
+
+    <p><strong>Temporal-difference</strong> (TD) learning doesn't wait. It <strong>bootstraps</strong>, using the immediate reward plus its own current estimate of the value of the next state, exactly as the Bellman equation describes. That estimate is biased, because it depends on a value function that's still being learned and is currently wrong. But it has far lower variance, because it depends on one step of randomness instead of an entire trajectory's worth.</p>
+
+    <p>Maybe the surprise is that the biased target comes out ahead. In practice, lower variance usually wins, and TD methods tend to learn faster and more stably from the same amount of experience. TD also has a structural advantage Monte Carlo can't offer: it works in continuing tasks that never terminate, since it never needs to wait for an episode to end at all.</p>
+
+    <p>The other question is about PPO. We described the clip as a safeguard, but how bad is a single oversized update? Without clipping, one large policy-gradient update, triggered by, say, one unusually high-advantage rollout, can shove the policy into a region of action space it has never explored well. Next, a batch of rollouts is collected under this new, poorly understood policy, the advantage estimates for that batch are unreliable, and the next update compounds the damage. Meanwhile the data for the next gradient step comes from the policy that just got wrecked.</p>
+
+    <p>This failure happens in practice. An RL run can look like it's training fine and then collapse in a handful of updates with no way back. Clipping prevents the update from moving the probability ratio more than <span>$\epsilon$</span> away from 1, which caps how far any single step can push the policy. That gives most of the stability TRPO achieved with its explicit trust-region constraint, computed with a min and a clip on scalar ratios and no constrained optimization problem at all. PPO displaced almost everything before it because it offers close to TRPO's stability at a small fraction of the implementation complexity.</p>
+
+    <p>We now have value-based methods built on the Bellman equation and policy-gradient methods built on advantage. How do they compare, and where does each one break?</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">05</span>Families of methods, and where each one fails</h2>
+    <p>What we've built falls into three families of methods. <strong>Value-based</strong> methods such as DQN learn <span>$Q(s,a)$</span> and act by argmax. <strong>Policy-gradient</strong> methods such as REINFORCE and PPO learn the policy directly. <strong>Actor-critic</strong> methods learn both. Four comparisons are in the table, and two of its terms need a word of explanation. A method is <strong>off-policy</strong> if it can learn from data collected by an older or different policy, and <strong>on-policy</strong> if it needs data from the policy it's currently training. <strong>Sample efficiency</strong> is how much learning you get per unit of experience collected.</p>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>Value-based (DQN)</th><th>Policy gradient (REINFORCE / PPO)</th><th>Actor-critic</th></tr></thead>
+        <tbody>
+          <tr><td>What it learns directly</td><td>Q(s,a) for every action</td><td>The policy π(a|s) itself</td><td>Both a policy (actor) and a value function (critic)</td></tr>
+          <tr><td>Sample efficiency</td><td>Higher — off-policy, reuses old data via a replay buffer</td><td>Lower — classic REINFORCE is on-policy and high-variance</td><td>Better than plain REINFORCE — the critic reduces variance</td></tr>
+          <tr><td>Training stability</td><td>Can be unstable without replay buffer + target network</td><td>High variance gradients; PPO's clipping tames this substantially</td><td>Generally the most practical stability/efficiency balance</td></tr>
+          <tr><td>Action space fit</td><td>Naturally discrete — argmax over a finite action set</td><td>Works for both, but especially natural for continuous actions</td><td>Both — this is why it's the dominant modern recipe</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Maybe the neatest way to see actor-critic is as the direct fusion of the other two ideas, with two components and two jobs. One part, the <strong>actor</strong>, is the policy, improved by a policy-gradient update that uses the advantage the way REINFORCE uses raw return. The other part, the <strong>critic</strong>, is a learned value function, used in place of the raw, noisy Monte Carlo return to judge how good each action was, supplying a low-variance advantage estimate the way TD learning does. PPO is, precisely, an actor-critic method with a clipped policy-gradient update for the actor.</p>
+
+    <p>One more comment on the value-based column, because "DQN is just Q-learning with a neural network instead of a table" understates the change. Q-learning's convergence guarantees assume exact, tabular updates. Swap in a neural network and two things break: the updates become correlated, since consecutive experiences are highly similar, and the target you're regressing toward moves every time you update the network, so the network is chasing a target that shifts as it moves. DQN needed two specific fixes for these, a replay buffer and a target network, on top of a bigger function approximator. Section 7 explains each.</p>
+
+    <h3 id="where-training-breaks">Where training breaks</h3>
+    <p>Even with the right family, three failures show up again and again, and they're probably the ones you'll hit first. First comes the credit-assignment problem at its worst: <strong>sparse rewards</strong>. If the agent almost never receives a nonzero reward, as when it has to reach the end of a long maze or win a long game, then for a long stretch of training every action looks equally uninformative, and gradient-based learning has almost nothing to learn from. That's why reward shaping, curiosity-driven exploration bonuses and hierarchical RL exist as whole subfields.</p>
+
+    <p>Next is <strong>reward hacking</strong>. Here the agent optimizes what you told it to reward, which may differ from what you wanted. Think of a boat-racing agent that spins in circles collecting the same power-up over and over instead of finishing the race, because that scores higher under the literal reward function. Any time a reward function is a proxy for the real goal, and it almost always is, the optimizer will find the gap between the proxy and the goal if the gap is exploitable.</p>
+
+    <p>Last is <strong>offline RL's distribution-shift trap</strong>. Offline RL means learning a policy from a fixed, previously collected dataset, with no further interaction with the real environment at training time. Here the danger is that the learned policy can drift toward actions the data-collecting policy rarely or never took. For those actions, the training data gives no reliable signal about what would happen. Its value estimate there can be badly wrong and badly overoptimistic, with no way to catch the error since there's no environment left to test against.</p>
+
+    <p>That's the whole toolkit, and it's compact enough to summarize before we build it.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">06</span>Summary</h2>
+    <ol>
+      <li><strong>RL learns from late, unlabelled feedback.</strong> An agent observes a state, picks an action, and gets a reward and a new state, and the hard part is credit assignment: working out which earlier decisions deserve the reward that arrives later.</li>
+      <li><strong>Exploration is part of the problem.</strong> A purely greedy agent can lock onto a poor choice, so some random trying is needed. On the three slot machines, epsilon-greedy with 10% exploration earned 0.770, against 0.201 for never exploring and 0.507 for always exploring.</li>
+      <li><strong>An MDP gives the loop its parts:</strong> states, actions, a transition function, a reward function and a discount factor. The Markov assumption says the current state summarizes everything relevant.</li>
+      <li><strong>The discount makes later reward count for less.</strong> It reflects uncertainty, keeps infinite sums finite and carries credit backwards from the goal.</li>
+      <li><strong>V, Q and advantage measure different things.</strong> V(s) scores a state, Q(s,a) scores a state with a first action fixed, and the advantage Q(s,a) minus V(s) says how much better an action is than usual.</li>
+      <li><strong>The Bellman equation turns an infinite future into one step.</strong> V(s) is the immediate reward plus the discounted value of the next state, so value spreads backwards from the goal.</li>
+      <li><strong>Policy gradients need no model of the environment.</strong> Using the log-derivative trick makes the gradient an expectation we can sample, and the environment's dynamics drop out of it.</li>
+      <li><strong>A baseline cuts variance for free, and advantage is the right one.</strong> Subtracting any action-independent baseline leaves the gradient unbiased, and choosing V(s) turns the weight on each action into its advantage.</li>
+      <li><strong>PPO clips the probability ratio</strong> so that one update can't move the policy far from the one that collected the data. It approximates TRPO's trust region at a fraction of the complexity, without the same guarantee.</li>
+      <li><strong>TD bootstrapping usually beats Monte Carlo.</strong> Its target is biased but much lower in variance, and it works in tasks that never end.</li>
+      <li><strong>Training fails in known ways:</strong> sparse rewards, reward hacking, and in offline RL a drift toward actions the data never covered. DQN's replay buffer and target network, explained in section 7, address correlated updates and a moving target.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+
+    <h3 id="why-dqn-needs-a-replay-buffer-and-a-target-network">Why DQN needs a replay buffer and a target network</h3>
+    <p>Interviewers often ask why each fix exists, and each one solves a distinct instability.</p>
+    <p>Training a neural network with plain gradient descent assumes roughly independent, identically distributed training examples. But an agent playing through an environment produces a highly correlated stream. Consecutive frames of the same game look nearly identical. Training on them in that order badly biases the network toward whatever situation the agent happens to be in right now, then violently biases it toward the next situation.</p>
+    <p>A <strong>replay buffer</strong> breaks this correlation: store past transitions (state, action, reward, next state) in a large buffer, and train on randomly sampled batches from it and not on the live stream. It also improves sample efficiency, since each transition can be reused in many updates instead of being seen once and discarded.</p>
+    <p>Separately, Q-learning's update target is itself built from the network's own current Q-value estimate at the next state. You're regressing the network toward a target that's computed by the same network you're currently updating. Every gradient step changes the network, which changes the target, which changes what "correct" means for the very next step. The target keeps moving, so training can oscillate or diverge and may never settle.</p>
+    <p>DQN fixes this by keeping a separate <strong>target network</strong>, a lagging copy of the main network's weights that's only updated (or slowly blended in) every so many steps. The target used for each update comes from this frozen copy, so the regression target stays stable for a while, giving the main network something fixed to converge toward before the target itself shifts.</p>
+
+    <p class="lede">Both of those fixes are repairs to a method that already works in a table, with no network anywhere in it. Print that table after every episode and the Bellman equation stops being an equation.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Print a Q-table and watch value spread backwards</span>
+        <span class="proj-meta">~2 hours · NumPy</span>
+      </div>
+      <p>Run tabular Q-learning on a 5×5 gridworld small enough to print in full. It uses no network, no Gym and no replay buffer, so the <strong>entire value function fits on one screen</strong>. You can watch reward travel backwards out of the goal cell and do not have to infer it from a reward curve.</p>
+      <ol class="proj-steps">
+        <li>Write the world in about thirty lines. A 5×5 grid, start in one corner, goal in the opposite one, four actions, walls that clamp. Reward is <code>+1</code> for entering the goal and <code>0</code> everywhere else. Put one pit next to the shortest route, worth <code>-1</code> and ending the episode.</li>
+        <li>Make <code>Q</code> a zeros array of shape <code>(25, 4)</code>. Write the update yourself from the Bellman equation in section 03: <span>$Q(s,a) \leftarrow Q(s,a) + \alpha\big[r + \gamma \max_{a'} Q(s',a') - Q(s,a)\big]$</span>. That one line is all the learning in the project.</li>
+        <li>Train with ε-greedy action selection. After every episode, print <span>$\max_a Q(s,a)$</span> for all 25 cells as a grid of two-decimal numbers. Then read the printouts in order.</li>
+        <li>Read the greedy policy off the finished table with an argmax per cell, and print it as arrows.</li>
+        <li>Break it by setting <span>$\gamma = 0$</span>, retraining from zeros and printing the same grids.</li>
+        <li>Restore <span>$\gamma$</span> and make the world stochastic instead. Give every action some chance of slipping into a random direction. First run the deterministic table's arrows in this world, then retrain in it and compare the two arrow maps.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the printed grids sit flat at zero, away from the pit, until the agent first stumbles into the goal. After that a nonzero region starts spreading out of the goal cell, roughly a ring at a time. Each backup can only carry information one step, so the wave is slow enough to watch its edge advance. Nothing in your code draws that wave. It is one line of Bellman backup, iterated.</div>
+      <div class="proj-stretch"><strong>What the two breakages teach.</strong> With <span>$\gamma = 0$</span> the update collapses to <span>$Q(s,a) \leftarrow r$</span>. Only transitions that touch the goal or the pit are ever worth anything. The wave never starts, and the rest of the table stays at zero. The discount is what carries reward backwards at all. It is not a knob for how far-sighted the agent feels. Then the slip. The tight route past the pit stops being the best route. Section 03's expectation is now averaging over transitions that can shove you in. A table trained in the deterministic world still recommends that route and takes the penalty. Retrain under slip and the arrows should bend away from the pit.</div>
+    </div>
+
+    <h3 id="where-this-runs-in-production">Where this runs in production</h3>
+    <p>The most common place PPO shows up in a 2026 interview is RLHF. A <strong>reward model</strong>, trained on human preference comparisons, stands in for the reward function. The language model itself is the <strong>policy</strong>. Generating a response token-by-token is the sequence of <strong>actions</strong>.</p>
+    <p>PPO takes the update step described above (improve the policy, but clip so it doesn't move too far from the previous policy in one step) with a KL penalty added on top, to keep the fine-tuned model from drifting too far from the original supervised-fine-tuned model it started from.</p>
+    <p>Page 10 covers RLHF's full pipeline in depth: reward modeling, the KL penalty, RLHF vs. DPO. What matters here is that everything RLHF does with PPO applies the MDP, advantage, and clipped-objective machinery on this page directly, with no new machinery at the LLM layer.</p>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">08</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What's the difference between V(s) and Q(s,a)?</summary>
+      <div class="qa-body"><p>V(s) is the expected discounted return from state s, assuming the agent acts optimally (or under a fixed policy) from here on — a property of the state alone. Q(s,a) is the expected discounted return from taking a specific action a in state s, then acting optimally afterward — a property of the state-action pair. The difference is exactly one decision: Q fixes the first action for you, V assumes the best one is already chosen. Advantage, Q(s,a) − V(s), measures how much better this specific action is than the state's average.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why do we discount future rewards?</summary>
+      <div class="qa-body"><p>Two reasons. A reward now is worth more than an identical reward later because of uncertainty — the environment could change, the episode could end, you might never actually collect it. And mathematically, discounting keeps the sum of an infinite sequence of future rewards finite (a convergent geometric series) rather than diverging, which is necessary to even compare policies in tasks with no natural end point.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does DQN need a replay buffer and a target network?</summary>
+      <div class="qa-body"><p>The replay buffer breaks the correlation between consecutive experiences in a live trajectory by sampling random past transitions to train on, which both stabilizes gradient descent (which assumes roughly i.i.d. data) and reuses data for better sample efficiency. The target network fixes a different problem: Q-learning's update target is built from the network's own current estimate at the next state, so without a frozen, lagging copy of the network to compute that target from, the regression target shifts every single update step, which can cause oscillation or divergence instead of convergence.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Monte Carlo vs. temporal-difference learning — what's the actual tradeoff?</summary>
+      <div class="qa-body"><p>Monte Carlo waits for a full episode to end and uses the actual observed return as the learning target — unbiased, but high variance, since it depends on every random action and transition for the rest of the episode. TD bootstraps: it uses one real reward plus the current value estimate of the next state (the Bellman equation) as the target — biased, because that value estimate is still being learned and is currently wrong, but much lower variance, since it only depends on one step of randomness. In practice TD usually wins because lower variance means faster, more stable learning from the same data, and TD also works in continuing tasks that never terminate, which Monte Carlo structurally cannot handle.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What does the advantage function buy you that raw reward doesn't?</summary>
+      <div class="qa-body"><p>Raw reward (or raw return) tells you an action's absolute outcome, which is noisy and depends heavily on which state you happened to be in. Advantage, Q(s,a) − V(s), tells you how much better or worse this action was than what you'd expect on average from this state — a relative, baseline-subtracted signal. Policy gradients that use advantage instead of raw return have substantially lower variance, because subtracting a well-chosen baseline (the state's own value) removes a large chunk of noise that doesn't actually depend on which action was chosen.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Explain PPO's clipped objective and why it matters.</summary>
+      <div class="qa-body"><p>PPO computes the probability ratio between the new and old policy for the action taken, multiplies it by the estimated advantage, and takes the minimum of that unclipped term and a version where the ratio is clipped to [1−ε, 1+ε]. The min means clipping only ever removes the incentive to keep pushing the policy further once it's already moved enough — it never creates a new incentive to push harder. This matters because unconstrained policy-gradient updates can move the policy so far in one step that it starts producing actions unlike anything in its training data, destabilizing all subsequent updates (which use rollouts from that now-broken policy) with no way to recover. PPO gets most of TRPO's stability guarantee — bounding how far the policy moves per update — using a simple clip-and-min on scalar ratios instead of an explicit, expensive trust-region constraint, which is exactly why it displaced TRPO as the default and is the algorithm underneath RLHF.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why might you reach for SAC or TD3 instead of PPO for a continuous-control robotics task?</summary>
+      <div class="qa-body"><p>SAC adds an entropy bonus to the objective, explicitly rewarding the policy for staying stochastic/exploratory rather than collapsing too early to a narrow, possibly-suboptimal behavior — valuable in continuous action spaces where naive exploration is easy to get stuck in. TD3 (and SAC) both use twin critics — train two separate Q-function estimators and take the minimum of the two when computing targets — specifically to counter the systematic overestimation bias that a single Q-function tends to develop, since taking a max/argmax over a noisy estimate tends to pick out the noise, not the true best action. Both are also typically more sample-efficient than PPO in continuous control because they're off-policy and can reuse a replay buffer, whereas PPO is on-policy and needs comparatively fresh rollouts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>What's the core danger in offline RL, and why doesn't it show up in online RL the same way?</summary>
+      <div class="qa-body"><p>Offline RL learns entirely from a fixed, previously-collected dataset with no further environment interaction. If the learned policy drifts toward actions rarely or never taken by the policy that collected the data, the value function has no reliable evidence for what happens there and can become badly overoptimistic about exactly the actions the policy is being pushed toward — a compounding error with nothing to correct it, since there's no environment left to test against. Online RL doesn't have this problem in the same way because the agent can always go collect more real data about whatever action it's currently curious about, which grounds its estimates; offline RL loses that safety net entirely, which is why offline algorithms explicitly constrain the learned policy to stay close to the data-collecting policy's behavior.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">09</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/1312.5602" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Playing Atari with Deep Reinforcement Learning</div><div class="r-sub">Mnih et al., 2013 — arXiv:1312.5602</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1707.06347" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Proximal Policy Optimization Algorithms</div><div class="r-sub">Schulman et al., 2017 — arXiv:1707.06347</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/257" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Compute Temporal Difference Error</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/224" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Group Relative Advantage for GRPO</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/159" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Incremental Mean for Online Reward Estimation</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/142" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Gridworld Policy Evaluation</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/133" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Implement Q-Learning Algorithm for MDPs</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/157" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Implement the Bellman Equation for Value Iteration</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">10</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/01-math-foundations"><div class="rc-sec" style="color:var(--c-math)">01 · Prerequisite</div><div class="rc-title">Math &amp; Stats Foundations</div><div class="rc-hook">Expectation, probability, and gradient-based optimization — used everywhere on this page.</div></a>
+      <a class="related-card" href="/topics/10-llm-architecture-training"><div class="rc-sec" style="color:var(--c-llm)">10 · Built on this</div><div class="rc-title">LLM Architecture &amp; Training</div><div class="rc-hook">RLHF applies PPO to align a language model — full treatment there.</div></a>
+      <a class="related-card" href="/topics/21-robotics-embodied-ai"><div class="rc-sec" style="color:var(--c-world)">21 · What changed next</div><div class="rc-title">Robotics &amp; Embodied AI</div><div class="rc-hook">RL for continuous control, and where sim-to-real takes over.</div></a>
+      <a class="related-card" href="/topics/11-rag-agents-reasoning"><div class="rc-sec" style="color:var(--c-rag)">11 · Built on this</div><div class="rc-title">RAG, Agents &amp; Reasoning</div><div class="rc-hook">RL for multi-step reasoning and agentic decision-making.</div></a>
+    </div>
+  </section>

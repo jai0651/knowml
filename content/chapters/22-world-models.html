@@ -1,0 +1,516 @@
+---
+title: "World Models"
+dek: "Follow a robot arm that can't afford millions of real attempts as it learns a copy of its world and practises inside it. You'll learn why that copy compounds its own errors, and how latent models, short rollouts and replanning keep it useful."
+readingTime: "~24 min"
+prereqs: "RL basics (15), latent variables (12)"
+group: "Embodied & Frontier"
+label: "Chapter 22"
+description: "Why learn a simulator at all: sample efficiency bought with compounding model error. Latent dynamics and the RSSM, PlaNet and the Dreamer line, MuZero's value-equivalent model, video prediction and JEPA, and why short imagined rollouts beat long ones."
+---
+<section id="tldr">
+    <p>Picture a robot arm on a table, with a small block in front of it and a marker a hand's width away. Its job is to push the block onto the marker. In chapter 15 you met the standard way to teach a machine a job like this, <strong>reinforcement learning</strong> (RL). The arm tries something, gets a number back that says how well it went (the <strong>reward</strong>), and gradually shifts toward whatever scored higher. Its rule for choosing the next move is called a <strong>policy</strong>. That recipe works, but it works by repetition, and a policy for even a simple task can often need millions of attempts before it gets good.</p>
+
+    <p>Millions of attempts are nearly free if the "arm" is a game emulator running on a server, because a computer can play millions of frames overnight. A real arm is another matter. It moves at the speed of physics, it wears out, and sometimes it knocks the block off the table, which means someone has to walk over and put it back. Any method that needs that many real attempts is out of reach.</p>
+
+    <p>This chapter is about a different way to spend them. Suppose the arm spends a small number of real pushes learning to predict what the world does in response: if the block is here and I move this way, where does the block end up? That predictor is a <strong>world model</strong>, a learned copy of the environment, and once the arm has one it can run millions of practice pushes inside the copy without moving a motor. We'll follow that idea in order. First, what the copy has to contain. Then why it's always slightly wrong, and why those small errors pile up the longer you trust it. After that come the designs that survive the problem: predicting in a compressed space, imagining only a few steps ahead, and replanning constantly. Finally we'll look at two newer routes that start from video instead of from control.</p>
+
+    <p>Nothing in this idea is free, and you'll probably want to keep that in mind all the way through. A world model swaps one problem, needing too much real data, for another one, needing a model that's accurate enough to be trusted.</p>
+  </section>
+
+  <section id="trade">
+    <h2><span class="num">01</span>Two ways to spend a real interaction</h2>
+
+    <p>Let's make the choice concrete by looking at what happens to one real push in each approach. The diagram shows both. Start with the top loop, <strong>model-free</strong> RL: the arm acts, the environment returns a new state and a reward, and the policy takes one gradient step from that single experience. Then that experience is gone, and the next improvement needs another real push, so every improvement is paid for in real steps. The diagram puts the total at 10⁶ to 10⁸ of them.</p>
+
+    <p>In the bottom loop, <strong>model-based</strong> RL, the real world supplies only a thin trickle of logs, and those logs are used to fit the world model. The policy then trains on the model's output (the diagram calls it dreams) for millions of steps. Every so often the arm goes back to the real world, acts, logs what happened and refits the model. Here the diagram puts the real-step count at 10⁴ to 10⁵. Look at the red curve at the bottom as well, because it's what you pay for the saving. It's the model's error, and it grows with every step you imagine.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Two ways to spend a real interaction
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 400" xmlns="http://www.w3.org/2000/svg">
+        <text x="30" y="28" font-size="11" font-weight="700" fill="#f472b6">MODEL-FREE</text>
+
+        <rect x="30" y="44" width="140" height="62" rx="8" fill="#f472b6" opacity="0.14"/>
+        <rect x="30" y="44" width="140" height="62" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+        <text x="100" y="72" text-anchor="middle" font-size="12.5" font-weight="700">REAL WORLD</text>
+        <text x="100" y="90" text-anchor="middle" font-size="9.5" class="dim">one step per step</text>
+
+        <path d="M176,66 L292,66" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+        <text x="234" y="58" text-anchor="middle" font-size="9.5" class="dim">state, reward</text>
+
+        <rect x="298" y="44" width="140" height="62" rx="8" fill="#f472b6" opacity="0.14"/>
+        <rect x="298" y="44" width="140" height="62" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+        <text x="368" y="72" text-anchor="middle" font-size="12.5" font-weight="700">POLICY</text>
+        <text x="368" y="90" text-anchor="middle" font-size="9.5" class="dim">one gradient step</text>
+
+        <path d="M368,112 L368,130 L100,130 L100,112" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+        <text x="234" y="146" text-anchor="middle" font-size="9.5" class="dim">action</text>
+
+        <text x="470" y="66" font-size="10.5" class="dim">every improvement is paid for in</text>
+        <text x="470" y="92" font-size="17" font-weight="700" fill="#f472b6">10⁶ – 10⁸</text>
+        <text x="558" y="92" font-size="10.5" class="dim">real steps</text>
+
+        <line x1="30" y1="172" x2="660" y2="172" stroke="rgba(255,255,255,.14)" stroke-width="1"/>
+
+        <text x="30" y="202" font-size="11" font-weight="700" fill="#34d399">WITH A WORLD MODEL</text>
+
+        <rect x="30" y="218" width="120" height="62" rx="8" fill="#34d399" opacity="0.14"/>
+        <rect x="30" y="218" width="120" height="62" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+        <text x="90" y="246" text-anchor="middle" font-size="12" font-weight="700">REAL WORLD</text>
+        <text x="90" y="264" text-anchor="middle" font-size="9.5" class="dim">a thin trickle</text>
+
+        <path d="M156,240 L206,240" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+        <text x="181" y="232" text-anchor="middle" font-size="9" class="dim">logs</text>
+
+        <rect x="212" y="218" width="150" height="62" rx="8" fill="#fbbf24" opacity="0.14"/>
+        <rect x="212" y="218" width="150" height="62" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.8" class="pulse-node"/>
+        <text x="287" y="246" text-anchor="middle" font-size="12.5" font-weight="700" fill="#fbbf24">WORLD MODEL</text>
+        <text x="287" y="264" text-anchor="middle" font-size="9.5" class="dim">a step is a matmul</text>
+
+        <path d="M368,240 L418,240" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+        <text x="393" y="232" text-anchor="middle" font-size="9" class="dim">dreams</text>
+
+        <rect x="424" y="218" width="130" height="62" rx="8" fill="#34d399" opacity="0.14"/>
+        <rect x="424" y="218" width="130" height="62" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+        <text x="489" y="246" text-anchor="middle" font-size="12.5" font-weight="700">POLICY</text>
+        <text x="489" y="264" text-anchor="middle" font-size="9.5" class="dim">millions of steps</text>
+
+        <path d="M489,286 L489,306 L90,306 L90,286" stroke="#34d399" stroke-width="1.6" fill="none" stroke-dasharray="4 5"/>
+        <text x="290" y="322" text-anchor="middle" font-size="9.5" class="dim">act occasionally, log it, refit the model</text>
+
+        <text x="576" y="240" font-size="15" font-weight="700" fill="#34d399">10⁴ – 10⁵</text>
+        <text x="576" y="258" font-size="10" class="dim">real steps</text>
+
+        <path d="M30,382 C 220,378 400,362 660,336" stroke="#f87171" stroke-width="2" fill="none" class="flow-line"/>
+        <text x="30" y="356" font-size="10" class="dim">model error</text>
+        <line x1="150" y1="330" x2="150" y2="386" stroke="rgba(255,255,255,.2)" stroke-width="1" stroke-dasharray="3 4"/>
+        <text x="158" y="344" font-size="9.5" fill="#fbbf24">imagine only this far</text>
+        <text x="600" y="392" text-anchor="end" font-size="9.5" class="dim">imagined horizon →</text>
+      </svg>
+      <div class="diagram-caption">Compare the two counters on the right. The bottom loop needs one to four orders of magnitude fewer real steps, because the policy's gradient steps are served by the model and not by the environment. Then look at the red curve along the bottom. That is what you are buying it with: error that grows with every imagined step. That's why the dashed marker sits so far to the left.</div>
+    </div>
+
+    <p>How much the real-step bill matters depends on where the environment lives. An Atari emulator runs faster than real time and costs only electricity, so spending 200 million frames on it is routine. A physics simulator is nearly as cheap, but it only simulates what somebody wrote into it. Our robot arm runs at one times real time. If we assume one step per second, ten million steps would be 10,000,000 ÷ 86,400 ≈ 116 days of nonstop pushing, and that's before any time for resets or repairs. A power grid or a live recommender is worse, because nobody can explore it at all: a bad action there has consequences that can't be taken back.</p>
+
+    <p>Model-based RL changes what a real interaction buys. In the model-free loop, a real step buys one gradient step. In the model-based loop it buys a bit more knowledge about how the world behaves, and everything that used to be trial and error moves inside the model, where a step costs a matrix multiplication.</p>
+
+    <h4 class="why">What does the trade cost?</h4>
+    <p>You've swapped a sampling problem for a modelling problem. A model-free learner needs a lot of data, but it stays honest, because it's always evaluated against the real environment. A world model needs far less data, but it's wrong in a systematic way. If its errors were random noise, they'd average out over many steps. They don't. They're a bias, a consistent lean in one direction, and a policy that's optimising against the model will find that lean and use it, the way a player finds a bug in a game. Containing that is what the rest of this chapter is about. To contain it we first need to be exact about what the model is supposed to predict.</p>
+  </section>
+
+  <section id="what">
+    <h2><span class="num">02</span>What a world model is</h2>
+
+    <p>Strip the neural networks away and a world model is three small functions. The <strong>transition</strong> function takes the current state (everything the agent knows about the world right now, for us the arm's joint angles and the block's position) and an action, and predicts the next state. The <strong>reward</strong> function takes a state and predicts the reward, usually learned and occasionally known in closed form. The third, the <strong>continuation</strong> function, predicts whether the episode (one attempt, from start to finish) ends here. It's easy to forget, and without it an imagined rollout runs straight off the end of the world, because nothing tells it that the block already reached the marker or fell off the table.</p>
+
+    <div class="eq-block"><span>$$\hat{s}_{t+1},\ \hat{r}_t,\ \hat{c}_t \;=\; f_{\theta}(s_t, a_t)$$</span></div>
+
+    <p class="eq-explain">A world model is one learned function standing in for the environment's step method. Hats mark predictions, and θ stands for the parameters that training adjusts.</p>
+
+    <p>Everything from the earliest version to today's generative models is a choice about how to represent those three functions. The earliest is <strong>Dyna</strong>, which Sutton proposed in 1991. Here the agent acts in the real environment and stores each transition it sees. It then updates its value estimates (its running guesses of how much reward each state leads to) on the real transitions and also on transitions replayed from the learned model. Each real step can be used many times, so the model manufactures extra experience at no interaction cost.</p>
+
+    <p>That's the claim, and we can test it on something small enough to reason about completely. Our test environment is a corridor of 20 states with a reward at the far right end. The arm, for this test, is a token that can step left or right. Two learners see exactly the same random walk, step by step. One is model-free: it runs Q-learning, which keeps a table <code>Q[s, a]</code> estimating the future reward of taking action <code>a</code> in state <code>s</code>, and each real step nudges one entry of that table. The other is model-based. It only records what it sees in two tables, <code>T</code> for the next state after each state and action, and <code>R</code> for the reward. Once those tables are full, it runs value iteration, which sweeps over the tables again and again to work out the best action everywhere. That loop never touches the environment, so the code comments say it costs zero steps. <code>V[T]</code> looks up the value of whichever state each entry of <code>T</code> points to.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Two learners, identical data, and the step count each one needs</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+N = 20                       # a 20-state chain, reward at the far end
+
+def step(s, a):              # a=1 moves right, a=0 moves left
+    s2 = min(N - 1, s + 1) if a else max(0, s - 1)
+    return s2, float(s2 == N - 1)
+
+Q = np.zeros((N, 2))                # model-free: one backup per real step
+T, R = np.full((N, 2), -1), np.zeros((N, 2))   # model-based: keep s&#x27;, r
+s = mf = mb = 0
+for t in range(1, 100000):          # the SAME random data feeds both
+    a = int(rng.integers(2))
+    s2, r = step(s, a)
+    Q[s, a] += .5 * (r + .95 * Q[s2].max() - Q[s, a])
+    T[s, a], R[s, a] = s2, r
+    if not mf and (Q[:-1].argmax(1) == 1).all(): mf = t
+    if not mb and (T[:-1] &gt;= 0).all():
+        V = np.zeros(N)
+        for _ in range(100): V = (R + .95 * V[T]).max(1)  # costs 0 steps
+        if ((R + .95 * V[T]).argmax(1)[:-1] == 1).all(): mb = t
+    s = 0 if r else s2
+    if mf and mb: break
+print(&quot;Q&quot;, Q.shape, &quot; learned model T&quot;, T.shape, &quot;R&quot;, R.shape)
+print(&quot;model-free  policy correct after&quot;, mf, &quot;real steps&quot;)
+print(&quot;model-based policy correct after&quot;, mb, &quot;real steps&quot;)</code></pre>
+      <div class="tryit-out">Both learners are fed the identical random walk. Q-learning needs <code>1337</code> real steps before its greedy policy points right everywhere. The model-based learner is finished at <code>145</code>, about nine times fewer.</div>
+    </details>
+
+    <p>Read the two numbers against the explanation. One real step buys Q-learning exactly one backup, and the reward has to seep back down the corridor one state at a time, twenty states in all. The model-based learner is done at the moment <code>T</code> and <code>R</code> cover every state-action pair, because value iteration then extracts the best policy with no further interaction. It didn't know more than Q-learning did, and it didn't use a better algorithm or a bigger network. It stopped throwing away each transition after using it once.</p>
+
+    <p>That's the good half of the trade. The corridor's model is perfect, though, because the corridor is deterministic and fully covered. What happens when we have to learn the model from noisy data?</p>
+  </section>
+
+  <section id="compounding">
+    <h2><span class="num">03</span>Compounding error, and where the bill arrives</h2>
+
+    <p>A model that is 99% right on each step is nowhere near 99% right over a long rollout, and that one fact shapes most of the field. Why not? Think about what rolling a model out means. We give it a state and an action and get a predicted next state. To go one step further we have to give it that prediction as input, because there's no real state to use. That prediction has a small error, so the model is now working from a slightly wrong state, and its next output is wronger. By step three the input is wronger still. Slowly the trajectory walks off the part of the world the model was fitted on, where it has no reason to be accurate. It's the same mechanism that makes behavioural cloning drift in chapter <a href="/topics/21-robotics-embodied-ai">21</a>, with the dynamics model standing where the policy stood.</p>
+
+    <p>Let's measure it. In the code below, the true world is a gentle rotation of a two-number state, described by a matrix <code>A</code> that the model never sees. We generate 50 states, apply the rotation to each and add a little noise, and then <code>np.linalg.lstsq</code> finds the matrix <code>Ahat</code> that best maps the inputs to the noisy outputs. That matrix is the entire world model. Then we run two rollouts side by side from the same start, one with the true <code>A</code> and one with <code>Ahat</code>, and the model's rollout never gets corrected by data. The <strong>drift</strong> is the distance between the two states, shown as a percentage of the true state's size.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Fit a near-perfect one-step model, then watch a long rollout leave reality</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+# Ground truth: a gentle rotation. The model never sees this matrix.
+A = np.array([[0.995, 0.100], [-0.100, 0.995]])
+X = rng.normal(size=(50, 2))                  # 50 states, short rollouts
+Y = X @ A.T + 0.02 * rng.normal(size=(50, 2))   # one noisy step each
+Ahat = np.linalg.lstsq(X, Y, rcond=None)[0].T   # the entire world model
+
+print(&quot;pairs&quot;, X.shape, &quot;-&gt; model&quot;, Ahat.shape)
+print(&quot;worst one-step entry error %.4f&quot; % np.abs(Ahat - A).max())
+
+true = model = np.array([1.0, 0.0])
+for h in range(1, 201):
+    true = A @ true
+    model = Ahat @ model        # imagine on, never corrected by data
+    if h in (1, 5, 15, 50, 100, 200):
+        drift = np.linalg.norm(model - true)
+        print(&quot;horizon %3d   drift %.3f   %3.0f%% of true state&quot;
+              % (h, drift, 100 * drift / np.linalg.norm(true)))</code></pre>
+      <div class="tryit-out">The worst entry of the fitted matrix is off by <code>0.0065</code>, which any one-step validation loss would call excellent. At horizon 15 the drift is still only <code>7%</code> of the state. By horizon 200 the imagined state is <code>0.972</code> away from a true state whose norm is about 1, a drift of <code>97%</code>, so the prediction carries no information.</div>
+    </details>
+
+    <p>A one-step error of well under 1% turned into a 97% rollout error. Nothing is broken here, because the model is being asked to extrapolate 200 steps from a fit that was only ever checked on one. Notice the middle of the output as well: at 15 steps the drift is still small, and that's why short imagined rollouts are usable at all.</p>
+
+    <p>There's a standard bound that says how fast the gap grows. Suppose the true dynamics are deterministic and have a <strong>Lipschitz constant</strong> <span>$L$</span>, meaning that one step can stretch the distance between two states by a factor of at most <span>$L$</span>. Suppose also that the model's one-step error never exceeds <span>$\varepsilon$</span>. Then the gap after <span>$H$</span> steps obeys:</p>
+
+    <div class="eq-block"><span>$$\varepsilon_H \;\le\; \varepsilon \cdot \frac{L^{H} - 1}{L - 1}$$</span></div>
+
+    <p class="eq-explain">When <span>$L \approx 1$</span> this collapses to <span>$\varepsilon H$</span>, linear and survivable. That's the benign case above, where drift grew almost exactly linearly, at about <code>0.005</code> per step (0.972 over 200 steps). Any expansion in the dynamics pushes <span>$L$</span> above 1, the sum turns geometric, and the usable horizon collapses.</p>
+
+    <h4 class="why">If long trajectories say more about the future, why imagine short ones?</h4>
+    <p>Imagining far ahead looks like the obvious move, but it tends to backfire. Value estimates taken from a drifted rollout are confidently wrong, and the policy tends to learn to walk toward wherever the model hallucinates reward. <strong>MBPO</strong> (model-based policy optimization) made the fix explicit. It starts every imagined rollout from a real state drawn out of the replay buffer (the store of real transitions collected so far) and keeps the rollout short. Many short branches anchored to reality usually beat a few long fantasies. The whole Dreamer line, which we'll reach in section 05, follows the same rule: imagine briefly and constantly, and re-anchor on fresh real data all the time.</p>
+
+    <p>So the model should be trusted for a few steps at a time. That leaves a question we haven't asked yet. What should the model predict in the first place? For our arm the observation is probably a camera image, do we want it predicting pixels?</p>
+  </section>
+
+  <section id="latent">
+    <h2><span class="num">04</span>Latent dynamics: predict in a space built for predicting</h2>
+
+    <p>If the observation is a 64×64 colour image, predicting the next one means predicting 12,288 numbers (64 × 64 pixels × 3 colours), and almost none of them matter for control. Whether a pixel of the tabletop is slightly darker probably tells the arm nothing about where to push. Yet a pixel-level model may have to spend its capacity on all of them, and each one is a place for error to start compounding.</p>
+
+    <p>The <strong>latent dynamics</strong> idea splits the problem in two. An encoder maps each observation to a compact vector called the latent state, a short summary that keeps what's needed to predict the future and drops the rest. We then learn the dynamics inside that compact space. A decoder that turns latents back into images still exists, but mainly to give the encoder a training signal (if the latent can be decoded into the right image, it must have kept the useful information). Planning never calls it.</p>
+
+    <p>Three things improve at once. The model has far fewer parameters, so it fits from less data. A rollout becomes a small matrix multiplication and stops being a generated image. And the latent is trained to be predictable, which raw pixels never were.</p>
+
+    <p>To see it in a case small enough to run, the code below builds a world that is secretly two-dimensional but is observed through 64 numbers, a stand-in for an image. The matrix <code>W</code> turns the two hidden numbers into 64 observed ones, and <code>A</code> is the true rotation of the hidden state. Approach (a) predicts the observation directly, which needs a 64×64 matrix of weights fitted from only 100 pairs. Approach (b) first finds a 2-dimensional latent using an SVD, which finds the two directions along which the observations vary most (the rows of <code>E</code>), and then fits dynamics inside that. Both then roll out 20 steps from a fresh start that wasn't in the training data, and the error is reported relative to the true observation.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">The same system modelled in 64 dimensions and in 2, rolled out 20 steps</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+D, K, N = 64, 2, 100         # 64-dim observations of a 2-dim world
+A = np.array([[0.99, 0.12], [-0.12, 0.99]])   # true latent dynamics
+W = rng.normal(size=(K, D)) / np.sqrt(K)      # latent -&gt; observation
+Z = rng.normal(size=(N, K))
+O = Z @ W + 0.05 * rng.normal(size=(N, D))
+On = (Z @ A.T) @ W + 0.05 * rng.normal(size=(N, D))
+
+# (a) predict the observation itself: D*D weights from N pairs
+Mpix = np.linalg.lstsq(O, On, rcond=None)[0].T
+# (b) find a K-dim latent with an SVD, then predict inside it
+E = np.linalg.svd(O, full_matrices=False)[2][:K]
+Mlat = np.linalg.lstsq(O @ E.T, On @ E.T, rcond=None)[0].T
+print(&quot;pixel model&quot;, Mpix.shape, &quot; latent model&quot;, Mlat.shape)
+
+z = rng.normal(size=K)               # a fresh start, unseen in training
+pix, lat = z @ W, (z @ W) @ E.T
+for h in range(1, 21):
+    z, pix, lat = A @ z, Mpix @ pix, Mlat @ lat
+    if h in (1, 5, 20):
+        t = z @ W
+        print(&quot;h=%2d  pixel err %.3f   latent err %.3f&quot;
+              % (h, np.linalg.norm(pix - t) / np.linalg.norm(t),
+                 np.linalg.norm(lat @ E - t) / np.linalg.norm(t)))</code></pre>
+      <div class="tryit-out">At <code>h=1</code> the two models look comparable, <code>0.012</code> against <code>0.008</code>, so a one-step metric wouldn't separate them. By <code>h=20</code> the pixel-space model's error is <code>0.490</code> against the latent model's <code>0.016</code>, about thirty times apart.</div>
+    </details>
+
+    <p>At one step the two are nearly tied. It's the same trap as in the last section, since a one-step number can't tell them apart. They differ in what each has to get right. The pixel model holds 64×64 free parameters fitted from 100 pairs, so it absorbs the observation noise as if it were dynamics, and that noise then compounds. The latent model is just a <code>(2, 2)</code> matrix, four numbers in all, so it has fewer things to get wrong and they're compounded fewer times. Real systems learn the encoder instead of taking an SVD, and the latent probably carries a hundred or so dimensions instead of two, but the argument is the same: a learned bottleneck makes long-horizon prediction tractable.</p>
+
+    <p>That gives us the ingredients. One family of models has put them together and carried the idea for years, and it's worth following version by version, since each one fixed something the last one couldn't do.</p>
+  </section>
+
+  <section id="dreamer">
+    <h2><span class="num">05</span>PlaNet, the RSSM, and the Dreamer line</h2>
+
+    <p><strong>PlaNet</strong> (2018) learned latent dynamics from pixels and planned directly in the latent space. Its lasting contribution is the <strong>recurrent state-space model</strong> (RSSM), which keeps two kinds of information in the state at the same time. One is a <strong>deterministic path</strong>, a recurrent hidden state that carries information forward reliably. Without it the model forgets what it saw a few steps ago. The other is a <strong>stochastic path</strong>, a sampled latent that represents genuine uncertainty. Without it the model can't say "the block might slide either way" and ends up predicting the average of the two futures, a blur that never happens.</p>
+
+    <div class="eq-block"><span>$$h_t = f(h_{t-1}, z_{t-1}, a_{t-1}), \qquad z_t \sim q(z_t \mid h_t, o_t), \qquad \hat{z}_t \sim p(z_t \mid h_t)$$</span></div>
+
+    <ul class="eq-explain">
+      <li><span class="sym">h_t</span> is the deterministic state. It uses plain recurrence with no sampling, so information survives many steps.</li>
+      <li><span class="sym">q</span> is the posterior. It sees the actual observation <span>$o_t$</span>, so it is only available while training.</li>
+      <li><span class="sym">p</span> is the prior. It must guess <span>$z_t$</span> from <span>$h_t$</span> alone. Training pulls the prior toward the posterior.</li>
+    </ul>
+
+    <p>The last part is the trick. Once the prior can predict what the posterior would have said without seeing the next frame, you can run the model forward with no observations at all, and that's what imagination means here.</p>
+
+    <p><strong>Dreamer</strong> (2019) changed what you do with the model. PlaNet ran a fresh search at every step. Dreamer trains an <strong>actor</strong> (the policy) and a <strong>critic</strong> (a network that estimates how much reward a state leads to) on imagined latent trajectories, and it backpropagates value gradients through the learned dynamics. An expensive online search gets replaced by a network that has already done the work, so acting afterwards is a single forward pass.</p>
+
+    <p>Later versions kept the architecture and widened what it could do. DreamerV2 (2020) swapped Gaussian latents for discrete categorical ones, which handle multimodal futures better, and it was the first agent to reach human-level performance on the 55-game Atari benchmark by learning its behaviours inside a separately trained world model. DreamerV3 (2023) added normalisation and transformation fixes that let a single hyperparameter setting work across more than 150 tasks. Applied out of the box, it was the first system to collect diamonds in Minecraft from scratch, with no human data and no curriculum. DayDreamer (2022) took the same algorithm onto physical robots, learning online. A quadruped learned to roll off its back, stand and walk in one hour of real experience, without a simulator and without resets.</p>
+
+    <p>DayDreamer is the cleanest evidence for the claim we started with: one hour of wall-clock experience is the kind of budget a physical robot has. Dreamer uses its model to train a policy, though, and that's only one of the things a model can be used for.</p>
+  </section>
+
+  <section id="planning">
+    <h2><span class="num">06</span>Planning inside the model</h2>
+
+    <p>A world model hands you a cheap simulator, and what you do with it is a separate choice. There are three standard answers. One is to sample and score: draw hundreds of action sequences, roll each one through the model, keep the best few, refit the sampling distribution around them and repeat. This is the cross-entropy method, it needs no policy network at all, and PlaNet and PETS work this way. Another is Dreamer's answer, which we just saw: amortise the search into an actor and a critic, so that acting is one forward pass. A third is to search with a learned value, running Monte Carlo tree search (a search that expands the most promising moves first) over a learned model. That's MuZero.</p>
+
+    <p><strong>MuZero</strong> is the interesting case, because it declines to model the world. Its learned dynamics predict three quantities and no others: reward, value and policy. It never reconstructs a frame or a board position. This is <strong>value equivalence</strong>: the model has to be right about the quantities the search consumes, and any detail that can't change a value is free to be wrong.</p>
+
+    <h4 class="why">If the model drifts after a few steps, how can a long plan be any use?</h4>
+    <p>It can't, so every practical planner replans. It computes a plan of length <span>$H$</span>, executes one or two steps, observes what happened, and plans again from the true state. This is called <strong>model predictive control</strong>. Each replan starts from reality, so the compounding error resets to zero every step. A plan that would be nonsense at horizon 50 is perfectly fine when you only ever execute its first action. That's the same idea as MBPO's short branches, applied at decision time instead of training time.</p>
+
+    <p>The same machinery gives you <strong>counterfactual prediction</strong>. It can answer "what would have happened if I'd pushed from the left" without pushing from the left. That's how an agent compares options it never took. Generating counterfactuals is cheap, but being right about them is hard.</p>
+
+    <p>Everything so far has come from control, a field that starts from the agent and works outward to a model. The rest of the field arrives from the opposite direction, starting with models that generate video and working backwards toward control.</p>
+  </section>
+
+  <section id="video">
+    <h2><span class="num">07</span>Video prediction as a world model</h2>
+
+    <p>A model that predicts the next frame of a video is a world model with no actions and no reward. Add the actions and it becomes something a policy can use. <strong>Action-conditioned video prediction</strong> conditions the next frame on the past frames and on the action that was taken. Finn and Levine did this for robot arms in 2016 under the name visual foresight: they planned pushes by searching over action sequences and scoring the predicted frames. That's close to our running example.</p>
+
+    <p>Modern versions are generative video models, and they're far better at producing frames. GameNGen (2024) trained a diffusion model to predict the next DOOM frame from past frames and player inputs. It runs at 20 frames per second on a single TPU, and human raters are barely better than chance at telling short clips from the real game. Genie (2024) learned a latent action space from unlabelled internet video, so it can turn a single image or sketch into a controllable environment with no action labels anywhere in training. GAIA-1 (2023) and NVIDIA's Cosmos platform do the same for driving and physical AI, generating futures conditioned on actions and text.</p>
+
+    <p>It's easy to blur three things together here, so let's separate them. A <strong>simulator</strong> is written by a person. It's consistent by construction and wrong wherever that person's physics was wrong, and you can query it anywhere, including states no data ever covered. A <strong>generative video model</strong> produces plausible frames, and plausible frames aren't always consistent: an object can leave the frame and come back a different colour, and nothing in a per-frame loss objects. A <strong>world model</strong> is judged by whether a policy trained inside it works in the real environment, and that's a much harder test than looking right.</p>
+
+    <p>The live question through 2025 and 2026 is whether the video route reaches control. Frame quality and real-time interactivity have improved enormously. Long-horizon consistency and physical reasoning have improved much less, and those are exactly the properties a planner leans on. Chapter <a href="/topics/26-frontier-2026">26</a> tracks where that has got to. Is a frame even the right thing to predict?</p>
+  </section>
+
+  <section id="jepa">
+    <h2><span class="num">08</span>JEPA: predict representations, not pixels</h2>
+
+    <p>There's a third position, and it's worth taking seriously: predicting pixels is the wrong objective in the first place. A pixel loss spends most of its capacity on things that are both unpredictable and irrelevant, such as leaf texture, sensor noise and the exact shape of a shadow. A model that gets those wrong is penalised as hard as one that misses the oncoming car.</p>
+
+    <p>A <strong>joint-embedding predictive architecture</strong> (JEPA) predicts in representation space instead. You encode the context, encode the target, and train a predictor to match the target's embedding. There's no decoder and no reconstruction. One obvious objection is <strong>collapse</strong>: if the encoder emits a constant, prediction is perfect and nothing has been learned. JEPA variants avoid this with asymmetry, such as a stop-gradient (blocking learning signal from flowing through the target side), a slowly updated target encoder, or both. Chapter <a href="/topics/03-unsupervised-self-supervised">03</a> covers those tricks in their original setting.</p>
+
+    <p><strong>V-JEPA 2</strong> (2025) carried this into control. It's pre-trained on over a million hours of internet video with no action labels, then post-trained as an action-conditioned latent model on under 62 hours of unlabelled robot video, and it plans with that model zero-shot on a real Franka arm. Their bet is to learn the structure of the world from video nobody labelled, then attach actions using a small amount of interaction data.</p>
+
+    <p>With several kinds of model on the table, we need a way to tell whether any of them is good, and the obvious metric turns out to be misleading.</p>
+  </section>
+
+  <section id="evaluation">
+    <h2><span class="num">09</span>Evaluating a world model</h2>
+
+    <p>A world model has two jobs, and they're measured in incompatible ways. <strong>Prediction quality</strong> covers one-step and multi-step error, PSNR (a measure of how close a predicted image is to the real one) and FVD (a score for how realistic generated video looks). It's cheap and reproducible, and perhaps only loosely related to usefulness. <strong>Downstream control utility</strong> asks whether a policy trained or planned inside the model performs in the real environment. That's expensive and noisy, and it's the only thing that settles the question.</p>
+
+    <h4 class="why">How can a better pixel loss make control worse?</h4>
+    <p>Reconstruction loss is dominated by whatever occupies the most pixels. In a driving scene that's road and sky, and in our arm's case it's the tabletop and the wall behind it. A model can lower its loss by rendering the background more precisely while getting the small, fast, control-relevant object wrong, and then the numbers improve while the policies get worse. This is why PlaNet argued for judging the model on predicted reward over several steps and not on predicted observations.</p>
+
+    <p>An aggregate error number hides three specific failures, so each one needs its own probe. First, long-horizon consistency: roll out for hundreds of steps and check that the scene is still the same scene (does the room still have the same number of doors?). Second, object permanence and physical reasoning: occlude something, wait, then reveal it. Benchmarks such as IntPhys and Physion probe this directly, and models that look excellent frame to frame often fail it. Third, counterfactual accuracy: take one start state and two different action sequences, and the model has to predict two different futures and not a blurred average of both.</p>
+
+    <p>One more problem catches teams late: error where the policy goes. A model fitted on data from the old policy is probably accurate on the old policy's states. Training a new policy inside it usually moves the state distribution to exactly the region the model was never fitted on. Each round of improvement invalidates part of the model, and that's why the loop in the diagram, act occasionally and refit, never stops.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">10</span>Summary</h2>
+    <ol>
+      <li><strong>A world model is a learned simulator.</strong> It predicts the next state, the reward and whether the episode ends, from the current state and an action.</li>
+      <li><strong>It changes what real interactions buy.</strong> They go into fitting the model, and trial and error then happens inside it at the cost of a matrix multiplication. That's worth about 10⁴ to 10⁵ real steps in place of 10⁶ to 10⁸.</li>
+      <li><strong>The corridor shows the effect.</strong> With identical data, the model-based learner found the right policy after 145 real steps and Q-learning needed 1337.</li>
+      <li><strong>Model error is a bias, not noise,</strong> so a policy optimising against the model will find and exploit it.</li>
+      <li><strong>Error compounds along a rollout</strong> because each prediction becomes the next input. A one-step error of 0.0065 grew to 97% drift by step 200, and the bound grows linearly when L is near 1 and geometrically above it.</li>
+      <li><strong>Short imagined rollouts branched from real states win.</strong> MBPO makes this explicit, and the Dreamer line follows it.</li>
+      <li><strong>Predict in a latent space.</strong> A learned bottleneck means fewer parameters, cheap rollouts and a target built to be predictable. In the experiment it cut the 20-step error from 0.490 to 0.016.</li>
+      <li><strong>The RSSM keeps a deterministic path for memory and a stochastic path for uncertainty.</strong> Training pulls the prior toward the posterior, so the model can run forward with no observations.</li>
+      <li><strong>Planners replan.</strong> Model predictive control executes one or two steps of a plan and plans again from the true state, which resets compounding error. MuZero goes further and models only reward, value and policy.</li>
+      <li><strong>Video models and JEPA come at the problem from the other side.</strong> Frame quality alone doesn't make a world model, and JEPA predicts embeddings so that irrelevant detail isn't penalised.</li>
+      <li><strong>Judge a world model by control, not by loss.</strong> A better pixel loss can make policies worse, so probe long-horizon consistency, object permanence and counterfactuals, and always evaluate in the real environment.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">11</span>Build this</h2>
+    <p class="lede">The horizon trade-off on this page is a curve with a peak in it. You can plot that curve in an afternoon, on a laptop, in numpy.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Plot the imagination-horizon curve and find where it turns over</span>
+        <span class="proj-meta">~4 hours · numpy only</span>
+      </div>
+      <p>Build a control task small enough to solve exactly, learn its dynamics from a handful of real episodes, then train policies inside the model at several imagination horizons. What you are hunting for is a curve that rises and then falls.</p>
+      <ol class="proj-steps">
+        <li>Write a 2-D point-mass environment in numpy. State is position and velocity, action is a bounded acceleration, reward is negative distance to a target. Solve it with a scripted controller first so you know what good looks like.</li>
+        <li>Collect 20 real episodes under a random policy. Fit a linear dynamics model on the one-step transitions. Report its one-step error and its 50-step rollout error as two separate numbers.</li>
+        <li>Train a policy by random shooting inside the learned model, at imagination horizons H of 1, 3, 5, 15 and 50. Evaluate each resulting policy in the real environment, never in the model.</li>
+        <li>Plot real-environment return against H. Record where the peak sits, and keep the imagined return on the same axes for comparison.</li>
+        <li>Now alternate: collect 5 more real episodes using the current policy, refit the model, retrain, repeat five times. Watch the peak move to the right as the model improves.</li>
+        <li>The breakage: freeze the model after step 2, never refit it, and push H to 200.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the two curves separate. The policy reports steadily better news from inside the model while doing worse in the environment. That gap is model exploitation, happening in front of you.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> The frozen-model run puts the entire failure mode in one plot. The policy is not malfunctioning. It is doing its job perfectly against a reward signal that has quietly become fictional. The part worth sitting with is that no metric computed inside the model detects this, because inside the model everything is going well. Only a real rollout can tell you. That is why model-based systems are scored in the environment, and why the data-collection loop in step 5 exists at all.</div>
+    </div>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">12</span>What breaks</h2>
+    <p class="lede">World-model failures are rarely a bad architecture. They are a model being trusted somewhere it was never fitted.</p>
+
+    <ul>
+      <li><strong>The policy finds a hole in the model.</strong> Imagined return climbs steadily while real return is flat or falling. The agent has located a state where the model promises reward the environment does not pay.</li>
+      <li><strong>One-step error looks superb and 50-step rollouts are garbage.</strong> Validating on one-step transitions is the default, and it certifies nothing about rollouts.</li>
+      <li><strong>The model is accurate everywhere the old policy went.</strong> Then the new policy goes somewhere else, and the model has no data there. Each round of improvement invalidates part of the model.</li>
+      <li><strong>Imagined episodes never end.</strong> The continuation head was skipped, so the agent imagines collecting reward past a terminal state and learns to run into walls.</li>
+      <li><strong>The stochastic latent collapses.</strong> The posterior stops carrying information, the model turns deterministic, and every uncertain future is predicted as its own blurry average.</li>
+      <li><strong>Long rollouts lose the scene.</strong> Objects change colour, doors vanish, counts drift. A video world model can be excellent frame to frame and no longer the same world after thirty seconds.</li>
+      <li><strong>Reward is the hardest head to fit and the one that matters most.</strong> With sparse reward almost every imagined transition has reward zero, so the head predicts zero everywhere and imagination becomes worthless.</li>
+      <li><strong>Weeks go into the model's own metrics.</strong> Reconstruction loss falls steadily and control performance does not move, because nobody was running the policy in the real environment.</li>
+    </ul>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">13</span>Where you meet this in the wild</h2>
+    <p class="lede">Same idea, four very different reasons for wanting it.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card">
+        <div class="wild-head"><strong>Robots learning on real hardware</strong></div>
+        <p>This is the original motivation. Real steps are slow, wear out joints and break objects, so the only viable budget is hours of interaction and not years.</p>
+        <p class="reach reach-yes">Latent world model trained online, short imagined rollouts, constant refitting.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Autonomous driving</strong></div>
+        <p>Used mostly to manufacture the rare events that logged data does not contain. Generate the cut-in, the pedestrian at dusk, the debris in lane, then test a planner against them.</p>
+        <p class="reach reach-yes">Scenario generation, counterfactual replay and closed-loop evaluation.</p>
+        <p class="reach reach-no">Not, so far, the thing steering the car.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Neural game engines and agent environments</strong></div>
+        <p>Here the world model is the product. A learned engine can be conditioned on an image or a sentence, which no hand-built engine can do, and it generates training environments for agents at scale.</p>
+        <p class="reach reach-yes">Action-conditioned video generation with a latent action space.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Industrial and energy control</strong></div>
+        <p>Data-centre cooling, chemical plants, grid dispatch. Exploration is not permitted, so a model is fitted from logs and a controller plans against it. Much of this is system identification wearing newer clothes.</p>
+        <p class="reach reach-yes">Learned dynamics plus MPC, with hard safety limits enforced outside the model.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">14</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is a world model, and why would you train one?</summary>
+      <div class="qa-body"><p>A world model is a learned simulator of an environment's dynamics: given a state and an action it predicts the next state, the reward, and usually whether the episode has ended. You train one because model-free reinforcement learning pays for every improvement in real interactions, and in many settings those interactions are the scarce resource. A game emulator makes them nearly free, but a robot arm runs at one times real time and wears out, and a power grid or a live production system cannot be explored at all. A world model redirects the interaction budget: instead of spending real steps on trial and error, you spend them on fitting the dynamics, and then do the trial and error inside the model where a step costs a matrix multiply. The gain is sample efficiency and the cost is that the model is systematically wrong in ways the policy will find.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is the difference between model-based and model-free RL?</summary>
+      <div class="qa-body"><p>Model-free methods learn a policy or a value function directly from experienced transitions and never represent the environment's dynamics explicitly. Q-learning, DQN and PPO are all model-free. Model-based methods learn an explicit transition function, and often a reward function, then use it either to generate extra training data or to plan by searching over imagined action sequences. The practical difference is where the samples come from. A model-free learner performs one update per real transition, so improvement is bounded by how fast the environment can be run. A model-based learner can replay the same real transitions through a learned model to manufacture many more, or plan without collecting anything new. Model-free is asymptotically more reliable because it is always judged against reality; model-based is dramatically more sample efficient and inherits every error in the model it learned.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does compounding error limit rollout length, and what do you do about it?</summary>
+      <div class="qa-body"><p>Rolling a model forward means feeding it its own output, so the input at step two already contains the step-one error, and each subsequent prediction is made from a state further off the training distribution. Errors therefore accumulate rather than cancel. For deterministic dynamics with Lipschitz constant L and one-step error at most epsilon, the horizon-H gap is bounded by epsilon times (L^H minus 1) over (L minus 1), which is linear in H when L is near one and geometric as soon as L exceeds one. The consequence is that a model with an excellent one-step validation loss can produce a rollout that is completely uninformative fifty steps out. The standard mitigations are to keep imagined rollouts short, to branch each of them from a real state sampled out of the replay buffer rather than from an imagined one, which is MBPO's contribution, to replan from the true state after executing only one or two actions, which is model predictive control, and to keep refitting the model on fresh data as the policy changes where it goes.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What does the RSSM's split into deterministic and stochastic state buy you?</summary>
+      <div class="qa-body"><p>Each path fixes a failure of the other. A purely stochastic latent is resampled at every step, so information has to survive repeated sampling to persist, and in practice the model forgets context quickly and long-horizon prediction degrades. A purely deterministic recurrent state remembers reliably but cannot represent genuine uncertainty, so when the future is multimodal it predicts the average of the modes, which is often a state that cannot physically occur. The RSSM carries both: a recurrent deterministic hidden state that transports information across many steps, and a sampled stochastic latent conditioned on it that expresses what is genuinely unknown. Training fits a posterior that sees the current observation and a prior that does not, and pulls the prior toward the posterior. That is what makes imagination possible, because at rollout time only the prior is available and it has been trained to stand in for the posterior without ever seeing a frame.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does Dreamer learn behaviours in latent space rather than in pixel space?</summary>
+      <div class="qa-body"><p>Three reasons, all of them practical. First, cost: an imagined step in a compact latent is a small matrix operation, whereas an imagined step in pixel space means generating an image, and Dreamer needs enormous numbers of imagined steps to train an actor and a critic. Second, fit: a latent dynamics model has orders of magnitude fewer parameters than a pixel-space predictor, so it can be fitted from the small amount of real data that made the whole approach worthwhile. Third, and most importantly, predictability: the encoder is trained so that the latent is something the dynamics can actually predict, while raw pixels contain a great deal of high-frequency detail that is both unpredictable and irrelevant to control. A pixel loss forces capacity onto texture and noise. The decoder exists to supply a training signal for the representation, and planning never needs to call it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>MuZero never predicts observations. What does it predict, and why is that enough?</summary>
+      <div class="qa-body"><p>MuZero learns three functions: a representation function that maps the observation history to an abstract state, a dynamics function that takes an abstract state and an action to the next abstract state plus a predicted reward, and a prediction function that outputs a policy and a value from an abstract state. Nothing reconstructs an observation, and the abstract state has no imposed semantics at all. This is enough because Monte Carlo tree search only ever consumes rewards, values and policy priors, so a model that is correct about those is indistinguishable, from the search's point of view, from a perfect simulator. That is the value-equivalence principle: the model must be accurate about the quantities that affect decisions, not about the world. The benefit is that all of the model's capacity goes into decision-relevant structure rather than into rendering, which is why it works on Atari pixels and on Go without being given the rules. The cost is that the model is not interpretable or reusable for anything other than the task whose values it was trained on.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Your world model's validation loss is excellent but policies trained in it fail. Diagnose.</summary>
+      <div class="qa-body"><p>The first suspicion is that validation is measuring the wrong thing. One-step prediction error on held-out logged transitions says nothing about multi-step rollouts, so re-measure as multi-step rollout error and, more importantly, as predicted cumulative reward over the horizon you actually imagine at. The second suspicion is distribution shift caused by the policy itself: the model was fitted on data from an earlier policy, and training a new policy inside it drives the state distribution into regions with no data, where the model is extrapolating and the validation set cannot see it. Look for imagined return climbing while real return stays flat, which is the signature of model exploitation, and check whether the visited latent states during imagination fall outside the training set's support. Other common causes are a missing or badly fitted continuation head, so imagined episodes never terminate, a collapsed stochastic latent that averages multimodal futures, and a reward head that predicts zero everywhere because reward is sparse. The fixes are structural rather than clever: shorten the imagination horizon, branch rollouts from real replayed states, use an ensemble and penalise disagreement so the policy is discouraged from going where the model is uncertain, and refit the model on freshly collected on-policy data every iteration.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>When would you not use a world model?</summary>
+      <div class="qa-body"><p>When real interactions are cheap and the dynamics are hard to model, which is exactly the regime where model-free methods win. If you have a fast deterministic simulator, running it is both free and exactly correct, so learning an approximation of it buys nothing and introduces bias; you are better off spending the compute on more environment steps. The same argument applies when a good hand-written simulator already exists and the deployment gap is one of appearance rather than physics, where domain randomisation is usually the cheaper tool. World models also struggle where dynamics are chaotic or dominated by other agents, since prediction error grows too fast for any usable horizon, and in highly stochastic environments where the model must represent a wide distribution rather than a trajectory. A final practical case against is engineering cost: a world model adds an encoder, a dynamics model, reward and continuation heads, and an imagination loop, all of which can fail quietly. If you can afford the samples, the simpler system is usually the right call.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">15</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://worldmodels.github.io/" target="_blank" rel="noopener">
+        <div class="r-icon">🎮</div>
+        <div class="r-body"><div class="r-kind">Interactive</div><div class="r-title">World Models</div><div class="r-sub">Ha &amp; Schmidhuber, 2018. The interactive article that named the field, with a controller trained entirely inside the model's dream — arXiv:1803.10122</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1811.04551" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Learning Latent Dynamics for Planning from Pixels (PlaNet)</div><div class="r-sub">Hafner et al., 2018 — the RSSM in section 05, and latent-space planning from images — arXiv:1811.04551</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1912.01603" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Dream to Control: Learning Behaviors by Latent Imagination</div><div class="r-sub">Hafner et al., 2019 — actor-critic trained on imagined latent trajectories, with value gradients through the dynamics — arXiv:1912.01603</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2301.04104" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Mastering Diverse Domains through World Models (DreamerV3)</div><div class="r-sub">Hafner et al., 2023 — one configuration across 150+ tasks, and Minecraft diamonds from scratch — arXiv:2301.04104</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1906.08253" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">When to Trust Your Model: Model-Based Policy Optimization</div><div class="r-sub">Janner et al., 2019 — the argument for short rollouts branched from real states. The core of section 03 — arXiv:1906.08253</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1911.08265" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Mastering Atari, Go, Chess and Shogi by Planning with a Learned Model (MuZero)</div><div class="r-sub">Schrittwieser et al., 2019 — a model that predicts reward, value and policy and nothing else — arXiv:1911.08265</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2206.14176" target="_blank" rel="noopener">
+        <div class="r-icon">🤖</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">DayDreamer: World Models for Physical Robot Learning</div><div class="r-sub">Wu et al., 2022 — a quadruped learning to stand and walk in one hour of real experience, no simulator — arXiv:2206.14176</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2402.15391" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Genie: Generative Interactive Environments</div><div class="r-sub">Bruce et al., 2024 — a latent action space learned from unlabelled internet video, so any image becomes controllable — arXiv:2402.15391</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2408.14837" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Diffusion Models Are Real-Time Game Engines (GameNGen)</div><div class="r-sub">Valevski et al., 2024 — DOOM simulated by a diffusion model at 20 fps on one TPU — arXiv:2408.14837</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2506.09985" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">V-JEPA 2: Self-Supervised Video Models Enable Understanding, Prediction and Planning</div><div class="r-sub">Assran et al., 2025 — internet-scale video pre-training plus 62 hours of robot video, then zero-shot planning — arXiv:2506.09985</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/251" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Analyze Canary Deployment Health for Model Rollout</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1373" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Next-Hidden Loss with Recursive Rollout</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/688" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Teacher-Forced vs. Free-Running Rollout Evaluation</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/524" target="_blank" rel="noopener"><span class="dm-diff dm-hard">hard</span><span class="dm-title">Dyna-Q: Model-Based RL with Planning</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/683" target="_blank" rel="noopener"><span class="dm-diff dm-hard">hard</span><span class="dm-title">Goal-Conditioned World Model with Future Anchoring</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/598" target="_blank" rel="noopener"><span class="dm-diff dm-hard">hard</span><span class="dm-title">Model-Based Value Expansion</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">16</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/15-reinforcement-learning"><div class="rc-sec" style="color:var(--c-rl)">15 · Prerequisite</div><div class="rc-title">Reinforcement Learning</div><div class="rc-hook">MDPs, value functions and the model-free algorithms whose sample cost this page is trying to avoid.</div></a>
+      <a class="related-card" href="/topics/21-robotics-embodied-ai"><div class="rc-sec" style="color:var(--c-world)">21 · Where it pays off</div><div class="rc-title">Robotics &amp; Embodied AI</div><div class="rc-hook">The hierarchical stack a world model plugs into, and compounding error seen from the policy's side.</div></a>
+      <a class="related-card" href="/topics/12-generative-models"><div class="rc-sec" style="color:var(--c-genai)">12 · The video machinery</div><div class="rc-title">Generative Models</div><div class="rc-hook">VAEs and diffusion, which is what every generative video world model in section 07 is built from.</div></a>
+      <a class="related-card" href="/topics/20-3d-spatial-autonomous-driving"><div class="rc-sec" style="color:var(--c-world)">20 · Driving</div><div class="rc-title">3D, Spatial AI &amp; Autonomous Driving</div><div class="rc-hook">Where driving world models are used: scenario generation, counterfactual replay and closed-loop evaluation.</div></a>
+    </div>
+  </section>

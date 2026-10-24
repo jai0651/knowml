@@ -1,0 +1,408 @@
+---
+title: "Model Atlas: Vision & Generative Media"
+dek: "Follow a small online shop's shelf photos, scanned invoices, photo library and ad campaign through the four jobs people call \"vision\" and the models behind generated images and video, and learn how to read the benchmarks that rank them."
+readingTime: "~19 min"
+prereqs: "CNNs (05), vision foundation models (06)"
+group: "Model Atlas"
+label: "Chapter 35"
+description: "Vision-language models, detection and segmentation, OCR and document parsing, visual retrieval, image generation and video generation. The 2026 open-weight and closed shortlists, and why FID stopped being reported."
+---
+<section id="tldr">
+    <p>Picture a small online shop. Someone has taken a photo of a shelf and needs the boxes on it counted. A few thousand supplier invoices sit in a folder as scanned pages. The product photo library has grown to the point where nobody can find anything in it. And the marketing team would like posters and a short video ad without booking a studio. People call all of this "computer vision", but these problems ask for different kinds of model, and a model that handles one of them well can be a slow and expensive choice for another.</p>
+
+    <p>This chapter takes the shop's problems one at a time. Half of it is about understanding images, which turns out to be four separate jobs: <strong>describe</strong> an image in language, <strong>locate</strong> things in it, <strong>read</strong> a document, and <strong>embed</strong> an image as a vector so it can be searched. Each job has its own best model, and the most common design error is using a vision-language model for something a detector does better and a hundred times cheaper. The other half is about generating images and video. In that area open weights are at parity for most work: a 6B model under Apache 2.0 produces publishable images in eight steps on a 16 GB card.</p>
+
+    <p>Along the way we'll come back to one more question, which is how to read the numbers these models are ranked by. Generative benchmarks measure human preference, and preference includes style, so a model can win an arena by being prettier while ignoring half your prompt. You'll see where that comes from and what to read alongside it. The chapter assumes you've met CNNs (05) and the vision foundation models (06), so terms like detector, CLIP and ViT won't be explained from scratch.</p>
+
+    <p>One warning before any numbers. This page is a snapshot assembled on 6 September 2026, and image and video generation move faster than any other area on this site, so a six-month-old comparison here is obsolete. What stays true is the shape of each problem, the metric definitions and the licence structure. Check the live boards in section 14 before you quote a rank.</p>
+  </section>
+
+  <section id="four-jobs">
+    <h2><span class="num">01</span>Four jobs people call "vision"</h2>
+
+    <p>Start with the shelf photo. Three different people at the shop could ask three different things of it. One asks "what's on this shelf?", and wants an answer in a sentence. Another asks "where exactly is each box?", and wants a rectangle around every one. A third has a photo of an invoice and asks "what does this say, and what's in the total column?". A fourth has ten thousand photos and wants the ones that look like a red mug, which is maybe the hardest to do by hand. Each of these is a different job, and naming yours correctly rules out most of the field before you compare any models.</p>
+
+    <p>The first job is to <strong>describe</strong>: answer a question about an image in natural language. Its model is a <strong>vision-language model</strong> (VLM), a language model with an image encoder attached, so pictures become tokens the language model can read. It's flexible, expensive, and vague about exactly where things are.</p>
+
+    <p>The second job is to <strong>locate</strong>. A detector draws a box around each object it finds, and a segmenter goes further and marks the exact pixels that belong to each one, called a mask. These models are fast, cheap and precise, and they're limited to what they were trained or prompted to find.</p>
+
+    <p>The third is to <strong>read</strong>. A document model converts a page into structured text with its layout preserved, and the work goes well beyond recognising characters, because it has to rebuild the layout and the order in which things are read.</p>
+
+    <p>The fourth is to <strong>embed</strong>. A <strong>contrastive encoder</strong>, trained so that an image and a caption describing it land close together, turns an image into a vector, a list of numbers. Vectors that sit close together mean similar images, so you can use them for search, for finding duplicates, or for zero-shot classification (labelling images with classes the model was never explicitly trained on). It takes milliseconds per image and generates nothing.</p>
+
+    <h4 class="why">Why not ask a vision-language model to do all four?</h4>
+    <p>Because the cost difference is enormous and the VLM doesn't win on quality. Suppose the shop wants to count boxes on a shelf, or return the coordinates of each one, for every frame of a camera feed. A VLM will produce plausible-looking answers, at a hundred to a thousand times the cost of a detector, with worse accuracy and no calibration, which means its confidence can't be trusted or thresholded. So the rule of thumb is that if the output has a fixed shape, such as a box, a mask or a vector, a specialist model wants that job. Use the VLM for the open-ended part, and only for that part.</p>
+
+    <p>Generation is a fifth category, and it splits again into image, video and 3D. Sections 06 and 07 cover the first two. Sections 02 to 05 take the four understanding jobs in turn, beginning with the most flexible and most expensive one, because it's the one people reach for first.</p>
+  </section>
+
+  <section id="vlms">
+    <h2><span class="num">02</span>Vision-language models</h2>
+
+    <p>When the shop owner types "what's on this shelf?" next to a photo, a vision-language model answers. A few years ago multimodal models were a separate product line from language models. That's no longer true: the strongest open language models now accept images by default, so the VLM table and the LLM table have largely merged. Here are the current open ones, with the numbers their authors report.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model</th><th>Params</th><th>Licence</th><th>Inputs</th><th>Notable numbers</th></tr></thead>
+      <tbody>
+        <tr><td>Kimi K3</td><td>2.8T / 104B MoE</td><td>Kimi K3 (revenue-tiered)</td><td>image + text</td><td>MoonViT-V2 401M encoder; MathVision 94.3; MMVU 82.1; OSWorld-Verified 84.8</td></tr>
+        <tr><td>GLM-5.3-Flash</td><td>320B / 18B MoE</td><td>MIT</td><td>image + text</td><td>Natively multimodal; 300K context</td></tr>
+        <tr><td>DeepSeek-V4-Flash-Vision</td><td>305B MoE</td><td>open weights</td><td>image + text</td><td>Vision variant of the V4-Flash line</td></tr>
+        <tr><td>Qwen3.8-27B</td><td>27B dense</td><td>Apache 2.0</td><td>image + video + text</td><td>MathVision 94.6; OmniDocBench 1.5 91.1; OSWorld-Verified 84.3</td></tr>
+        <tr><td>Gemma 4 31B</td><td>31B dense</td><td>Apache 2.0</td><td>image + text</td><td>MMMU-Pro 76.9; 256K context</td></tr>
+        <tr><td>Gemma 4 12B</td><td>12B dense</td><td>Apache 2.0</td><td>image + audio + video + text</td><td>Audio to 30s, video to 60s; fits a 12 GB card at 4-bit</td></tr>
+        <tr><td>Gemma 4 E4B</td><td>4.5B effective</td><td>Apache 2.0</td><td>image + audio + video + text</td><td>Runs on a phone</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>In the Params column, "MoE" means a mixture of experts, where only part of the model runs for each token, so "2.8T / 104B" is the total size and the part used per token. "Dense" means all the parameters are used every time. Licence matters more than it looks, and we'll return to it in section 10.</p>
+
+    <h3 id="what-the-benchmarks-measure">What the benchmarks measure</h3>
+    <p>The right-hand column is full of benchmark names, and each one tests something different, so it helps to know what each one tests. <strong>MMMU</strong> and its harder rebuild <strong>MMMU-Pro</strong>, which has trickier wrong answers, are college-level questions across many subjects with diagrams and figures. They serve as the general capability score. <strong>MathVista</strong> and <strong>MathVision</strong> are mathematical reasoning problems where the necessary information is in the figure, which separates models that read a chart from models that guess from the caption.</p>
+
+    <p><strong>DocVQA</strong>, <strong>ChartQA</strong> and <strong>OCRBench</strong> measure how well a model reads documents and charts, and they're the practical proxy for whether it can handle your PDFs. <strong>OSWorld-Verified</strong> puts a model in front of a real desktop and gives it real tasks, so it's the benchmark for GUI agents, and it needs accurate grounding (pointing at the right place on the screen) on top of description. <strong>MMVU</strong> tests video understanding. That's a different problem again, because it adds reasoning over time and a much larger token budget.</p>
+
+    <h3 id="describing-is-not-locating">Describing is not locating</h3>
+    <p>Back to the shelf. A model can score in the nineties on visual mathematics and still miscount six identical boxes, or return a bounding box that's twenty pixels off. Describing what's in an image and saying precisely <em>where</em> it is draw on different capabilities, and benchmarks weight the first far more heavily than the second. So if your task needs coordinates, test coordinates directly. Grounding scores are the ones that matter for that, and OSWorld-style agentic numbers are a better proxy for them than MMMU. And if the shop needs coordinates for every frame of a camera feed, we're back at the first job's cheaper answer, which is a detector.</p>
+  </section>
+
+  <section id="detection">
+    <h2><span class="num">03</span>Detection and segmentation</h2>
+
+    <p>Locating things is the oldest branch of applied vision, and it's still the cheapest way to answer "where is it" at scale. The 2026 change is that you no longer have to choose between open vocabulary (finding things you name at the moment you ask) and real-time speed. Which of three families you want comes down to one question: do you know your class list in advance?</p>
+
+    <h3 id="closed-set-detectors">Closed-set detectors</h3>
+    <p>YOLO and its relatives are trained on a fixed class list, and they're tiny and fast enough to process video on embedded hardware. Adding a new class means collecting data and retraining. Reach for one when the class list is fixed and the frame rate is the constraint. For the shop's camera, the list is probably short, since it only needs boxes of a few known products, so this is the natural fit.</p>
+
+    <h3 id="open-vocabulary-detectors">Open-vocabulary detectors</h3>
+    <p><strong>SAM 3</strong> detects, segments and tracks every instance of a concept described by a text phrase or an example image, in images and in video, with no retraining for a new class. Reach for it when the classes are open-ended, or when you're exploring before you commit to a list. If someone at the shop says "find everything that looks like a damaged box", this is the tool, because nobody has a training set for that.</p>
+
+    <h3 id="promptable-segmenters">Promptable segmenters</h3>
+    <p>The Segment Anything lineage is prompted with a point, a box or a mask, and produces pixel-accurate outlines. It's the tool for when the shape matters and not only the location, so measurement, editing and annotation work belong here.</p>
+
+    <p>Each family has a weakness the next one fixes, and the pattern that has become standard combines two of them. Use SAM 3 to auto-label a large image set with high-quality masks, then train a small YOLO on that output for production. You get open-vocabulary flexibility at labelling time and real-time speed at inference time, which neither model gives you alone.</p>
+
+    <h3 id="scoring-a-detector">Scoring a detector</h3>
+    <p>To compare detectors you need a number, and it's <strong>mAP</strong>, mean average precision. A predicted box counts as correct when it overlaps a true box enough, and overlap is measured by <strong>intersection-over-union</strong> (IoU): the area the two boxes share divided by the area they cover together. mAP is usually averaged over IoU thresholds from 0.5 to 0.95 on COCO, a standard labelled image set. Chapter 05 covers where these come from.</p>
+
+    <p>Two things mAP hides matter before you compare numbers. Small objects drag the average down heavily, so a model tuned for them looks worse overall. And the <strong>non-maximum-suppression</strong> threshold, which decides how aggressively overlapping duplicate boxes are removed, is a tuning knob that moves mAP without changing the network. Detection handles the shelf. The invoices need something else, because the job there is to read.</p>
+  </section>
+
+  <section id="ocr">
+    <h2><span class="num">04</span>Document AI and OCR</h2>
+
+    <p>OCR, optical character recognition, means turning an image of text into text. For the shop's invoices that sounds like the whole job, and it became a solved-enough problem in 2026, because the framing changed. The task is no longer reading characters. It's reconstructing a document's structure. A modern document model takes a page image and emits Markdown or HTML with headings, reading order, tables, figures and formulas intact.</p>
+
+    <p>Character accuracy on clean text was never the hard part. <strong>Reading order</strong> on a two-column page with a sidebar, and <strong>table structure</strong> with merged cells, are the hard parts, and a stream of perfect characters in the wrong order is useless to the next system. Here are the main options and where each one is strong.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model</th><th>Approach</th><th>Notable</th></tr></thead>
+      <tbody>
+        <tr><td>PaddleOCR-VL 1.5</td><td>Document VLM</td><td>Around 94.5 on OmniDocBench v1.5 and 96.33 on v1.6; the accuracy leader, and the safe pick when the language is unknown</td></tr>
+        <tr><td>GLM-OCR</td><td>Document VLM</td><td>Around 94.62 on OmniDocBench v1.5 at roughly 1.86 pages per second; the throughput pick</td></tr>
+        <tr><td>DeepSeek-OCR 2</td><td>MoE decoder, ~570M active</td><td>Optical context compression, tuned for grounded Markdown at high throughput</td></tr>
+        <tr><td>dots.ocr</td><td>Layout-aware VLM</td><td>Strong on complex layouts</td></tr>
+        <tr><td>olmOCR</td><td>VLM pipeline</td><td>Robust on messy scans and handwriting</td></tr>
+        <tr><td>Tesseract, classic PaddleOCR</td><td>Traditional OCR</td><td>Orders of magnitude cheaper on clean, simple text. Still the right answer sometimes.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Those scores come from <strong>OmniDocBench</strong>, the benchmark that made this field comparable. It scores end-to-end page parsing across document types, with separate breakdowns for text, formulas, tables and reading order. Look at the sub-scores, because a model can lead overall and be weak on exactly the element type your corpus is full of. If the shop's invoices are mostly tables, the table score is the one to read.</p>
+
+    <h4 class="why">Why not send every page to the best model?</h4>
+    <p>Because document VLMs are language models, so they cost language-model money per page, and most pages don't need that. If ninety percent of the invoice pile is clean single-column text, route that ninety percent to a classical engine such as Tesseract and send only the hard pages to the VLM. Savings are large, and easy pages lose no quality. That's the last of the three jobs where the output is text or boxes. The fourth job doesn't produce either, and for the shop's unsearchable photo library it's the one that matters.</p>
+  </section>
+
+  <section id="visual-embeddings">
+    <h2><span class="num">05</span>Visual embeddings and retrieval</h2>
+
+    <p>Nobody can search the shop's photo library today, because the photos have no labels. This is where embeddings come in, and they're the quiet workhorse of this page: no generation, no prompt, milliseconds per image, and probably more production problems solved than anything else here.</p>
+
+    <p>A contrastive encoder in the CLIP and SigLIP lineage maps images and text into one shared space, so a photo of a red mug and the words "red mug" end up near each other. That single property gives you four things at once. You can search an image corpus by text, with no labels anywhere: embed the query, then return the images nearest to it. You can classify zero-shot, by embedding the class names and taking the nearest one to the image. You can find duplicates and near-duplicates, usually the first thing a large image pipeline needs, since two photos of the same mug sit almost on top of each other. And you can triage moderation, by measuring distance to reference concepts, as a cheap first pass before an expensive model looks at anything.</p>
+
+    <p>The newer multimodal retrievers go further. Qwen3-VL-Embedding-8B reports a mean task score around 67.9 on the multilingual MTEB (a benchmark suite for embedding models), with a matching reranker, and it handles image and text queries in one model.</p>
+
+    <p>For documents specifically, late-interaction retrievers changed the standard recipe. Older systems ran OCR on a page and then embedded the text. These models embed the <em>page image</em> directly and match at the patch level, comparing pieces of the query against pieces of the page. That removes the OCR stage from the retrieval path entirely, along with every error it would have introduced. With that, the shop has a tool for each of its understanding problems, and we can turn to the marketing team, who want pictures that don't exist yet.</p>
+  </section>
+
+  <section id="image-gen">
+    <h2><span class="num">06</span>Image generation</h2>
+
+    <p>Open image generators are closer to parity with closed ones than any other model family on this site, and the interesting axis stopped being quality some time ago. It's now steps, memory and licence. Before the table, three terms. A diffusion model builds an image by starting from noise and cleaning it up in repeated passes, each called a <strong>denoising step</strong> (chapter 12 explains how). A <strong>DiT</strong> is a diffusion transformer, a Transformer used as the network that does the cleaning. And a <strong>LoRA</strong> is a small add-on set of weights, trained to give a base model a particular style or subject, so a big library of LoRAs probably matters more than base quality when a brand needs a look. It makes a base model easy to bend to a brand.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model</th><th>Size</th><th>Licence</th><th>Steps</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Z-Image-Turbo</td><td>6B</td><td>Apache 2.0</td><td>8</td><td>Single-stream DiT, fits in 16 GB, bilingual text rendering</td></tr>
+        <tr><td>FLUX.1-schnell</td><td>12B</td><td>Apache 2.0</td><td>1–4</td><td>The permissive distilled default</td></tr>
+        <tr><td>FLUX.1-dev</td><td>12B</td><td>non-commercial</td><td>~20–50</td><td>The most fine-tuned base model in the ecosystem, and the largest LoRA library</td></tr>
+        <tr><td>Krea 2 Turbo</td><td>12B DiT</td><td>Krea 2 Community</td><td>8</td><td>Distilled from Krea 2, tuned for photographic realism</td></tr>
+        <tr><td>LLaDA-Image</td><td>7B</td><td>open weights</td><td>—</td><td>Diffusion-language approach rather than a standard latent diffusion stack</td></tr>
+        <tr><td>SDXL</td><td>3B</td><td>OpenRAIL++</td><td>~30</td><td>Older, smallest, still the widest tooling support</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Closed models still lead the human-preference boards. GPT Image 2 held a clear lead on the LMArena text-to-image board through mid-2026, with Gemini's image models, Recraft, Midjourney and Ideogram behind it. The gap is real, and it's probably narrower than the headline Elo spread suggests. <strong>Elo</strong> is a rating computed from head-to-head votes, and it rewards a house style as much as it rewards correctness, which section 08 comes back to.</p>
+
+    <h4 class="why">Why is a 6B model cheaper than a 3B one?</h4>
+    <p>Look at the Steps column against the Size column. A diffusion model's cost is the number of denoising passes, and parameter count matters less. Z-Image-Turbo at 6B and 8 steps is cheaper per image than SDXL at 3B and 30 steps, despite being twice the size, because it runs the network far fewer times. <strong>Distillation</strong> is what collapsed that number from fifty to under ten. It trains a fast student to reproduce in a few steps what a slower model does in many, and it's the single largest cost reduction in generative imaging.</p>
+
+    <p>It isn't free. Distilled models produce noticeably less variety across seeds, where a seed is the random starting noise that makes each image different. So if the marketing team wants twenty different options for one brief, the undistilled model is still the right tool. The build exercise at the end of the chapter lets you measure this loss yourself.</p>
+
+    <p>Two capabilities now matter more than raw fidelity for most products. <strong>Text rendering</strong> inside the image was broken until recently, and it's the difference between a usable poster and a re-shoot. And <strong>instruction-based editing</strong>, where you hand the model an image and a sentence describing the change, is a far more common production need than generating from nothing. Both matter for the shop's posters. Once stills work, the next request is the video ad.</p>
+  </section>
+
+  <section id="video-gen">
+    <h2><span class="num">07</span>Video generation</h2>
+
+    <p>Video generation is about two years behind image generation and closing fast. The open tier crossed from demo to production in 2026, largely because of one architectural change: generating audio and video together, so the clip arrives with its sound already in sync instead of needing a second model to add it.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Model</th><th>Size</th><th>Licence</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>LTX-2.5</td><td>22B DiT</td><td>LTX-2.x Community (free under $10M revenue)</td><td>Native synchronised audio and video in one pass; up to 4K via spatial upscaling; FP8 for smaller cards</td></tr>
+        <tr><td>MiniMax-H3</td><td>33B</td><td>open weights</td><td>Camera moves exposed as prompt tokens, so shot planning is controllable rather than accidental</td></tr>
+        <tr><td>Wan 2.2-TI2V-5B</td><td>5B</td><td>open weights</td><td>The small one. Text and image to video on modest hardware</td></tr>
+        <tr><td>HunyuanVideo 1.5</td><td>8.3B</td><td>open weights</td><td>Long clips on a single consumer card</td></tr>
+        <tr><td>FastVideo distillations</td><td>varies</td><td>varies</td><td>Four-step distillations of larger models. Same steps-versus-diversity trade as images</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>LTX-2.5 is interesting beyond its outputs. It uses a Gemma 4 12B model as its text encoder, which shows how the tiers on these three atlas pages compose: a language model from page 33 is a component inside a video model here. That last row of the table also repeats the lesson from images, since a four-step distillation of a larger video model buys speed at the price of variety.</p>
+
+    <p>Which of these should the shop build its ad pipeline on? There's a risk that has nothing to do with quality, and a hosted model shows it best. OpenAI notified developers on 24 March 2026 that the Sora 2 model and the Videos API would be removed. Its consumer app closed on 26 April 2026, and the API is removed on 24 September 2026, so anything built on it had six months to migrate. That's the clearest argument for open weights, and it doesn't depend on cost or quality: a downloaded checkpoint can't be deprecated. If a product depends on a specific look, keeping the weights that produce it is a business continuity decision.</p>
+
+    <p>The practical selection criteria for video also have little to do with benchmark scores. Ask about seconds of output per GPU-minute, peak VRAM at your target resolution, whether audio comes free or needs a second model, and what control you get over the result: first and last frame, camera path, reference images. Those four decide whether a model fits a production pipeline. But a chosen model still has to be compared with another, and that means reading benchmarks, and that's where decisions tend to go wrong.</p>
+  </section>
+
+  <section id="reading-benchmarks">
+    <h2><span class="num">08</span>Reading a generative benchmark</h2>
+
+    <p>Discriminative evaluation is easy to state, because a detector's box is either right or wrong. Generative evaluation has no correct answer to compare against, so everything published is a proxy, and knowing which proxy is which prevents most bad decisions.</p>
+
+    <p><strong>Arena Elo</strong> comes from humans voting blind between two outputs for the same prompt. It's probably the best available signal, but it conflates prompt adherence with aesthetic style.</p>
+
+    <h4 class="why">Why can a model win the arena and still ignore your prompt?</h4>
+    <p>Voters see two images and pick the one they like better. A model with a pleasing house look wins those votes even if it quietly dropped the "exactly five mugs" in the prompt, because the voter liked the picture. So Elo ends up counting beauty and obedience together, and you can't tell the two apart from the number. That's why it needs a companion that measures only one of them.</p>
+
+    <p><strong>GenEval</strong> is that companion for obedience. It runs automated compositional checks: is there the right <em>number</em> of objects, the right colours, the right spatial relations. It ignores beauty entirely, so it's useful to read alongside Elo. <strong>DPG-Bench</strong> tests adherence to long, dense prompts with many simultaneous constraints, which makes it the closest proxy for real production prompts. For video there's <strong>VBench</strong>, which breaks quality into dimensions such as subject consistency, motion smoothness and temporal flicker. Read the individual dimensions and treat the total with caution.</p>
+
+    <p>There's also a metric you'll see in older papers and rarely in new ones. <strong>Fréchet Inception Distance</strong> (FID) compares the statistics of generated images against a reference set. It answers "do these look like that distribution", which was the right question when models produced obvious artefacts. It's the wrong question now. FID can't see whether the model followed the prompt, it shifts with sample count and feature extractor, and a model can lower it by generating safe, average images. Once outputs became broadly realistic, the useful axis moved to instruction-following, and FID doesn't measure that at all.</p>
+
+    <p>One last correction applies to every published example. Demo images and videos are best-of-N, chosen by people whose job is to make the model look good. Your first generation is a sample from the distribution and not from the highlight reel. So judge on twenty unedited outputs from your own prompts. That's exactly what the build project below sets up.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">09</span>Summary</h2>
+    <ol>
+      <li><strong>"Vision" is four jobs.</strong> Describe an image in language, locate things in it, read a document, or embed it as a vector. Each has its own best model family, and naming your job first removes most of the field.</li>
+      <li><strong>A vision-language model is the wrong default for fixed-shape outputs.</strong> For boxes, masks and counts it costs a hundred to a thousand times what a detector does, with worse accuracy and no calibration. Use it for the open-ended part only.</li>
+      <li><strong>Describing and grounding are different skills.</strong> A model can ace visual maths and still return coordinates that are off, so test coordinates directly, and treat OSWorld-style scores as a better proxy than MMMU.</li>
+      <li><strong>Detection is chosen by whether the class list is known.</strong> A YOLO-style detector for a fixed list at video speed, SAM 3 for open-ended concepts, and a SAM 3 to YOLO pipeline when you want both.</li>
+      <li><strong>Modern OCR is document parsing.</strong> Reading order and table structure are the hard parts, so read the OmniDocBench sub-scores, and send only the difficult pages to a document VLM while a classical engine handles the clean ones.</li>
+      <li><strong>Embeddings quietly solve most search problems.</strong> A CLIP or SigLIP-style encoder gives text search, zero-shot classification, deduplication and moderation triage in milliseconds, and late-interaction retrievers can skip OCR for documents.</li>
+      <li><strong>Steps decide an image model's bill, more than parameters do.</strong> Distillation cut them from fifty to under ten, and the cost is less variety across seeds.</li>
+      <li><strong>Check the licence and the API before the quality.</strong> FLUX.1-dev is non-commercial, several video models carry revenue thresholds, and Sora 2's removal shows that a hosted model can disappear while a downloaded checkpoint can't.</li>
+      <li><strong>Choose video models on throughput, VRAM, audio and control,</strong> and not on published scores.</li>
+      <li><strong>Arena Elo mixes preference with obedience.</strong> Read GenEval and DPG-Bench for adherence and VBench's dimensions for video, and ignore FID for modern models.</li>
+      <li><strong>Demos are best-of-N,</strong> so judge any model on twenty unedited outputs from your own prompts.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">10</span>Build this</h2>
+    <p class="lede">Two hours with a fixed prompt set will tell you more than a week of reading comparisons, and it exposes a cost that no leaderboard reports.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Twenty prompts, three models, and the diversity a turbo model costs you</span>
+        <span class="proj-meta">~2 hours · one GPU or a hosted endpoint</span>
+      </div>
+      <p>Run a fixed prompt set across models, rate blind, and then measure the thing arenas never test: how much variety you lose when you drop from fifty steps to eight.</p>
+      <ol class="proj-steps">
+        <li>Write twenty prompts covering the cases you need. Include at least three with counting ("exactly five"), three with spatial relations, and three with text to render inside the image.</li>
+        <li>Generate four images per prompt per model, with fixed seeds, across a distilled model, an undistilled one and one closed API. Log step count, wall-clock time and peak VRAM.</li>
+        <li>Rate blind on two separate scales: did it follow the prompt, and does it look good. Keep the scores apart, because they will disagree and the disagreement is informative.</li>
+        <li>For the diversity test, generate sixteen images from one prompt with sixteen different seeds, for the distilled and undistilled model.</li>
+        <li>Compare the two grids of sixteen side by side.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> your adherence ranking and your aesthetic ranking put different models first. That split is precisely what a single Elo number hides, and it tells you which model to use for client work and which for exploration.</div>
+      <div class="proj-stretch"><strong>What the seed grid shows.</strong> The undistilled grid will contain several different compositions. The distilled grid will look like sixteen variations on one idea. Distillation collapses the output distribution, which is a fine trade when you know what you want and a bad one when you are searching for it. That cost appears in no benchmark, and it is the single most useful thing this project teaches.</div>
+    </div>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">11</span>What breaks</h2>
+    <p class="lede">The failures here are mostly framing errors made early and discovered late.</p>
+
+    <ul>
+      <li><strong>A VLM was used where a detector belonged.</strong> The answers are plausible, nothing is calibrated, and the bill scales with frames and not with objects.</li>
+      <li><strong>Grounding was never tested.</strong> The model describes the scene beautifully and its coordinates are unusable. Description scores do not predict grounding accuracy.</li>
+      <li><strong>Every page went through the expensive path.</strong> Clean single-column text does not need a document VLM. Routing by difficulty is usually a large, easy saving.</li>
+      <li><strong>The distilled model killed variety.</strong> Discovered during a shoot when every seed returns the same composition.</li>
+      <li><strong>The licence blocked the launch.</strong> FLUX.1-dev is non-commercial, several video models carry revenue thresholds, and the best-looking option is often the one you cannot ship.</li>
+      <li><strong>The API was deprecated.</strong> Sora 2 is the concrete case. Products whose visual identity depends on one hosted model inherit that model's lifecycle.</li>
+      <li><strong>Demo quality was assumed to be typical.</strong> Published samples are curated, so budget for a rejection rate and measure it before you promise a delivery schedule.</li>
+      <li><strong>Video VRAM was measured at the wrong resolution.</strong> Memory grows with frames times resolution. A model that fits at 480p and five seconds may not fit at 1080p and ten.</li>
+    </ul>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">12</span>Pick by use case</h2>
+    <p class="lede">Six shapes, and the model family each one implies.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card">
+        <div class="wild-head"><strong>Invoices and contracts at volume</strong></div>
+        <p>Structure matters more than prose: tables, totals, dates, reading order. A document VLM with a classical fallback for the easy pages.</p>
+        <p class="reach reach-yes">PaddleOCR-VL for accuracy, GLM-OCR for throughput, Tesseract for the clean ninety percent.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Real-time video analytics</strong></div>
+        <p>Fixed classes, many frames per second, often on embedded hardware. A closed-set detector, auto-labelled with an open-vocabulary model during development.</p>
+        <p class="reach reach-yes">SAM 3 to label, a small YOLO to serve.</p>
+        <p class="reach reach-no">Not a VLM per frame.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Search over a photo library</strong></div>
+        <p>Text queries against unlabelled images, plus deduplication. A contrastive encoder and a vector index, with no generation anywhere in the path.</p>
+        <p class="reach reach-yes">A SigLIP-class encoder, or a multimodal retriever if queries mix image and text.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Marketing image production</strong></div>
+        <p>Brand consistency, text inside the image, and many variations per brief. Fine-tuning and LoRA ecosystem matter more than base quality.</p>
+        <p class="reach reach-yes">FLUX.1-dev if non-commercial terms permit the workflow, Z-Image-Turbo or FLUX.1-schnell if they do not.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Short-form video</strong></div>
+        <p>Clips with synchronised audio, produced on a schedule. Seconds per GPU-minute is the metric that decides whether the pipeline is viable.</p>
+        <p class="reach reach-yes">LTX-2.5 for joint audio and video, MiniMax-H3 when the camera move is part of the brief.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Screen and GUI automation</strong></div>
+        <p>An agent that reads an interface and clicks it needs grounding and not just description, so the relevant benchmark is OSWorld and not MMMU.</p>
+        <p class="reach reach-yes">A VLM with strong agentic scores. Test coordinate accuracy on your own screenshots first.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">13</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>When should you use a detector rather than a vision-language model?</summary>
+      <div class="qa-body"><p>Whenever the output has a fixed shape and the class list is known. A detector returns boxes or masks with confidence scores, runs in milliseconds, and can be calibrated and thresholded, while a vision-language model returns free text that has to be parsed and cannot be calibrated the same way. The cost difference is one to three orders of magnitude per image, which matters enormously on video. The reasonable division of labour is to use the detector for locating and counting, and reserve the language model for open-ended questions where no fixed schema exists.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What does an open-vocabulary detector give you that a YOLO does not?</summary>
+      <div class="qa-body"><p>The ability to find classes it was never trained on, specified at inference time by a text phrase or an example image. A closed-set detector like YOLO can only produce the labels in its training set, so a new class means collecting data and retraining. An open-vocabulary model such as SAM 3 accepts a concept prompt and finds every instance of it in an image or a video. The trade is speed and size: closed-set detectors remain far faster and smaller, which is why the common production pattern uses the open-vocabulary model to generate labels and then trains a small closed-set detector on them.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why has FID fallen out of use for evaluating image generation?</summary>
+      <div class="qa-body"><p>Because it answers a question that is no longer the interesting one. FID measures the distance between the feature statistics of generated images and those of a reference set, so it detects unrealistic outputs, which was the dominant failure mode when it was introduced. It cannot see whether the model followed the prompt, and prompt adherence is where models now differ. It is also unstable with respect to sample count and the choice of feature extractor, and it can be improved by generating safe, average images, which is the opposite of what anyone wants. Evaluation moved to human preference arenas for overall quality and to compositional benchmarks like GenEval and DPG-Bench for adherence.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What does distillation cost a diffusion model, beyond the obvious?</summary>
+      <div class="qa-body"><p>Diversity. A distilled model reaches a good image in four to eight denoising steps instead of thirty to fifty, which is a very large cost reduction because a diffusion model's expense is dominated by the number of passes rather than by parameter count. The hidden cost is that the output distribution collapses: generating sixteen images from sixteen seeds yields variations on one composition rather than several genuinely different ideas. That is fine when you know what you want and bad when you are exploring. It is also invisible on arena leaderboards, which score single outputs, so it has to be measured with a seed grid.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why is modern OCR framed as document parsing rather than character recognition?</summary>
+      <div class="qa-body"><p>Because character accuracy on clean text stopped being the bottleneck years ago. What downstream systems actually need is structure: which text is a heading, what order the columns are read in, which cells belong to which row of a table, where a formula begins and ends. A stream of correct characters in the wrong order is unusable, and merged table cells destroy the meaning of every number in the row. So the current generation of models emits Markdown or HTML with layout preserved, and benchmarks like OmniDocBench score end-to-end page reconstruction with separate breakdowns for text, formulas, tables and reading order.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>A model tops the image arena but your users complain it ignores their prompts. Explain.</summary>
+      <div class="qa-body"><p>Arena Elo is a human preference score, and human preference conflates two things: whether the output satisfies the request, and whether it looks appealing. Voters see two images for a prompt and choose the one they like, so a model with a strong, attractive house style accumulates wins even when it quietly drops constraints, especially counting, spatial relations and text rendering, which are easy to overlook at a glance. The diagnosis is to score adherence separately with a compositional benchmark such as GenEval or DPG-Bench, or with your own rubric applied to your own prompts. It is common for adherence and aesthetic rankings to put different models first, and a product with specific requirements should be selecting on adherence.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you build a production pipeline that reads ten million PDFs?</summary>
+      <div class="qa-body"><p>Route by difficulty rather than sending everything through one model. Classify each page cheaply first: clean single-column text with an embedded text layer needs no vision model at all, and a classical engine handles simple scans at a tiny fraction of the cost. Send only complex layouts, tables, formulas and poor scans to a document VLM, since those are language models and cost language-model money per page. Validate structurally rather than by eye, checking that tables parse, that numbers reconcile and that reading order is monotonic, and sample a few hundred pages against a hand-built ground truth broken down by element type. Finally, consider whether retrieval even needs the text: a late-interaction retriever that embeds page images directly removes the parsing stage from the search path and every error it would have contributed.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>What are the real selection criteria for a video generation model?</summary>
+      <div class="qa-body"><p>Very little to do with published quality scores. Four operational questions decide it. Throughput, expressed as seconds of finished output per GPU-minute at your target resolution, because that sets both cost and schedule. Peak memory at that resolution and duration, since memory grows with frames times resolution and a model that fits at 480p may not fit at 1080p. Whether audio is generated jointly, because a separate audio model adds a synchronisation problem that joint models avoid. And what control surface exists: first and last frame conditioning, camera path, reference images, since a model that cannot be directed is a novelty rather than a tool. Licence sits alongside these, as several strong open video models carry revenue thresholds that convert to a paid agreement at scale.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">14</span>Go deeper</h2>
+    <p class="dek">Live boards first, then the papers that define the metrics.</p>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://lmarena.ai/leaderboard/text-to-image" target="_blank" rel="noopener">
+        <div class="r-icon">📊</div>
+        <div class="r-body"><div class="r-kind">Leaderboard</div><div class="r-title">LMArena — text to image</div><div class="r-sub">Blind human preference votes across open and closed image models. Read it as taste plus adherence, not adherence alone.</div></div>
+      </a>
+      <a class="resource-card" href="https://huggingface.co/spaces/opencompass/open_vlm_leaderboard" target="_blank" rel="noopener">
+        <div class="r-icon">📊</div>
+        <div class="r-body"><div class="r-kind">Leaderboard</div><div class="r-title">OpenCompass — open VLM leaderboard</div><div class="r-sub">Vision-language models scored across MMMU, MathVista, OCRBench and more, with per-benchmark breakdowns.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/opendatalab/OmniDocBench" target="_blank" rel="noopener">
+        <div class="r-icon">📊</div>
+        <div class="r-body"><div class="r-kind">Leaderboard</div><div class="r-title">OmniDocBench</div><div class="r-sub">End-to-end document parsing, with separate scores for text, formulas, tables and reading order. The board that made OCR comparable.</div></div>
+      </a>
+      <a class="resource-card" href="https://huggingface.co/spaces/Vchitect/VBench_Leaderboard" target="_blank" rel="noopener">
+        <div class="r-icon">📊</div>
+        <div class="r-body"><div class="r-kind">Leaderboard</div><div class="r-title">VBench — video generation</div><div class="r-sub">Video quality decomposed into subject consistency, motion smoothness, flicker and more. Read the dimensions, not the total.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2511.16719" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">SAM 3: Segment Anything with Concepts</div><div class="r-sub">Detect, segment and track every instance of a text-described concept in images and video — arXiv:2511.16719</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2310.11440" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">GenEval: An Object-Focused Framework for Evaluating Text-to-Image Alignment</div><div class="r-sub">Ghosh et al. — automated checks for counting, colour and spatial relations, which is obedience rather than beauty — arXiv:2310.11440</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2311.17982" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">VBench: Comprehensive Benchmark Suite for Video Generative Models</div><div class="r-sub">Huang et al. — why one video quality number is meaningless and sixteen dimensions are not — arXiv:2311.17982</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2601.03233" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">LTX-2: Efficient Joint Audio-Visual Foundation Model</div><div class="r-sub">The design behind generating synchronised audio and video in a single pass — arXiv:2601.03233</div></div>
+      </a>
+      <a class="resource-card" href="https://developers.openai.com/api/docs/deprecations" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">OpenAI API deprecations</div><div class="r-sub">The Sora 2 removal timeline in the vendor's own words. Worth bookmarking as a reminder of what an API dependency commits you to.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2311.16502" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">MMMU: A Massive Multi-discipline Multimodal Understanding Benchmark</div><div class="r-sub">Yue et al. — college-level questions with figures, and the aggregate most VLM comparisons lead with — arXiv:2311.16502</div></div>
+      </a>
+      <a class="resource-card" href="https://huggingface.co/models?pipeline_tag=text-to-image&amp;sort=trending" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">Hugging Face — trending image models</div><div class="r-sub">What the open generation community is running this week. Swap the pipeline tag for text-to-video or image-text-to-text.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/70" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Calculate Image Brightness</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/237" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Convert RGB Image to Grayscale</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/82" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Grayscale Image Contrast Calculator</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/240" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Bilinear Image Resizing</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/302" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Diffusion Reconstruction Loss</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/303" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Forward Diffusion Process</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">15</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/06-modern-vision-foundation-models"><div class="rc-sec" style="color:var(--c-visionfm)">06 · The mechanisms</div><div class="rc-title">Vision Foundation Models</div><div class="rc-hook">ViTs, CLIP, DINO and SAM explained rather than listed. Read this if the architecture names above are unfamiliar.</div></a>
+      <a class="related-card" href="/topics/12-generative-models"><div class="rc-sec" style="color:var(--c-genai)">12 · How generation works</div><div class="rc-title">Generative Models</div><div class="rc-hook">Diffusion, flow matching and latent spaces. The theory under sections 06 and 07.</div></a>
+      <a class="related-card" href="/topics/34-model-atlas-speech-audio"><div class="rc-sec" style="color:var(--c-atlas)">34 · Previous in this series</div><div class="rc-title">Model Atlas: Speech &amp; Audio</div><div class="rc-hook">Transcription, streaming, synthesis, isolation and noise suppression.</div></a>
+      <a class="related-card" href="/topics/33-model-atlas-language"><div class="rc-sec" style="color:var(--c-atlas)">33 · Start of this series</div><div class="rc-title">Model Atlas: Language Models</div><div class="rc-hook">Frontier, open-weight and on-device language models, and how to read their leaderboards.</div></a>
+      <a class="related-card" href="/topics/14-multimodal-ai"><div class="rc-sec" style="color:var(--c-multimodal)">14 · How images enter an LLM</div><div class="rc-title">Multimodal AI</div><div class="rc-hook">Vision encoders, projection layers and the training recipe that fuses the two modalities.</div></a>
+      <a class="related-card" href="/topics/05-cnn-vision-foundations"><div class="rc-sec" style="color:var(--c-vision)">05 · The foundations</div><div class="rc-title">CNNs &amp; Vision</div><div class="rc-hook">Where mAP, IoU and non-maximum suppression come from, and why detection is scored the way it is.</div></a>
+    </div>
+  </section>

@@ -1,0 +1,472 @@
+---
+title: "Recommenders, Ranking & Search"
+dek: "Follow Maya and a billion-video app through the three-stage funnel that picks her next video in 30 milliseconds. Along the way you will learn why retrieval needs two towers, and why the clicks used to train every stage are a record of the system's own earlier choices."
+readingTime: "~21 min"
+prereqs: "embeddings (09), dense retrieval (11)"
+group: "Decision & Retrieval Systems"
+label: "Chapter 16"
+description: "A billion items, thirty milliseconds: the retrieval-ranking-reranking funnel and why it has to be three stages. Two-tower models, in-batch negatives and logQ correction, learning to rank, ANN indexes, and the feedback loop that makes your training data a recording of your own past decisions."
+---
+<section id="tldr">
+    <p>Picture a video app with a billion videos in its catalogue, and a user named Maya who opens it on her phone one weeknight evening. She has watched a lot of cooking videos lately. The app has to fill her screen with videos she'll want, and it has about 30 milliseconds to do it before the page starts to feel slow. Software that picks, from a large catalogue, the few items a particular person is most likely to want is a <strong>recommender system</strong>, and the catalogue it picks from is called the <strong>corpus</strong>.</p>
+
+    <p>Why is that hard? The most accurate thing we could build would be a model that reads Maya's profile and one video's details together and outputs a score. Running that model once for each of a billion videos is far beyond 30 milliseconds. So production systems narrow the field first and score later. A cheap first stage <strong>retrieves</strong> about a thousand <strong>candidates</strong>, an expensive model then <strong>ranks</strong> them, and a last pass <strong>reranks</strong> the top few for variety and business rules. We'll see that the cheap stage has to be built as two separate encoders, called a <strong>two-tower</strong> model, and that this one engineering constraint dictates the architecture.</p>
+
+    <p>A second difficulty has nothing to do with speed. Every model here learns from what users clicked, but users could only click on what the previous version of the system chose to show them. So a click tells us what Maya picked out of what she was shown, and only indirectly what she wanted. That loop, with a model's own choices turning into its next training data, is the hardest problem in the chapter.</p>
+
+    <p>You should know what an <strong>embedding</strong> is, a list of numbers whose geometry carries meaning (chapter 09), and how dense retrieval compares such lists (chapter 11). We'll build up from the oldest recommendation idea, matrix factorization, to the two towers, then to the ranker and how it's trained. After that we look at the three ways the data misleads us, what to do about new users and new items, and how a billion vectors get searched in about a millisecond.</p>
+  </section>
+
+  <section id="funnel">
+    <h2><span class="num">01</span>The funnel</h2>
+
+    <p>Let's start with what Maya's request looks like from the system's side. Her phone sends a request, and somewhere a service has to turn "this user, right now" into an ordered list of ten or so videos. We met the constraint in the opening: every video can't be examined carefully, and the model that examines carefully gives the best answers. One way out is to spend effort unevenly, with a little on every video and a lot on the few that survive. Below is the resulting shape for one request, and the numbers on it are what force the design.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">One request through the funnel — the numbers are what force the design
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 340" xmlns="http://www.w3.org/2000/svg">
+        <rect x="30" y="60" width="132" height="120" rx="8" fill="#818cf8" opacity="0.14"/>
+        <rect x="30" y="60" width="132" height="120" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+        <text x="96" y="46" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">CORPUS</text>
+        <text x="96" y="112" text-anchor="middle" font-size="17" font-weight="700" fill="#e9e9ef">10⁹</text>
+        <text x="96" y="132" text-anchor="middle" font-size="10" class="dim">items</text>
+
+        <path d="M168,120 L206,120" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="212" y="76" width="120" height="88" rx="8" fill="#fbbf24" opacity="0.14"/>
+        <rect x="212" y="76" width="120" height="88" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+        <text x="272" y="46" text-anchor="middle" font-size="11" font-weight="700" fill="#fbbf24">RETRIEVAL</text>
+        <text x="272" y="112" text-anchor="middle" font-size="15" font-weight="700" fill="#e9e9ef">~1000</text>
+        <text x="272" y="130" text-anchor="middle" font-size="10" class="dim">candidates</text>
+        <text x="272" y="186" text-anchor="middle" font-size="9.5" fill="#fbbf24">two-tower + ANN</text>
+        <text x="272" y="199" text-anchor="middle" font-size="9.5" class="dim">~1 ms · no user-item</text>
+        <text x="272" y="211" text-anchor="middle" font-size="9.5" class="dim">interaction allowed</text>
+
+        <path d="M338,120 L376,120" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="382" y="90" width="108" height="60" rx="8" fill="#34d399" opacity="0.14"/>
+        <rect x="382" y="90" width="108" height="60" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+        <text x="436" y="46" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">RANKING</text>
+        <text x="436" y="116" text-anchor="middle" font-size="15" font-weight="700" fill="#e9e9ef">~100</text>
+        <text x="436" y="134" text-anchor="middle" font-size="10" class="dim">scored</text>
+        <text x="436" y="186" text-anchor="middle" font-size="9.5" fill="#34d399">heavy cross-features</text>
+        <text x="436" y="199" text-anchor="middle" font-size="9.5" class="dim">~20 ms · sees the pair</text>
+
+        <path d="M496,120 L534,120" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="540" y="100" width="94" height="40" rx="8" fill="#f472b6" opacity="0.14"/>
+        <rect x="540" y="100" width="94" height="40" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+        <text x="587" y="46" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">RERANK</text>
+        <text x="587" y="125" text-anchor="middle" font-size="14" font-weight="700" fill="#e9e9ef">~10</text>
+        <text x="587" y="186" text-anchor="middle" font-size="9.5" fill="#f472b6">diversity, freshness,</text>
+        <text x="587" y="199" text-anchor="middle" font-size="9.5" class="dim">policy, dedup</text>
+
+        <line x1="30" y1="248" x2="660" y2="248" stroke="rgba(255,255,255,.14)" stroke-width="1"/>
+        <text x="30" y="270" font-size="10.5" class="dim">cost per item</text>
+        <text x="96" y="290" text-anchor="middle" font-size="11" fill="#818cf8">~0</text>
+        <text x="272" y="290" text-anchor="middle" font-size="11" fill="#fbbf24">one dot product</text>
+        <text x="436" y="290" text-anchor="middle" font-size="11" fill="#34d399">a full forward pass</text>
+        <text x="587" y="290" text-anchor="middle" font-size="11" fill="#f472b6">whole-list logic</text>
+
+        <text x="30" y="320" font-size="10.5" class="dim">Each stage is ~10× smaller and ~100× more expensive per item than the one before it.</text>
+      </svg>
+      <div class="diagram-caption">Read the bottom row. Cost per item rises by orders of magnitude from left to right while the candidate count falls by roughly the same factor, and that product is what keeps total latency flat. The funnel isn't an optimisation somebody added later. It's the only shape that fits a billion items into 30 milliseconds, and every choice further down the page follows from which box it lives in.</div>
+    </div>
+
+    <p>First comes <strong>retrieval</strong>, also called candidate generation. It reduces a billion videos to about a thousand, taking roughly a millisecond, and its work has to be <strong>sublinear</strong> in the size of the corpus, which means doubling the catalogue must not double the work. That rules out anything that looks at Maya and a video together, because we'd have to do that once per video. Retrieval therefore gets the cheapest possible test, a single dot product between a vector for Maya and a vector for a video. Next, <strong>ranking</strong> scores the survivors precisely. It can afford a full pass of a large model per candidate, with rich features that see the pair together, because a thousand or so is a small number. Last, <strong>reranking</strong> looks at the finished list as a whole. Scoring each video on its own can't notice that three of the top five are near-identical, that nothing published this week made it in, or that one video breaks a policy, so reranking fixes those with whole-list logic.</p>
+
+    <p>This two-stage split was set out in the 2016 YouTube paper listed under "Go deeper", and the shape has barely changed since. What has changed is what sits inside each box, and the next few sections open them one at a time, starting with the oldest idea in the retrieval box: how can we guess what Maya wants if we know nothing about the videos themselves?</p>
+  </section>
+
+  <section id="cf">
+    <h2><span class="num">02</span>Collaborative filtering: the idea everything else refines</h2>
+
+    <p>Here's a surprising fact about recommendation: you don't need to know what a video is in order to recommend it. Suppose Maya and two other people have all watched the same five cooking videos, and the other two also loved a sixth one that Maya hasn't seen. Maya will probably like it too, and nothing in that guess used a title, a genre or a description. <strong>Collaborative filtering</strong> is this idea turned into a method. It uses only the record of who touched what, on the assumption that users who agreed in the past will agree again.</p>
+
+    <p>To make it precise, write the record as a table <span>$R$</span> with one row per user and one column per item, where each cell holds a rating or a watch. Such a table is enormously sparse, since a typical user has touched a vanishing fraction of the catalogue, so most cells are blank and the job is to fill them in. <strong>Matrix factorization</strong> does this by assuming the table is secretly <strong>low-rank</strong>, meaning it can be rebuilt from a small number of hidden tastes. Each user gets a short vector, each item gets a short vector of the same length, and the prediction for a cell is the dot product of the two:</p>
+
+    <div class="eq-block"><span>$$R \approx U V^{\top}, \qquad U \in \mathbb{R}^{m \times k},\ V \in \mathbb{R}^{n \times k}$$</span></div>
+
+    <p>Here <span>$m$</span> is the number of users, <span>$n$</span> the number of items, and <span>$k$</span> the length of each vector, the number of hidden factors we allow. Every user and every item becomes a <span>$k$</span>-dimensional vector, and a prediction is one dot product. Nobody tells the model what the factors mean. They're whatever directions of taste make the known cells come out right.</p>
+
+    <p>It's easier to believe once you see it work. Our code builds a tiny table of 6 users and 6 items. Users 0 to 2 like items 0 to 2, users 3 to 5 like items 3 to 5, and nobody says so. A 0 means the user never interacted with that item, so the mask on the line <code>mask = R &gt; 0</code> hides those cells from the loss, and the model learns from observed entries only. It uses <code>k = 2</code>, so every user and item is squeezed through two numbers. Each loop pass computes the error on observed cells and nudges <code>U</code> and <code>V</code> to shrink it, with a small <code>.05</code> pull toward zero (weight decay) to keep the vectors modest. After training it predicts four cells the model never saw.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Factorize a tiny ratings matrix and watch the blanks fill in</span>
+      </summary>
+<pre><code>import numpy as np
+
+# 6 users x 6 items. 0 = never interacted, so the model never sees it.
+# Users 0-2 like items 0-2. Users 3-5 like items 3-5. Nobody says so.
+R = np.array([[5., 0., 4., 1., 1., 0.],
+              [4., 5., 5., 1., 1., 1.],
+              [5., 4., 5., 1., 0., 1.],
+              [1., 1., 1., 5., 0., 5.],
+              [1., 1., 1., 4., 5., 5.],
+              [0., 1., 1., 5., 5., 4.]])
+mask = R &gt; 0                       # learn from observed entries only
+
+k = 2                              # two latent factors -- the bottleneck
+rng = np.random.default_rng(0)
+U = rng.normal(0, .1, (6, k))      # user vectors  (6, 2)
+V = rng.normal(0, .1, (6, k))      # item vectors  (6, 2)
+
+for _ in range(6000):              # plain SGD, with weight decay
+    err = mask * (R - U @ V.T)
+    U += .02 * (err @ V - .05 * U)
+    V += .02 * (err.T @ U - .05 * V)
+
+P = U @ V.T
+print(&quot;shapes:&quot;, U.shape, &quot;@&quot;, V.T.shape, &quot;-&gt;&quot;, P.shape, &quot;\n&quot;)
+for (u, i) in [(0, 1), (3, 4), (2, 4), (5, 0)]:
+    print(f&quot;user {u}, item {i}: unseen -&gt; predicted {P[u, i]:.1f}&quot;)</code></pre>
+      <div class="tryit-out">The four predictions are all for cells the model never saw. It puts user 0 on item 1 at <code>4.2</code> and user 3 on item 4 at <code>5.5</code>, but user 2 on item 4 at <code>1.0</code>. It has worked out which group each user belongs to and predicts accordingly, though nothing in the input said there were two groups. That fell out of forcing every user and item through <code>k=2</code> numbers.</div>
+    </details>
+
+    <p>Look at those four predictions. Every one is a cell the model never saw. It puts user 0 on item 1 at 4.2 and user 3 on item 4 at 5.5, yet user 2 on item 4 comes out at 1.0. It has worked out which group each user belongs to and predicts accordingly, even though nothing in the input mentioned groups.</p>
+
+    <h4 class="why">Why does squeezing through two numbers help?</h4>
+
+    <p>If <span>$k$</span> were large enough, <span>$UV^{\top}$</span> could reproduce <span>$R$</span> exactly, blanks excluded, and we'd have learned nothing, because the model would have stored each rating individually. That bottleneck is what forces it to find structure. Pushing millions of users through 64 numbers means the model has nowhere to keep the specifics, so the only way to explain the data is with patterns that carry over to cells it hasn't seen. This is the bottleneck argument from the autoencoder on page <a href="/topics/03-unsupervised-self-supervised">03</a>: compression forces generalisation.</p>
+
+    <p>So collaborative filtering gives every user and item a vector, and similar tastes end up as nearby vectors. That's probably most of what retrieval needs. What's left is making it work for a billion items and for users who aren't in the training table, and that brings us to the design where the user and item vectors come from two separate models.</p>
+  </section>
+
+  <section id="two-tower">
+    <h2><span class="num">03</span>Two-tower retrieval, and the constraint that shapes it</h2>
+
+    <p>Matrix factorization gives each user and item a vector, maybe 64 numbers long, that was looked up by its ID. We'd like to compute those vectors from features instead, such as Maya's device, language and recent watches, or a video's text and category, so that a user or video outside the training table still gets a vector. Using features the obvious way means is one big model that reads a user and an item together and outputs a score, with cross-attention between them and rich interaction features. That model would be far more accurate than a dot product. For retrieval it's also, perhaps surprisingly, banned, because at a billion items it would need a billion forward passes per request.</p>
+
+    <p>So retrieval accepts a hard rule: the user and the item must never meet until the final dot product. We use two separate encoders, one for users and one for items, and a single score:</p>
+
+    <div class="eq-block"><span>$$s(u, i) = f_{\theta}(u) \cdot g_{\phi}(i)$$</span></div>
+
+    <p>Here <span>$f_{\theta}$</span> is the user tower and <span>$g_{\phi}$</span> the item tower, each a neural network with its own parameters, and the two have no interaction until the end. That separation buys a great deal. Because <span>$g_{\phi}(i)$</span> doesn't depend on the user, every item vector can be computed offline, once, and loaded into an index. At request time we embed Maya with the user tower and search the index for the item vectors closest to hers, a job called approximate nearest neighbour search, which we'll get to in section 08. None of the billion gets touched.</p>
+
+    <p>Training needs positive examples, which are pairs of a user and an item they clicked, and it needs negatives, items the user didn't pick. Sampling negatives is awkward, so the common trick is to take them from the same batch. Our code builds two small towers, each a two-layer network (<code>nn.Sequential</code>) that turns raw features, 64 for users and 48 for items, into a 32-number vector. It then normalizes each vector to length 1 so the dot product behaves like cosine similarity. With a batch of <code>B = 8</code> pairs, where item <code>i</code> is the one user <code>i</code> clicked, the line <code>u @ v.T</code> scores every user against every item at once, giving an 8 by 8 table of scores called <strong>logits</strong>. Dividing by 0.05 sharpens the differences, and the loss is ordinary cross-entropy that asks each row to put its highest score on the diagonal.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">A two-tower model, in-batch negatives, and the shapes at every step</span>
+      </summary>
+<pre><code>import torch, torch.nn as nn, torch.nn.functional as F
+torch.manual_seed(0)
+
+D = 32                                 # embedding width
+user_tower = nn.Sequential(
+    nn.Linear(64, 128), nn.ReLU(), nn.Linear(128, D))
+item_tower = nn.Sequential(
+    nn.Linear(48, 128), nn.ReLU(), nn.Linear(128, D))
+
+B = 8
+user_feats = torch.randn(B, 64)        # (B, 64)
+item_feats = torch.randn(B, 48)        # (B, 48) item i is user i&#x27;s +ve
+
+u = F.normalize(user_tower(user_feats), dim=-1)   # (B, D)
+v = F.normalize(item_tower(item_feats), dim=-1)   # (B, D)
+
+logits = u @ v.T / 0.05                # (B, B) every user vs every item
+labels = torch.arange(B)               # the diagonal is the positive
+loss = F.cross_entropy(logits, labels)
+
+print(&quot;u&quot;, tuple(u.shape), &quot;v&quot;, tuple(v.shape))
+print(&quot;logits&quot;, tuple(logits.shape), &quot;loss&quot;, round(loss.item(), 3))</code></pre>
+      <div class="tryit-out">The tower outputs <code>u</code> and <code>v</code> are both <code>(8, 32)</code>, and <code>logits</code> is <code>(8, 8)</code>. Each row is one user scored against every item in the batch. The diagonal is the item they clicked, and the other <code>B-1</code> are free negatives you didn't have to sample. The untrained model prints a loss of <code>6.252</code>.</div>
+    </details>
+
+    <p>Notice the shape of <code>logits</code>, <code>(B, B)</code>. Each row is one user scored against every item in the batch. Its diagonal entry is the item they clicked, and the other <code>B-1</code> items are negatives that cost nothing extra, because they were already encoded for their own users. This is <strong>in-batch negative sampling</strong>.</p>
+
+    <h4 class="why">Why does batch size matter so much for a two-tower model?</h4>
+
+    <p>In ordinary supervised training, batch size mostly affects speed and gradient noise. Here it also sets how many negatives each positive is compared against, since the negatives are the other items in the batch. A bigger batch gives a harder, more informative comparison for every example.</p>
+
+    <p>Free negatives come with a bias, though. They're drawn from your traffic, so popular videos appear as negatives far more often than rare ones, and the model learns to push popular videos down, exactly backwards. A standard fix is a <strong>logQ correction</strong>: subtract the log of each item's sampling probability from its logit, so frequently sampled items aren't unfairly penalised. It comes from the 2019 Google two-tower paper linked at the end of the chapter, and skipping it is a common and quietly expensive mistake.</p>
+
+    <p>Retrieval now hands the ranker about a thousand candidates for Maya, and since the towers are done, the ranker can use everything retrieval was denied.</p>
+  </section>
+
+  <section id="ranking">
+    <h2><span class="num">04</span>Ranking: where the expensive model earns its keep</h2>
+
+    <p>A thousand candidates is small enough to score extravagantly, and this stage decides what Maya sees. Retrieval couldn't let her profile and a video interact, but the ranker can, so it receives cross features (facts about the pair), her long watch history, the video's recent click-through rate (the fraction of people shown it who clicked), and the time of day.</p>
+
+    <p>Here's the difficulty: useful signals are usually combinations. "Maya likes cooking videos" is a weak signal, while "Maya likes cooking videos, on a phone, in the evening" is a strong one. A plain multilayer perceptron can in principle learn such combinations, but on sparse categorical features, where most inputs are one-hot IDs, it does so slowly and badly. Two families of architecture attack this directly.</p>
+
+    <p><strong>Wide &amp; Deep</strong> (Google, 2016) runs two paths side by side. Its wide path is a linear model over hand-crafted cross features, which <em>memorises</em> specific combinations known to matter. Its deep path is a neural network that <em>generalises</em> to combinations it has never seen. Their outputs are summed and the two are trained jointly. <strong>DeepFM</strong> (2017) removes the hand-crafting. A factorization machine component (the dot-product idea from section 02 applied to features) learns every pairwise feature interaction automatically and shares its embeddings with a deep component, so no feature engineer has to write the crosses.</p>
+
+    <p>It's tempting to read the wide path as a legacy part that deep learning should have replaced. But some facts are arbitrary and have to be memorised: this user buys this brand of coffee, for no reason the features explain. A deep path can't store that without overfitting everything else, and the wide path can, so Wide &amp; Deep accepts that a recommender needs both memorising and generalising.</p>
+
+    <h3 id="sequence-matters-and-modelling-it-changes-the-answer">Sequence matters, and modelling it changes the answer</h3>
+
+    <p>So far we've treated Maya's history as a set. It is ordered, and the order carries information. If she watched three episodes of one series in a row, she wants the fourth, and a bag of her all-time favourites doesn't say that. <strong>SASRec</strong> (2018) applied a causal self-attention stack to the interaction sequence, predicting the next item from the ones before it. That's a language model over items instead of tokens, using the same architecture as page <a href="/topics/08-attention-transformers">08</a> with a different vocabulary.</p>
+
+    <p>We now have a model that scores each candidate for Maya, and what's left is how to train it. Its output is a list, and an ordered list is a different target from a single score.</p>
+  </section>
+
+  <section id="ltr">
+    <h2><span class="num">05</span>Learning to rank: three ways to phrase the loss</h2>
+
+    <p>You're producing an ordered list, but the obvious loss functions score one item at a time, and that mismatch has three standard answers. They differ in how much of the list the loss gets to see.</p>
+
+        <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Approach</th><th>What the loss sees</th><th>Optimises</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td>Pointwise</td><td>one item</td><td>predicted score vs. label</td><td>cheapest, ignores order entirely</td></tr>
+        <tr><td>Pairwise</td><td>two items</td><td>is the better one ranked higher?</td><td>matches the task, quadratic pairs</td></tr>
+        <tr><td>Listwise</td><td>the whole list</td><td>a ranking metric directly</td><td>closest to the goal, hardest to optimise</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p><strong>Pointwise</strong> treats ranking as regression or classification. Predict a click probability for each video, then sort by it. It's simple, and it's what most production rankers do, because sorting by a well-calibrated probability is a strong baseline. Its weakness is in the table: it ignores order entirely.</p>
+
+    <p><strong>Pairwise</strong> asks a narrower and better-posed question. Given a video Maya clicked and one she saw but skipped, does the model score the clicked one higher? <strong>BPR</strong> (Bayesian Personalized Ranking) is the canonical version for implicit feedback, meaning feedback inferred from behaviour such as clicks, with no star ratings. It models the chance that the clicked video outranks the skipped one as the sigmoid of the score gap, and it minimises the negative log of that chance. Here it is applied to three pairs, each with a score for the clicked item and a score for the skipped one.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">The BPR loss, which is three lines and one good idea</span>
+      </summary>
+<pre><code>import torch, torch.nn.functional as F
+
+# For one user: an item they clicked, and one they saw but skipped.
+s_pos = torch.tensor([2.10, 1.80, 1.50])   # scores for clicked items
+s_neg = torch.tensor([1.30, 1.10, 1.90])   # scores for skipped items
+
+# BPR maximises P(positive above negative) = sigmoid(s_pos - s_neg).
+margin = s_pos - s_neg
+per_pair = -F.logsigmoid(margin)
+
+print(&quot;margins:  &quot;, [round(m, 2) for m in margin.tolist()])
+print(&quot;per-pair: &quot;, [round(x, 3) for x in per_pair.tolist()])
+print(&quot;total:    &quot;, round(per_pair.mean().item(), 4))</code></pre>
+      <div class="tryit-out">The third pair is ranked wrong, because the skipped item scores higher, so its margin is negative and its per-pair loss is <code>0.913</code> against <code>0.371</code> and <code>0.403</code> for the two correct pairs. Nothing in the loss mentions a target value. BPR only claims that the clicked item belongs above the skipped one.</div>
+    </details>
+
+    <p>Only the difference between the two scores appears. The third pair is ranked wrong, because the skipped item scores higher, so its margin is negative and its loss is 0.913, against 0.371 and 0.403 for the two correct pairs. Notice what's absent: any target value. BPR never claims a video deserves a 4.2, only that it belongs above another one, and when no ratings exist that's the only honest thing to ask.</p>
+
+    <p><strong>Listwise</strong> goes after the ranking metric itself. Trouble is, ranking metrics are step functions of the ordering. Swap two items and the score jumps, so there's no usable gradient. LambdaRank sidesteps this by defining the gradient directly, weighting each pair by how much swapping it would move the metric NDCG, which we define next.</p>
+
+    <h3 id="the-metrics-and-what-each-one-refuses-to-tell-you">The metrics, and what each one refuses to tell you</h3>
+
+    <p>Three metrics come up constantly, and each answers a different question. <strong>Recall@k</strong> asks, of the items the user wanted, how many made the top <span>$k$</span>. It's the right metric for the retrieval stage, where the only goal is not losing anything good. <strong>MRR</strong> (mean reciprocal rank) is one over the rank of the first relevant hit, averaged over queries, which suits cases with one correct answer such as a navigational search. <strong>NDCG@k</strong> discounts each item's gain logarithmically by its position, then normalises by the best possible ordering, so a perfect list scores 1. It's the standard ranking metric because it knows position 1 beats position 10.</p>
+
+    <p>All three are offline metrics, computed against logged data, and that's their catch. Logs record what users did with the results of the old ranker. A new model that surfaces something better gets no credit for it, because nobody ever clicked a video the old system never showed. Serious recommender teams therefore treat offline metrics as a filter and decide with an online A/B test, in which two versions run on live traffic and real behaviour is compared. Page <a href="/topics/24-mlops">24</a> covers the experimentation machinery. And that observation, that the log is a record of the old model's choices, is where the real trouble starts.</p>
+  </section>
+
+  <section id="feedback-loop">
+    <h2><span class="num">06</span>The data lies, and it lies in a specific direction</h2>
+
+    <p>If you take one thing from this chapter beyond the funnel, make it this section. It separates people who have run a recommender from people who have read about one. A click isn't a statement that Maya wanted a video. It's a statement that she wanted it out of what she was shown, and what she was shown was chosen by the previous version of your model. Three problems follow from that, and they compound.</p>
+
+    <p>First there's <strong>position bias</strong>. Videos at the top of the screen get clicked because they're at the top, so if you train naively you learn that whatever you ranked first is good, and that's circular. Next comes <strong>exposure bias</strong>. A video that was never shown has no clicks, so it looks bad, so it stays unshown, and the set of videos you can learn anything about shrinks over time. Last is <strong>popularity feedback</strong>. Popular videos get recommended, which makes them more popular, which makes the model more certain about them, and the catalogue quietly collapses toward a small head.</p>
+
+    <h4 class="why">Why isn't this just ordinary distribution shift?</h4>
+
+    <p>Usually distribution shift means the world changed underneath the model. Here the model changed the world. Your system chooses the impressions, the impressions become the training data, and the training data trains the next system. It's a closed loop with your own model inside it. A better architecture doesn't break that loop, so the fixes concern data collection and leave the model alone.</p>
+
+    <p>Practical mitigations are unglamorous, and they work. One is to model position explicitly: feed the displayed position in as a feature during training, then fix it to a constant at serving time, so the model has to attribute some of each click to the slot and not only to the video. Another is <strong>inverse propensity weighting</strong>: weight each logged example by one over its probability of having been shown, so rarely shown videos count for more. A third is deliberate exploration, spending a small slice of traffic on videos the model is uncertain about, specifically to generate data you wouldn't otherwise get.</p>
+
+    <p>That last one is a genuine cost, because you're knowingly showing some users something worse now to have a better system later. How much to spend is the subject of the next section, which also covers a closely related problem, the users and videos with no history at all.</p>
+  </section>
+
+  <section id="cold-start">
+    <h2><span class="num">07</span>Cold start and exploration</h2>
+
+    <p>Collaborative filtering needs interaction history, and new users and new items have none. Every real system faces this daily, and it comes in three cases, only two of which have good answers. A new video is tractable: use content features such as text, images and category, so the item tower can produce a vector on day zero without any interactions. A new user is probably harder, since nothing about their taste is known yet. Fall back to popularity and context such as locale, device and referrer, then adapt quickly, because the first session matters disproportionately. A new system has no data at all, so it has to be content-based or rule-based until enough interactions accumulate, so the first version of a recommender is usually not a recommender.</p>
+
+    <p>Exploration is the systematic version of the same problem. At every request you can <em>exploit</em> what you know, showing what the model thinks Maya likes best, or <em>explore</em> to learn more, showing something whose value is uncertain, maybe a cooking video from a channel she's never watched. <strong>Epsilon-greedy</strong> shows a random item some fraction of the time. <strong>Thompson sampling</strong> is better behaved: it samples from the posterior over each item's value, meaning the model's current spread of beliefs about how good it is, and shows the highest sample, so uncertainty drives exploration and not a coin flip. Page <a href="/topics/15-reinforcement-learning">15</a> covers the bandit machinery properly.</p>
+
+    <p>One piece of the funnel is still unexplained, the search through a billion item vectors that we promised in section 03.</p>
+  </section>
+
+  <section id="ann">
+    <h2><span class="num">08</span>Making retrieval fast: ANN indexes</h2>
+
+    <p>Our user tower gives us a vector for Maya, and finding its neighbours among a billion others is a separate engineering problem with its own literature. Exact nearest-neighbour search compares the query with every vector, so it's linear in corpus size, which defeats the point. <strong>Approximate nearest neighbour</strong> (ANN) search gives up a small amount of recall for orders of magnitude of speed. Two families dominate.</p>
+
+    <p>Graph-based indexes such as HNSW build a navigable small-world graph over the vectors, in which each vector links to some near ones and a few distant ones, and then walk it greedily toward the query. This gives an excellent recall-latency tradeoff at a high memory cost. Partition-and-quantise indexes such as IVF-PQ, as implemented in FAISS, cluster the vectors, search only the nearest clusters, and compress each vector into a compact code. Their memory footprint is far smaller, and the price is some accuracy lost to the compression.</p>
+
+    <h4 class="why">Does a 98% recall index mean 98% good recommendations?</h4>
+
+    <p>No, and the difference is a common way for retrieval work to stall. An ANN index is measured against the exact nearest neighbours of the same embedding model, so 98% recall means you found 98% of what your model would have ranked highest. It says nothing about whether the model was right. Tuning the index to 99.5% while the embedding model is mediocre is effort in the wrong place.</p>
+
+    <p>That completes the funnel from request to list, and the recurring theme is that the model is rarely what fails. To believe the feedback loop from section 06, watch it happen, as the project below lets you do.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">09</span>Summary</h2>
+    <ol>
+      <li><strong>You can't score a billion items in 30 ms,</strong> so the system narrows first. It retrieves about a thousand candidates, ranks them with an expensive model, then reranks the top few for diversity and business rules.</li>
+      <li><strong>Each stage is about 10 times smaller and 100 times more expensive per item</strong> than the one before, which keeps total latency flat.</li>
+      <li><strong>Collaborative filtering uses only who touched what.</strong> Matrix factorization fills the blanks by giving every user and item a short vector, and the low rank is what forces it to generalise.</li>
+      <li><strong>Retrieval is a two-tower model</strong> because the item tower doesn't depend on the user, so every item vector is computed offline and indexed. User and item never meet until the final dot product.</li>
+      <li><strong>In-batch negatives are free but biased.</strong> Popular items appear as negatives too often, and a logQ correction fixes it.</li>
+      <li><strong>The ranker gets everything retrieval was denied,</strong> such as cross features and history. Wide &amp; Deep memorises and generalises, DeepFM learns interactions on its own, and SASRec models the order of the history.</li>
+      <li><strong>Pointwise, pairwise and listwise losses</strong> differ in how much of the list they see. BPR asks only whether the clicked item beats the skipped one.</li>
+      <li><strong>Offline metrics are measured on the old ranker's logs,</strong> so they reward agreeing with it. Use them as a filter and decide with an A/B test.</li>
+      <li><strong>The data is a record of your own earlier decisions.</strong> Position bias, exposure bias and popularity feedback compound, and the fixes are in data collection: model position, weight by inverse propensity, and explore.</li>
+      <li><strong>Cold start has content-based answers for new items</strong> and popularity and context for new users. Thompson sampling lets uncertainty drive exploration.</li>
+      <li><strong>ANN recall is measured against your own model,</strong> so a high-recall index can still serve poor recommendations if the embeddings are mediocre.</li>
+    </ol>
+  </section>
+  <section id="build">
+    <h2><span class="num">10</span>Build this</h2>
+    <p class="lede">The feedback loop in section 06 is the one thing here you should not take on trust. You can watch it happen in an afternoon, with no data and no GPU.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Simulate the feedback loop until your catalogue collapses</span>
+        <span class="proj-meta">~3 hours · numpy only</span>
+      </div>
+      <p>Build a synthetic world where you know the true user preferences, then train a recommender on its own logged clicks, repeatedly. You are not measuring accuracy. You are watching how fast the system stops being able to see most of its own catalogue.</p>
+      <ol class="proj-steps">
+        <li>Create 1,000 users and 500 items with known latent vectors. True preference is the dot product. This is ground truth that you never show the model.</li>
+        <li>Round one: show each user 10 random items. Simulate clicks by sampling from the true preference. Log the impressions <em>and</em> the clicks, not just the clicks.</li>
+        <li>Train matrix factorization on the logged clicks only. Use it to pick each user's next 10 impressions, simulate again, and repeat for 20 rounds.</li>
+        <li>Each round, record two things: what fraction of the 500 items has been shown to anyone at all, and mean true preference of what was shown.</li>
+        <li>Now rerun the whole thing with 10% of slots filled randomly, and plot both curves against the pure-exploitation run.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> catalogue coverage falls off a cliff in the first few rounds and then flattens near the bottom. The model is not broken and its offline accuracy will look fine — it is scoring well on exactly the items it chose to learn about.</div>
+      <div class="proj-stretch"><strong>What the exploration arm teaches.</strong> The 10%-random run will show <em>lower</em> mean preference early on, which looks like a worse system, and higher coverage throughout. Somewhere around round 8 to 12 the curves usually cross, and after that the explored system is better on the metric the greedy one was optimising. That crossover is the entire argument for spending traffic on exploration, and seeing where it falls for your own parameters is more convincing than any assertion here.</div>
+    </div>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">11</span>What breaks</h2>
+    <p class="lede">Recommender failures are rarely a bad model. They are a metric that stopped meaning what you thought.</p>
+
+    <ul>
+      <li><strong>Offline metrics improve, the A/B test does not.</strong> The single most common outcome. Your offline set was generated by the old ranker, so it rewards agreeing with it.</li>
+      <li><strong>The filter bubble closes.</strong> Coverage drops quietly while engagement looks stable, until the catalogue is effectively a few hundred items.</li>
+      <li><strong>Popularity masquerades as personalisation.</strong> A model that just predicts global popularity can score respectably. Always compare against that baseline explicitly — it is embarrassing how often it wins.</li>
+      <li><strong>Training and serving features drift apart.</strong> The ranker was trained on a feature computed one way in the warehouse and served one computed another way. Page <a href="/topics/24-mlops">24</a> calls this training-serving skew; it is endemic here because there are so many features.</li>
+      <li><strong>In-batch negatives punished popular items.</strong> No logQ correction, so the model systematically suppresses exactly the items most people want.</li>
+      <li><strong>The index degraded.</strong> Recall@k of the ANN index drifts as the corpus grows and nobody re-tunes it. Measured end to end, this looks like the model getting worse even though the model has not changed.</li>
+      <li><strong>Delayed feedback.</strong> A click arrives in seconds, a purchase or a cancellation in days. Train on the fast signal alone and you optimise for clickbait.</li>
+    </ul>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">12</span>Where you meet this in the wild</h2>
+    <p class="lede">Same funnel, very different weightings.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card">
+        <div class="wild-head"><strong>A video feed</strong></div>
+        <p>Enormous corpus, implicit feedback only, strong sequence signal. Watch time is the target, which immediately raises the question of whether watch time is the thing you want to maximise.</p>
+        <p class="reach reach-yes">Two-tower retrieval, sequential ranker, heavy diversity reranking.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>E-commerce search</strong></div>
+        <p>The query is an explicit statement of intent, which is a luxury a feed does not have. Relevance and revenue pull in different directions, and resolving that tension is a product decision as much as a modelling one.</p>
+        <p class="reach reach-yes">Hybrid lexical plus semantic retrieval, then a learned ranker over both.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Music streaming</strong></div>
+        <p>Repeat consumption is normal and desirable, which breaks the usual assumption that a consumed item should be suppressed. Sessions have a shape: a workout playlist is not a sleep playlist.</p>
+        <p class="reach reach-yes">Session-based models, strong context features.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Job or dating matching</strong></div>
+        <p>The market is two-sided, so a recommendation is only good if <em>both</em> parties want it, and one side has finite capacity — a job can be filled, a person can only reply so often.</p>
+        <p class="reach reach-yes">Reciprocal objectives plus congestion control.</p>
+        <p class="reach reach-no">Not a standard one-sided ranker.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">13</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why do recommender systems use a multi-stage funnel instead of one model?</summary>
+      <div class="qa-body"><p>Because cost per item and number of items cannot both be large. Scoring a billion items with a rich model inside a 30-millisecond budget is impossible, so the system narrows first with something cheap and scores later with something expensive. Retrieval reduces roughly a billion candidates to a thousand using a single dot product per item against a precomputed index. Ranking then scores that thousand with a full model that can afford cross features and long histories. A final reranking stage fixes list-level properties such as diversity and freshness that pointwise scoring cannot see. Each stage is about an order of magnitude smaller and two orders more expensive per item, which is what keeps total latency roughly flat.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is collaborative filtering, and what does matrix factorization add?</summary>
+      <div class="qa-body"><p>Collaborative filtering recommends using only the interaction matrix of who engaged with what, with no content features at all, on the assumption that users who agreed before will agree again. Matrix factorization implements that by assuming the sparse user-item matrix is approximately low-rank, factorizing it into a user matrix and an item matrix of some small dimension k, so a prediction becomes a dot product between a user vector and an item vector. The low rank is the essential part: forcing millions of users through a few dozen dimensions means the model cannot memorise individual entries and must find structure that generalises, which is what lets it predict the blanks.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why must a retrieval model keep user and item towers separate?</summary>
+      <div class="qa-body"><p>So that item vectors can be computed offline. If the architecture lets user and item features interact before the final score, every item's representation depends on the user, and you would have to run the model once per item per request — a billion forward passes. Restricting interaction to a single dot product at the end means the item tower can be evaluated once per item, ahead of time, and stored in an approximate nearest neighbour index. At request time you embed only the user and query the index, which is sublinear in corpus size. The accuracy cost is real, since no cross features are possible, and that is precisely what the ranking stage exists to recover on the surviving thousand candidates.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What are in-batch negatives, and what bias do they introduce?</summary>
+      <div class="qa-body"><p>In a batch of B user-item positive pairs, you score every user against every item in the batch, giving a B×B matrix whose diagonal holds the true positives and whose off-diagonal entries serve as negatives. It is efficient because the negatives are already encoded, and it makes batch size effectively the negative count. The bias is that negatives are sampled from your traffic distribution, so popular items appear as negatives far more often than rare ones and the model learns to suppress them — exactly backwards. The standard correction is logQ: subtract the log sampling probability of each item from its logit so frequently sampled items are not penalised for being frequent.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Compare pointwise, pairwise and listwise learning to rank.</summary>
+      <div class="qa-body"><p>Pointwise treats each item independently, predicting a score or click probability and sorting by it. It is simple, calibrated and ignores the fact that ranking is about relative order, yet it remains a strong production baseline. Pairwise looks at two items at a time and asks only whether the better one is scored higher, which matches the real task better and suits implicit feedback where absolute relevance labels do not exist; BPR is the canonical example. Listwise optimises a ranking metric over the whole list, which is closest to the goal but hardest to train, because metrics like NDCG are step functions of the ordering with no usable gradient. LambdaRank works around this by defining the gradient directly, weighting each pair by the NDCG change that swapping it would cause.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Your offline NDCG improves by 8% but the A/B test is flat. What is going on?</summary>
+      <div class="qa-body"><p>The most likely explanation is that offline evaluation rewards agreement with the system that produced the logs. Your evaluation set records impressions chosen by the current ranker, so a new model can only be credited for items that were already shown; anything genuinely better that the old system never surfaced has no click to be right about. Related causes are position bias, where the model learns that whatever was ranked first gets clicked and so learns the old ranker's ordering, and a train-serve feature mismatch that only manifests online. Diagnose by checking whether the gain persists on a small randomly-ranked exploration slice, which is unbiased by construction, by inspecting how much of the improvement is concentrated in top positions, and by verifying feature parity between training and serving. The general rule is that offline metrics filter candidates for an online test rather than substituting for one.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Explain the feedback loop in a deployed recommender and how you would mitigate it.</summary>
+      <div class="qa-body"><p>The model chooses impressions, impressions generate clicks, clicks become training data, and that data trains the next model, so the system is learning from a world it created. Three effects compound: position bias, where clicks reflect placement rather than preference; exposure bias, where unshown items accumulate no evidence and therefore stay unshown; and popularity amplification, where recommending popular items makes them more popular and shrinks effective catalogue coverage. This is not ordinary distribution shift, because the model caused it, so no architectural change escapes it. Mitigations act on data collection rather than the model: include displayed position as a training feature and hold it constant at serving so the model attributes some click probability to the slot, weight logged examples by inverse propensity so rarely-shown items count for more, and reserve a slice of traffic for deliberate exploration that produces unbiased data. Exploration has a genuine short-term cost, which is the point — you are paying now for data you cannot otherwise obtain.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you handle cold start for a brand-new item in a two-tower system?</summary>
+      <div class="qa-body"><p>Make the item tower depend on content rather than on an ID embedding. If the tower consumes text, images, category and other metadata, it can produce a usable vector the moment the item is created, with no interactions at all, and that vector can be indexed immediately. A pure ID embedding cannot: it is randomly initialised and stays random until interactions arrive, which they will not, because an unindexed item is never shown. In practice you blend the two, learning an ID embedding that gradually takes over as evidence accumulates while the content vector carries the early period. Alongside that, reserve some exploration traffic specifically for new items so they accumulate evidence at all, and expect that without it the system has no mechanism to ever discover them.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">14</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://research.google/pubs/deep-neural-networks-for-youtube-recommendations/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Deep Neural Networks for YouTube Recommendations</div><div class="r-sub">Covington, Adams &amp; Sargin, RecSys 2016 — where the candidate-generation / ranking split was laid out. The origin of the funnel on this page.</div></div>
+      </a>
+      <a class="resource-card" href="https://research.google/pubs/sampling-bias-corrected-neural-modeling-for-large-corpus-item-recommendations/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Sampling-Bias-Corrected Neural Modeling for Large Corpus Item Recommendations</div><div class="r-sub">Yi et al., RecSys 2019 — the two-tower retrieval model and the logQ correction for in-batch negatives.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1205.2618" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">BPR: Bayesian Personalized Ranking from Implicit Feedback</div><div class="r-sub">Rendle et al. — the pairwise loss in section 05, and the standard way to train on clicks rather than ratings — arXiv:1205.2618</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1606.07792" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Wide &amp; Deep Learning for Recommender Systems</div><div class="r-sub">Cheng et al., 2016 — memorisation and generalisation as two paths trained jointly — arXiv:1606.07792</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1703.04247" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">DeepFM: A Factorization-Machine based Neural Network for CTR Prediction</div><div class="r-sub">Guo et al., 2017 — learns pairwise feature interactions without hand-crafted crosses — arXiv:1703.04247</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1808.09781" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Self-Attentive Sequential Recommendation (SASRec)</div><div class="r-sub">Kang &amp; McAuley, 2018 — a causal transformer over the interaction sequence. Page 08's architecture, item vocabulary — arXiv:1808.09781</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1603.09320" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Efficient and robust approximate nearest neighbor search using HNSW graphs</div><div class="r-sub">Malkov &amp; Yashunin — the graph index behind most vector databases — arXiv:1603.09320</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1702.08734" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Billion-scale similarity search with GPUs (FAISS)</div><div class="r-sub">Johnson, Douze &amp; Jégou — IVF-PQ and the memory-accuracy tradeoff in section 08 — arXiv:1702.08734</div></div>
+      </a>
+      <a class="resource-card" href="https://faiss.ai/" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">FAISS</div><div class="r-sub">The library to build the index with. Start here before reaching for a hosted vector database.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">15</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/11-rag-agents-reasoning"><div class="rc-sec" style="color:var(--c-rag)">11 · Directly reused</div><div class="rc-title">RAG, Agents &amp; Reasoning</div><div class="rc-hook">Dense retrieval and rerankers, which are the same two-stage idea applied to documents instead of items.</div></a>
+      <a class="related-card" href="/topics/15-reinforcement-learning"><div class="rc-sec" style="color:var(--c-rl)">15 · The exploration half</div><div class="rc-title">Reinforcement Learning</div><div class="rc-hook">Bandits, Thompson sampling and the exploration-exploitation tradeoff in section 07, properly.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">A/B testing, feature stores and training-serving skew — the failure modes in section 11.</div></a>
+      <a class="related-card" href="/topics/09-nlp-evolution"><div class="rc-sec" style="color:var(--c-nlp)">09 · Where embeddings start</div><div class="rc-title">NLP Evolution</div><div class="rc-hook">Learning a vector whose geometry means something, which is what both towers are doing.</div></a>
+    </div>
+  </section>

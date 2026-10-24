@@ -1,0 +1,618 @@
+---
+title: "Real-Time Voice AI: The Latency Budget"
+dek: "Follow one question to a voice agent, \"What's my balance?\", from the moment the caller stops talking to the first sound of the reply. You'll see where the milliseconds go, how the agent decides the caller has finished, and what interruptions and packet loss do to the pipeline."
+readingTime: "~29 min"
+prereqs: "the speech stack (13), time to first token (31)"
+group: "Hands-on"
+label: "Chapter 39"
+description: "A voice agent is a budget problem before it is a speech problem. Where the milliseconds go between the end of your sentence and the start of its reply: endpointing, streaming ASR chunk size, time to first audio, barge-in, jitter buffers, and the cascade versus speech-to-speech trade."
+---
+<section id="tldr">
+    <p>Picture a customer phoning a support line and asking a voice agent, "What's my balance?" The moment they finish the last word, a clock starts. The caller is waiting to hear something back, and every extra tenth of a second makes the pause feel less like a conversation and more like a bad connection. This chapter follows that one turn, from the instant the caller stops speaking to the instant the first sound of the reply reaches their ear, and asks where the time goes.</p>
+
+    <p>A <strong>voice agent</strong> is usually built as three programs in a row, which we'll call a <strong>cascade</strong>. A speech recogniser (<strong>ASR</strong>, for automatic speech recognition) turns the caller's audio into text. A language model (<strong>LLM</strong>) reads that text and writes a reply. A speech synthesiser (<strong>TTS</strong>, for text-to-speech) turns the reply back into audio. You met the speech pieces in chapter 13 and the model's time to first token in chapter 31. What's new here is that each piece has to run while the others are still working, and that audio has to travel to and from the caller's phone as well.</p>
+
+    <p>You might expect the language model to dominate the delay, and most teams optimise it first, since it's the biggest and most expensive part. We'll build a budget for one turn and find that it doesn't. Deciding that the caller has finished speaking takes longer than the model does, and moving audio around takes more than the model does, too. Every setting we can change is also a trade against some other failure: answer sooner and you start interrupting people, shrink one buffer and the recogniser hears glitches, drop the cascade for a single speech model and you lose the written transcript you may have been logging.</p>
+
+    <p>We'll start with how long a human pause is, because that's the number everything else gets measured against. Then we'll price each stage of the turn, spend most of our time on the largest stage, and finish with what happens when the caller interrupts and when the network drops packets.</p>
+  </section>
+
+  <section id="clock">
+    <h2><span class="num">01</span>The clock you are running against</h2>
+
+    <p>Before we can say a reply is too slow, we need to know how fast people reply to each other. Stivers and colleagues timed the gap between a yes/no question and its answer in ten languages drawn from five continents. Every language gave the same kind of picture, a single hump in the distribution with its peak between 0 and 200 ms. The median across languages was <strong>+100 ms</strong>, and the language averages ran from +7 ms in Japanese to +469 ms in Danish. People start answering almost as soon as the question ends, and often they've started planning the answer before it does.</p>
+
+    <p>Now put our agent on that scale. If a turn takes 859 ms (the total we'll build in the next section), it sits at roughly eight times the cross-linguistic median and nearly double the slowest language average that was measured. Even the slow end of human conversation was 469 ms.</p>
+
+    <p>Telephone engineers reached a compatible number from the other direction. ITU-T Recommendation G.114 says that below 150 ms of one-way mouth-to-ear delay most applications feel almost transparent, and that above 400 ms the delay is unacceptable for general network planning. A conversation is a round trip, so we can take two one-way trips at that unacceptable limit and get 800 ms. Human gaps almost all fall below 500 ms. Somewhere around 800 ms of turn latency, a reply stops landing anywhere a conversational gap has ever been observed to land, and that's the working line for this chapter.</p>
+
+    <p>How close do real systems get? OpenAI's GPT-4o system card reports audio responses in as little as <strong>232 ms</strong> with an average of <strong>320 ms</strong>, and positions that as human-comparable. Kyutai's Moshi paper gives a theoretical <strong>160 ms</strong>, made of an 80 ms Mimi frame plus 80 ms of acoustic delay, and about 200 ms in practice on an L4 GPU. Both are native speech models, a design we'll compare with the cascade in section 07. A 2026 tutorial that built a careful self-hosted cascade, with streaming ASR, vLLM (an LLM serving engine) and streaming synthesis, measured <strong>755 ms</strong> to first audio, with a best case of 729 ms. That gap between 320 and 755 is what the rest of the chapter is about, so the next job is to see where a cascade spends its time.</p>
+  </section>
+
+  <section id="waterfall">
+    <h2><span class="num">02</span>Where the milliseconds go</h2>
+
+    <p>Let's follow our caller's question through the system and write down every wait along the way. We measure from the user's last phoneme (the last individual speech sound they make) to the first sample of the reply reaching their ear. Nine stages sit in that interval. The picture below draws them to scale, so a bar twice as wide is twice as long, and it's worth reading the long bar first.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">One turn, drawn to scale. Bar widths are proportional to milliseconds.</div>
+      <svg viewBox="0 0 700 336" xmlns="http://www.w3.org/2000/svg">
+        <line x1="288.6" y1="48" x2="288.6" y2="302" stroke="#34d399" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+        <text x="293.6" y="44" font-size="9.5" fill="#34d399">200 ms: a human has already answered</text>
+        <text x="640" y="44" text-anchor="end" font-size="10.5" font-weight="700" fill="#e9e9ef">859 ms total</text>
+        <text x="172" y="74" text-anchor="end" font-size="10.5" class="dim">capture + Opus encode</text>
+        <rect x="182.0" y="62" width="13.3" height="15" rx="2" fill="#818cf8" opacity="0.85"/>
+        <text x="201.3" y="74" font-size="10" fill="#818cf8">25</text>
+        <text x="172" y="100" text-anchor="end" font-size="10.5" class="dim">network, up</text>
+        <rect x="195.3" y="88" width="16.0" height="15" rx="2" fill="#818cf8" opacity="0.85"/>
+        <text x="217.3" y="100" font-size="10" fill="#818cf8">30</text>
+        <text x="172" y="126" text-anchor="end" font-size="10.5" class="dim">jitter buffer</text>
+        <rect x="211.3" y="114" width="42.7" height="15" rx="2" fill="#818cf8" opacity="0.85"/>
+        <text x="260.0" y="126" font-size="10" fill="#818cf8">80</text>
+        <text x="172" y="152" text-anchor="end" font-size="10.5" class="dim">endpointing</text>
+        <rect x="254.0" y="140" width="157.3" height="15" rx="2" fill="#fbbf24" opacity="0.85"/>
+        <text x="417.3" y="152" font-size="10" fill="#fbbf24">295</text>
+        <text x="172" y="178" text-anchor="end" font-size="10.5" class="dim">ASR final transcript</text>
+        <rect x="411.3" y="166" width="12.8" height="15" rx="2" fill="#34d399" opacity="0.85"/>
+        <text x="430.1" y="178" font-size="10" fill="#34d399">24</text>
+        <text x="172" y="204" text-anchor="end" font-size="10.5" class="dim">LLM first token</text>
+        <rect x="424.1" y="192" width="117.3" height="15" rx="2" fill="#f472b6" opacity="0.85"/>
+        <text x="547.4" y="204" font-size="10" fill="#f472b6">220</text>
+        <text x="172" y="230" text-anchor="end" font-size="10.5" class="dim">TTS first audio</text>
+        <rect x="541.4" y="218" width="40.0" height="15" rx="2" fill="#38bdf8" opacity="0.85"/>
+        <text x="587.4" y="230" font-size="10" fill="#38bdf8">75</text>
+        <text x="172" y="256" text-anchor="end" font-size="10.5" class="dim">network, down</text>
+        <rect x="581.4" y="244" width="16.0" height="15" rx="2" fill="#818cf8" opacity="0.85"/>
+        <text x="603.3" y="256" font-size="10" fill="#818cf8">30</text>
+        <text x="172" y="282" text-anchor="end" font-size="10.5" class="dim">playout buffer</text>
+        <rect x="597.3" y="270" width="42.7" height="15" rx="2" fill="#818cf8" opacity="0.85"/>
+        <text x="646.0" y="282" font-size="10" fill="#818cf8">80</text>
+        <line x1="182.0" y1="302" x2="640.0" y2="302" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+        <line x1="182.0" y1="302" x2="182.0" y2="307" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+        <text x="182.0" y="320" text-anchor="middle" font-size="10" class="dim">0</text>
+        <line x1="288.6" y1="302" x2="288.6" y2="307" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+        <text x="288.6" y="320" text-anchor="middle" font-size="10" class="dim">200</text>
+        <line x1="395.3" y1="302" x2="395.3" y2="307" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+        <text x="395.3" y="320" text-anchor="middle" font-size="10" class="dim">400</text>
+        <line x1="501.9" y1="302" x2="501.9" y2="307" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+        <text x="501.9" y="320" text-anchor="middle" font-size="10" class="dim">600</text>
+        <line x1="608.5" y1="302" x2="608.5" y2="307" stroke="rgba(255,255,255,.16)" stroke-width="1"/>
+        <text x="608.5" y="320" text-anchor="middle" font-size="10" class="dim">800</text>
+      </svg>
+      <div class="diagram-caption">Bars start at their cumulative offset, so the right edge of the last bar is the turn latency. The scale is 458 drawing units for 859 ms, applied to every segment, so a bar twice as wide is twice as long. Note where the green line falls: by the time a human would have finished answering, this pipeline is still waiting to be sure the user has stopped.</div>
+    </div>
+
+    <p>Here's each stage in order, with what it is and where its number came from. The caller's voice is first captured and compressed with the <strong>Opus</strong> audio codec, which works on 20 ms frames of sound. It crosses the network and lands in a <strong>jitter buffer</strong>, a short queue that holds audio back so uneven packet arrival doesn't make it stutter. An <strong>endpointer</strong> then decides the caller has stopped talking, the ASR finalises its transcript, and the LLM produces its first token. The TTS produces the first sample of audio, then crosses the network again and waits in a playout buffer on the caller's device. Notice that the jitter buffer and the playout buffer are the same mechanism at either end, so both are 80 ms.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Stage</th><th>ms</th><th>Where the number comes from</th></tr></thead>
+      <tbody>
+        <tr><td>Capture + Opus encode</td><td>25</td><td>One 20 ms frame plus the 5 ms of look-ahead RFC 6716 says the SILK layer needs for noise shaping.</td></tr>
+        <tr><td>Network, up</td><td>30</td><td>One direction of a 60 ms round trip, inside the 20 to 200 ms range ElevenLabs' latency docs quote.</td></tr>
+        <tr><td>Jitter buffer</td><td>80</td><td>NetEq's starting target delay in the WebRTC source, before it adapts to the measured arrival spread.</td></tr>
+        <tr><td>Endpointing</td><td>295</td><td>LiveKit Turn Detector v1's mean latency at a 10% false-cutoff operating point on eot-bench.</td></tr>
+        <tr><td>ASR final transcript</td><td>24</td><td>NVIDIA's reported median time to final transcription for cache-aware streaming Nemotron ASR.</td></tr>
+        <tr><td>LLM first token</td><td>220</td><td><strong>Assumed.</strong> This one you must measure yourself. Page <a href="/topics/31-llm-inference-serving">31</a> is about what sets it.</td></tr>
+        <tr><td>TTS first audio</td><td>75</td><td>ElevenLabs' stated Flash model inference time for short inputs, excluding network and player buffering.</td></tr>
+        <tr><td>Network, down</td><td>30</td><td>Symmetric with the uplink.</td></tr>
+        <tr><td>Playout buffer</td><td>80</td><td>The same jitter mechanism on the return path.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The budget rests on one assumed figure (the LLM row, which you have to measure on your own system) and eight sourced ones, and it totals 859 ms. What matters is the shape more than the exact sum, so let's push on it. Below, the code puts the nine numbers in an array, prints the four biggest rows and the total spent moving audio instead of thinking, and then prices three changes. The <code>edit</code> helper copies the array, replaces one stage with a new value and returns the new total, so each change is measured against the same baseline. Both of the last two changes touch only the endpointer's row: moving it to a 5% false-cutoff operating point (543 ms, a figure from section 03), and replacing it with a plain 800 ms silence timer.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Price three optimisations against the same budget</span>
+      </summary>
+<pre><code>import numpy as np
+
+# One turn, end of the user&#x27;s speech to first agent audio.
+# Every row is sourced or flagged as an assumption on the page.
+stage = [&quot;capture + Opus encode&quot;, &quot;network up&quot;, &quot;jitter buffer&quot;,
+         &quot;endpointing&quot;, &quot;ASR final transcript&quot;, &quot;LLM first token&quot;,
+         &quot;TTS first audio&quot;, &quot;network down&quot;, &quot;playout buffer&quot;]
+ms = np.array([25, 30, 80, 295, 24, 220, 75, 30, 80], float)
+total = ms.sum()
+
+print(f&quot;budget {total:.0f} ms&quot;)
+for i in np.argsort(-ms)[:4]:
+    print(f&quot;  {stage[i]:&lt;21} {ms[i]:5.0f} ms   {ms[i]/total:5.1%}&quot;)
+
+moved = ms[[0, 1, 2, 7, 8]].sum()
+print(f&quot;\naudio moving, not thinking   {moved:.0f} ms&quot;)
+print(f&quot;LLM first token              {ms[5]:.0f} ms&quot;)
+
+def edit(i, v):
+    x = ms.copy(); x[i] = v; return x.sum()
+
+print(f&quot;\nhalve the LLM            {edit(5, 110):.0f} ms&quot;)
+print(f&quot;endpointer at 5% cutoff  {edit(3, 543):.0f} ms&quot;)
+print(f&quot;fixed 800 ms silence     {edit(3, 800):.0f} ms&quot;)</code></pre>
+      <div class="tryit-out">Endpointing is the biggest row at 295 ms, about a third of the turn, with the LLM second at 220 ms. Five rows only move audio around (capture, both network hops and both buffers) add up to 245 ms, more than the model. Halving the language model, the hardest and most expensive change on the list, moves 859 ms to <code>749</code>. Loosening the endpointer from a 10% to a 5% false-cutoff rate moves it to <code>1107</code>, and that erases the win three times over. A plain 800 ms silence timer lands at <code>1364</code>. The turn-taking policy has more leverage than the model, and it is a config value.</div>
+    </details>
+
+    <h4 class="why">Why does the endpointer cost more than the model?</h4>
+    <p>Because it isn't computing anything slow. It's waiting. A model can't be sure the caller has finished until it has heard some silence, and every millisecond of that doubt is added to every turn. We'll spend the whole next section on it. Before that, one caution about the table: it describes a typical turn, and the complaints come from the unusual ones. A tool call in the middle of a turn, say the agent looking up the balance, inserts a second full model round trip, and nothing about the first one streams across it. One HTTP retry on any hop costs more than the entire budget above. Both are invisible at the median (p50) and dominate the 95th percentile (p95), so latency here is a distribution, and the complaints come from its tail.</p>
+  </section>
+
+  <section id="endpointing">
+    <h2><span class="num">03</span>Endpointing: deciding that you stopped</h2>
+
+    <p>The largest single item in the budget is a decision, and it comes in two parts that are easy to confuse. One part is cheap. <strong>Voice activity detection</strong> (VAD) answers whether a slice of audio contains speech. Silero VAD processes a 30 ms chunk in under a millisecond on one CPU thread, from a model of about two megabytes, so that question is close to free.</p>
+
+    <p>The second part is hard, and it's called <strong>endpointing</strong>: has this person finished, or are they thinking? Suppose our caller says "My account number is four two" and then goes quiet for 300 ms while they read the next digits off a card. That same 300 ms of silence also follows "What's my balance?" The audio is identical in both cases, and the right action is opposite.</p>
+
+    <h3 id="fixed-thresholds-and-why-they-cannot-win">Fixed thresholds, and why they cannot win</h3>
+
+    <p>The simplest policy is a silence timer. Wait <span>$T$</span> milliseconds of non-speech, then commit the turn and hand the transcript to the model. It can go wrong in exactly two ways. A <strong>false cut-off</strong> happens when a mid-sentence hesitation lasts longer than <span>$T$</span>, so the agent starts talking over a caller who wasn't done. They have to start over, and recovering costs several seconds. <strong>Dead air</strong> is the other failure: the caller finished, and we pay <span>$T$</span> milliseconds of silence before anything happens. Every turn pays it.</p>
+
+    <h4 class="why">Why not just pick a shorter timer?</h4>
+    <p>Because the two failures pull against each other with nothing to adjust. Raising <span>$T$</span> reduces cut-offs and raises dead air by exactly the same amount, since dead air <em>is</em> <span>$T$</span>. A shorter timer means more interruptions, a longer one means a slower agent, and no value of <span>$T$</span> escapes that. To do better we need information the silence timer doesn't have.</p>
+
+    <h3 id="semantic-endpointing-moves-the-curve">Semantic endpointing moves the curve</h3>
+
+    <p>The extra information is what was said. "My account number is four two" is unfinished even after 400 ms of silence, and "That's all, thanks" is finished after 150 ms. A small language model reading the partial transcript can tell those apart, so the agent can commit early when the words sound complete and wait longer when they don't. This is called <strong>semantic endpointing</strong>.</p>
+
+    <p>LiveKit's Turn Detector v1, released in June 2026, distils a Qwen2.5-7B teacher into a 0.5B student that runs on a CPU, and reports results on an open benchmark called eot-bench. Here's the false cut-off rate each system reaches when it's allowed a given latency budget.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Latency budget</th><th>LiveKit v1</th><th>Deepgram Flux</th><th>Other reported</th></tr></thead>
+      <tbody>
+        <tr><td>300 ms</td><td>9.9% false cut-off</td><td>12.9%</td><td>ultraVAD 27.7%</td></tr>
+        <tr><td>600 ms</td><td>4.5% false cut-off</td><td>9.9%</td><td>Soniox 5.5%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Read that as a curve and not a ranking. That post also gives the inverse view: a 10% false-cutoff target costs 295 ms of mean latency, and a 5% target costs 543 ms. Halving your interruption rate costs <strong>248 ms</strong> on every turn. That's the exchange rate you're buying. (That 295 is the endpointing row in our budget, and the 543 is the number we used in the last section's code.)</p>
+
+    <p>To see why a semantic endpointer helps, we can simulate it. In the code below, half of 60,000 simulated turns are real endings, and the other half are mid-turn hesitations whose length follows a lognormal distribution centred near 240 ms. The <code>fixed(T)</code> function counts how often a silence timer of length T cuts off a hesitation. Our semantic endpointer gets a noisy confidence score for each turn (higher for real endings), and it commits at 120 ms whenever the score clears a threshold <code>c</code>. We then sweep the threshold, and for each result find the silence timer with the same false cut-off rate so the two policies can be compared like for like. Since we invented the separation between scores, only the shape of the curve carries over.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">The endpointing trade, at matched error rates</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+N = 60000
+is_end = rng.random(N) &lt; 0.5          # the user really has finished
+# Mid-turn hesitations in ms. A real turn end never resumes.
+pause = np.where(is_end, np.inf,
+                 rng.lognormal(np.log(240), 0.6, N))
+hes = ~is_end
+
+def fixed(T):
+    &quot;&quot;&quot;Wait T ms of silence, then commit. Dead air is always T.&quot;&quot;&quot;
+    return (hes &amp; (pause &gt; T)).sum() / hes.sum()
+
+# A semantic endpointer reads the partial transcript at 120 ms and
+# commits early when confident. The separation below is invented;
+# only the shape of the curve is the point.
+score = rng.normal(np.where(is_end, 1.7, 0.0), 1.0)
+
+def semantic(c, T=800.0):
+    early = score &gt; c
+    bad = (hes &amp; early &amp; (pause &gt; 120)) | (hes &amp; ~early &amp; (pause &gt; T))
+    wait = np.where(early, 120.0, T)
+    return bad.sum() / hes.sum(), wait[is_end].mean()
+
+grid = np.arange(50, 3000, 5.0)
+rates = np.array([fixed(t) for t in grid])
+
+print(&quot; false cut | fixed silence | semantic | saved&quot;)
+for c in (0.4, 1.0, 1.6, 2.2):
+    r, wait = semantic(c)
+    t_match = grid[np.argmin(np.abs(rates - r))]   # same error rate
+    print(f&quot;   {r:6.2%}  |   {t_match:6.0f} ms   | {wait:5.0f} ms |&quot;
+          f&quot; {t_match - wait:5.0f} ms&quot;)</code></pre>
+      <div class="tryit-out">Look first at the last column. At every matched error rate the semantic policy waits less, by <code>125</code> to <code>146</code> ms across the four rows, because it can commit before the silence has elapsed. Then look down the columns: going from <code>16.16%</code> to <code>7.22%</code> false cut-offs costs 148 ms of extra dead air. Neither policy escapes that. You are choosing a point on a curve, and no setting is correct.</div>
+    </details>
+
+    <p>So a better endpointer buys a better curve, and we still have to choose where on it to sit. There's one more trick that changes the arithmetic. Start generating a reply on the partial transcript while the endpointer is still undecided, and cancel if the caller keeps talking. We pay for model turns that get thrown away, and in exchange the LLM's 220 ms runs alongside the endpointer's 295 ms instead of after it. That only works if cancellation is cheap and complete. A cancelled turn that still emits audio, or still writes to the conversation state, is worse than the latency it saved. Cancellation is the central problem of the next section, where the caller interrupts the agent.</p>
+  </section>
+
+  <section id="barge-in">
+    <h2><span class="num">04</span>Barge-in, and the state it corrupts</h2>
+
+    <p>So far the caller has been the only one talking. Now let the agent be halfway through "Your balance is forty-two dollars and..." when the caller says "wait, which account?" Letting the caller cut in like this is called <strong>barge-in</strong>. It's usually specified as "stop the audio", but that hides three separate problems, and the third is where the bugs live.</p>
+
+    <h3 id="hearing-the-user-through-your-own-voice">Hearing the user through your own voice</h3>
+
+    <p>The first problem is that the caller's microphone picks up their loudspeaker. Without any correction, the agent's own voice is the loudest thing in the input, so the VAD fires on the agent and the agent interrupts itself. <strong>Acoustic echo cancellation</strong> (AEC) solves this by subtracting a filtered copy of what was just played from what the microphone heard. That's why the playback path has to hand its samples to the AEC as a reference. RFC 7874 says WebRTC endpoints SHOULD include an AEC and deliberately mandates no particular algorithm.</p>
+
+    <p>The hard case is <strong>double-talk</strong>, where both parties speak at once, and that's exactly what barge-in is. Its adaptive filter has to learn the echo path from a signal that now also contains the caller's voice, and it must not diverge while it does. The ICASSP 2022 AEC Challenge scored entries on subjective quality across single-talk and double-talk conditions, plus a speech recognition word acceptance rate. That's the right pairing, because residual echo that a human tolerates can still wreck a transcript.</p>
+
+    <h3 id="audio-you-cannot-take-back">Audio you cannot take back</h3>
+
+    <p>Suppose the echo is handled and we've decided to stop. Some of the agent's speech has already left. Frames handed to the playout buffer are out of our control, and with the 80 ms buffer from section 02 plus a 20 ms frame, up to about <strong>100 ms</strong> of speech can reach the ear after we cancel. That sounds small, and its consequence is large: the agent said a word we believe it didn't say.</p>
+
+    <p>Here's how that goes wrong in nearly every cascade. On barge-in, the naive implementation stops playback and then writes the <em>full generated response</em> into the conversation history. Now the model believes it delivered "forty-two dollars" when the caller heard only "Your balance is", so it never repeats the number and carries on as if the information landed. To fix it, truncate the assistant turn at the point where audio stopped. That needs an alignment between generated text and emitted audio. For that reason a streaming synthesiser should return timing marks as well as bytes. Without them you're guessing where to cut.</p>
+
+    <h3 id="deciding-it-was-an-interruption-at-all">Deciding it was an interruption at all</h3>
+
+    <p>The third problem is that not everything the caller says is an interruption. "Mhm", "right" and "yeah" are <strong>backchannels</strong>: they mean "keep going". A VAD classifies them as speech and stops the agent. Over-eager barge-in therefore feels as broken as none at all. Energy alone can't separate a backchannel from a real interruption, so we need the words, and that lands us on the same kind of model that does semantic endpointing. In a cascade, the barge-in decision therefore depends on the ASR having already produced a partial transcript for an utterance only 200 ms long.</p>
+
+    <p>Finally, cancellation has to reach every component. If we stop the synthesiser while the language model keeps generating, we leave an orphaned response that arrives after the caller's next question and answers the previous one. That distributed cancel is part of what the cascade costs, and we'll come back to it in section 07. First, though, we should look at the ASR stage we've been treating as a 24 ms box.</p>
+  </section>
+
+  <section id="streaming-asr">
+    <h2><span class="num">05</span>Streaming ASR: what a chunk costs</h2>
+
+    <p>A batch recogniser looks at the whole utterance before it writes anything. A voice agent can't wait for that. A <strong>streaming</strong> recogniser has to commit to words while audio is still arriving, using everything before the current moment plus a short window after it. That window goes by several names: <strong>lookahead</strong>, right context, emission delay or chunk latency. More lookahead means the recogniser has more of the next sound to go on, so it should make fewer mistakes, and that's the price of arriving early.</p>
+
+    <p>NVIDIA published a clean version of the exchange rate for its cache-aware streaming Nemotron models in January 2026. Raising the chunk latency from 0.16 s to 0.56 s drops the word error rate (WER, the fraction of words the recogniser gets wrong) from 7.84% to 7.22%. Working it out, 400 ms of extra delay buys 0.62 WER points, about 0.16 points per 100 ms. That's an unusually mild trade.</p>
+
+    <h4 class="why">Why does lookahead cost so little turn latency?</h4>
+    <p>Because the delay is spent <em>while the caller is still speaking</em>. It overlaps the utterance and doesn't get added to the end of it. Only the last chunk's delay lands after the final word, and even that mostly overlaps the endpointer's wait. That's why the ASR row in our budget is 24 ms and not 160. So the useful question is how much of the lookahead is still unpaid when the endpointer fires, and usually the answer is none of it.</p>
+
+    <h3 id="why-you-cannot-just-chunk-an-offline-model">Why you cannot just chunk an offline model</h3>
+
+    <p>If streaming is just windows of audio, why not slice the input and run an ordinary batch model on each window? It looks like streaming but isn't, and chapters <a href="/topics/13-speech-audio">13</a> and <a href="/topics/34-model-atlas-speech-audio">34</a> cover why the accuracy degrades. Compute is the cost that matters here. Sliding windows overlap, so the encoder repeatedly re-processes audio it has already seen, and recomputes attention over context it already had. A cache-aware streaming encoder keeps those activations instead and processes each frame once.</p>
+
+    <p>NVIDIA reports the size of that difference as concurrency: at a 320 ms chunk on an H100, 560 simultaneous streams against a 180-stream baseline, roughly three times. For a voice product, the number of conversations one GPU can hold is the unit cost of a conversation, so this is a pricing decision as much as an architecture one.</p>
+
+    <h3 id="the-third-knob-is-the-one-nobody-sets">The third knob is the one nobody sets</h3>
+
+    <p>Lookahead looks forward, and the other two knobs are the chunk size and the left context, which looks back. A streaming encoder that keeps unbounded history grows its state for every stream, and memory per stream is what caps concurrency. Bounding it costs a little accuracy on long turns and is frequently the difference between one GPU and four. With the listening side priced, the next stage to look at is the one that produces the sound.</p>
+  </section>
+
+  <section id="streaming-tts">
+    <h2><span class="num">06</span>Streaming TTS: only the first chunk matters</h2>
+
+    <p>When the model has written "Your balance is forty-two dollars", the synthesiser has to turn it into sound. Once playback starts, generation only has to keep up with real time: a <strong>real-time factor</strong> below 1.0 means the synthesiser produces audio faster than it plays, so the buffer never drains. Total synthesis time hardly matters. What the caller feels is <strong>time to first audio</strong>, and that splits into more parts than most teams look at.</p>
+
+    <p>ElevenLabs' own latency documentation is candid about this. Flash model inference is around 75 ms for short inputs. Network round trips are 20 to 200 ms. A 500 ms player buffer is common. Of those terms the model is the smallest, and the largest term of all probably sits upstream of the synthesiser.</p>
+
+    <h3 id="the-chunking-decision-that-costs-half-a-second">The chunking decision that costs half a second</h3>
+
+    <p>The synthesiser can't start until it has text, and the text arrives from the LLM token by token. What we choose to wait for is a latency decision made before the TTS ever runs. Take the arithmetic: at 40 tokens per second, one token is 25 ms. Waiting for a complete 20-token sentence costs 500 ms after time to first token. Cutting at the first clause boundary, maybe 6 tokens in, costs 150 ms.</p>
+
+    <p>That 350 ms difference comes from a text-splitting rule, and it's larger than anything we'd win by changing the synthesiser. It's also why "we stream the TTS" is an ambiguous claim worth interrogating. Streaming <em>audio out</em> while buffering <em>text in</em> to a sentence boundary gives you the latency of a non-streaming system.</p>
+
+    <h4 class="why">Why not cut as early as possible, then?</h4>
+    <p>Because prosody, the rise and fall of pitch and rhythm, is planned over a phrase. Synthesise "I can help with that" and "if you give me the account number" as independent chunks and you get two falling intonations glued together, which sounds like two sentences. A usable compromise is a short first chunk for speed and longer chunks after, since the first one buys the time for everything behind it. We trade the naturalness of one phrase for the responsiveness of every turn.</p>
+
+    <h3 id="where-the-vocoder-sits-in-this">Where the vocoder sits in this</h3>
+
+    <p>The last stage inside the synthesiser is the <strong>vocoder</strong>, which turns the model's frames into audio samples, and it can't start from a single frame. Convolutional vocoders need enough frames to fill their receptive field, plus some lookahead, before the first sample exists. Chunks are also spliced with an overlap from the previous chunk so the seam isn't audible.</p>
+
+    <p>Whether that stage is your bottleneck depends on where you run it. A 2025 comparison of low-latency neural vocoders found that on CPU-only systems the per-chunk streaming overhead, meaning data movement and parameter loading, dominates raw arithmetic at low latencies. That same work reports that a single frame of lookahead recovers nearly all of the quality of a non-causal model. On a server GPU the picture inverts: the autoregressive token generation in front of the vocoder is the slow part, and the vocoder is a rounding error. Claiming one universal bottleneck is how teams end up optimising the wrong stage. Having priced every stage of the cascade, we can now ask whether the cascade is the right shape at all.</p>
+  </section>
+
+  <section id="cascade">
+    <h2><span class="num">07</span>Cascade or speech-to-speech</h2>
+
+    <p>Look at what we've been building. Two of the cascade's three stages exist only to convert between audio and text, and each conversion costs time and throws something away. A <strong>native speech model</strong> (also called speech-to-speech) skips both: it consumes audio and emits audio, with no text in the loop. Chapter <a href="/topics/34-model-atlas-speech-audio">34</a> has the model-by-model view, and this section covers the engineering consequences. This trade is real, and in 2026 it's far from settled, because each option gives up something specific.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th></th><th>Cascade</th><th>Speech to speech</th></tr></thead>
+      <tbody>
+        <tr><td>Reported turnaround</td><td>755 ms measured in a 2026 self-hosted build</td><td>Moshi 200 ms on an L4; GPT-4o 320 ms average</td></tr>
+        <tr><td>Intermediate state</td><td>A readable transcript at every hop</td><td>Activations. No transcript unless you add an ASR pass</td></tr>
+        <tr><td>Swapping a component</td><td>Independent, one at a time</td><td>All or nothing</td></tr>
+        <tr><td>Prosody, emotion, overlap</td><td>Discarded at the transcript</td><td>Preserved end to end</td></tr>
+        <tr><td>Barge-in</td><td>A distributed cancel across three services</td><td>Native, because it never had a turn state</td></tr>
+        <tr><td>Guardrails and tools</td><td>Text-level, mature, easy to constrain</td><td>Harder to constrain mid-stream</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Start with what the cascade loses, because "information loss" undersells it. A transcript destroys hesitation, sarcasm, emphasis and emotional state, and it also destroys <em>timing</em>. Overlapped speech becomes either one sequence or two, and which one is a decision your diarizer (the component that labels who spoke when) made. A cascade also serialises three separate warm-up latencies, and gives you three services that can each rate-limit, retry or go down in the middle of a turn.</p>
+
+    <p>What speech-to-speech loses is mostly observability. You can't log what you never rendered, so transcripts, retrieval keys, quality evals, compliance review and text guardrails all need a parallel ASR pass, the very step you were trying to avoid running.</p>
+
+    <p>The 2026 tutorial cited in section 01 is useful because it tried both. Its cascade of streaming ASR, vLLM and streaming synthesis measured 755 ms. An end-to-end Qwen3-Omni reached 702 ms through a hosted API, and 146 seconds run locally. That last figure is the real state of play: native speech models are faster when somebody else operates them at scale, and mostly aren't self-hostable yet at conversational speed. Regulated and self-hosted deployments choose the cascade for reasons that are only partly about the model. Whichever shape we pick, the audio still has to reach the caller, and that part runs over a connection we don't control.</p>
+  </section>
+
+  <section id="transport">
+    <h2><span class="num">08</span>Transport: why WebRTC, and what loss does</h2>
+
+    <p>In our budget, 245 ms is audio in transit or sitting in a buffer, so the protocol underneath matters as much as any model. What surprises newcomers is why live voice doesn't just use HTTP, or a WebSocket, to send audio.</p>
+
+    <h3 id="why-not-http">Why not HTTP</h3>
+
+    <p>HTTP and WebSockets run on TCP, which guarantees ordered delivery. If one segment is lost, TCP retransmits it, and every later segment waits behind it. This is <strong>head-of-line blocking</strong>, and it's the wrong guarantee for a live conversation. Audio that arrives 200 ms late is worthless, because its moment has passed, so it's better to conceal 20 ms of missing sound than to stall the next 200 ms waiting for it. WebRTC carries audio over SRTP (an encrypted form of the real-time transport protocol) on UDP, which doesn't retransmit, so a lost packet leaves a hole and doesn't stall the stream.</p>
+
+    <h4 class="why">So is a WebSocket never the right choice?</h4>
+    <p>It's fine in two places. WebSockets over TCP remain a good fit for the control plane, and for server-to-server hops on a reliable network. They're the wrong choice for the last mile to a phone on a train, where loss is routine.</p>
+
+    <h3 id="opus-and-the-25-ms-you-pay-before-sending-anything">Opus, and the 25 ms you pay before sending anything</h3>
+
+    <p>RFC 7874 makes Opus and G.711 mandatory for WebRTC endpoints, and requires decoders to support all Opus modes, so Opus is the floor here and not a matter of preference. RFC 6716 describes how it's built. The SILK layer handles 10 to 60 ms frames and needs 5 ms of extra look-ahead for noise shaping. The CELT layer handles 2.5 to 20 ms frames with 2.5 ms of overlap look-ahead. A 20 ms frame plus SILK's 5 ms is the 25 ms in the budget table, spent before a single packet is on the wire.</p>
+
+    <p>Opus also carries in-band forward error correction: a low-bitrate copy of the previous frame rides inside the next packet, so one isolated loss is recovered without a retransmission and without a round trip. It covers exactly one frame back, so a burst of four defeats it. Mozilla's 2016 experiments found the effect subtle at low loss rates and very noticeable at high ones.</p>
+
+    <h3 id="the-jitter-buffer-is-a-latency-knob">The jitter buffer is a latency knob</h3>
+
+    <p>Packets sent every 20 ms don't arrive every 20 ms, because each takes a slightly different time across the network. That variation in arrival time is called <strong>jitter</strong>. A buffer absorbs it by holding audio back, so a packet that comes a little late still arrives before its turn to play, and that's why the buffer appears twice in the budget. A packet that misses its deadline is treated as lost and <strong>concealed</strong>: the decoder fills the gap with audio it makes up.</p>
+
+    <p>WebRTC's NetEq pulls 10 ms of audio at a time and adapts continuously. Its delay manager keeps a histogram of packet inter-arrival times in 20 ms buckets and targets roughly the 97th percentile, starting from 80 ms. When the buffer runs long or short it time-stretches the audio, accelerating or expanding it, and it doesn't drop or stall. Why the 97th percentile? The simulation below shows it. It sends 400,000 packets with a 30 ms minimum delay and a long-tailed jitter (most packets are early, a few are very late), and for each buffer depth counts the fraction that miss their deadline and would be concealed. Packet <code>i</code>'s deadline is its send time plus the 30 ms floor plus the buffer depth.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Buffer depth against concealed packets, and where the knee is</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(1)
+
+# 20 ms Opus packets. One-way delay is a 30 ms floor plus a heavy
+# right tail: most packets are early, a few are very late.
+n = 400000
+sent = np.arange(n) * 20.0
+jitter = rng.gamma(2.0, 7.0, n)          # ms
+arrive = sent + 30.0 + jitter
+
+print(&quot;buffer   concealed   added delay&quot;)
+for depth in (0, 20, 40, 60, 80, 120):
+    deadline = sent + 30.0 + depth
+    late = (arrive &gt; deadline).mean()
+    print(f&quot;{depth:4} ms   {late:8.3%}   {depth:8} ms&quot;)
+
+q97 = np.quantile(jitter, 0.97)
+print(f&quot;\n97th percentile of the jitter: {q97:.0f} ms&quot;)
+print(&quot;NetEq sets its target near that quantile, then adapts.&quot;)</code></pre>
+      <div class="tryit-out">The concealment rate falls off a cliff, and the cliff sits at the 97th percentile of the jitter. Going from 20 ms to 40 ms of buffer takes concealment from <code>22.020%</code> to <code>2.187%</code>. Another 40 ms takes it to <code>0.013%</code>, for the same 40 ms of delay. The 97th percentile of this jitter distribution is <code>37</code> ms, right where the collapse happens. So NetEq tracks a high quantile of measured arrivals and doesn't use a constant: a fixed buffer is either wasting delay or shredding audio, and which one depends on a network you don't control.</div>
+    </details>
+
+    <h3 id="what-concealment-does-to-the-recogniser">What concealment does to the recogniser</h3>
+
+    <p>A concealed packet isn't silence. Instead the decoder invents plausible audio to bridge the gap, tuned to sound acceptable to a human ear, and your ASR was never trained on it. A 2022 study over G.722 telephony found the damage is a knee and not a slope: a clean-trained recogniser held up to about 10% packet loss and then degraded roughly in proportion, while a model trained on network-distorted speech pushed that knee out to about 15%. Training on the distortion you'll see moves the cliff.</p>
+
+    <p>There's a cheaper version of the same idea. Dissen and colleagues showed at Interspeech 2024 that a front-end adaptation network in front of a <em>frozen</em> Whisper, trained against the recogniser's own loss, recovers much of the loss-induced error without retraining the ASR. All of this points at a gap in how we measure. Published word error rates come from audio files, but your audio came through a codec, a jitter buffer, a concealment algorithm and possibly a transcode at a carrier boundary down to 8 kHz. If you've never measured your own WER on audio captured at the far end of your own transport, you don't know your recognition accuracy, only somebody else's. Measuring that, and the latency budget from section 02 on your own system, is where the next section starts.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">09</span>Summary</h2>
+    <ol>
+      <li><strong>Human turn-taking sets the clock.</strong> The median gap between a question and its answer is about 100 ms across ten languages, and a reply that arrives around 800 ms lands outside anything measured.</li>
+      <li><strong>A turn is a nine-stage budget,</strong> from the user's last phoneme to the first reply sample at their ear. In the worked example it totals 859 ms, with one assumed row (the LLM) and eight sourced ones.</li>
+      <li><strong>The model isn't the biggest item.</strong> Endpointing costs 295 ms, the LLM 220 ms, and moving audio around 245 ms, so the turn-taking policy has more leverage than the model.</li>
+      <li><strong>Endpointing is a decision, not a computation.</strong> A silence timer trades false cut-offs against dead air one for one, and semantic endpointing shifts the whole curve by reading the transcript, saving roughly 125 to 146 ms at matched error rates in the simulation.</li>
+      <li><strong>Speculative generation hides the LLM behind the endpointer,</strong> but only if cancelling a thrown-away turn is cheap and complete.</li>
+      <li><strong>Barge-in is three problems:</strong> echo cancellation so the agent doesn't hear itself, truncating the conversation history at the point where audio stopped, and telling backchannels from real interruptions. The cancel must also reach every component.</li>
+      <li><strong>Streaming ASR lookahead is cheap in turn latency,</strong> because the delay overlaps the user's speech. What it costs is compute, and cache-aware encoders hold about three times the concurrent streams of a sliding-window baseline.</li>
+      <li><strong>For TTS, only time to first audio matters.</strong> Where you cut the LLM's text into chunks can cost 350 ms, more than any synthesiser change, though cutting too early hurts prosody.</li>
+      <li><strong>Cascade and speech-to-speech each give something up.</strong> The cascade loses prosody and timing and needs a distributed cancel, and speech-to-speech loses the transcript. Native models are fast when hosted and mostly not self-hostable at conversational speed yet.</li>
+      <li><strong>Voice transport runs on UDP through WebRTC, not TCP,</strong> because a late packet is worthless and head-of-line blocking stalls everything behind it. The jitter buffer is a latency knob, and NetEq sets it near the 97th percentile of measured arrivals.</li>
+      <li><strong>Packet loss reaches your word error rate,</strong> because concealed audio isn't what your ASR trained on. Measure WER on audio captured at the far end of your own transport.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">10</span>Build this</h2>
+    <p class="lede">The budget in section 02 is a worked example with one assumed row. Yours will look different, and the difference is the only thing worth acting on.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Instrument one turn, then move exactly one number</span>
+        <span class="proj-meta">~4 hours · any voice stack you already have</span>
+      </div>
+      <p>You are not building an agent. You are building the measurement that tells you which stage to work on, and then checking whether the arithmetic predicted what happened.</p>
+      <ol class="proj-steps">
+        <li>Put a monotonic timestamp at nine points on every turn: last speech frame in, endpoint decision, final transcript, first LLM token, first TTS byte, first byte on the wire, first sample played. Ship them with the turn id.</li>
+        <li>Collect 200 real turns, and avoid staff turns. Plot p50 and p95 per stage as a stacked bar, widths proportional to milliseconds, the same way the diagram above is drawn.</li>
+        <li>Find the gap between p50 and p95 for each stage. One stage will own nearly all of it. That stage is your actual problem, and it is usually not the one that is largest at p50.</li>
+        <li>Log every pause with its duration and whether the user resumed. You now have a labelled endpointing dataset for free.</li>
+        <li>Sweep the silence threshold over that logged data offline and plot false cut-offs against dead air. Pick a false-cutoff target <em>first</em>, then read off the threshold.</li>
+        <li>Deploy that one change and re-measure, then compare the movement in total latency against what step five predicted.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the measured total moves by close to what the sweep predicted. If it does not, one of your nine timestamps is measuring something other than what its name says, and finding which one is worth more than the latency win.</div>
+      <div class="proj-stretch"><strong>The stretch that changes your mind.</strong> Add a second series for turns where the user was interrupted by the agent. Their total time to a successful exchange includes the recovery: the user restarting, the agent re-answering. Priced that way, a false cut-off often costs three to five seconds. Plot the expected time per successful turn against the threshold, rather than the latency, and the optimum usually moves toward waiting longer than felt right.</div>
+    </div>
+  </section>
+
+  <section id="breaks">
+    <h2><span class="num">11</span>What breaks</h2>
+    <p class="lede">Almost none of these are model failures, and almost all of them show up as "it feels laggy".</p>
+
+    <ul>
+      <li><strong>p50 is fine and p95 is three seconds.</strong> One slow hop, a cold start or a retry. Users remember the tail, and a mean hides it completely.</li>
+      <li><strong>The endpointer was tuned in an office.</strong> Staff speak in fluent complete sentences to a demo. Customers hesitate, read numbers aloud and pause to find documents.</li>
+      <li><strong>Barge-in stops the audio but not the model.</strong> The orphaned generation arrives later and answers the previous question.</li>
+      <li><strong>The transcript records what was generated and not what was heard.</strong> After every interruption the model believes it delivered a sentence that was cut off mid-word.</li>
+      <li><strong>The synthesiser buffers to a sentence boundary.</strong> Streaming audio out while blocking on text in gives you non-streaming latency behind a streaming API.</li>
+      <li><strong>The jitter buffer is a constant.</strong> Tuned on a wired desk connection, then deployed to mobile networks, where it is now too shallow.</li>
+      <li><strong>Echo cancellation fails on a speakerphone.</strong> The agent hears itself, the VAD fires, and it interrupts itself in a loop.</li>
+      <li><strong>The first tool call doubles the turn.</strong> Nothing streams across a function call, so the user gets the full budget twice with no audio in between.</li>
+      <li><strong>Backchannels stop the agent.</strong> Someone says "mhm" and the agent goes quiet, which reads as being ignored.</li>
+      <li><strong>WER was measured on clean files.</strong> The production path adds a codec, concealment and possibly an 8 kHz transcode that no benchmark includes.</li>
+    </ul>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">12</span>Where you meet this in the wild</h2>
+    <p class="lede">Same budget, very different constraints on which lines you can touch.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card">
+        <div class="wild-head"><strong>Phone and contact centre</strong></div>
+        <p>8 kHz narrowband, a carrier path you cannot instrument, and echo control happening somewhere you do not own. The transport lines of the budget are fixed, so endpointing and the model turn are all you can move.</p>
+        <p class="reach reach-yes">Semantic endpointing, aggressive speculative generation, and WER measured on your own recordings.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Browser widget</strong></div>
+        <p>WebRTC end to end, so you control the codec, the buffer and the AEC. The catch is that you also own the AEC, and laptop speakerphones in open-plan offices are the worst case for double-talk.</p>
+        <p class="reach reach-yes">Tune the jitter buffer per session, ship timing marks with synthesised audio.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>On-device and in-car</strong></div>
+        <p>Network latency goes to zero, which removes about 220 ms. In exchange the vocoder and the recogniser now share one CPU, and concurrency stops mattering while single-stream latency starts to.</p>
+        <p class="reach reach-yes">Small streaming ASR, short lookahead, a vocoder chosen for per-chunk overhead.</p>
+        <p class="reach reach-no">Not a place to assume a server-class bottleneck profile.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Drive-through and kiosk</strong></div>
+        <p>Constant background noise, multiple speakers, and people who change their order mid-sentence. Endpointing carries the product, because a false cut-off is a wrong order and not just a slow reply.</p>
+        <p class="reach reach-yes">Long thresholds, target speaker extraction, explicit confirmation.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">13</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why is 800 ms the wrong number for a voice agent?</summary>
+      <div class="qa-body"><p>Because human conversation does not work at that speed. Stivers and colleagues measured the gap between a question and its answer across ten languages and found a unimodal distribution in every one, with modes between 0 and 200 ms and a cross-linguistic median of about 100 ms. Even the slowest language mean, Danish at 469 ms, is far below 800.</p>
+      <p>Telephony reaches a compatible conclusion from the other side. ITU-T G.114 treats one-way mouth-to-ear delay under 150 ms as essentially transparent and over 400 ms as unacceptable for planning.</p>
+      <p>A turn that takes 800 ms is therefore not slightly slow. It is outside the range in which conversational gaps have been observed, which is why it reads as a machine rather than as hesitation.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is endpointing and why is it not the same as voice activity detection?</summary>
+      <div class="qa-body"><p>Voice activity detection answers whether a frame of audio contains speech. It is cheap, essentially solved, and runs in well under a millisecond per chunk on a CPU.</p>
+      <p>Endpointing answers a different and much harder question: has this person finished their turn, or are they pausing mid-thought. The acoustic evidence for those two cases is identical, because both are silence.</p>
+      <p>A fixed silence threshold is the naive policy, and it has exactly two behaviours: cutting people off when a hesitation runs long, and adding its full value as dead air to every completed turn. Semantic endpointing improves on it by reading the partial transcript, since the words distinguish an unfinished account number where the silence cannot.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Your agent takes 900 ms per turn. The LLM's time to first token is 200 ms. Where do you look, and in what order?</summary>
+      <div class="qa-body"><p>At endpointing first, because it is usually the largest single item and it is invisible in any model metric. Published operating points put a semantic endpointer at roughly 295 ms of mean latency for a 10% false-cutoff rate and 543 ms for 5%, so the difference between two reasonable settings exceeds the entire model turn.</p>
+      <p>Second, at whether text is buffered to a sentence boundary before synthesis starts. At 40 tokens per second that silently adds around 500 ms for a 20-token sentence.</p>
+      <p>Third, at transport. Two network legs plus two jitter buffers is commonly 200 ms or more, and nobody looks at it.</p>
+      <p>Only then at the recogniser, and specifically at whether its chunk delay genuinely overlaps the user's speech rather than being paid after the last word. The general rule: the terms nobody measures are larger than the term everybody optimises.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why can a streaming ASR model afford lookahead almost for free in a voice agent?</summary>
+      <div class="qa-body"><p>Because chunk delay overlaps the utterance instead of appending to it. A recogniser emitting with 160 ms of right context is 160 ms behind the audio at every instant, but the user is still talking, so that lag costs no turn latency at all.</p>
+      <p>Only the final chunk's delay lands after the last word, and even that runs concurrently with the endpointer deciding whether the turn is over.</p>
+      <p>NVIDIA's cache-aware streaming numbers show the accuracy side is also mild: moving chunk latency from 0.16 s to 0.56 s improved word error rate only from 7.84% to 7.22%, about 0.16 points per 100 ms.</p>
+      <p>So lookahead is the wrong knob to fight over. The right question is how much of it is still unpaid at the moment the endpointer commits.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does a voice agent use WebRTC rather than a WebSocket?</summary>
+      <div class="qa-body"><p>Because TCP's ordering guarantee is the wrong guarantee for live audio. A lost segment is retransmitted and every later segment queues behind it, so a single loss stalls the stream by at least a round trip.</p>
+      <p>Audio that arrives 200 ms late has missed its playout slot and is useless, so concealing 20 ms of missing sound is strictly better than waiting. WebRTC carries media over SRTP on UDP, which turns a loss into a hole rather than a stall, and pairs it with an adaptive jitter buffer that time-stretches audio to absorb arrival spread.</p>
+      <p>It also brings the rest of the real-time stack. RFC 7874 makes Opus mandatory and says endpoints should include acoustic echo cancellation, which you need for barge-in. WebSockets remain reasonable for control messages and for server-to-server hops on a reliable network.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Walk through implementing barge-in properly. What breaks in the naive version?</summary>
+      <div class="qa-body"><p>Three problems, and the third is the one that ships broken. First, you must hear the user through your own output, which requires acoustic echo cancellation with the playback signal as reference. The hard condition is double-talk, both parties speaking at once, which is precisely what barge-in is, and what the ICASSP AEC challenges exist to measure.</p>
+      <p>Second, you must stop, and stopping is not instantaneous. Frames already handed to the playout buffer will be heard. With an 80 ms buffer and 20 ms frames, assume roughly 100 ms of speech reaches the ear after you cancel.</p>
+      <p>Third, and most often wrong, you must repair conversation state. The naive implementation writes the full generated response into history, so the model believes it delivered a sentence the user never heard and will not repeat the information.</p>
+      <p>The fix is to truncate the assistant turn at the point where audio stopped, which requires the synthesiser to return timing marks aligning text to emitted samples. Cancellation must also reach the language model, or an orphaned generation arrives later and answers the previous question.</p>
+      <p>Finally, backchannels like "mhm" should not trigger any of this, and telling them apart needs the words rather than the energy.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>You are choosing between a cascade and a speech-to-speech model in 2026. Argue both sides with specifics.</summary>
+      <div class="qa-body"><p>The cascade's case is operational. Every intermediate is a string, so you can log it, filter it, apply mature text guardrails, constrain tool calls, run evals and hand transcripts to compliance. Each component swaps independently, which matters in a field where the best recogniser and the best synthesiser come from different labs.</p>
+      <p>Its costs are concrete: three serial models, three services that can each fail mid-turn, and a transcript that destroys prosody, emotion and the timing of overlapped speech. A careful 2026 self-hosted build of exactly this shape measured 755 ms to first audio.</p>
+      <p>The speech-to-speech case is latency and fidelity. Moshi reports 160 ms theoretical, an 80 ms frame plus 80 ms of acoustic delay, and about 200 ms in practice on an L4. GPT-4o's system card claims a 320 ms average. Interruption is close to native because a full-duplex model never maintained a turn state to unwind.</p>
+      <p>Its cost is observability. There is no transcript unless you run a parallel recogniser, which reintroduces the component you removed, and constraining generation mid-stream is harder.</p>
+      <p>The practical tiebreaker is deployment. The same 2026 comparison found an end-to-end model at 702 ms through a hosted API and 146 seconds run locally, so self-hosted and regulated deployments still mostly pick the cascade.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How does packet loss reach your word error rate, and what would you do about it?</summary>
+      <div class="qa-body"><p>It reaches it through concealment rather than through silence. When a packet is lost the decoder synthesises plausible audio to bridge the gap, tuned to be inoffensive to a human ear, and your recogniser was trained on neither the artefact nor the discontinuity.</p>
+      <p>The damage is a knee rather than a slope. A study over G.722 telephony found a clean-trained recogniser holding up to around 10% loss before degrading roughly in proportion, while a model trained on network-distorted speech pushed that knee to about 15%.</p>
+      <p>The mitigations stack. At the transport layer, enable Opus in-band forward error correction, which carries a low-bitrate copy of the previous frame in the next packet and recovers isolated losses with no retransmission and no round trip. It covers only one frame back, so bursts defeat it.</p>
+      <p>Size the jitter buffer from measured arrival statistics rather than a constant, since a shallow buffer converts jitter into loss.</p>
+      <p>At the model layer, either fine-tune on audio degraded the way your production path degrades it, or put a front-end adaptation network ahead of a frozen recogniser, as Dissen and colleagues did with Whisper at Interspeech 2024.</p>
+      <p>Above all, measure word error rate on audio captured at the far end of your own transport. A benchmark number from clean files describes a system you are not running.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">14</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://pmc.ncbi.nlm.nih.gov/articles/PMC2705608/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Universals and cultural variation in turn-taking in conversation</div><div class="r-sub">Stivers et al., PNAS 2009. Ten languages, a cross-linguistic median gap of +100 ms. The clock in section 01.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.itu.int/rec/T-REC-G.114" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Standard</div><div class="r-title">ITU-T G.114: One-way transmission time</div><div class="r-sub">The 150 ms and 400 ms mouth-to-ear thresholds that fifty years of telephony planning is built on.</div></div>
+      </a>
+      <a class="resource-card" href="https://livekit.com/blog/solving-end-of-turn-detection" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Engineering</div><div class="r-title">Solving end-of-turn detection: LiveKit Turn Detector v1.0</div><div class="r-sub">June 2026. False-cutoff rates against latency budgets, and the 295 ms versus 543 ms operating points in section 03.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/livekit/eot-bench" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">eot-bench</div><div class="r-sub">The open end-of-turn benchmark behind those numbers. Run your own endpointer against it before believing any vendor curve.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/snakers4/silero-vad" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">Silero VAD</div><div class="r-sub">MIT, about two megabytes, a 30 ms chunk in under a millisecond on one CPU thread. The default first stage.</div></div>
+      </a>
+      <a class="resource-card" href="https://huggingface.co/blog/nvidia/nemotron-speech-asr-scaling-voice-agents" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Engineering</div><div class="r-title">Scaling Real-Time Voice Agents with Cache-Aware Streaming ASR</div><div class="r-sub">NVIDIA, January 2026. Chunk latency against WER, and why sliding windows cost you concurrency.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.rfc-editor.org/rfc/rfc6716.html" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Standard</div><div class="r-title">RFC 6716: Definition of the Opus Audio Codec</div><div class="r-sub">Frame sizes, the SILK and CELT layers, and the look-ahead each needs. Where the 25 ms in the budget comes from.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.rfc-editor.org/rfc/rfc7874.html" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Standard</div><div class="r-title">RFC 7874: WebRTC Audio Codec and Processing Requirements</div><div class="r-sub">Opus and G.711 are mandatory, and endpoints SHOULD include echo control. Short, and worth reading in full.</div></div>
+      </a>
+      <a class="resource-card" href="https://chromium.googlesource.com/external/webrtc/+/refs/heads/main/modules/audio_coding/neteq/g3doc/index.md" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Source</div><div class="r-title">NetEq design notes</div><div class="r-sub">The adaptive jitter buffer inside WebRTC: 10 ms pulls, target delay from arrival statistics, accelerate and expand.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2410.00037" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Moshi: a speech-text foundation model for real-time dialogue</div><div class="r-sub">Défossez et al., 2024. 160 ms theoretical latency decomposed, and the full-duplex design that gets there. arXiv:2410.00037</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2410.21276" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Report</div><div class="r-title">GPT-4o System Card</div><div class="r-sub">OpenAI, 2024. The source of the 232 ms minimum and 320 ms average audio response figures in section 01. arXiv:2410.21276</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2603.05413" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Building Enterprise Realtime Voice Agents from Scratch</div><div class="r-sub">Qiu et al., March 2026. A measured 755 ms cascade against an end-to-end alternative, self-hosted. arXiv:2603.05413</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2202.13290" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">ICASSP 2022 Acoustic Echo Cancellation Challenge</div><div class="r-sub">Double-talk as the hard case, scored on subjective quality and on speech recognition word acceptance. arXiv:2202.13290</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2406.18928" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Enhanced ASR Robustness to Packet Loss with a Front-End Adaptation Network</div><div class="r-sub">Dissen et al., Interspeech 2024. Repair the input to a frozen recogniser instead of retraining it. arXiv:2406.18928</div></div>
+      </a>
+      <a class="resource-card" href="https://www.frontiersin.org/journals/signal-processing/articles/10.3389/frsip.2022.999457/full" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">ASR performance on integrated noise-network distorted speech</div><div class="r-sub">Where the packet-loss knee sits for a clean-trained recogniser, and how far training on distortion moves it.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2506.03554" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Fast and High-Fidelity Neural Vocoders for Low-Latency Streaming Synthesis</div><div class="r-sub">Chunk size against real-time factor on constrained hardware, and how little lookahead a vocoder needs. arXiv:2506.03554</div></div>
+      </a>
+      <a class="resource-card" href="https://elevenlabs.io/docs/eleven-api/concepts/latency" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">Understanding latency (ElevenLabs)</div><div class="r-sub">A vendor decomposing time to first audio into inference, network and player buffering, and admitting which term is small.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/454" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Autoregressive Video Chunk FPS Calculator</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/293" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Calculate P50/P95/P99 Latency Percentiles</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/866" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Merge LoRA Adapter Weights for Zero-Latency Inference</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/444" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">ASR Real-Time Factor for Parallel Chunk Transcription</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/413" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">End-to-End Latency Decomposition</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/445" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">TTS Concurrent Real-Time Stream Capacity</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">15</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/13-speech-audio"><div class="rc-sec" style="color:var(--c-genai)">13 · The models underneath</div><div class="rc-title">Speech &amp; Audio</div><div class="rc-hook">CTC, RNN-T, Conformer, neural codecs and why streaming is an architectural property rather than a runtime flag.</div></a>
+      <a class="related-card" href="/topics/34-model-atlas-speech-audio"><div class="rc-sec" style="color:var(--c-atlas)">34 · Which model to pick</div><div class="rc-title">Model Atlas: Speech &amp; Audio</div><div class="rc-hook">Named recognisers and synthesisers with their error rates, licences and reported latencies.</div></a>
+      <a class="related-card" href="/topics/31-llm-inference-serving"><div class="rc-sec" style="color:var(--c-practice)">31 · The one assumed row</div><div class="rc-title">LLM Inference &amp; Serving</div><div class="rc-hook">Where time to first token comes from, and the batching decisions that trade it against throughput.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it honestly</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Tail latency, distributions rather than means, and why a benchmark number is not a production number.</div></a>
+    </div>
+  </section>

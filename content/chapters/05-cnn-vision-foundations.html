@@ -1,0 +1,487 @@
+---
+title: "CNNs & Vision Foundations"
+dek: "Follow a tiny 5×5 image through a sliding filter, a stack of layers and the task heads built on top, and learn why weight sharing, residual connections and skip connections each solve a specific problem."
+readingTime: "~26 min"
+prereqs: "backprop & residual connections (04), dot products (01)"
+group: "Neural Nets & Vision"
+label: "Chapter 05"
+description: "Convolutions, receptive fields and weight sharing; the LeNet→AlexNet→VGG→ResNet arc; two-stage vs one-stage detection; semantic vs instance vs panoptic segmentation; and the CNN vs ViT inductive-bias tradeoff for interviews."
+---
+<section id="tldr">
+    <p>Let's start with the smallest picture that still has something in it. It's a grayscale image, 5 pixels wide and 5 tall, stored as a grid of brightness numbers where 0 is dark and 9 is bright. Every row reads 0, 0, 9, 9, 9, so there's a dark strip on the left, a bright block on the right, and one vertical edge between them. You see that edge at once. A program only gets 25 numbers, and it has to find the edge in them. A real photo is the same thing on a bigger scale: a 224×224 colour image holds 224 × 224 × 3 = 150,528 numbers, one for each pixel in each of three colour layers (red, green and blue). This chapter builds a network that can take such a grid of numbers and say what's in it.</p>
+
+    <p>Chapter 04 gives us a first attempt, a stack of fully-connected layers in which every unit has its own weight for every input number. On a photo that gets out of hand quickly. A single layer of 1,000 units would need over 150 million weights, and every one of them is tied to one particular pixel position, so a cat learned in the top-left corner tells the network nothing about a cat in the bottom-right. Images have a structure that this design ignores. Nearby pixels belong together, and a pattern that's useful in one place is useful in another.</p>
+
+    <p>A <strong>convolution</strong> builds both facts in. We take a small grid of weights, a <strong>filter</strong>, and slide it across the image, reusing the same weights at every position. That one change cuts the weight count dramatically and lets a detector learned in one place work everywhere. Before 2012, vision systems mostly fed hand-designed features into a classical classifier. Then AlexNet showed that a deep stack of learned convolutions beat that approach by a wide margin, and convolutional networks (CNNs) became the default for images for the next decade.</p>
+
+    <p>We'll follow our 5×5 image through the chapter. First we slide a filter over it and see what comes out. Then we count what that costs in output size and weights, stack layers into a network, and ask why very deep stacks stopped training until residual connections arrived. After a short history of the architectures that followed, we put new heads on the same backbone to find objects and label pixels, and finish with what each of those choices costs you.</p>
+  </section>
+
+  <section id="intuition">
+    <h2><span class="num">01</span>A small filter, slid across the image</h2>
+
+    <p>Let's take the fully-connected approach seriously for a moment, using our tiny image. If each of 9 output units gets its own weight for each of the 25 pixels, that's 9 × 25 = 225 weights for one layer, and each weight only knows about one pixel position. Scale the image up to 224×224×3 and a layer with 1,000 units needs over 150 million weights. There aren't enough labeled images in existence to learn that many independent numbers without <strong>overfitting</strong>, which means memorising the quirks of the training set instead of the pattern behind it. And since the weights are tied to positions, the network would have to see an object at every possible position during training to recognise it anywhere.</p>
+
+    <p>The convolution avoids both problems. Take a 3×3 filter, which is just nine numbers. Lay it over the top-left 3×3 patch of the image, multiply each filter number by the pixel underneath it, and add up the nine products. That's the dot product from chapter 01, and it gives a single number that's large when the patch looks like whatever the filter is built to detect. Now slide the filter one pixel to the right and do it again, and carry on across the row, then down to the next row. The numbers we collect form a new grid called a <strong>feature map</strong>, and the whole sliding procedure is a <strong>convolution</strong>. The filter also has one extra number, a <strong>bias</strong>, added to each result, so the filter has 9 weights plus a bias in total.</p>
+
+    <p>For our image, let's use a filter whose three rows are all <code>[-1, 0, 1]</code>. At each position it subtracts the pixel on the left from the pixel on the right, so it gives a big positive number wherever dark turns into bright. On the top-left patch the pixels in each row are 0, 0, 9, so each row contributes −0 + 0 + 9 = 9, and the three rows add up to 27. On the last patch every pixel is 9, so each row gives −9 + 0 + 9 = 0.</p>
+
+    <p>The code below does exactly this. It builds the image and the filter, then loops over the 3×3 grid of positions where the filter fits inside the 5×5 image. The slice <code>img[i:i+3, j:j+3]</code> is the patch under the filter, and multiplying it by <code>k</code> and calling <code>.sum()</code> is the dot product.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Slide an edge-detecting filter over a tiny image</span>
+      </summary>
+<pre><code>import numpy as np
+
+img = np.array([[0, 0, 9, 9, 9]] * 5, dtype=float)   # dark | bright
+k = np.array([[-1, 0, 1]] * 3, dtype=float)          # dark-to-bright
+
+out = np.zeros((3, 3))
+for i in range(3):
+    for j in range(3):
+        out[i, j] = (img[i:i+3, j:j+3] * k).sum()
+
+print(out.astype(int))</code></pre>
+      <div class="tryit-out">The filter answers <code>27</code> in the two left columns of the output and <code>0</code> in the right one. Every row is the same because every row of the image is the same. The first two patches contain the jump from <code>0</code> to <code>9</code>, and the last patch sees only bright pixels. The same nine filter weights were used at all nine positions.</div>
+    </details>
+
+    <p>Look at the three columns of the output. The first two patches each include the dark-to-bright jump, so they both score 27, and the last patch sits entirely inside the bright block, so it scores 0. Nobody told the code where the edge was. The filter found it by being slid everywhere. In a real network the nine numbers aren't chosen by hand like this. They start random and get adjusted by gradient descent, so that the filter ends up detecting whatever pattern helps the task.</p>
+
+    <h4 class="why">Why can one small filter do the work of so many weights?</h4>
+
+    <p>Think of the filter as a stencil. A stencil has a fixed shape, and you don't cut a new one for every spot you want to stamp it. In the same way, the filter's size follows the pattern it looks for and has nothing to do with the size of the picture. Nine numbers describe a vertical edge, and that description doesn't get longer when the image does. Our filter has 9 weights and a bias on a 5×5 image, and it would have the same 9 weights and a bias on a 4096×4096 one. We call the reuse of the same weights at every position <strong>weight sharing</strong>.</p>
+
+    <p>Weight sharing bakes in two assumptions about images. Nearby pixels are related, which we call <strong>locality</strong>, so a filter only needs to look at a small window at a time. And a useful pattern stays useful wherever it appears, which gives us <strong>translation invariance</strong>: an edge detector that works in the top-left corner works in the bottom-right corner too, so the network never has to learn "edge at (5,5)" and "edge at (200,200)" as two unrelated facts. Both assumptions hold for almost every natural image, so a CNN doesn't spend parameters or training data rediscovering them. A fully-connected layer gets neither, because each output unit has an independent weight for every input pixel.</p>
+
+    <p>Parameter counts staying flat as the image grows, a detector transferring from one corner to every other, and layers that stay affordable as we add more of them all follow from this one property. A few settings control how the sliding happens. <strong>Stride</strong> is how far the filter moves between positions. Stride 1 checks every position, and stride 2 skips every other one, which halves the output resolution. <strong>Padding</strong> is a border of zeros added around the image before sliding, most often so the output stays the same size as the input. <strong>Dilation</strong> spreads the filter's nine sample points further apart, with gaps between them, so one filter sees a wider area without gaining a single weight.</p>
+
+    <p>The last setting is <strong>channels</strong>, the depth of the data. A colour image has three channels, one each for red, green and blue. A real convolutional layer doesn't run one filter. It runs dozens or hundreds of independent filters over the same input, and each one produces its own feature map: edges, corners, colour blobs, whatever gradient descent finds useful. Stacked together, those maps are the channels the next layer sees. So how big is the output, and how many weights does a layer have once channels come into it? Let's count.</p>
+  </section>
+
+  <section id="math">
+    <h2><span class="num">02</span>Counting output sizes and weights</h2>
+
+    <p>In our example the 3×3 filter fitted into the 5-pixel row at 3 positions, so the output was 3×3. The general rule uses the input's width <code>W</code>, the filter size <code>K</code>, the padding <code>P</code> and the stride <code>S</code>:</p>
+
+    <div class="eq-block">
+      <span>$$W_{out} = \left\lfloor \frac{W - K + 2P}{S} \right\rfloor + 1$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">W</span> the input's spatial width (or height, computed identically and usually equal for square feature maps) — e.g. 224 for a 224×224 input image, or whatever spatial size the previous layer output.</li>
+      <li><span class="sym">K</span> kernel size — the width/height of the learned filter, most commonly 3, sometimes 5 or 7 for an early "stem" layer.</li>
+      <li><span class="sym">P</span> padding — rows/columns of zeros added to each side of the input before sliding the kernel, most often chosen so the output stays the same spatial size as the input ("same" padding).</li>
+      <li><span class="sym">S</span> stride — how many pixels the kernel moves between applications. <code>S=1</code> checks every position; <code>S=2</code> skips every other position and roughly halves the output size — this is exactly what a strided convolution uses to downsample instead of pooling.</li>
+      <li><span class="sym">⌊⌋ + 1</span> the floor accounts for the kernel needing to fit fully inside the padded input (a fractional position isn't a valid convolution step); the <code>+1</code> counts the starting position itself.</li>
+    </ul>
+
+    <p>Try it on our image first. With <code>W=5</code>, <code>K=3</code>, <code>P=0</code> and <code>S=1</code> we get (5 − 3)/1 + 1 = 3, which matches the 3×3 output we computed. Add one ring of zero padding, <code>P=1</code>, and it becomes (5 − 3 + 2)/1 + 1 = 5, the same size as the input. Keep <code>P=0</code> and use stride 2, and it becomes ⌊2/2⌋ + 1 = 2. For a bigger check, take ResNet's first layer, which puts a 224×224 input through a 7×7 kernel with stride 2 and padding 3. <code>(224 − 7 + 2·3)/2 + 1 = (223)/2 + 1 = 111 + 1 = 112</code>, a 112×112 output, exactly matching the published architecture.</p>
+
+    <h3 id="parameter-count">Parameter count</h3>
+
+    <p>Channels change the weight count too. A 3×3 convolution with <code>C_in</code> input channels and <code>C_out</code> output channels has exactly <span>$9 \cdot C_{in} \cdot C_{out} + C_{out}$</span> parameters. Each (input channel, output channel) pair contributes 9 weights, and each output channel adds one bias. Notice what the formula leaves out: the image's width and height. Run the same filters on a 32×32 image or a 4096×4096 image and the parameter count doesn't move. Only the compute does, because the same small filters get evaluated at more positions.</p>
+
+    <p>Compare that with a fully-connected layer mapping a 224×224×3 image (150,528 input values) to a modest 1,000-unit hidden layer, which has over 150 million weights in that one layer. With 9 · C_in · C_out weights reused at every position, learning from a realistic number of labeled images becomes a tractable problem. So one convolutional layer is cheap, but it only detects small local patterns like our edge. How do we get from edges to cats?</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">03</span>Stacking layers into a network</h2>
+
+    <p>A second convolutional layer, applied to the feature maps of the first, looks for patterns in a map of edges, so it finds patterns of edges: corners, curves, textures. A third layer finds patterns of those, such as parts of objects, and further up we get whole objects. This is a <strong>feature hierarchy</strong>, and it builds itself during training, because gradient descent adjusts every layer's filters to whatever helps the final answer. Each output unit in a deeper layer depends on a wider patch of the original image, called its <strong>receptive field</strong>, even though every individual filter only ever looks at a small window.</p>
+
+    <p>To widen the receptive field quickly, networks shrink the feature maps as they go. After halving the map, a 3×3 filter covers twice as much of the original image. Since shrinking throws away spatial positions, the network compensates by adding channels, so it can keep track of more kinds of patterns in less space. The result is a pipeline you can see in the diagram below: alternate convolution layers (each followed by a ReLU, the activation from chapter 04 that sets negative values to zero) with downsampling, shrinking space while channels grow. When the map is small enough, we average each channel's whole map down to one number (global pooling), flatten the result into a single vector, and hand it to a plain fully-connected layer whose softmax turns the class scores into probabilities.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">A simple CNN classification stack — spatial size shrinks, channel depth grows
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+        <rect x="14" y="95" width="108" height="108" rx="6" fill="#14141d" stroke="#38bdf8" stroke-width="2"/>
+        <rect x="53" y="134" width="30" height="30" fill="none" stroke="#fbbf24" stroke-width="1.2" stroke-dasharray="3 3" opacity="0.9"/>
+        <rect x="40" y="121" width="56" height="56" fill="none" stroke="#fbbf24" stroke-width="1.2" stroke-dasharray="3 3" opacity="0.55"/>
+        <rect x="24" y="105" width="88" height="88" fill="none" stroke="#fbbf24" stroke-width="1.2" stroke-dasharray="3 3" opacity="0.3"/>
+        <text x="68" y="228" text-anchor="middle" font-size="11.5" font-weight="700" fill="#e9e9ef">Input image</text>
+        <text x="68" y="242" text-anchor="middle" font-size="10" fill="#9a9aa8">H × W × 3</text>
+
+        <path d="M128,149 L174,149" stroke="#38bdf8" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="190" y="97" width="82" height="82" rx="6" fill="#14141d" stroke="#38bdf8" stroke-width="1.2" opacity="0.3"/>
+        <rect x="184" y="103" width="82" height="82" rx="6" fill="#14141d" stroke="#38bdf8" stroke-width="1.4" opacity="0.6"/>
+        <rect x="178" y="109" width="82" height="82" rx="6" fill="#14141d" stroke="#38bdf8" stroke-width="2"/>
+        <text x="219" y="228" text-anchor="middle" font-size="11.5" font-weight="700" fill="#e9e9ef">Conv + ReLU</text>
+        <text x="219" y="242" text-anchor="middle" font-size="10" fill="#9a9aa8">112×112×64</text>
+
+        <path d="M276,149 L318,149" stroke="#38bdf8" stroke-width="2" fill="none" class="flow-line"/>
+        <text x="297" y="138" text-anchor="middle" font-size="9.5" fill="#f472b6">↓ pool /2</text>
+
+        <rect x="332" y="115" width="58" height="58" rx="5" fill="#14141d" stroke="#38bdf8" stroke-width="1.2" opacity="0.3"/>
+        <rect x="327" y="120" width="58" height="58" rx="5" fill="#14141d" stroke="#38bdf8" stroke-width="1.4" opacity="0.6"/>
+        <rect x="322" y="125" width="58" height="58" rx="5" fill="#14141d" stroke="#38bdf8" stroke-width="2"/>
+        <text x="351" y="228" text-anchor="middle" font-size="11.5" font-weight="700" fill="#e9e9ef">Conv + ReLU</text>
+        <text x="351" y="242" text-anchor="middle" font-size="10" fill="#9a9aa8">56×56×128</text>
+
+        <path d="M394,149 L438,149" stroke="#38bdf8" stroke-width="2" fill="none" class="flow-line"/>
+        <text x="416" y="138" text-anchor="middle" font-size="9.5" fill="#f472b6">↓ pool /2</text>
+
+        <rect x="452" y="128" width="42" height="42" rx="5" fill="#14141d" stroke="#38bdf8" stroke-width="1.2" opacity="0.3"/>
+        <rect x="448" y="132" width="42" height="42" rx="5" fill="#14141d" stroke="#38bdf8" stroke-width="1.4" opacity="0.6"/>
+        <rect x="444" y="136" width="42" height="42" rx="5" fill="#14141d" stroke="#38bdf8" stroke-width="2"/>
+        <text x="465" y="228" text-anchor="middle" font-size="11.5" font-weight="700" fill="#e9e9ef">Conv + ReLU</text>
+        <text x="465" y="242" text-anchor="middle" font-size="10" fill="#9a9aa8">28×28×256</text>
+
+        <path d="M498,149 L540,149" stroke="#38bdf8" stroke-width="2" fill="none" class="flow-line"/>
+        <text x="519" y="138" text-anchor="middle" font-size="9" fill="#a3a3b2">global pool</text>
+
+        <rect x="544" y="109" width="20" height="82" rx="4" fill="#1a1a24" stroke="#818cf8" stroke-width="2"/>
+        <text x="554" y="228" text-anchor="middle" font-size="10.5" font-weight="700" fill="#e9e9ef">Flatten</text>
+        <text x="554" y="242" text-anchor="middle" font-size="10" fill="#9a9aa8">256-d</text>
+
+        <path d="M568,149 L612,149" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="618" y="115" width="150" height="68" rx="8" fill="#14141d" stroke="#fbbf24" stroke-width="2"/>
+        <text x="693" y="144" text-anchor="middle" font-size="12" font-weight="700" fill="#fbbf24">FC layer</text>
+        <text x="693" y="164" text-anchor="middle" font-size="12" font-weight="700" fill="#fbbf24">→ softmax</text>
+        <text x="693" y="228" text-anchor="middle" font-size="10.5" font-weight="700" fill="#e9e9ef">Classifier head</text>
+        <text x="693" y="242" text-anchor="middle" font-size="10" fill="#9a9aa8">class scores</text>
+      </svg>
+      <div class="diagram-caption">The dashed amber squares over the input mark how much of the original image a single output unit can "see" at increasing depth — its receptive field — even though every individual filter only ever looks at a small local window at a time. Spatial dimensions shown (112×112, 56×56, 28×28) are illustrative, roughly how a ResNet-style backbone shrinks space while channel depth grows.</div>
+    </div>
+
+    <p>Follow the sizes left to right. A colour image goes in, and the first block turns it into 112×112 with 64 channels. Each "pool /2" halves the width and height, giving 56×56 with 128 channels and then 28×28 with 256 channels. Global pooling collapses each of the 256 maps into one number, so the flattened vector has 256 entries, and the classifier head maps it to class scores. The three dashed amber squares over the input show how the area a single output unit can see grows at each stage.</p>
+
+    <h3 id="pooling-versus-strided-convolution-two-ways-to-downsample">Pooling versus strided convolution: two ways to downsample</h3>
+
+    <p>Both operations shrink the feature map, and they differ in who decides how. <strong>Pooling</strong> applies a fixed rule with no learned parameters: max pooling keeps the largest value in each small window, and average pooling keeps the mean. It's cheap, and it gives a small amount of translation invariance almost for free, since a small shift in the input often doesn't change which value was the largest. A <strong>strided convolution</strong> downsamples by moving a learned filter more than one pixel at a time (stride 2 instead of 1), so the network gets to learn how to summarise each region.</p>
+
+    <p>Most modern backbones lean toward strided convolutions, or a mix of both, because letting gradient descent decide how to downsample beat the fixed rule often enough that max-pooling-everywhere fell out of fashion in the highest-performing designs. Pooling is still cheap, simple and common. With the pipeline in place, the obvious next move is to make it deeper, since deeper means more levels of the hierarchy. That turns out to be harder than it sounds, and you might already suspect why.</p>
+  </section>
+
+  <section id="why">
+    <h2><span class="num">04</span>Going deeper: why residual connections</h2>
+
+    <p>By the mid-2010s, people were stacking convolutional layers deeper and deeper. Plain networks past roughly 20 layers, though, got harder to train. He et al. (2015) saw something that looks backwards: a plain, non-residual 56-layer CNN had <em>higher training error</em> than an 18-layer one. Training error is the error on the very data the network learns from. Overfitting would show up as low training error and high error on new data, so it can't explain a deeper network doing worse on its own training set.</p>
+
+    <h4 class="why">Why couldn't the deep network just copy the shallow one?</h4>
+
+    <p>In principle it can. A deeper plain network can always represent the shallower one exactly, by setting the extra layers to compute the identity and pass their input through unchanged. Capacity was never the issue, so the cause had to be an <strong>optimization failure</strong>: plain stochastic gradient descent, working through dozens of stacked non-linear layers, couldn't reliably find that identity mapping.</p>
+
+    <p>The fix, which chapter 04 introduced, is to make identity the starting point. A <strong>residual block</strong> computes <span>$f(x) + x$</span> instead of <span>$f(x)$</span>, where <span>$x$</span> is the block's input and <span>$f$</span> is the usual stack of convolutions. Whenever the learned branch <span>$f$</span> contributes little, the block just passes the input through, so the network begins at "do nothing" and only has to learn a useful deviation, instead of learning identity the hard way through stacked layers. That single change took ImageNet-winning networks (ImageNet is a large benchmark collection of labeled photos) from roughly 19 layers (VGG) to 152 in the same year, and they were still improving, perhaps surprisingly, as depth grew. The figure below shows the smallest member of the family, ResNet-18, drawn out in full.</p>
+
+        <div class="ref-figure">
+      <div class="rf-img-wrap"><img src="https://upload.wikimedia.org/wikipedia/commons/6/6f/Resnet-18_architecture.svg" alt="ResNet-18 full architecture diagram, layer by layer" loading="lazy"></div>
+      <div class="rf-caption"><span class="rf-label">Reference figure</span>ResNet-18's full layer-by-layer architecture — conv stem, four stages of residual blocks with increasing channels and decreasing spatial size, global pool, then a classifier head. Source: Zhang, Lipton, Li &amp; Smola, <a href="https://commons.wikimedia.org/wiki/File:Resnet-18_architecture.svg" target="_blank" rel="noopener">Dive into Deep Learning</a>, via Wikimedia Commons (CC BY-SA 4.0).</div>
+    </div>
+
+    <p>Reading it from top to bottom, you can pick out a convolutional stem at the start, four stages of residual blocks in which the channels grow and the spatial size shrinks (the same pattern as our diagram), then global pooling and a classifier head. With depth no longer the bottleneck, a lot of different ideas became worth trying, and the field produced a whole family of architectures. Let's see how they line up.</p>
+  </section>
+
+  <section id="timeline">
+    <h2><span class="num">05</span>How the architectures got here</h2>
+
+    <p>Before 2012, vision pipelines fed hand-engineered features such as SIFT and HOG into a classical classifier like an SVM (a support vector machine). Those systems plateaued below what tasks needed and broke under changes in lighting, rotation or camera angle. AlexNet (Krizhevsky, Sutskever and Hinton, 2012) trained a deep convolutional network end to end on GPUs with ReLU and ImageNet, and beat the hand-engineered pipelines by a large margin, because the features were learned from pixels. VGG, Inception, ResNet and EfficientNet then refined the design, task-specific heads added detection, segmentation and pose estimation, and CNNs stayed the default until Vision Transformers (06) began taking over at the largest scales after 2020.</p>
+
+    <h3 id="from-lenet-to-resnet-one-question-at-a-time">From LeNet to ResNet, one question at a time</h3>
+
+    <p>Each architecture in this lineage answered a question the previous one left open, and interviewers tend to ask "why did X matter" more often than "when was X", so the reasons are the part worth keeping. <strong>LeNet</strong> (LeCun, late 1980s and 1990s) set the template on small images such as handwritten digits: convolution layers, pooling, and a small classifier head. The compute and data of its era couldn't scale it further.</p>
+
+    <p><strong>AlexNet</strong> (2012) proved the template scales. Enough labeled data (ImageNet), enough compute (GPUs) and ReLU in place of saturating activations carried it past the hand-engineered features. ReLU mattered because it avoided the vanishing-gradient problem that sigmoid and tanh networks suffered at depth. <strong>VGG</strong> (2014) then made a simplicity argument: stop hand-tuning filter sizes per layer, stack small 3×3 convolutions repeatedly, and go deeper. Three stacked 3×3 convolutions see as much of the input as one 7×7, with more non-linearity and roughly 45% fewer parameters, <code>27·C²</code> against <code>49·C²</code> at equal channel count <code>C</code>.</p>
+
+    <p><strong>Inception/GoogLeNet</strong> (2014) argued that a second axis mattered too. Instead of picking one filter size per layer, it runs several (1×1, 3×3 and 5×5) in parallel inside the same layer, and lets the network combine multi-scale information itself instead of betting on one receptive field size being right everywhere. Then <strong>ResNet</strong> (He et al., 2015) fixed the structural problem we saw in the last section, which is the same residual-connection idea introduced in chapter 04.</p>
+
+    <h3 id="after-resnet-the-efficiency-lineage">After ResNet: the efficiency lineage</h3>
+
+    <p>Once depth stopped being the bottleneck, the next generation optimised for parameter and compute efficiency as well as raw accuracy. <strong>DenseNet</strong> connects each layer to every previous layer's output, not just the one before it. That encourages feature reuse and eases gradient flow through a different mechanism than ResNet's: concatenation instead of summation. <strong>EfficientNet</strong> scales depth, width and input resolution together in a fixed ratio (<em class="term">compound scaling</em>) instead of growing one dimension alone, which gives a better accuracy per FLOP (a floating-point operation, the unit we count compute in) than scaling any single dimension.</p>
+
+    <p><strong>MobileNet</strong> targets on-device inference and is built from <strong>depthwise separable convolutions</strong>. These split a standard convolution into a per-channel spatial filter followed by a 1×1 filter that mixes channels, doing almost the same job for a fraction of the parameters and compute. The cost ratio against a standard <code>k×k</code> convolution with <code>N</code> output channels is <code>1/N + 1/k²</code>, which for 3×3 kernels at typical channel counts is roughly 8–9× cheaper. And <strong>ConvNeXt</strong> (2022) is a more recent data point in the CNN-versus-ViT story. It took a standard ResNet, modernised the training recipe, and borrowed a handful of transformer design choices. A "pure" CNN can still match ViT-era accuracy when trained with modern tricks, which suggests that some of the ViT-era gains came from training recipes and not from attention alone.</p>
+
+    <p>All of these are classification backbones, designed to answer "what's in this image?" with a single label. Many real tasks need more than that, and they reuse the same backbones with different final layers.</p>
+  </section>
+
+  <section id="heads">
+    <h2><span class="num">06</span>Finding objects and labelling pixels</h2>
+
+    <p>The convolutional layers that produce feature maps are called the <strong>backbone</strong>, and the layers on top that turn those maps into an answer are called the <strong>head</strong>. Swap the head and the same backbone can answer a different question. Detection and segmentation both need two things from the backbone at once. Early layers have fine spatial detail, and late layers have strong semantic content but coarse resolution. <strong>Feature pyramids</strong> combine feature maps from several depths of the same backbone, which is the standard way detection and segmentation heads get both properties and avoid picking one depth and losing the other.</p>
+
+    <h3 id="object-detection">Object detection</h3>
+
+    <p><strong>Object detection</strong> asks "what objects are here, and where?". The answer is a class label plus a <strong>bounding box</strong>, a rectangle drawn around each object. Two families approach it differently. <strong>Two-stage detectors</strong> (R-CNN, then Fast R-CNN, then Faster R-CNN) first propose candidate regions that might contain an object, then run a second network to classify and refine each region individually. <strong>One-stage detectors</strong> (YOLO, SSD) skip the proposal stage and predict every box and class directly, everywhere on the image, in a single forward pass.</p>
+
+    <p>Most detectors in both families historically relied on <strong>anchor boxes</strong>, a fixed set of predefined box shapes tiled across the image, with the network predicting offsets from the nearest anchor and not raw coordinates. <strong>Anchor-free</strong> detectors predict box boundaries straight from each spatial location instead. That removes a category of shape hyperparameters, at the cost of a different and often simpler matching problem during training. How the two families compare on speed and accuracy comes up in the next section.</p>
+
+    <h3 id="segmentation">Segmentation</h3>
+
+    <p>Segmentation asks a finer question than detection: where detection gives a box, segmentation gives a label for every pixel. It comes in three variants. <strong>Semantic segmentation</strong> answers "what class is this pixel?", so every pixel gets one of a fixed set of labels, and two adjacent cats come out as "cat, cat", indistinguishable as separate objects. <strong>Instance segmentation</strong> answers "which individual object does this pixel belong to?", and separates those two cats into two distinct instances. <strong>Panoptic segmentation</strong> combines both: every pixel gets a class label, and every pixel belonging to a countable "thing" (an object, as opposed to a background region like sky or road) also gets an instance id, so one unified output replaces two separate tasks.</p>
+
+    <p>Two architectures cover most of this ground. <strong>Mask R-CNN</strong> extends a two-stage detector into instance segmentation, doing everything Faster R-CNN does plus a small branch that predicts a pixel mask for each detected region. <strong>U-Net</strong> (Ronneberger et al., 2015) is the classic semantic segmentation architecture. It has an encoder that downsamples like a normal CNN, a decoder that upsamples back to the original resolution, and skip connections that carry fine spatial detail from encoder to decoder at matching resolutions. Why those skips are needed is the subject of the next section.</p>
+
+    <h3 id="other-tasks-built-the-same-way">Other tasks built the same way</h3>
+
+    <p>Several other vision tasks reuse the backbone-plus-head pattern. <strong>Pose estimation</strong> predicts pixel locations for a fixed set of keypoints, such as the joints of a human body, instead of a box or a mask. <strong>OCR and document understanding</strong> combine detection (where is the text?) with sequence recognition (what does it say?), and structured documents add layout analysis, which asks what role each block plays, whether a title, a table cell or a caption. <strong>Optical flow</strong> estimates, for every pixel, how it moved between two consecutive video frames, giving a dense motion field and not a single global camera motion.</p>
+
+    <p><strong>Depth estimation</strong> predicts per-pixel distance from the camera. From a single image it's monocular, inherently ambiguous, and relies on learned priors, while a stereo pair lets you triangulate directly. <strong>Visual tracking</strong> follows a specific object's identity across video frames. It builds on detection and adds the constraint that the same physical object should keep the same identity over time. Finally, <strong>face recognition and metric learning</strong> train a network to produce embeddings where one identity's images land close together and different identities land far apart, in place of a fixed closed-set classifier. The same idea reappears constantly in retrieval and recommendation systems (16). Each of these choices of head and backbone comes with costs, so let's go through what they are.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">07</span>What each choice costs</h2>
+
+    <p>Start with the two detector families. The table lays out how they differ, and the short version is that one is slower and more careful, and the other is faster and more direct.</p>
+
+        <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>Two-stage (R-CNN family)</th><th>One-stage (YOLO / SSD)</th></tr></thead>
+        <tbody>
+          <tr><td>Core idea</td><td>Propose candidate regions first, then classify and refine each one individually</td><td>Predict every box and class directly, everywhere, in one forward pass</td></tr>
+          <tr><td>Speed</td><td>Slower — two networks run in sequence</td><td>Faster — a single pass, real-time capable</td></tr>
+          <tr><td>Accuracy (historically)</td><td>Higher, especially on small or overlapping objects, from the dedicated per-region refinement step</td><td>Historically lower, though better losses (e.g. focal loss, addressing the huge foreground/background imbalance one-stage detectors face) and feature pyramids have closed most of that gap</td></tr>
+          <tr><td>Typical use case</td><td>Offline or high-accuracy pipelines where latency matters less — e.g. medical image review</td><td>Real-time systems — video, robotics, mobile/edge deployment</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The "historically" in the accuracy row matters. The gap was real and large around 2015–2017, when Faster R-CNN clearly beat early YOLO and SSD on accuracy. Better losses and multi-scale features closed most of it over the following years, so for most production systems today a well-tuned one-stage detector is the default, and it's probably no longer a compromise made only when speed is forced on you. The idea that two-stage detectors are always meaningfully more accurate describes the 2015 situation.</p>
+
+    <h3 id="failure-modes">Failure modes</h3>
+
+    <p>Pooling (or a strided convolution) makes a network cheaper and more translation-invariant, and it destroys exact spatial detail on the way. After five rounds of halving, a 224×224 input is down to 7×7, and the network no longer knows which original pixel any given feature came from. That suits classification, since "is there a cat in this image?" doesn't need pixel-exact detail. Segmentation does need it, because it has to label every original pixel, and that detail is gone from the bottleneck.</p>
+
+    <h4 class="why">Why do U-Net's skip connections fix this?</h4>
+
+    <p>At each resolution level, the encoder's feature map from <em>before</em> it was downsampled is copied straight across to the matching level in the decoder and concatenated with the upsampled features. Without the skip, the decoder has to reconstruct a precise object boundary from a heavily compressed, low-resolution bottleneck. That information was thrown away several pooling steps ago and isn't recoverable. The skip connection hands the decoder back exactly the spatial detail the encoder saw before pooling, at exactly the resolution needed to draw a sharp edge.</p>
+
+    <h3 id="built-in-assumptions-a-head-start-and-a-ceiling">Built-in assumptions: a head start and a ceiling</h3>
+
+    <p>Remember the two assumptions from section 01, locality and translation invariance. They're a genuine strength when data is scarce. The network doesn't have to spend training examples learning that images have local structure, because that's wired into the architecture before training starts, so a CNN reaches good accuracy from comparatively little labeled data. But a baked-in assumption is also a ceiling. At very large scale, an architecture with fewer built-in assumptions and more freedom to learn spatial structure directly from data has empirically scaled further. That architecture is the Vision Transformer (08 covers the attention mechanism, and 06 covers ViT specifically), and its freedom becomes an advantage once dataset size and compute are large enough.</p>
+
+    <p>So where does that leave CNNs in 2026? Their backbones remain the default wherever inference budget or labeled data is limited: mobile and edge deployment, and transfer-learning pipelines fine-tuned on a modest labeled dataset. The reasons are the low-data inductive bias described above and a decade of mature tooling built around it. At the frontier end, ViT-based and hybrid conv-transformer backbones (06) are now the default for large-scale pretrained vision foundation models. "CNNs are obsolete" is an overclaim. It's a scale- and data-dependent tradeoff and not a strict replacement, and exactly where the line falls is what 06 covers next.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">08</span>Summary</h2>
+    <ol>
+      <li><strong>A convolution is a small filter slid across the image.</strong> At each position it takes a dot product with the patch underneath, and the grid of results is a feature map.</li>
+      <li><strong>Weight sharing is what makes it cheap.</strong> A 3×3 filter has 9 weights and a bias whatever the image size, while a fully-connected layer on a 224×224×3 photo needs over 150 million.</li>
+      <li><strong>It builds in two assumptions about images,</strong> locality and translation invariance, so a detector learned in one place works everywhere.</li>
+      <li><strong>Output size follows one formula,</strong> <code>⌊(W − K + 2P)/S⌋ + 1</code>, and a layer's weight count, <code>9·C_in·C_out + C_out</code> for 3×3 filters, never depends on image size.</li>
+      <li><strong>Stacking layers builds a feature hierarchy</strong> from edges to textures to parts to objects, and each deeper unit has a wider receptive field.</li>
+      <li><strong>A classification CNN shrinks space while growing channels,</strong> then pools globally and hands a vector to a classifier head. Pooling uses a fixed rule, while strided convolution learns how to downsample.</li>
+      <li><strong>Plain networks got worse when made deeper,</strong> even on training data, because of an optimization failure. Residual blocks compute <code>f(x) + x</code> so identity is the default, and that took networks from about 19 layers to 152.</li>
+      <li><strong>Each architecture answered one question:</strong> AlexNet showed the template scales, VGG showed stacked 3×3 filters suffice, Inception ran several filter sizes in parallel, ResNet fixed depth, and MobileNet and EfficientNet cut cost.</li>
+      <li><strong>Heads turn a backbone into other tasks.</strong> Detection produces boxes (two-stage or one-stage, with or without anchors), and segmentation labels pixels (semantic, instance or panoptic).</li>
+      <li><strong>Downsampling destroys spatial detail,</strong> which is fine for classification and fatal for segmentation. U-Net's skip connections copy that detail back to the decoder.</li>
+      <li><strong>CNNs win when data or compute is limited,</strong> and ViT-style backbones pull ahead at large scale. Neither has replaced the other.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">09</span>Build this</h2>
+    <p class="lede">Nobody tells a convolution to look for edges. It finds them anyway, and the fastest way to believe that is to plot the filters yourself.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Watch a conv layer grow its own edge detectors</span>
+        <span class="proj-meta">~3 hours · PyTorch</span>
+      </div>
+      <p>Train a small CNN on CIFAR-10, then render its first convolutional layer's filters as images. The classification task is ordinary on purpose. The reveal is the filter grid. It starts as random noise and ends up looking like a page from a signal-processing textbook nobody handed the network.</p>
+      <ol class="proj-steps">
+        <li>Write the convolution yourself first. Loop over output positions, dot the kernel with the patch underneath, and check the answer matches <code>nn.Conv2d</code> on a random input. Use the library version afterwards so training finishes.</li>
+        <li>Build a small CNN: a 7×7 first conv with 32 filters, then three 3×3 blocks with stride-2 downsampling, global pool, one linear head. The first kernel is large on purpose, so the filters are legible when plotted. Size each layer with the formula from §02.</li>
+        <li>Before any training, render those 32 filters as tiny RGB images on a grid and save that picture.</li>
+        <li>Train for a few epochs. Re-render the same grid after every epoch. Then push one test image through and plot the 32 activation maps the first layer produces.</li>
+        <li>Now break it: replace the whole conv stack with an MLP of matching parameter count and train it identically.</li>
+        <li>Shift every test image two pixels to the right. Re-evaluate both models on the shifted set.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the filter grid stops looking like static. Oriented edges, opposing-colour blobs and a few centre-surround spots appear, and each one lights up a different region of the activation maps. Gradient descent chose those. You did not.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> The parameter-matched MLP scores worse, and the two-pixel shift costs it far more than it costs the CNN. That second gap is <strong>weight sharing</strong> made visible. The CNN learned one edge detector and got every position for free. The MLP had to learn each position separately, from whichever training examples happened to land there. §01 argues this in prose; here it is a number you measured.</div>
+    </div>
+
+    <h3 id="where-this-runs-in-production">Where this runs in production</h3>
+    <p>Say the constraint is a phone-class NPU running object detection at 30 fps — roughly a 33ms budget per frame. Every choice covered above becomes a concrete lever and stops being abstract:</p>
+    <ul>
+      <li>Backbone: a MobileNet-style stack built from depthwise separable convolutions rather than standard convolutions. Illustrative at <code>C_in = C_out = 256</code>: a standard 3×3 convolution costs <code>9·256·256 ≈ 590,000</code> parameters (and proportional FLOPs); splitting it into a depthwise 3×3 (one filter per channel, <code>9·256 ≈ 2,300</code> parameters) followed by a pointwise 1×1 that mixes channels (<code>256·256 ≈ 65,500</code> parameters) does nearly the same job for roughly 8–9× fewer parameters and FLOPs — the difference between fitting the latency budget and not.</li>
+      <li>Detector head: one-stage (YOLO/SSD-style) rather than two-stage — a single forward pass fits inside the budget; a two-stage detector's second region-by-region pass does not.</li>
+      <li>Downsampling: strided convolutions folded into the backbone rather than separate pooling layers, so downsampling doesn't cost an extra pass over the data.</li>
+      <li>Anchors: a small anchor set tuned to the object scales that occur in the target use case, rather than the broad, expensive anchor sets tuned for general-purpose benchmarks — fewer anchors means fewer candidate boxes to score every frame.</li>
+    </ul>
+    <p>None of this is an exotic trick list — every item is a direct, mechanical consequence of an idea already covered above: fewer parameters per layer, one forward pass instead of two, and letting the network fold downsampling into a convolution it's already computing rather than paying for a separate operation.</p>
+  </section>
+
+  <section id="taxonomy">
+    <h2><span class="num">10</span>Vision is not one task</h2>
+    <p class="lede">"Computer vision" names a dozen different problems that happen to share an input type. The backbone is often identical. What changes is the head, the shape of the label, and what counts as a failure.</p>
+
+    <p>Section §06 introduced detection and segmentation as families of task head, and this is the practical version. For each problem: <strong>what goes in, what comes out, what makes it hard,</strong> and what you would reach for now.</p>
+
+    <ul>
+      <li><strong>Image classification.</strong> In: one image. Out: one label. It is the easiest member of the family, and the one where architecture choice matters least. The decision that matters is <em>which pretrained weights you start from</em>.</li>
+      <li><strong>Object detection.</strong> Out: a variable-length list of boxes with labels. The variable length is the hard part: a network with a fixed-size output has to be coerced into emitting a set, and that coercion is the entire design problem.</li>
+      <li><strong>Semantic segmentation.</strong> Out: a class label for every pixel. Hard because you need pixel-exact boundaries from a backbone that threw spatial detail away while downsampling. Skip connections (§07) exist for exactly this.</li>
+      <li><strong>Instance segmentation.</strong> Out: one mask per object, plus a class. Two adjacent cats become two masks. Masks are allowed to overlap, and nothing requires you to label the background at all.</li>
+      <li><strong>Panoptic segmentation.</strong> Out: exactly one class and one instance id for every pixel, background included. It is not a union of the two above, for reasons that deserve a subsection of their own.</li>
+      <li><strong>Keypoint and pose estimation.</strong> Out: pixel coordinates for a fixed skeleton of joints. Joints get occluded constantly, and you still have to work out <em>which person</em> a detected elbow belongs to.</li>
+      <li><strong>Depth estimation.</strong> Out: distance from the camera, per pixel. A stereo pair lets you triangulate geometrically. A single image does not: absolute scale is unrecoverable, so a monocular model leans on learned priors about how big things usually are.</li>
+      <li><strong>Tracking.</strong> Out: detections plus a consistent identity across frames. Detection quality is rarely the bottleneck here; identity is, and the signature failure is the <em>ID switch</em>, where two objects cross paths and swap labels.</li>
+    </ul>
+
+    <h3 id="why-detection-needed-anchors-and-then-stopped">Why detection needed anchors, and then stopped</h3>
+    <p>A convolutional head emits a fixed grid of predictions. Objects arrive as a variable-length set. Something has to decide which output slot is responsible for which real object. That <em class="term">assignment problem</em> is the thing every generation of detector has been attacking.</p>
+
+    <p><strong>Anchors</strong> were the first answer: tile a set of predefined box shapes across every location, then assign each ground-truth object to whichever anchor overlaps it most. The network predicts an offset from that anchor rather than raw coordinates, and regressing a small correction is far easier than regressing an absolute box from nothing.</p>
+
+    <p>Anchors bought tractability and charged for it:</p>
+    <ul>
+      <li><strong>Hyperparameters.</strong> How many shapes, which aspect ratios, which scales. All tuned per dataset, none of them learned.</li>
+      <li><strong>Class imbalance.</strong> Most anchors match nothing, so easy background examples swamp the gradient. <a href="https://arxiv.org/abs/1708.02002" target="_blank" rel="noopener">Focal loss</a> was designed specifically to stop that drowning effect.</li>
+      <li><strong>Duplicate predictions.</strong> Several anchors fire on the same object, so you need non-maximum suppression afterwards to clean up.</li>
+    </ul>
+
+    <p><strong>Anchor-free</strong> detectors predict box edges straight from each spatial location, deleting the shape hyperparameters outright. <a href="https://arxiv.org/abs/2005.12872" target="_blank" rel="noopener">DETR</a> went further still, reframing detection as direct set prediction: it matches predictions to ground truth with the Hungarian algorithm during training, and so removes NMS by construction rather than by post-processing.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The thread running through all of it</span>
+      <p>Anchors, anchor-free heads and set prediction look like three unrelated architectures. They are three answers to one question: <strong>which prediction should be held responsible for which object?</strong></p>
+      <p>Anchors answer it with a hand-designed geometric prior. Anchor-free heads answer it with spatial position. DETR answers it by solving an explicit matching problem during training.</p>
+      <p>If an interviewer asks why detection is harder than classification, this is the answer. Classification has one output and one label. Detection has to invent a correspondence.</p>
+    </div>
+
+    <h3 id="why-panoptic-is-not-semantic-plus-instance">Why panoptic is not semantic plus instance</h3>
+    <p><a href="https://arxiv.org/abs/1801.00868" target="_blank" rel="noopener">Kirillov et al. (2019)</a> defined panoptic segmentation with a hard constraint: every pixel gets exactly one class label and one instance id, with no overlaps and no gaps.</p>
+
+    <p>You cannot reach that by running two models and merging their output:</p>
+    <ul>
+      <li><strong>Instance masks may overlap.</strong> Two predicted masks claiming the same pixel is legal in instance segmentation and illegal in panoptic, so something has to arbitrate.</li>
+      <li><strong>Instance segmentation ignores the background.</strong> Sky, road and grass have no countable instances, so an instance model has nothing to say about them.</li>
+      <li><strong>Semantic segmentation cannot split objects.</strong> It covers every pixel, but two touching cars come back as one undifferentiated "car" region.</li>
+    </ul>
+
+    <p>The vocabulary is the part worth keeping. <em class="term">Things</em> are countable: cars, people, bottles. <em class="term">Stuff</em> is not: road, sky, vegetation. Panoptic gives things an instance id and leaves stuff without one.</p>
+
+    <p><a href="https://arxiv.org/abs/2112.01527" target="_blank" rel="noopener">Mask2Former</a> resolved the split architecturally. Predict a set of binary masks, each carrying one class label. Semantic, instance and panoptic then become the same model output, read three different ways.</p>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">11</span>Where you meet this in the wild</h2>
+    <p class="lede">Almost none of these deployments look like ImageNet. The label format is usually the thing that changes, and the interesting engineering happens around the model.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card" style="--wc:var(--c-sci)">
+        <div class="wc-domain">Medical imaging</div>
+        <div class="wc-what">Segmenting an organ or a tumour in a CT volume</div>
+        <div class="wc-body">U-Net's home turf, and still competitive. <a href="https://www.nature.com/articles/s41592-020-01008-z" target="_blank" rel="noopener">nnU-Net</a> surpassed most existing approaches, including highly specialised ones, across 23 public datasets from international segmentation competitions — without a novel architecture. Its contribution was automatic configuration: preprocessing, patch size, and training schedule derived from the dataset itself. The lesson generalises well beyond medicine.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-mlops)">
+        <div class="wc-domain">Manufacturing</div>
+        <div class="wc-what">Catching a defect you have never seen before</div>
+        <div class="wc-body">The obvious framing fails here: you cannot train a defect classifier when defects are rare and the next one is a category nobody has photographed yet. So the task is usually inverted: train only on <em>normal</em> parts and flag deviation, as in the <a href="https://www.mvtec.com/company/research/datasets/mvtec-ad" target="_blank" rel="noopener">MVTec AD</a> benchmark. Anomaly detection, not classification.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-3d)">
+        <div class="wc-domain">Satellite and aerial</div>
+        <div class="wc-what">Finding small objects in enormous images</div>
+        <div class="wc-body">A single scene can run to tens of thousands of pixels a side, so images get tiled and stitched, and objects of interest are often a handful of pixels across. Sensors also give you more than three channels. A convolution does not care: change the input channel count and the rest of the network is untouched.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-nlp)">
+        <div class="wc-domain">Documents</div>
+        <div class="wc-what">Turning a scanned invoice into structured fields</div>
+        <div class="wc-body">Three problems wearing one coat: detection finds where the text is, sequence recognition reads it, and layout analysis works out what each block <em>means</em>, whether that is a total, a line item or a header. The vision half is usually the easy half.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-rec)">
+        <div class="wc-domain">Sports and retail</div>
+        <div class="wc-what">Following the same person across a whole video</div>
+        <div class="wc-body">Detection per frame is close to solved, but identity across frames is not. Players occlude each other, shoppers leave and re-enter the frame, and a single ID switch corrupts every downstream statistic. Most of the engineering budget goes to the association step, not the detector.</div>
+      </div>
+    </div>
+
+    <div class="reach">
+      <div class="reach-col reach-yes">
+        <div class="reach-head">Reach for a CNN when</div>
+        <ul>
+          <li><strong>Local texture or shape decides the answer.</strong> Defects, tissue boundaries, edges. Locality is a correct assumption here, and you get it for free.</li>
+          <li>You have <strong>modest labelled data</strong> and a pretrained backbone. The inductive bias substitutes for examples you do not have.</li>
+          <li><strong>Compute or latency is tight.</strong> Edge devices, real-time video, embedded hardware. The tooling is mature and the models are small.</li>
+          <li>Your input <strong>is not three-channel RGB</strong>: multispectral, depth or stacked medical slices all drop straight in.</li>
+        </ul>
+      </div>
+      <div class="reach-col reach-no">
+        <div class="reach-head">Look elsewhere when</div>
+        <ul>
+          <li>The answer depends on <strong>relating distant parts of the image</strong>. Attention models that assumption instead of fighting it. See <a href="/topics/06-modern-vision-foundation-models">06</a>.</li>
+          <li>You have <strong>large-scale pretraining available</strong>: past a certain data budget, fewer built-in assumptions scale further, which is the tradeoff §07 lays out.</li>
+          <li>The problem is <strong>geometric with known mathematics</strong>. Calibration, homographies, and stereo rectification are solved analytically, and learning them gives a worse answer.</li>
+          <li><strong>Labels are the bottleneck.</strong> Promptable models like <a href="https://arxiv.org/abs/2304.02643" target="_blank" rel="noopener">SAM</a> can cut annotation cost far more than a better backbone would.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">12</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What does a convolution actually compute, and why does weight sharing matter?</summary>
+      <div class="qa-body"><p>A convolution slides a small learned filter over every position of the input, computing a dot product between the filter and the patch underneath at each position. Reusing the same filter (weight sharing) at every position gives two things: far fewer parameters than a fully-connected layer, since the filter's size doesn't depend on the image's size, and translation invariance, since a pattern learned in one position is automatically recognized in every other position.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Pooling vs. a strided convolution — what's the actual difference?</summary>
+      <div class="qa-body"><p>Both downsample the spatial size of a feature map. Pooling (max or average) applies a fixed, hard-coded rule with zero learned parameters — cheap, and gives a bit of translation invariance for free. A strided convolution downsamples using its learned weights, moving the filter more than one pixel per step, which lets the network learn how to summarize each region instead of following a fixed rule. Most high-performing modern backbones lean toward strided convolutions or a mix, rather than pure pooling everywhere.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Derive the output spatial size of a convolutional layer.</summary>
+      <div class="qa-body"><p><code>W_out = ⌊(W − K + 2P) / S⌋ + 1</code>, where <code>W</code> is input width, <code>K</code> is kernel size, <code>P</code> is padding on each side, and <code>S</code> is stride. The kernel needs <code>K</code> input positions to produce one output; padding effectively extends the usable width to <code>W + 2P</code>; dividing by stride and flooring counts how many valid starting positions fit; the <code>+1</code> counts the first position. Concrete check: ResNet's stem uses a 224 input, <code>K=7</code>, <code>P=3</code>, <code>S=2</code>: <code>(224 − 7 + 6)/2 + 1 = 111 + 1 = 112</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why did ResNet's residual connections specifically fix the degradation problem — why wasn't it just an overfitting issue?</summary>
+      <div class="qa-body"><p>He et al. showed that a plain (non-residual) deeper network could have <em>higher training error</em> than a shallower one — not a generalization gap, worse error on the training set itself. Since a deeper plain network can always represent the shallower function exactly (set extra layers to identity), this had to be an optimization failure: plain SGD struggled to find the identity mapping through many stacked non-linear layers. A residual block computes <span>$f(x)+x$</span> instead of <span>$f(x)$</span>, making identity the default whenever the learned branch contributes little, so the network only has to learn a useful deviation from "do nothing" rather than learning identity the hard way.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>When would you actually choose a two-stage detector over a one-stage one today?</summary>
+      <div class="qa-body"><p>When the latency budget genuinely allows for it and the task rewards the extra accuracy a dedicated per-region refinement step gives — small or heavily overlapping objects, or offline/high-stakes review pipelines like medical imaging — rather than real-time constraints. For most real-time or edge deployments, a well-tuned one-stage detector has closed most of the historical accuracy gap and is the default choice, not a fallback.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why do skip connections matter specifically for segmentation?</summary>
+      <div class="qa-body"><p>An encoder built from repeated pooling/stride-2 convolutions destroys exact spatial detail as it downsamples — after several halvings, the network no longer knows precisely which original pixel a feature came from. That's harmless for classification but fatal for segmentation, which needs a label for every original pixel. U-Net's skip connections copy the encoder's feature map at each resolution directly across to the matching resolution in the decoder, concatenating it with the upsampled features. Without that connection, the decoder would have to reconstruct sharp object boundaries purely from a heavily compressed low-resolution bottleneck — detail that was already thrown away and isn't recoverable from the bottleneck alone.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>You're choosing a backbone — CNN or ViT — for a new vision product with a modest labeled dataset, tens of thousands of images. Which do you pick, and why?</summary>
+      <div class="qa-body"><p>The deciding factor isn't "CNN vs. ViT" in the abstract, it's how much data and pretraining you actually have access to. A CNN's built-in locality and translation-invariance assumptions give it a strong head start on modest data, so a CNN — or better, a CNN pretrained on a large dataset and fine-tuned on yours (transfer learning) — is the safer default when data is limited. A ViT can still win, but only by leaning on large-scale pretraining (06) to learn spatial structure it doesn't get for free architecturally; training a ViT from scratch on tens of thousands of images, with no pretraining, typically underperforms a comparable CNN.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">13</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/1512.03385" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Deep Residual Learning for Image Recognition</div><div class="r-sub">He et al., 2015 — arXiv:1512.03385</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1506.02640" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">You Only Look Once: Unified, Real-Time Object Detection</div><div class="r-sub">Redmon et al., 2015 — arXiv:1506.02640</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1505.04597" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">U-Net: Convolutional Networks for Biomedical Image Segmentation</div><div class="r-sub">Ronneberger et al., 2015 — arXiv:1505.04597</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/70" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Calculate Image Brightness</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/82" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Grayscale Image Contrast Calculator</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/45" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Linear Kernel Function</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/240" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Bilinear Image Resizing</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/280" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Implement RBF (Gaussian) Kernel Function</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/190" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Overlapping Max Pooling</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">14</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/04-neural-network-fundamentals"><div class="rc-sec" style="color:var(--c-nn)">04 · Prerequisite</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">Backprop, ReLU, residual connections — the machinery every conv layer trains with.</div></a>
+      <a class="related-card" href="/topics/06-modern-vision-foundation-models"><div class="rc-sec" style="color:var(--c-visionfm)">06 · What changed next</div><div class="rc-title">Modern Vision Foundation Models</div><div class="rc-hook">CNNs plateaued at scale; ViT, CLIP, and DINO-style pretraining picked up from here.</div></a>
+      <a class="related-card" href="/topics/08-attention-transformers"><div class="rc-sec" style="color:var(--c-attention)">08 · Bridges to this</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">ViT deletes the convolution entirely and asks attention to learn locality from scratch.</div></a>
+      <a class="related-card" href="/topics/20-3d-spatial-autonomous-driving"><div class="rc-sec" style="color:var(--c-3d)">20 · Used downstream</div><div class="rc-title">3D, Spatial &amp; Autonomous Driving</div><div class="rc-hook">Detection and segmentation stacks, dropped onto a moving vehicle's sensor suite.</div></a>
+    </div>
+  </section>

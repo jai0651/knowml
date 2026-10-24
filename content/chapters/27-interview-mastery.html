@@ -1,0 +1,265 @@
+---
+title: "Interview Mastery"
+dek: "Follow the same few shapes through every kind of interview question: a six-question checklist for “why did you use X”, then the shapes of system-design and debugging answers, three short drills, and a bank of worked questions."
+readingTime: "~20 min"
+prereqs: ""
+group: "Systems, Safety & Interview"
+label: "Chapter 27"
+description: "The repeatable framework behind every ML/AI interview question — model selection, system design, debugging, paper reading, and 60-second explanations — drilled with real prompts."
+---
+<section id="tldr">
+    <p>Imagine three questions from three different interviews. "Why did you pick this model?" "Design a RAG system for our internal docs." "Your loss went to NaN overnight, what do you check?" They sound unrelated, and you might be tempted to prepare for each one separately, by memorizing a list of models, a list of architectures and a list of failure modes.</p>
+
+    <p>That usually isn't what's being tested. An interviewer who asks about a model rarely cares whether you remember its layer count. They want to see whether you can <strong>reconstruct a design decision from first principles</strong>: what problem it solves, what the alternatives were, and what you gave up to get here. Someone who can do that for a model they've met before can also do it for one they haven't, and in a real interview you'll be in that second situation for at least half of the questions.</p>
+
+    <p>So this chapter isn't a 28th topic to memorize. It's a set of shapes that an answer can take, and we'll build them one at a time. We start with a checklist of six questions that works on any "why did you use X" question, and we run it live on one example, a customer-support chatbot. Then we look at the shape of a system-design answer, the shape of a debugging answer, and three short drills: explaining something in 60 seconds, comparing two architectures, and walking through a paper. The question bank and a list of where to practice come after that.</p>
+
+    <p>Examples here borrow from other chapters on the site, mostly 08, 10, 11, 23 and 25, so the chapter is probably most useful once you've read a few of them. When an example leans on one, we'll say which.</p>
+  </section>
+
+  <section id="framework">
+    <h2><span class="num">01</span>The six-question framework</h2>
+    <p>If the interviewer wants a decision reconstructed, the first problem is knowing where to start. You can't recite everything you know about a model, and you can't improvise a structure under pressure either. What helps is a fixed order of questions to walk through, so that your answer always has somewhere to go next. The order we'll use is the one every page on this site is written in, and it's also roughly the order a well-run technical interview follows, whether or not the interviewer says so out loud:</p>
+    <div class="mental-flow">
+      <div class="mf-step">Representation</div><div class="mf-arrow">→</div>
+      <div class="mf-step">Objective</div><div class="mf-arrow">→</div>
+      <div class="mf-step">Architecture</div><div class="mf-arrow">→</div>
+      <div class="mf-step">Training</div><div class="mf-arrow">→</div>
+      <div class="mf-step">Inference</div><div class="mf-arrow">→</div>
+      <div class="mf-step">Deployment</div>
+    </div>
+    <p>These are <strong>representation</strong> (how the data is turned into numbers the model can work with), <strong>objective</strong> (what the model is trained to optimize), <strong>architecture</strong> (how the layers are wired together), <strong>training</strong> (how the weights get fitted), <strong>inference</strong> (what it costs to run the trained model on one input) and <strong>deployment</strong> (the constraints of the system it has to live in). Treat the list as a <em class="term">silent checklist</em> that you start running the moment you hear "why did you use X" or "why not Y instead." If you can fill in one honest sentence for each of the six, you have a real answer. And if you get stuck on one, that box is precisely the gap you should go and revise, so it's not a cue to change the subject.</p>
+
+    <h3 id="applying-it-live">Applying it live</h3>
+    <p>Here's the example we'll use. The question is: <em>"Why would you use a Transformer decoder instead of an LSTM for a customer-support chatbot?"</em> (An LSTM is a recurrent network, which reads a sequence one step at a time. Chapter 07 covers it.) Let's run the checklist out loud, starting at the top.</p>
+
+    <p>On <strong>representation</strong>, both models consume a sequence of tokens, but they hold the history differently. An LSTM compresses everything before the current step into one fixed-size hidden state. A Transformer keeps every past token's key/value pair explicitly, and lets the current step attend back to any of them directly. Say that difference first, because it's the root cause of everything that follows.</p>
+
+    <p>On <strong>objective</strong>, both are typically trained with the same next-token cross-entropy loss, so this box doesn't separate the two options. Say so out loud. Knowing when a box does <em>not</em> differentiate two options signals understanding just as much as knowing when it does.</p>
+
+    <p>On <strong>architecture</strong>, we reach the real answer. An LSTM's hidden state has to carry turn 1 through every step up to turn 40 sequentially, and it degrades with distance. A Transformer gives turn 1 and turn 40 a direct, one-hop path via self-attention (see 08). That path matters when a user refers back to something they said much earlier in a long conversation.</p>
+
+    <p>On <strong>training</strong>, LSTM training is inherently sequential, because step 40 needs step 39, so it cannot parallelize across the time axis on a GPU. A Transformer processes the whole sequence in one parallel matmul (a matrix multiplication). That's probably why Transformer-based chatbots could be trained on the data volumes they were, where an LSTM at that scale would take too long to be practical.</p>
+
+    <p>On <strong>inference</strong>, the tradeoff flips, and saying so is what separates a memorized answer from an understood one. LSTM inference costs O(1) memory and compute per generated token. A Transformer needs a growing <strong>KV cache</strong>, the stored keys and values of every earlier token, and its attention cost scales with context length. That's why serving tricks like grouped-query attention and paged KV caches exist (see 08).</p>
+
+    <p>On <strong>deployment</strong>, the choice now depends on constraints the question hasn't specified: expected conversation length, latency SLA (the response time you've promised), GPU budget. That's your cue to ask a clarifying question instead of guessing, and asking it is part of the answer.</p>
+
+    <h4 class="why">What makes this answer sound understood instead of memorized?</h4>
+    <p>Look back at what the answer never said. It never said "Transformers are just better." It said what each architecture does differently, why that difference matters for this specific task, and what it costs. That's <strong>mechanism plus cost with no verdict</strong>, and it's what lets the same skeleton carry over to a question you haven't seen. The next question is what the skeleton looks like when the prompt isn't "why X" but "build me a whole system."</p>
+  </section>
+
+  <section id="system-design">
+    <h2><span class="num">02</span>System-design answers have a shape</h2>
+    <p>"Design a system that does X" is not a request to reproduce an architecture diagram from memory. It's a request to watch how you reason when you don't have all the information, and the six questions above don't quite fit, since there's often no single model to interrogate. Strong answers tend to follow a different sequence, whether X is a recommender, a RAG pipeline or a fraud model:</p>
+    <div class="mental-flow">
+      <div class="mf-step">Clarify</div><div class="mf-arrow">→</div>
+      <div class="mf-step">Baseline</div><div class="mf-arrow">→</div>
+      <div class="mf-step">Bottleneck</div><div class="mf-arrow">→</div>
+      <div class="mf-step">Iterate</div><div class="mf-arrow">→</div>
+      <div class="mf-step">Evaluate</div><div class="mf-arrow">→</div>
+      <div class="mf-step">Monitor</div>
+    </div>
+    <p>You start by <strong>clarifying</strong>: requirements, constraints and scale, before proposing anything. That means volume, latency budget, freshness needs and who the users are. Then you name a <strong>baseline</strong>, the simplest thing that could plausibly work, which proves you know how to ship something before you know how to gold-plate it. The baseline will hit a limit, so you name that <strong>bottleneck</strong> specifically instead of gesturing at "scaling issues." Each upgrade you then <strong>iterate</strong> in is justified by the exact bottleneck it fixes. After that you <strong>evaluate</strong>: state the metric you'd track and why it fits this problem, without defaulting to accuracy. Last, you <strong>monitor</strong>, which means naming the failure modes that only show up in production and what you'd alert on.</p>
+
+    <h4 class="why">Why spend the first minutes asking questions?</h4>
+    <p>Skipping the clarify step is the most common way strong candidates give weak system-design answers: they solve a problem the interviewer didn't ask about. Two minutes spent pinning down <em>volume</em>, <em>latency</em> and <em>freshness</em> changes which baseline is even reasonable. A batch job that reruns overnight and a service answering interactively aren't the same problem, and the question rarely says which one you're in.</p>
+
+    <h3 id="model-answer-design-a-rag-system-for-internal-company-docs">Model answer: "Design a RAG system for internal company docs"</h3>
+    <p>A RAG (retrieval-augmented generation) system looks up relevant text and hands it to a language model along with the question. Let's walk the six steps on it, and watch how each step creates the need for the next.</p>
+
+    <p><strong>Clarify.</strong> How many documents are there, and how often do they change? Does the answer need a citation back to the source doc? Is it single-turn Q&amp;A or a multi-turn conversation? Do different users have different document access? These answers change the entire design, so ask before proposing anything.</p>
+
+    <p><strong>Baseline.</strong> Chunk the documents into roughly paragraph-sized pieces. Embed each chunk with an off-the-shelf model and store the vectors in an HNSW-style approximate-nearest-neighbor index (a structure that finds close vectors without comparing against every one). Embed the incoming query the same way, retrieve the top-k most similar chunks, and put them into the LLM's prompt as context. See 11 for how this pipeline composes with the model itself.</p>
+
+    <p><strong>Bottleneck.</strong> This baseline fails in three predictable ways. It misses <em>exact matches</em> like a policy number or a table value, because semantic embeddings blur precise tokens. It misses <em>multi-hop questions</em> needing facts from several chunks, because top-k retrieval treats each chunk independently. And it ignores <em>per-user permissions</em> entirely, since the index has no notion of who may see what.</p>
+
+    <p><strong>Iterate.</strong> Each fix answers one of those failures. Add <em>hybrid retrieval</em>: combine BM25 keyword search (a classic ranking by shared words) with dense embedding search and merge the ranked lists, which catches the exact matches dense retrieval misses. Add a <em>cross-encoder reranker</em> over the top candidates, since scoring query and chunk jointly is far more accurate than embedding similarity alone, just too slow to run over the whole corpus. Chunk more carefully, keeping tables and code blocks intact instead of splitting mid-structure. Attach access-control metadata and filter at query time. None of these is a feature dumped in because it sounds sophisticated, and that's the thing to make clear to the interviewer.</p>
+
+    <p><strong>Evaluate.</strong> Two different things need two different metrics. For <em>retrieval quality</em>, use recall@k (how often the right chunk appears in the top k) and MRR (mean reciprocal rank, which rewards putting the right chunk near the top), both measured against a labeled set of question-to-correct-chunk pairs. For <em>end-to-end answer quality</em>, check whether the final answer is grounded in what was retrieved, using a human rubric or an LLM-as-judge, and track plain latency at P50 and P95 (the median request and the slow tail).</p>
+
+    <p><strong>Monitor.</strong> Two failure modes matter most in production. The first is <em>hallucination</em> when retrieval returns nothing relevant: the system needs an explicit "I couldn't find this in the docs" path so the LLM doesn't guess. The second is <em>staleness</em>, when documents change but the index isn't re-embedded, so track re-indexing lag as a first-class metric. Monitoring is where a design meets reality, and the next shape we'll look at, debugging, is what you do when reality disagrees.</p>
+  </section>
+
+  <section id="debugging-shape">
+    <h2><span class="num">03</span>Debugging questions have a shape too</h2>
+    <p>"Your loss went to NaN, what do you check?" isn't a trivia question. It checks whether you have a mental fault tree instead of a shrug, and a fault tree has the same three moves every time. First you name the symptom precisely. Then you list the causes that produce that exact symptom, skipping every other possible ML bug. Last, you say what you'd inspect first to tell those causes apart.</p>
+
+    <p>Here is that fault tree for five failure modes that come up constantly. The terms in it are used loosely, so a few quick definitions first. A <em>dead ReLU</em> is a unit whose output has got stuck at zero, so no gradient passes through it. <em>Loss scaling</em> multiplies the loss by a constant so tiny fp16 gradients don't underflow to zero. <em>bf16</em> is another 16-bit number format that has fp32's range, so it overflows less easily. <em>Mode collapse</em> is a generator settling on a few outputs. Read across each row from symptom to cause to first check.</p>
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th>Symptom</th><th>Likely causes</th><th>What you'd check first</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Loss plateaus early, stays flat</td>
+            <td>LR too low (barely moving) or too high (bouncing around a floor); dead ReLUs / vanishing gradients; bad initialization; a layer accidentally frozen; gradient clipping set too aggressively</td>
+            <td>Plot loss against a short LR range test; log per-layer gradient norms — a norm near zero points at dead units or a frozen layer, not the data</td>
+          </tr>
+          <tr>
+            <td>Loss goes to NaN</td>
+            <td>LR spike causing an exploding update; fp16 mixed precision without loss scaling; a log(0) or divide-by-zero in the loss (e.g. a class with zero predicted probability); a corrupted batch (inf/NaN pixel or feature value, an out-of-range label index)</td>
+            <td>Check the last good batch for inf/NaN before it hits the model; check gradient norm right before the spike; if on fp16, switch to bf16 or add loss scaling; add gradient clipping</td>
+          </tr>
+          <tr>
+            <td>Train loss keeps falling, val loss rises (overfitting)</td>
+            <td>Model has the capacity to memorize a training set that's too small or too repetitive relative to that capacity; no or weak regularization; no augmentation; too many epochs with no early stopping</td>
+            <td>Plot train vs. val curves side by side, not just final numbers; check dataset size and duplication rate; check whether dropout/weight decay/augmentation are enabled and not silently no-ops</td>
+          </tr>
+          <tr>
+            <td>Train loss won't go down at all</td>
+            <td>Gradients aren't flowing (a detached tensor, wrong parameters passed to the optimizer, a frozen backbone by accident); loss function mismatched to label format (e.g. expects class indices, got one-hot); LR far too low; a data/label pipeline bug (inputs and labels shuffled independently)</td>
+            <td>The standard sanity check: try to overfit a single batch of 8–16 examples. If loss won't go near zero on that, the bug is in the pipeline or the graph, not the dataset scale — go check gradients are nonzero and a few (input, label) pairs by hand before touching hyperparameters</td>
+          </tr>
+          <tr>
+            <td>Model collapses to one output</td>
+            <td>Severe class imbalance and "always predict the majority class" is a real local optimum for the loss; for GANs, discriminator overpowering the generator (mode collapse); LR spike early in training wiping out useful weights; a loss the model can satisfy with a trivial constant answer (e.g. predicting the dataset mean under MSE with weak signal in the features)</td>
+            <td>Check the distribution of predictions, not just the loss number; compute the "always predict majority" baseline as a sanity floor — if your model matches it, that's your answer; for GANs, plot generator vs. discriminator loss over time to see who's winning</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <h4 class="why">What do you do when you don't know where to start?</h4>
+    <p>Look at the row "train loss won't go down at all", which contains the one trick that rescues most "I don't know where to start" answers. Before debugging anything else, try to overfit a tiny slice of the data, a handful of examples, to near-zero loss. If the model can't do that, you don't have an optimization or generalization problem yet. You have a pipeline bug, and no amount of hyperparameter tuning will fix it.</p>
+
+    <p>This single move is probably the fastest way to split "something is broken" into "the code is broken" versus "the learning problem is hard." It's a good example of what a fault tree buys you: a cheap test whose result rules out half the possible causes at once. Debugging, system design and the six questions all reward that kind of structured, narrowing move, and the drills in the next three sections practice it on very short answers.</p>
+  </section>
+
+  <section id="sixty-second">
+    <h2><span class="num">04</span>The 60-second explanation drill</h2>
+    <p>"Explain X in 60 seconds" tests compression. Can you find the single sentence that matters, and then stop? The shape is four beats, said out loud, and no more: <strong>one-line definition → the problem it solved → the one key mechanism → one tradeoff</strong>. Let's apply it to the Transformer. The full treatment is chapter 08, and this is the compressed version you'd say.</p>
+
+    <p>Start with the definition: the Transformer is a neural network architecture that processes an entire sequence in parallel using self-attention instead of recurrence. Then the problem it solved: RNNs process tokens one at a time, so training can't parallelize across the sequence, and information from early tokens has to survive a long sequential chain of updates to reach later ones, which made long-range dependencies hard to learn.</p>
+
+    <p>Next comes the mechanism, and you only get one: self-attention. Every token computes a weighted average of every other token's representation, with weights learned by comparing queries against keys, so any two tokens, however far apart, get a direct one-hop path to influence each other. Then the tradeoff. That direct path costs <span>$O(n^2)$</span> compute and memory in sequence length, and that is why long-context serving needed a second wave of engineering (FlashAttention, grouped-query attention, paged KV caches) to become practical.</p>
+
+    <p>That's the whole drill. Notice that it never drifts into multi-head attention, positional encodings or layer-norm placement, which are 08's job and not these 60 seconds'. Saying less, correctly and in the right order, tends to read as more senior than saying everything you know. A related question comes up just as often, though, and it needs a different shape because there are two things to explain instead of one.</p>
+  </section>
+
+  <section id="compare-two">
+    <h2><span class="num">05</span>Compare-two-architectures drill</h2>
+    <p>A comparison has its own shape: <strong>what's shared → what's different → why the difference exists → when each wins</strong>. The trap is jumping straight to "different" without stating "shared" first, and most of the value in a comparison answer is showing you know which parts are the same idea in different clothes. The model answer here is GANs versus diffusion models, two mainstream approaches to image generation.</p>
+
+    <p><strong>What's shared.</strong> Both are deep generative models that turn some form of noise into a realistic sample. Both train end-to-end with gradient descent. Both can be conditioned on extra input, like a class label or a text prompt, to control what gets generated.</p>
+
+    <p><strong>What's different.</strong> A GAN generates a full sample in a single forward pass through a generator, trained by pitting it against a discriminator in an adversarial minimax game. A diffusion model starts from pure noise and runs many small denoising steps. Each step trains with a comparatively simple regression-style objective: predict the noise that was added.</p>
+
+    <p><strong>Why the difference exists.</strong> The adversarial game is what makes GANs capable of one-shot generation. That same minimax setup is notoriously unstable to train and prone to <em>mode collapse</em>, where the generator finds a handful of outputs that reliably fool the discriminator and stops exploring the rest of the distribution. Diffusion sidesteps the adversarial game entirely. It reframes generation as reversing a fixed, known noising process, which turns training into a well-behaved regression problem. It's far more stable, and in practice it tends to cover the full diversity of the data. The direct cost is needing many sequential denoising steps to produce one sample instead of one pass.</p>
+
+    <p><strong>When each wins.</strong> GANs win when single-pass, low-latency generation matters more than training stability or sample diversity, and you're willing to invest in the tuning tricks adversarial training needs. Diffusion wins when stability and output diversity matter more than raw speed. That's why most state-of-the-art text-to-image systems moved to diffusion, or a distilled few-step variant, and away from pure GANs. They trade some inference latency for consistently higher-quality, more diverse output, and a training process that doesn't require balancing two competing networks.</p>
+
+    <h4 class="why">Why state the shared part first?</h4>
+    <p>Because it shows you've seen through the surface differences. If you open with "GANs use a discriminator and diffusion uses denoising," you've listed two facts. If you open with "both turn noise into samples and train by gradient descent," then the differences that follow read as design choices with consequences. That habit, treating each difference as a decision with a cost, is also what the last drill checks, only this time on someone else's work.</p>
+  </section>
+
+  <section id="paper-reading">
+    <h2><span class="num">06</span>Paper-reading drill</h2>
+    <p>"Walk me through a paper you've read recently" is one of the highest-signal questions in an ML interview. Summarizing an abstract is easy, and most candidates stop there. Four things demonstrate you understood the paper, in this order: the <strong>core contribution</strong>, the <strong>baseline</strong> it's beating, the <strong>key ablation</strong> proving the contribution itself matters beyond the whole system (an ablation removes or changes one piece to see what breaks), and the <strong>stated limitation</strong>. We'll apply it to <em>Attention Is All You Need</em>, already the subject of 08, so you can check this against a page you know is accurate.</p>
+
+    <p>Start with the <strong>core contribution</strong>. It isn't "they built a good translation model", since plenty of systems already did. It's narrower and more interesting: recurrence can be removed entirely and replaced with attention alone, while matching or beating those systems. Nobody had shown that before.</p>
+
+    <p>Next, the <strong>baseline</strong> is the best contemporary recurrent and convolutional sequence-to-sequence systems for machine translation: RNN-with-attention encoder-decoders, and convolutional seq2seq approaches. The paper has to beat those on the same benchmark to justify the architectural claim, and showing that attention "works" in isolation wouldn't be enough.</p>
+
+    <p>For the <strong>key ablation</strong>, the paper doesn't only report one final BLEU score (a standard machine-translation quality metric). It varies the number of attention heads and the per-head dimension while holding total model size roughly fixed, and shows quality degrades if you collapse to too few heads or shrink each head too far. That ablation proves the specific design choice, splitting attention into multiple smaller heads, is doing real work, which is a stronger claim than "attention in general" being good. That distinction is what an interviewer is listening for.</p>
+
+    <p>Last, the <strong>stated limitation</strong> is that full self-attention is quadratic in sequence length. The paper is explicit about it, and flags restricting attention to a local neighborhood as future work for handling very long sequences. This is the constraint that later drove FlashAttention, sparse and windowed attention, and the KV-cache engineering covered in 08 and 23.</p>
+
+    <h4 class="why">Why does naming an ablation matter so much?</h4>
+    <p>Reciting the abstract and the headline result isn't the same as reading the paper. If you can't name one ablation from the results section, you haven't shown that you read past the introduction, and that's what this question is probably designed to catch. With the shapes in place, here's the whole chapter in short form.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">07</span>Summary</h2>
+    <ol>
+      <li><strong>Interviewers test reconstruction, not recall.</strong> They want to see you rebuild a design decision from the problem it solves, the alternatives and what was given up.</li>
+      <li><strong>Run six questions as a silent checklist:</strong> representation, objective, architecture, training, inference, deployment. A box you can't fill is a gap to revise.</li>
+      <li><strong>Say when a box doesn't differentiate two options.</strong> Giving mechanism plus cost, with no verdict, is what makes an answer sound understood.</li>
+      <li><strong>System design follows clarify, baseline, bottleneck, iterate, evaluate, monitor.</strong> Each upgrade is justified by the bottleneck it fixes.</li>
+      <li><strong>Clarify first,</strong> because volume, latency and freshness change which baseline is even reasonable.</li>
+      <li><strong>Debugging answers name the symptom, list the causes that produce it, and pick what to inspect first.</strong></li>
+      <li><strong>Overfit a tiny slice of data before anything else.</strong> If the model can't, the bug is in the pipeline, not the learning problem.</li>
+      <li><strong>A 60-second explanation has four beats:</strong> definition, the problem it solved, one mechanism, one tradeoff. Stopping early reads as seniority.</li>
+      <li><strong>Compare two architectures by stating what's shared before what's different,</strong> then why the difference exists and when each wins.</li>
+      <li><strong>Walk through a paper with its contribution, baseline, key ablation and stated limitation.</strong> If you can't name an ablation, you haven't read past the introduction.</li>
+    </ol>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">08</span>Interview questions</h2>
+    <p>Eight real prompts spanning the categories interviewers draw from. Each model answer applies one of the frameworks above out loud, on purpose. Read these as demonstrations of the shape and don't memorize them as scripts.</p>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Model selection</span>Gradient-boosted trees or a deep neural net for tabular customer-churn prediction — which do you pick, and why?</summary>
+      <div class="qa-body"><p>Run representation → objective → training → deployment. Representation: tabular data with a mix of categorical and numeric features, moderate row count — no inherent spatial or sequential structure for a neural net to exploit. Objective: both can optimize the same log-loss / AUC target, so that box is a wash. Training: gradient-boosted trees are dramatically more sample-efficient and robust on tabular data out of the box — they handle missing values and mixed feature types natively, need far less tuning to hit a strong baseline, and give you feature importances for free, which matters if the business needs an explanation for a churn score. A neural net can match or beat trees here, but usually only with more data, embedding layers for high-cardinality categoricals, and meaningfully more tuning effort. Deployment: trees are cheaper to serve and easier to audit. Verdict: trees, unless there's a specific reason to want representation learning — e.g. fusing tabular features with text or sequence data in one model, which is where neural approaches start to win on tabular problems.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Architecture derivation</span>Why does a ResNet need a residual/skip connection — what actually breaks without it?</summary>
+      <div class="qa-body"><p>Very deep plain (non-residual) networks were observed to get <em>worse training error</em>, not just worse test error, as depth increased past a point — that rules out overfitting as the explanation and points at optimization itself: the extra layers were making the function harder to fit, not easier. A residual connection reframes each block as learning a delta from the identity function rather than the full transformation from scratch — in the worst case, if the extra layers aren't helpful, the block can drive its own contribution toward zero and default to passing the input through unchanged. The practical effect is a direct additive path for gradients back toward the input, so depth stops being an optimization liability — the same reasoning that makes the residual stream inside a Transformer block trainable at 96+ layers (see 08).</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Data</span>Your fraud-detection model is getting 99% validation accuracy (illustrative number) — suspiciously good. Walk through how you'd check whether something's wrong.</summary>
+      <div class="qa-body"><p>First, check whether 99% is even meaningful: fraud datasets are usually severely imbalanced, so compute the "always predict not-fraud" baseline accuracy — if it's also near 99%, the metric itself is the problem, and you should be looking at precision/recall or PR-AUC instead. Second, check for leakage: is any feature computed using information that wouldn't exist yet at prediction time — e.g. a field only populated after a transaction was already confirmed fraudulent? Third, check the split: fraud data is inherently time-ordered, so a random train/val split lets future information leak backward into training; it needs a temporal split instead. Fourth, check for near-duplicate rows straddling the train/val boundary. Only after ruling all of that out would "the model is genuinely this good" become a plausible conclusion.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">System design</span>Design a real-time voice agent — what's the first thing you clarify, and what's your baseline?</summary>
+      <div class="qa-body"><p>Clarify first: what's the end-to-end latency budget (time to first audio response), does the system need to handle interruptions/barge-in mid-response, and what language(s) and acoustic conditions (noisy environments, accents) need coverage. Baseline: a cascaded pipeline — streaming ASR converts speech to text incrementally, a streaming LLM starts generating a response as soon as it has enough transcript, and streaming TTS starts speaking the first sentence before the LLM has finished generating the rest, so latency stages overlap instead of stacking fully in sequence. The bottleneck this baseline hits: cascaded latency still stacks (ASR finalization + LLM first-token + TTS first-audio) and errors compound — a mistranscription poisons everything downstream. Iterate by feeding partial ASR hypotheses to the LLM earlier, running voice-activity detection concurrently for barge-in, and considering a smaller/faster model specifically for latency-critical turns. Evaluate on end-to-end latency percentiles, word error rate, and task success rate, not just WER in isolation. Monitor for false-interruption triggers from background noise and WER degradation drift in noisy real-world audio versus the clean audio it was likely evaluated on.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Debugging</span>Training loss was decreasing normally for 2,000 steps, then spiked to NaN and stayed there. What do you check, in order?</summary>
+      <div class="qa-body"><p>This is the NaN row of the debugging table, applied: first check the last good batch for inf/NaN values in inputs or labels before they even hit the model — a single corrupted example is a common and easy-to-miss cause. Next, check the gradient norm in the steps right before the spike; a sudden explosion there points at an optimization instability rather than a data issue. Check precision — fp16 without loss scaling overflows far more easily than bf16, and this exact symptom (fine for a while, then NaN) is its classic signature. Check whether the LR schedule did something unusual right at that step, like a warmup restart. Fix candidates, cheapest first: add gradient clipping and switch to bf16 if on fp16, then resume from the last good checkpoint rather than restarting from scratch, and watch whether the same step number reproduces the failure — if it does, it's very likely a specific bad example, not randomness.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Latency &amp; cost</span>Your RAG chatbot has 4-second P95 latency (illustrative) and the product needs it under 1.5 seconds. Where do you look, and what do you trade off?</summary>
+      <div class="qa-body"><p>Break the budget down by pipeline stage before touching anything — query embedding, vector search, reranking, LLM generation, and network hops each contribute, and generation almost always dominates. Levers, each an explicit quality-for-latency trade you'd justify with measured numbers, not guesses: a smaller or distilled model for the generation step; streaming tokens to the client so perceived latency drops even if total generation time doesn't change much; caching embeddings and retrieval results for repeated or similar queries; reducing top-k or skipping the reranker on latency-sensitive paths at some cost to retrieval recall; quantizing the serving model; and speculative decoding to cut generation latency without changing output quality. The interview signal here isn't naming all of these — it's stating that every one of them is a tradeoff you'd measure, not a free win.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Distributed training</span>You're fine-tuning a 70B-parameter model and it doesn't fit on one GPU. What are your options, and how do you choose?</summary>
+      <div class="qa-body"><p>Data parallelism alone doesn't help — a single replica already can't fit, so replicating it across GPUs just fails on every replica. The real constraint is memory: parameters, gradients, optimizer states, and activations all have to live somewhere. Options: tensor parallelism splits individual matrix multiplies across GPUs, which needs fast interconnect since every layer communicates; pipeline parallelism splits layers across GPUs and streams micro-batches through them like a pipeline, communicating less often but introducing idle "bubble" time between stages; and sharded data parallelism (ZeRO/FSDP-style) shards the optimizer states, gradients, and parameters themselves across GPUs while every GPU still processes different data, which is the least invasive to adopt. In practice you'd start with sharded data parallelism, add tensor parallelism within a node where the interconnect is fast (e.g. NVLink) if a single shard still doesn't fit, and add pipeline parallelism across nodes if you need to scale further. The interviewer is checking whether you understand that memory — not raw GPU count — is the actual constraint.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Production incident</span>A recommendation model's click-through rate silently dropped 15% (illustrative) over two weeks, with no errors logged. How do you investigate?</summary>
+      <div class="qa-body"><p>No errors logged means this is a drift or pipeline problem, not a crash — treat it like the debugging shape, but for infrastructure instead of a training run. Check for upstream data changes first: did a feature start silently returning nulls or defaults after a schema change, did a join break quietly. Check for training/serving skew — is the online feature computation actually identical to what the model was trained on, or did one side get updated and not the other. Check for real distribution shift in the input population — a new user segment, a seasonal effect, a competitor change altering behavior. Check the serving infrastructure itself — a stale model version redeployed, a caching layer serving old results, a misconfigured A/B traffic split. Then correlate the exact start of the drop against every deploy and config change in that window before concluding the model itself degraded — the large majority of silent production regressions turn out to be pipeline or infrastructure issues, not the model quietly getting worse on its own.</p></div>
+    </details>
+  </section>
+
+  <section id="practice">
+    <h2><span class="num">09</span>Where to practice</h2>
+    <p>This page is the framework. The depth to apply it to lives on the specific topic pages. Go to whichever row below matches where you're weakest.</p>
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th>If you're weak on…</th><th>Go to</th></tr></thead>
+        <tbody>
+          <tr><td>LLM system design — RAG, fine-tuning, serving, evaluation</td><td><a href="/topics/10-llm-architecture-training">10 · LLM Architecture &amp; Training</a>, <a href="/topics/11-rag-agents-reasoning">11 · RAG, Agents &amp; Reasoning</a></td></tr>
+          <tr><td>Vision system design — detection, segmentation, retrieval</td><td><a href="/topics/05-cnn-vision-foundations">05 · CNNs &amp; Vision</a>, <a href="/topics/06-modern-vision-foundation-models">06 · Vision Foundation Models</a></td></tr>
+          <tr><td>Latency / cost / memory tradeoffs, distributed training</td><td><a href="/topics/23-efficient-ai-systems">23 · Efficient AI &amp; Systems</a></td></tr>
+          <tr><td>Evaluation, reliability, safety</td><td><a href="/topics/25-evaluation-reliability-safety">25 · Evaluation &amp; Reliability &amp; Safety</a></td></tr>
+          <tr><td>Speech / voice system design</td><td><a href="/topics/13-speech-audio">13 · Speech &amp; Audio</a></td></tr>
+          <tr><td>Multimodal system design</td><td><a href="/topics/14-multimodal-ai">14 · Multimodal AI</a></td></tr>
+          <tr><td>Recommendation / search design</td><td><a href="/topics/16-recommenders-ranking-search">16 · Recommenders &amp; Ranking &amp; Search</a></td></tr>
+          <tr><td>RL / robotics design</td><td><a href="/topics/15-reinforcement-learning">15 · Reinforcement Learning</a>, <a href="/topics/21-robotics-embodied-ai">21 · Robotics &amp; Embodied AI</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/46" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Implement Precision Metric</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/42" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Implement ReLU Activation Function</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/43" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Implement Ridge Regression Loss Function</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/49" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Implement Adam Optimization Algorithm</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/47" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Implement Gradient Descent Variants with MSE Loss</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/18" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Implement K-Fold Cross-Validation</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">10</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/10-llm-architecture-training"><div class="rc-sec" style="color:var(--c-llm)">10 · Apply it here</div><div class="rc-title">LLM Architecture &amp; Training</div><div class="rc-hook">Model-selection and architecture-derivation questions, worked on a real LLM stack.</div></a>
+      <a class="related-card" href="/topics/11-rag-agents-reasoning"><div class="rc-sec" style="color:var(--c-rag)">11 · Apply it here</div><div class="rc-title">RAG, Agents &amp; Reasoning</div><div class="rc-hook">The full RAG pipeline behind the system-design model answer above.</div></a>
+      <a class="related-card" href="/topics/23-efficient-ai-systems"><div class="rc-sec" style="color:var(--c-efficient)">23 · Apply it here</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Where latency, cost, memory and distributed-training questions get their real answers.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Apply it here</div><div class="rc-title">Evaluation &amp; Reliability &amp; Safety</div><div class="rc-hook">The metrics you'd name in the "evaluate" step of a system-design answer.</div></a>
+    </div>
+  </section>

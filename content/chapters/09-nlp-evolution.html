@@ -1,0 +1,382 @@
+---
+title: "NLP Evolution"
+dek: "Follow the word bank through two sentences, one about money and one about a river, as people try to turn it into numbers: first by counting, then with learned vectors, then with vectors that change with the sentence. You'll learn what each step fixed and what it left broken."
+readingTime: "~25 min"
+prereqs: "none, but pairs with sequence modeling (07) and attention (08)"
+group: "Sequence, Attention & LLMs"
+label: "Chapter 09"
+description: "Bag-of-words to TF-IDF to Word2Vec and GloVe to ELMo to BERT/GPT to T5 — how text representation evolved, term by term, and why each generation of embeddings existed only because the last one had exactly one crack in it."
+---
+<section id="tldr">
+    <p>Take two sentences: "I deposited money at the bank" and "We sat by the river bank." You read the word <em>bank</em> in each of them and know at once that the first one means a place that looks after money and the second means the edge of a river. A program is handed two strings of characters, and the four letters of <em>bank</em> are identical in both. Before it can search, classify or translate any text, it has to turn every word into numbers, and those numbers have to carry something of what the word means. A list of numbers like that is called a <strong>vector</strong>, and the question this chapter follows is how to get a good one for a word.</p>
+
+    <p>Counting is the first thing anyone tries, and counting gets a surprising amount right and a few things badly wrong. It can't tell that <em>good</em> and <em>great</em> are close in meaning, it throws away word order, and it has no way to give <em>bank</em> a different treatment in our two sentences. Each method that came after exists because of one specific failure of the one before it, so the chapter reads as a chain of fixes more than a list of techniques.</p>
+
+    <p>This chain has a short history. Through the 2000s, text became numbers by counting: bag-of-words, TF-IDF and n-gram models, which count runs of n words in a row. Word2Vec (Mikolov et al., 2013) and GloVe (2014) learned a dense vector per word from co-occurrence, so similar words landed near each other, and ELMo (2018) made the vector depend on the whole sentence. BERT and GPT (2018; see 08 and 10) moved to transformers pretrained at scale, T5 (2019) cast every task as text in, text out, and instruction tuning and RLHF turned next-token predictors into models that follow requests. We'll define each of those names when we reach it.</p>
+
+    <p>We'll start by counting words and watch exactly where that stops working. Then a model will learn a vector for each word from the words around it (Word2Vec and GloVe), we'll deal with words a model has never seen (subword tokenization), let the vector change with the sentence (ELMo), and finally pretrain a whole network instead of only the vectors (BERT, GPT and T5). Two pieces of this lineage are still running inside production systems today, and we'll finish by saying which ones and why.</p>
+  </section>
+
+  <section id="intuition">
+    <h2><span class="num">01</span>Counting words</h2>
+
+    <p>Let's start with the approach that needs no cleverness. Take a pile of text, which we'll call a <strong>corpus</strong>, and list every distinct word in it. That list is the <strong>vocabulary</strong>. For our two sentences, lower-cased, it has ten words: <em>at, bank, by, deposited, i, money, river, sat, the, we</em>. Now give each sentence a list of ten numbers, one slot per vocabulary word, and write into each slot how many times that word occurs in the sentence. "I deposited money at the bank" becomes <code>[1, 1, 0, 1, 1, 1, 0, 0, 1, 0]</code>, with ones for <em>at</em>, <em>bank</em>, <em>deposited</em>, <em>i</em>, <em>money</em> and <em>the</em>, and zeros for the four words it doesn't contain. This is <strong>bag-of-words</strong>: each document, here a single sentence, becomes a vector as long as the vocabulary, and each entry is how many times that word appears in it.</p>
+
+    <p>It's called a bag because a bag keeps what's inside it and forgets how it was arranged. Word order is thrown away entirely, so let's see what that costs. The code below uses Python's <code>Counter</code>, which maps each word to its count, to build the bag for "dog bites man" and for "man bites dog". Then it asks two questions: are the two bags equal, and are the two word lists equal?</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Count words in two sentences that mean different things</span>
+      </summary>
+<pre><code>from collections import Counter
+
+a = &quot;dog bites man&quot;.split()
+b = &quot;man bites dog&quot;.split()
+
+print(&quot;bag of words a:&quot;, dict(Counter(a)))
+print(&quot;bag of words b:&quot;, dict(Counter(b)))
+print(&quot;same counts:&quot;, Counter(a) == Counter(b))
+print(&quot;same sentence:&quot;, a == b)</code></pre>
+      <div class="tryit-out">The two bags come out identical, so <code>same counts</code> is <code>True</code> while <code>same sentence</code> is <code>False</code>. <code>dog bites man</code> and <code>man bites dog</code> each contain one <code>dog</code>, one <code>bites</code> and one <code>man</code>, so a bag of words can't tell them apart.</div>
+    </details>
+
+    <p>Both sentences contain one <em>dog</em>, one <em>bites</em> and one <em>man</em>, so any method that sees only counts has to treat a dog biting a man exactly like the reverse. Does that matter? For matching documents by topic, maybe not much, but for anything that depends on who did what to whom, it matters a lot, and most of what came next in NLP is a way to keep word order and meaning. Before we get there, counts have a second weakness. Common words like <em>the</em> turn up in nearly every document, so they fill the vector with big numbers that say nothing about what a document is about.</p>
+
+    <p>We can fix that by weighting each count by how informative the word is. <strong>TF-IDF</strong>, short for term frequency times inverse document frequency, keeps the same vector shape but replaces raw counts with a weighted score. You multiply how often a term appears in this document by how rare the term is across all documents. Common words get pushed toward zero, and a term that belongs to one document is allowed to dominate its vector.</p>
+
+    <div class="eq-block">
+      <span>$$\text{tfidf}(t, d) = \text{tf}(t, d) \times \log\!\left(\frac{N}{\text{df}(t)}\right)$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">tf(t, d)</span> how many times term <span>$t$</span> appears in document <span>$d$</span>.</li>
+      <li><span class="sym">N</span> total number of documents in the corpus.</li>
+      <li><span class="sym">df(t)</span> document frequency: in how many documents does <span>$t$</span> appear at all.</li>
+      <li><span class="sym">log(N / df(t))</span> is the inverse-document-frequency term. A word appearing in every document (df ≈ N) drives this toward <span>$\log(1) = 0$</span>, killing its weight. A word appearing in only a few documents keeps a large weight.</li>
+    </ul>
+
+    <p>Try it on our two sentences. The corpus has <span>$N = 2$</span> documents, and <em>the</em> appears in both, so its document frequency is also 2, the log term is <span>$\log(1) = 0$</span>, and its weight vanishes. So does <em>bank</em>, since both sentences contain it. That's partly an accident of having only two documents, because in a corpus of thousands the rare words would stand out. It does show what the weighting does, though: a word that can't tell documents apart gets switched off.</p>
+
+    <p>TF-IDF is a real improvement, and it still runs into a limit that no weighting can fix. Every word owns a slot, and two different words never share one. <em>Good</em> and <em>great</em> sit in separate slots, so as vectors they have nothing in common. A word written as a vector with a single 1 in its own slot and zeros everywhere else is called a <strong>one-hot</strong> vector, and every pair of one-hot vectors is equally far apart, whatever the words mean.</p>
+
+    <p>Whole documents run into the same wall. A document about "cars" and one about "automobiles" can score as nearly unrelated by <strong>cosine similarity</strong>, a standard way to compare two vectors by the angle between them, which is near 1 when they point the same way and near 0 when they share nothing. The cause is purely that the exact words don't overlap. These vectors are also <strong>sparse</strong>, meaning mostly zeros, and nothing in them lets <em>car</em> and <em>automobile</em> be recognised as related, which the learned vectors we're about to build will do.</p>
+
+    <p>So what we want has a different shape: a much shorter vector per word, mostly non-zero, in which words that get used alike sit close together. Nobody can write those numbers by hand, so they have to be learned from text. An old idea from linguistics says where to look.</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">02</span>Learning a vector for each word</h2>
+
+    <p>In 1957 the linguist J. R. Firth put the idea this way: "You shall know a word by the company it keeps." Maybe the quickest way to see this is to look at our sentences again. <em>Bank</em> keeps company with <em>deposited</em> and <em>money</em> in one and with <em>river</em> and <em>sat</em> in the other, and <em>good</em> and <em>great</em> turn up next to the same sorts of words even though they're spelled differently. If a word's meaning shows in its company, then a vector that records the company should record something of the meaning.</p>
+
+    <p>Nobody in this chapter disagrees that context gives words their meaning, and every method from TF-IDF to GPT assumes it. They differ in two narrower choices: how much context to use, and how to turn that context into numbers. TF-IDF's context is a whole document, and it comes out as a count. This section's methods use the handful of words around each occurrence, and they learn the numbers.</p>
+
+    <h3 id="word2vec-predicting-your-way-to-a-vector">Word2Vec: predicting your way to a vector</h3>
+
+    <p>You might wonder how a prediction task could produce anything that looks like meaning. Word2Vec (Mikolov et al., 2013) does it by turning Firth's idea into a training task. Train a small neural network, which is a function with many adjustable numbers that training tunes until its predictions improve, to predict the words that tend to surround <em>good</em>. Separately, train it to predict the words that surround <em>great</em>. Those two tasks end up wanting very similar internal representations, because the two words do appear in similar contexts. The predictions aren't the goal. The goal is the vector that falls out of solving the prediction task.</p>
+
+    <p>Word2Vec comes in two mirror-image forms, and both look at a <strong>context window</strong>, the few words on each side of a word that count as its context. Take "we sat by the river bank" with a window of 2 words on each side.</p>
+    <ul>
+      <li><strong>Skip-gram</strong> takes one center word and tries to predict each of its context words. For the center word <em>river</em> it has to predict <em>by</em>, <em>the</em> and <em>bank</em>.</li>
+      <li><strong>CBOW</strong> (continuous bag-of-words) does the reverse. It averages the vectors of the context words, then tries to predict the center word from that average.</li>
+    </ul>
+
+    <p>Both are, mechanically, a two-layer network. The input is the center word as a one-hot vector. Multiplying a one-hot vector by a matrix selects a single row of it, so the first layer is a table with one row per vocabulary word, called the <strong>embedding matrix</strong>, and the row that gets selected is the word vector being learned. A linear layer (one more matrix multiplication) then projects that row back up to one score per word in the vocabulary. A <strong>softmax</strong> turns the scores into a probability distribution: it raises <em>e</em> to the power of each score and divides by the total, so every word gets a positive probability and the probabilities add up to 1. Training nudges both matrices until the words that do occur next to the center word get high probability.</p>
+
+    <p>Skip-gram and CBOW trade off against each other. Skip-gram tends to do better on rare words, since each occurrence generates several training pairs, one per context word. CBOW trains faster, because it smooths several context words into one input.</p>
+
+    <p>There's a cost hiding in that softmax. It has to produce a probability for every word in a vocabulary that can pass 100,000 words, and it has to do that at every single training step, and that's expensive. So in practice Word2Vec uses <strong>negative sampling</strong>. Instead of scoring every word in the vocabulary, training becomes a binary classification task: given a (center, context) pair, is it a real pair from the text, or one of <em>k</em> randomly sampled "negative" pairs? That's dramatically cheaper, and it works about as well.</p>
+
+    <p>Written as a formula, the skip-gram goal is to make the real neighbours likely at every position in the corpus. A <strong>dot product</strong> multiplies two vectors entry by entry and adds up the products, so it's large when the vectors point the same way, and the exact objective feeds the dot product of the two words' vectors into the softmax. The logarithm of a probability grows when the probability grows, so adding up logs and making the total large means making the real neighbours probable.</p>
+
+    <div class="eq-block">
+      <span>$$\frac{1}{T}\sum_{t=1}^{T}\ \sum_{-c \le j \le c,\ j \ne 0} \log\, p(w_{t+j} \mid w_t)$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">T</span> total number of words processed; <span class="sym">c</span> the context window size (how many neighbors on each side count as "context").</li>
+      <li><span class="sym">p(w_{t+j} | w_t)</span> the probability the model assigns to the actual context word <span>$w_{t+j}$</span>, given center word <span>$w_t$</span>. The exact objective computes this with a softmax over the dot product of the two words' vectors. In practice it's approximated far more cheaply via negative sampling.</li>
+      <li>Maximizing this sum means: whatever vectors make the real (center, context) pairs in your corpus look likely are the vectors you keep.</li>
+    </ul>
+
+    <h3 id="glove-factorize-the-counts-directly">GloVe: factorize the counts directly</h3>
+
+    <p>There's a second route to the same place, and it skips the prediction. GloVe (2014) first builds a global word-word co-occurrence matrix: for every pair of words, how often do they appear near each other across the entire corpus? Then it learns vectors whose dot product approximates the <em>log</em> of that count. The fit uses a weighted least-squares objective, which means it minimizes squared errors with a weight on each pair, and the weights downweight extremely frequent and extremely rare pairs.</p>
+
+    <p>Compare that with Word2Vec, where the contrast is clean. Word2Vec is <strong>local and predictive</strong>, working one context window at a time. GloVe is <strong>global and count-based</strong>, factorizing the statistics of the whole corpus at once. In practice the two produce vector spaces with very similar properties, which suggests that the co-occurrence statistics carry the semantic signal and the particular training method matters less.</p>
+
+    <p>Either way we now have what we wanted: <em>good</em> and <em>great</em> get nearby vectors, because they keep similar company. But both methods train exactly one vector per word and freeze it. For <em>bank</em>, whose neighbours are <em>money</em> in some sentences and <em>river</em> in others, that will probably cause trouble, and section 04 returns to it. First comes a simpler problem. The vocabulary is a fixed list of words, so what happens to a word that isn't on it?</p>
+  </section>
+
+  <section id="tokenization">
+    <h2><span class="num">03</span>Words the model has never seen</h2>
+
+    <p>Every model so far has to decide what counts as "a word" before it can count or embed anything, and the obvious choice is whole words split at spaces. That has a hard failure mode. Any word not seen during training, whether a typo, a new slang term or maybe someone's name, has no vector at all. A model whose vocabulary has <em>bank</em> but never met <em>banking</em> has nothing to say about the second, even though a person sees the first inside it.</p>
+
+    <p>Instead we can build a vocabulary of word <em>pieces</em> in place of whole words, so that <em>banking</em> can be written as <em>bank</em> followed by a piece like <em>ing</em>. Any string can then be represented as some sequence of pieces, even if the whole word was never seen. This is <strong>subword tokenization</strong>, and each piece is a <strong>token</strong>, the unit the model reads. Three recipes for choosing the pieces are in common use.</p>
+
+    <p><strong>BPE</strong> (Byte-Pair Encoding) starts from individual characters as the vocabulary. It then repeatedly finds the single most frequent pair of adjacent symbols in the training corpus and merges it into one new symbol, repeating until it reaches a target vocabulary size, commonly 30,000–50,000 tokens. In a corpus full of <em>bank</em>, <em>banks</em> and <em>banking</em>, the pairs b-a, a-n and n-k occur in every one of them, so they merge early and <em>bank</em> becomes a single symbol while the endings stay separate. Common words end up as one token, and rare words fall back to a handful of subword pieces.</p>
+
+    <p>BPE has no loss function to minimize. It's a greedy, deterministic algorithm that follows one rule, shown here with <span>$(a, b)$</span> standing for a pair of adjacent symbols:</p>
+
+    <div class="eq-block">
+      <span>$$\begin{aligned}(a^*, b^*) &= \underset{(a,b)}{\text{arg max}}\ \ \text{count}(a, b) \\[3pt] &\Rightarrow\ \text{merge } (a^*, b^*) \text{ into one new symbol}\end{aligned}$$</span>
+    </div>
+
+    <p>At every iteration, count every pair of adjacent symbols across the whole corpus, still character-level at first, and merge whichever pair occurs most often into a single new symbol. Then repeat. After enough iterations, common whole words have been merged all the way into single tokens, while rare words remain split into a handful of frequent subword pieces. That's how a fixed-size vocabulary can represent effectively unbounded text.</p>
+
+    <p><strong>WordPiece</strong>, which BERT uses, runs the same merge-based procedure but chooses the pair differently. BPE merges the most <em>frequent</em> pair, while WordPiece merges whichever pair most increases the likelihood of the training corpus under the current tokenization, meaning how probable the text looks once it's cut up that way. The objective differs a little and the overall shape is the same.</p>
+
+    <p><strong>SentencePiece</strong> treats its input as a raw stream of Unicode characters (Unicode being the standard that gives every character in every writing system a number), and it counts whitespace as an ordinary symbol. So it needs no language-specific pre-tokenization step, the splitting at spaces and punctuation that BPE and WordPiece normally run first. That matters for languages like Japanese or Chinese, which don't delimit words with spaces at all. It's the tokenizer behind T5, ALBERT and many modern LLMs.</p>
+
+    <p>Tokens settle what a model reads, and they have sharp edges of their own that section 07 comes back to. They don't touch the problem we left open at the end of section 02, though. Whatever the pieces are, the vector for each one is still the same in every sentence, and <em>bank</em> is still waiting.</p>
+  </section>
+
+  <section id="contextual">
+    <h2><span class="num">04</span>One word, a different vector in each sentence</h2>
+
+    <p>Back to our two sentences. A <strong>static vector</strong>, the kind Word2Vec and GloVe produce, is decided once at training time and frozen. Training on text that contains both of our sentences pulls <em>bank</em> toward <em>money</em> and <em>deposited</em> in some places and toward <em>river</em> and <em>sat</em> in others, and the one vector that comes out is an uneasy average over every sense the word is ever used in. The name for this problem is <strong>polysemy</strong>, a word having several meanings. More training data won't fix it, because it follows from the structure of one vector per word type. Word2Vec and GloVe are mathematically incapable of giving <em>bank</em> two different vectors. The way out is to change the question.</p>
+
+    <p>ELMo (Peters et al., 2018) stops asking "what's the vector for this word?" and asks "what's the vector for this word <em>in this sentence</em>?" It runs the whole sentence through a <strong>language model</strong>, a model trained to predict the next word of a text, and then reads the word's representation off the model's internal state at that position. That state is called the <strong>hidden state</strong>, the list of numbers a network is holding after reading up to a given word. ELMo's network is an <strong>LSTM</strong>, the recurrent network from chapter 07 that reads a sentence one word at a time and carries a memory forward.</p>
+
+    <p>ELMo trains a two-layer bidirectional LSTM language model. One LSTM reads the sentence left to right, predicting the next word, and a separate one reads right to left, predicting the previous word. The two are trained jointly, so a word's representation can draw on the words on both sides of it. Two layers means a second LSTM reads what the first one produced.</p>
+
+    <p>A word's <strong>ELMo vector</strong> is a learned, task-specific weighted combination of three things, all evaluated on this specific sentence: the raw input embedding of the word, the first LSTM layer's hidden state at that position, and the second layer's hidden state. Lower layers tend to carry more syntactic information, higher layers more semantic and contextual information. A task here means whatever job the vectors are used for afterwards, such as classifying sentiment, and letting each task learn its own weighting over the three lets it pick whichever blend helps most.</p>
+
+    <p>One more detail matters. ELMo's input representation is built from a <strong>character-level CNN</strong> and has no word lookup table. A CNN, a convolutional network, slides small filters over the letters of a word and summarises what they find as a vector. So unlike Word2Vec or GloVe, ELMo can produce a reasonable representation for a word it never saw during training, just from its spelling. That's a partial answer to the problem of section 03.</p>
+
+    <p>Our two sentences go through both kinds of pipeline in the diagram below. In the top half, both sentences feed into one fixed vector for <em>bank</em>. In the bottom half, they go through a sequence model, a biLSTM for ELMo or a transformer for BERT, and come out as two different vectors, <em>bank₁</em> for the money sentence and <em>bank₂</em> for the river sentence.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Same word, two very different pipelines
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+        <text x="20" y="26" font-size="12" font-weight="700" fill="#a78bfa">Static — Word2Vec / GloVe</text>
+        <rect x="20" y="42" width="190" height="34" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="115" y="63" text-anchor="middle" font-size="10.5" fill="#e9e9ef">"...money at the bank"</text>
+        <rect x="20" y="86" width="190" height="34" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="115" y="107" text-anchor="middle" font-size="10.5" fill="#e9e9ef">"...sat by the river bank"</text>
+        <path d="M212,59 L330,72" stroke="#a78bfa" stroke-width="1.6" fill="none" class="flow-line"/>
+        <path d="M212,103 L330,78" stroke="#a78bfa" stroke-width="1.6" fill="none" class="flow-line"/>
+        <circle cx="355" cy="75" r="24" fill="none" stroke="#a78bfa" stroke-width="2.2"/>
+        <text x="355" y="72" text-anchor="middle" font-size="10" font-weight="700" fill="#a78bfa">bank</text>
+        <text x="355" y="84" text-anchor="middle" font-size="8.5" class="dim">[0.2, -0.4, 0.8…]</text>
+        <text x="440" y="79" font-size="10" class="dim">one fixed vector,</text>
+        <text x="440" y="91" font-size="10" class="dim">always — both senses blurred together</text>
+
+        <text x="20" y="176" font-size="12" font-weight="700" fill="#34d399">Contextual — ELMo / BERT</text>
+        <rect x="20" y="192" width="190" height="34" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="115" y="213" text-anchor="middle" font-size="10.5" fill="#e9e9ef">"...money at the bank"</text>
+        <rect x="20" y="236" width="190" height="34" rx="7" fill="#14141d" stroke="#24242f"/>
+        <text x="115" y="257" text-anchor="middle" font-size="10.5" fill="#e9e9ef">"...sat by the river bank"</text>
+        <rect x="290" y="205" width="110" height="56" rx="8" fill="#14141d" stroke="#34d399" stroke-width="1.6"/>
+        <text x="345" y="230" text-anchor="middle" font-size="10" fill="#34d399">biLSTM /</text>
+        <text x="345" y="244" text-anchor="middle" font-size="10" fill="#34d399">Transformer</text>
+        <path d="M212,209 L288,222" stroke="#34d399" stroke-width="1.6" fill="none" class="flow-line"/>
+        <path d="M212,253 L288,245" stroke="#34d399" stroke-width="1.6" fill="none" class="flow-line"/>
+        <path d="M402,222 L470,205" stroke="#34d399" stroke-width="1.6" fill="none" class="flow-line-slow"/>
+        <path d="M402,245 L470,262" stroke="#34d399" stroke-width="1.6" fill="none" class="flow-line-slow"/>
+        <circle cx="495" cy="200" r="22" fill="none" stroke="#34d399" stroke-width="2.2" class="pulse-node"/>
+        <text x="495" y="197" text-anchor="middle" font-size="9" font-weight="700" fill="#34d399">bank₁</text>
+        <text x="495" y="208" text-anchor="middle" font-size="7.5" class="dim">[0.9, 0.1, -0.2…]</text>
+        <circle cx="495" cy="267" r="22" fill="none" stroke="#34d399" stroke-width="2.2" class="pulse-node" style="animation-delay:.4s"/>
+        <text x="495" y="264" text-anchor="middle" font-size="9" font-weight="700" fill="#34d399">bank₂</text>
+        <text x="495" y="275" text-anchor="middle" font-size="7.5" class="dim">[-0.3, 0.7, 0.4…]</text>
+        <text x="560" y="238" font-size="10" class="dim">two different vectors —</text>
+        <text x="560" y="250" font-size="10" class="dim">one per sense, resolved</text>
+        <text x="560" y="262" font-size="10" class="dim">from context</text>
+      </svg>
+      <div class="diagram-caption">Illustrative vector values, not real model output. Word2Vec and GloVe commit to one vector for "bank" at training time and never revisit it. ELMo and BERT work the vector out again for every occurrence from the surrounding sentence, so the same input word gives two different outputs.</div>
+    </div>
+
+    <p>ELMo gives <em>bank</em> the right vector in each sentence, and what it pretrains is a two-layer LSTM. How far can the same idea go if we drop the LSTM and pretrain much more of the system?</p>
+  </section>
+
+  <section id="pretraining">
+    <h2><span class="num">05</span>Pretraining the whole network</h2>
+
+    <p>If the representation should depend on the whole sentence, there's little reason to keep a separate embedding-lookup stage at all. BERT and GPT (both 2018) pretrain one big network, end to end, and let every layer contribute to what <em>bank</em> means right here. Chapters <a href="/topics/08-attention-transformers">08</a> and <a href="/topics/10-llm-architecture-training">10</a> cover their architecture in depth, so here is the short version for this lineage. Both replace ELMo's biLSTM with a <strong>transformer</strong>, the attention-based network of chapter 08.</p>
+
+    <p>Instead of producing only a reusable embedding table, they pretrain the <em>entire stack</em>, dozens of layers, on a <strong>self-supervised</strong> objective, one where the training signal comes from the text itself, so nobody has to label anything. For BERT that objective is masked language modeling: hide some words in a sentence and predict them from the rest. For GPT it's next-token prediction: given the words so far, predict the next one. Then comes the second stage. The whole network is then fine-tuned, meaning trained further on a particular task's examples, or later instruction-tuned, for each task it will be used for.</p>
+
+    <p>Pretrained whole networks still tend to need a different output head per task, a small final layer shaped for that task's kind of answer. <strong>T5</strong> (Raffel et al., 2019) removes that last bit of per-task structure. It reframes <em>every</em> NLP task as reading one text string and writing another, using a short task prefix to tell the model what to do: <code>"translate English to German: ..."</code>, <code>"summarize: ..."</code>, <code>"cola sentence: ..."</code> for grammatical-acceptability classification.</p>
+
+    <p>T5 uses one encoder-decoder architecture, an encoder that reads the input and a decoder that writes the output (chapter 08 builds both), and one training objective, predicting corrupted spans of text, so every downstream task becomes the same kind of example. That completes the lineage. Before looking at what still breaks, we can put the generations side by side, because the comparison shows a pattern behind the whole chain.</p>
+  </section>
+
+  <section id="why">
+    <h2><span class="num">06</span>What changed at each step</h2>
+
+    <h4 class="why">Why not use a bigger lookup table?</h4>
+
+    <p>It's the obvious alternative at every step, and it fails twice over. A bigger table of hand-built synonym rules doesn't scale past a few thousand words and can't be learned from data. A bigger one-hot vocabulary still gives you zero notion of similarity between <em>good</em> and <em>great</em>, no matter how large you make it. So the real axis of progress across this chapter is a single question: how much does the representation have to be told, and how much can it learn on its own from raw co-occurrence? The table lines up the four generations on the properties we met along the way.</p>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>One-hot / BOW</th><th>Word2Vec / GloVe</th><th>ELMo</th><th>BERT / GPT</th></tr></thead>
+        <tbody>
+          <tr><td>Captures semantic similarity</td><td>No</td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+          <tr><td>Vector depends on context</td><td>No</td><td>No — one per word type</td><td>Yes</td><td>Yes</td></tr>
+          <tr><td>Handles unseen words</td><td>No</td><td>No (fixed vocabulary)</td><td>Partially (char-CNN input)</td><td>Yes (subword tokenization)</td></tr>
+          <tr><td>What's pretrained</td><td>Nothing</td><td>An embedding table only</td><td>A 2-layer biLSTM</td><td>The entire network, dozens of layers</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Read the first row and the counting methods are the only ones that can't say <em>good</em> and <em>great</em> are close, the gap section 02 closed. In the second row only ELMo and BERT/GPT give <em>bank</em> a vector that depends on the sentence, as section 04 showed. The third row is section 03 again: ELMo's character input gets partway there, and subword tokens finish the job.</p>
+
+    <p>Now read the bottom row from left to right, which is perhaps the most telling part of the table: nothing pretrained, then an embedding table, then a 2-layer biLSTM, then the entire network. At every step more of the model gets pretrained, and that trend runs through the whole chapter. It's the same story as the residual-stream idea in 04 and the attention idea in 08. Push more of the computation into something learned end to end from data, and the hand-designed stages keep disappearing: first a fixed synonym list, then a fixed embedding table that someone else trained. If you want one sentence for an interview, representation learning in NLP is a 60-year march from hand-counted, context-free, symbolic word representations toward fully learned, context-dependent, continuous ones.</p>
+
+    <p>None of these generations is free of problems, and you've probably guessed that some of them arrived with the fixes themselves. Section 07 collects them.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">07</span>What still goes wrong</h2>
+
+    <p>We've already met two failures: the one-vector-per-word limit that ELMo removed, and the sparse count vectors that can't relate <em>car</em> to <em>automobile</em>. Three more affect models you'll use today.</p>
+
+    <h3 id="vectors-inherit-the-biases-of-their-corpus">Vectors inherit the biases of their corpus</h3>
+
+    <p>A learned vector is a compression of how words get used together in a body of text, and real text carries real social biases. Bolukbasi et al. (2016) showed that Word2Vec vectors trained on Google News exhibit measurable gender stereotypes in their analogy geometry, with the well-known example "man is to computer programmer as woman is to homemaker." The vectors are a faithful compression of co-occurrence statistics, so the bias in the statistics becomes bias in the geometry.</p>
+
+    <h3 id="subword-tokenization-has-sharp-edges">Subword tokenization has sharp edges</h3>
+
+    <p>How a string gets split into subword pieces is sensitive to whitespace, casing, and even whether a number appears at the start or middle of a word. This is the mechanical reason LLMs are bad at character-level tasks like counting letters in a word: the model never sees individual characters as separate tokens to begin with.</p>
+
+    <h4 class="why">Do word embeddings capture meaning?</h4>
+
+    <p>Not quite, and the distinction matters. They capture the distributional statistics of how words are used together in a specific training corpus. That's usually a very good proxy for meaning, but it's still a proxy, and it silently encodes whatever the training text encodes, biases included. The one-vector-per-word limit from section 04 is a concrete case of the gap, since a single vector for <em>bank</em> reflects usage and can't reflect two senses. The same distinction shows up again on 25 (Evaluation, Reliability &amp; Safety) at model scale.</p>
+
+    <h3 id="where-things-stand-in-2026">Where things stand in 2026</h3>
+
+    <p>Bag-of-words, TF-IDF, Word2Vec, GloVe and ELMo are all functionally retired as the primary text representation in new systems, and nobody is training a fresh Word2Vec model to power a 2026 product. But two pieces of this lineage never left. TF-IDF and its close relative BM25 still provide sparse retrieval, and that's one half of almost every production hybrid search system (see 11). And subword tokenization (BPE, WordPiece, SentencePiece, or close variants) is still the very first thing that happens to your prompt before it reaches any modern LLM. The representations were replaced, and two of the mechanisms that produced them stayed, running unchanged in spirit inside every system you'll use.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">08</span>Summary</h2>
+
+    <ol>
+      <li><strong>Counting loses order and meaning.</strong> Bag-of-words turns "dog bites man" and "man bites dog" into the same vector, and <em>good</em> and <em>great</em> land in unrelated slots.</li>
+      <li><strong>TF-IDF reweights counts without changing their shape.</strong> It multiplies term frequency by <span>$\log(N/\text{df})$</span> so common words fade, but every word still owns its own slot, so <em>car</em> and <em>automobile</em> stay apart.</li>
+      <li><strong>A word is known by its company.</strong> Word2Vec turns predicting a word's neighbours into a training task and keeps the vector that falls out, using skip-gram or CBOW, with negative sampling to avoid a softmax over the whole vocabulary.</li>
+      <li><strong>GloVe reaches a similar place by counting.</strong> It fits vectors whose dot products approximate log co-occurrence counts, and the similar results suggest the statistics carry the signal.</li>
+      <li><strong>One vector per word cannot handle polysemy.</strong> A static vector for <em>bank</em> averages the money sense and the river sense, and no amount of data changes that.</li>
+      <li><strong>Subword tokenization handles words never seen.</strong> BPE merges the most frequent adjacent pair again and again, so common words become single tokens and rare ones split into pieces; WordPiece and SentencePiece vary the recipe.</li>
+      <li><strong>ELMo makes the vector depend on the sentence.</strong> A bidirectional LSTM language model gives a weighted blend of its layers at that position, so <em>bank</em> gets a different vector in each sentence.</li>
+      <li><strong>BERT and GPT pretrain the entire network.</strong> A transformer replaces the LSTM and the whole stack is trained on masked or next-token prediction, and T5 recasts every task as text in, text out.</li>
+      <li><strong>Each generation pretrains more of the model.</strong> Nothing, then an embedding table, then a biLSTM, then the whole network: hand-designed stages keep being replaced by learned ones.</li>
+      <li><strong>Vectors are a proxy for meaning.</strong> They compress the statistics of a corpus, so they carry its biases, such as the gender stereotypes Bolukbasi et al. found in Word2Vec.</li>
+      <li><strong>Two old pieces still run in production.</strong> Subword tokenization is the first step for every LLM prompt, and TF-IDF-style sparse retrieval is half of most hybrid search systems.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">09</span>Build this</h2>
+    <p class="lede">"Meaning becomes geometry" is the claim this page rests on. It stops being a slogan the first time you type a word into a space you trained yourself and read back its neighbours.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Train word vectors, then interrogate the space they live in</span>
+        <span class="proj-meta">~4 hours · PyTorch</span>
+      </div>
+      <p>Train skip-gram with negative sampling on a small corpus, roughly 100MB of plain text. A slice of a Wikipedia dump is the classic choice. Small is deliberate: you want a vocabulary you personally recognise, so you can tell a good neighbour list from a bad one at a glance.</p>
+      <ol class="proj-steps">
+        <li>Build the vocabulary and the training pairs by hand. Tokenise, drop words below a minimum count, and emit every (center, context) pair inside a window of 5.</li>
+        <li>Implement skip-gram with negative sampling from the objective in section 02. Two embedding matrices, a dot product, a sigmoid, and <span>$k$</span> negatives drawn from the unigram distribution raised to the 3/4 power.</li>
+        <li>Train, then write a nearest-neighbour lookup by cosine similarity. Query words you know well. Then query a polysemous one, <code>bank</code> or <code>bat</code>, and read what comes back.</li>
+        <li>Do the analogy arithmetic yourself: <code>king − man + woman</code>, then find the nearest vector to that result, excluding the three inputs. Try capitals, tenses and plurals too.</li>
+        <li>Project a few hundred frequent words down to 2D with t-SNE and look at what clusters.</li>
+        <li>Now break it by retraining with a context window of 1, and again with a window of 10, then re-run the same neighbour queries across all three models side by side.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the neighbour lists read like something a person would have written. Query a country and get other countries. Query a verb and get its other tenses. Nothing in the training signal named those categories. They fell out of counting co-occurrences.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> Window size is not a tuning knob. It is a definition of what "similar" means. At window 1 the neighbours drift toward words that are grammatically interchangeable, because only the adjacent slot counts as evidence. At window 10 they drift toward words from the same topic. The <code>bank</code> query is the other lesson: one list, both senses, blurred into a single vector. That is the polysemy limit from section 04, staring back at you.</div>
+    </div>
+
+    <h3 id="where-this-runs-in-production">Where this runs in production</h3>
+    <p>Two pieces of this page are still doing real work in 2026 production systems.</p>
+
+    <p><strong>Subword tokenization</strong> is the literal first step of the inference pipeline for every LLM API call you make. Before any transformer layer runs, your raw text string is split into BPE or SentencePiece tokens. The vocabulary size of that tokenizer is a real design decision every model provider makes: a bigger vocabulary means shorter sequences for the same text, at the cost of a bigger embedding table.</p>
+
+    <p><strong>TF-IDF and its close relative BM25</strong> remain a standard "sparse" retrieval signal in production RAG systems. They earn their place precisely <em>because</em> they need no training and match exact terms that dense embeddings can blur together: a product SKU, an error code, a rare proper noun. See 11 for how sparse and dense retrieval get combined in practice.</p>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">10</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What's the difference between bag-of-words and Word2Vec?</summary>
+      <div class="qa-body"><p>Bag-of-words represents a document as raw word counts, with no learned structure and no notion of similarity between words — "good" and "great" are unrelated columns in a sparse vector. Word2Vec learns a dense, low-dimensional vector per word by training a model to predict context from a center word (or vice versa); the resulting vectors place similar-usage words near each other in the space, which bag-of-words can never do.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Skip-gram vs. CBOW — what's actually different?</summary>
+      <div class="qa-body"><p>Skip-gram predicts each surrounding context word from one center word; CBOW averages the context words and predicts the center word from that average. Skip-gram tends to work better on rare words because each occurrence produces multiple training signals (one per context word); CBOW trains faster because it compresses several context words into a single averaged input.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why can't Word2Vec or GloVe handle polysemy (a word with multiple meanings)?</summary>
+      <div class="qa-body"><p>Both learn exactly one vector per word type, fixed at training time. That single vector has to serve every sense the word is ever used in, so it ends up as an average over all of them — there's no mechanism in the architecture for the vector to change based on which sentence the word appears in. Fixing this requires a fundamentally different approach: making the representation a function of the surrounding context, which is exactly what ELMo does.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does modern NLP use subword tokenization instead of whole-word vocabularies?</summary>
+      <div class="qa-body"><p>A whole-word vocabulary has no way to represent a word it never saw during training — typos, new terms, rare names all become an out-of-vocabulary token with no useful signal. Subword tokenization (BPE, WordPiece, SentencePiece) builds a vocabulary of frequent word pieces instead, so any string can be represented as some sequence of known pieces, even if the whole word is unseen — common words collapse to one token, rare or unseen ones fall back to a handful of subword fragments.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How does ELMo actually produce a "contextual" vector?</summary>
+      <div class="qa-body"><p>ELMo trains a deep bidirectional LSTM language model over the whole sentence — one direction predicting the next word, the other predicting the previous word. A word's ELMo representation is a learned, task-specific weighted combination of the raw input embedding and both LSTM layers' hidden states <em>at that position in that sentence</em>. Because it's derived from running the whole sentence through the model, the same word produces a different vector depending on what sentence it's actually in.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>T5 frames every task as text-to-text. What's the actual benefit of doing that over BERT's approach of a separate task-specific head per problem?</summary>
+      <div class="qa-body"><p>BERT needs a different output layer architecture per task type — a classification head for sentiment, a span-extraction head for QA, a token-tagging head for NER — each learned somewhat independently on top of the shared encoder. T5 needs exactly one architecture and one training objective (predict corrupted spans of text) for every task, because the task itself is specified in the input string via a prefix rather than baked into the model's output layer. That uniformity is what let the T5 paper run one of the largest systematic comparisons of pretraining objectives, architectures, and dataset choices in NLP up to that point — every experiment used literally the same evaluation harness regardless of task type.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Word2Vec and GloVe often produce vector spaces with similar analogy-solving properties despite very different training procedures. What does that suggest?</summary>
+      <div class="qa-body"><p>It suggests the semantic signal lives primarily in the corpus's co-occurrence statistics themselves, not in the particular algorithm used to extract them — a predictive local-window method (Word2Vec) and a global count-factorization method (GloVe) converging on similarly-shaped spaces is evidence that both are approximating the same underlying statistical structure of the language, just via different optimization paths. It's a useful sanity check to reach for whenever two very differently-motivated methods keep producing suspiciously similar results.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">11</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/1301.3781" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Efficient Estimation of Word Representations in Vector Space</div><div class="r-sub">Mikolov et al., 2013 — the Word2Vec paper, arXiv:1301.3781</div></div>
+      </a>
+      <a class="resource-card" href="https://nlp.stanford.edu/projects/glove/" target="_blank" rel="noopener">
+        <div class="r-icon">📰</div>
+        <div class="r-body"><div class="r-kind">Article</div><div class="r-title">GloVe: Global Vectors for Word Representation</div><div class="r-sub">Pennington, Socher &amp; Manning — Stanford NLP project page, with the paper and pretrained vectors</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1508.07909" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Neural Machine Translation of Rare Words with Subword Units</div><div class="r-sub">Sennrich, Haddow &amp; Birch, 2015 — the BPE-for-NLP paper, arXiv:1508.07909</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1802.05365" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Deep Contextualized Word Representations</div><div class="r-sub">Peters et al., 2018 — the ELMo paper, arXiv:1802.05365</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1910.10683" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer</div><div class="r-sub">Raffel et al., 2019 — the T5 paper, arXiv:1910.10683</div></div>
+      </a>
+      <a class="resource-card" href="https://www.youtube.com/watch?v=viZrOnJclY0" target="_blank" rel="noopener">
+        <div class="r-icon">▶</div>
+        <div class="r-body"><div class="r-kind">Video</div><div class="r-title">Word Embedding and Word2Vec, Clearly Explained</div><div class="r-sub">StatQuest with Josh Starmer</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/76" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Calculate Cosine Similarity Between Vectors</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/320" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Calculate Perplexity for Language Models</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/705" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Image Patch Embedding and Reconstruction</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/380" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Byte Pair Encoding (BPE) Tokenizer</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/399" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Diffusion Model U-Net Time Embedding</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/60" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Implement TF-IDF (Term Frequency-Inverse Document Frequency)</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">12</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/07-sequence-modeling-pre-transformer"><div class="rc-sec" style="color:var(--c-sequence)">07 · Shares the LSTM machinery</div><div class="rc-title">Sequence Modeling Pre-Transformer</div><div class="rc-hook">ELMo's biLSTM backbone, explained from the ground up.</div></a>
+      <a class="related-card" href="/topics/08-attention-transformers"><div class="rc-sec" style="color:var(--c-attention)">08 · What replaces the LSTM</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">BERT and GPT's actual architecture, in full depth.</div></a>
+      <a class="related-card" href="/topics/10-llm-architecture-training"><div class="rc-sec" style="color:var(--c-llm)">10 · Where this arc ends up</div><div class="rc-title">LLM Architecture &amp; Training</div><div class="rc-hook">Pretraining, fine-tuning, and instruction tuning at full scale.</div></a>
+      <a class="related-card" href="/topics/11-rag-agents-reasoning"><div class="rc-sec" style="color:var(--c-rag)">11 · TF-IDF's second life</div><div class="rc-title">RAG, Agents &amp; Reasoning</div><div class="rc-hook">Sparse (BM25) and dense retrieval, combined in production hybrid search.</div></a>
+    </div>
+  </section>

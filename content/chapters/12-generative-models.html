@@ -1,0 +1,741 @@
+---
+title: "Generative Models"
+dek: "Follow a folder of cat photos through three ways of teaching a network to make new ones, the VAE, the GAN and diffusion, and learn why diffusion's small denoising steps turn out to be so much easier to train."
+readingTime: "~23 min"
+prereqs: "neural network fundamentals & backprop (04), probability basics & KL divergence (01)"
+group: "Generative & Multimodal"
+label: "Chapter 12"
+description: "Generative vs discriminative modeling, VAEs, GANs, and diffusion models end to end — forward noising, reverse denoising, the DDPM objective, classifier-free guidance, and latent diffusion."
+---
+<section id="tldr">
+    <p>Suppose you have a folder of a few thousand cat photos and you'd like one more, a photo that isn't in the folder but looks like it belongs there. A classifier that tells cats from dogs can't give you that. It only has to find where the boundary between the two classes lies, and for that it needs a handful of useful features. It never has to know what makes a photo look like a photo at all. A model that can produce the new picture has to know a lot more: out of every possible grid of pixel values, which ones look like cats and which are static.</p>
+
+    <p>In the language of probability, the classifier learns <span>$P(\text{label}\mid\text{data})$</span>, the probability of a label given a photo. Our target model learns <span>$P(\text{data})$</span>, how likely each possible photo is to turn up in a folder like ours. Once we have that, we can draw samples from it, and every sample is a new photo. A <strong>generative model</strong> is exactly that: a model of the data itself, good enough to sample from. It's a big ask, because a single 512×512 colour photo is 786,432 numbers, so we're modelling a distribution over a space with that many dimensions.</p>
+
+    <p>This chapter follows three ways of getting there. We start with the next-token idea you met in chapter 10, applied to pixels. Two more dominated the 2010s: the variational autoencoder (VAE, 2013), which trained stably but gave blurry samples, and the generative adversarial network (GAN, 2014), which gave sharp samples but needed an unstable game between two networks. Both work, and both have well-documented failure modes. Then came diffusion. DDPM (2020) learned to reverse a fixed noising process by regressing the noise, with no adversary at all, and latent diffusion (2022, Stable Diffusion) made it practical by working in a compressed space. Diffusion has since become the default for image, video and audio generation, and by 2023 to 2024 Diffusion Transformers (DiT) were increasingly replacing the U-Net as the denoiser.</p>
+
+    <p>We'll keep the cat photos in mind the whole way through and keep asking one question of each method: what does it ask a network to do with a single photo? Diffusion's answer, making a slightly noisy photo slightly cleaner, turns out to be far easier to learn than "draw a cat", and most of the chapter is about why. You'll need neural networks and backpropagation from chapter 04, and probability and KL divergence (a number that says how different two distributions are) from chapter 01. We'll define the rest as we go.</p>
+  </section>
+
+  <section id="intuition">
+    <h2><span class="num">01</span>Two older ways to make a cat</h2>
+
+    <h3 id="telling-classes-apart-versus-making-new-examples">Telling classes apart versus making new examples</h3>
+    <p>Let's pin down the difference first, since it's easy to blur the two. A classifier that separates cats from dogs is a <strong>discriminative model</strong>. It learns a function from inputs to outputs, <span>$P(\text{label}\mid\text{data})$</span>, and nothing more, so it can get by without ever representing what a plausible photo looks like.</p>
+
+    <p>A generative model has to represent exactly that. It learns <span>$P(\text{data})$</span>, the full distribution of "things that look like real cat photos", well enough that a fresh sample from it is something that was never in the training folder and still looks like it belongs. A discriminative model needs a boundary. A generative model needs to understand the shape of the whole space well enough to invent a new point inside it. Our job from here is to find a way to do that which a network can learn.</p>
+
+    <h3 id="the-first-attempt-one-piece-at-a-time">The first attempt: one piece at a time</h3>
+    <p>Start with the approach you already know from language models. Any joint distribution can be split into a product of conditionals, each one predicting a piece given everything before it: <span>$P(x) = \prod_i P(x_i \mid x_{<i})$</span>. For text, that's next-token prediction. For our photos the same idea applies pixel by pixel, or, more practically, over discrete tokens produced by compressing the image first. We'd generate the top-left pixel, then the next one conditioned on it, and so on until the grid is full.</p>
+
+    <p>This works, and it gives an exact likelihood for any photo. But it has two costs. It's slow, since a single image takes thousands of sequential steps. And it can't revise: once a pixel or token is generated it's fixed, so there's no way to go back and improve an earlier guess. That second limit is a big part of why researchers went looking for other ways to break up the job of generating an image. One of the first was to squeeze each photo into a short code and learn to rebuild it from there.</p>
+
+    <h3 id="vaes-compress-the-photo-then-tidy-the-compression">VAEs: compress the photo, then tidy the compression</h3>
+    <p>A plain autoencoder has two halves. An <strong>encoder</strong> compresses an input into a short list of numbers called a <strong>latent code</strong> (latent because it's hidden inside the model, never seen in the data), and a <strong>decoder</strong> rebuilds the input from that code. Train it well and the reconstruction error goes to nearly zero. So can we throw away the encoder, pick a random latent code, and let the decoder draw a cat?</p>
+
+    <p>Not with a plain autoencoder. Its latent space is whatever shape happens to minimise reconstruction loss, and nothing says that two nearby codes should decode to anything sensible. A random code lands where the decoder has seen nothing like it, and what comes out is roughly noise.</p>
+
+    <p>A <strong>Variational Autoencoder</strong> fixes exactly this with two changes. First, the encoder stops outputting a single code. It outputs the parameters of a distribution over codes, a mean and a variance, and a sample is drawn from that distribution before it goes to the decoder. Second, the loss gets a <strong>KL-divergence term</strong> that pulls every photo's distribution toward a fixed, simple prior, usually a standard Gaussian (a bell curve centred at zero with spread one). That term forces the latent space to be smooth and densely packed around the origin, with no gaps. So <em>any</em> point you sample from the prior decodes into something plausible, and not only the points that came from encoding a real training photo. That's the difference between an autoencoder that can only reconstruct what it memorised and a VAE that can generate.</p>
+
+    <p>That first change hides a catch. Training sends gradients backward from the loss through every operation, back to the encoder's weights (chapter 04). A random draw from the encoder's distribution sits in the way, and a plain draw isn't an operation a gradient can pass through. A fix exists, the <strong>reparameterization trick</strong>. Draw a number <code>eps</code> from a standard Gaussian first, then compute the latent code as <code>mu + sd * eps</code>, where <code>mu</code> and <code>sd</code> are the encoder's mean and spread. Now the randomness enters as an input, and the path from the encoder's outputs to the code is ordinary arithmetic. In PyTorch <code>sample()</code> makes the plain draw and <code>rsample()</code> makes the reparameterized one.</p>
+
+    <p>In the code, both draws get the same seed so they return identical numbers, and we then try to backpropagate through each. <code>Normal(mu, sd)</code> stands in for what the encoder emits for one photo, and <code>requires_grad=True</code> marks the numbers we want gradients for. At the end we compute <code>mu + sd * eps</code> by hand, to show what <code>rsample()</code> does internally.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Same seed, same sample, and only one of them has a gradient</span>
+      </summary>
+<pre><code>import torch
+from torch.distributions import Normal
+r = lambda t: [round(v, 3) for v in t.tolist()]
+
+mu = torch.tensor([0.5, -1.0], requires_grad=True)
+sd = torch.tensor([0.8, 0.3], requires_grad=True)
+q = Normal(mu, sd)            # what the encoder emits for one input
+
+torch.manual_seed(0)
+z_bad = q.sample()            # the draw happens inside the graph
+print(&quot;sample() &quot;, r(z_bad), &quot;grad_fn&quot;, z_bad.grad_fn)
+try:
+    z_bad.sum().backward()
+except RuntimeError as e:
+    print(&quot;backward:&quot;, str(e).split(&quot; and&quot;)[0])
+
+torch.manual_seed(0)
+z_ok = q.rsample()            # the randomness is pushed out to eps
+print(&quot;rsample()&quot;, r(z_ok), &quot;grad_fn&quot;, type(z_ok.grad_fn).__name__)
+z_ok.sum().backward()
+print(&quot;dL/dmu   &quot;, r(mu.grad), &quot; dL/dsd&quot;, r(sd.grad))
+
+torch.manual_seed(0)
+eps = torch.randn(2)          # the same draw, written out by hand
+print(&quot;by hand  &quot;, r(mu + sd * eps), &quot; eps   &quot;, r(eps))</code></pre>
+      <div class="tryit-out">Both draws are the same two numbers. <code>sample()</code> and <code>rsample()</code> both return <code>[1.733, -1.088]</code>, because the seed is the same and so is <code>eps</code>. The first arrives with <code>grad_fn None</code>, which means PyTorch recorded no operation that produced it, and <code>backward()</code> refuses it. The second carries an <code>AddBackward0</code>, because it was built as <code>mu + sd * eps</code>, which the last line reproduces by hand. Then look at <code>dL/dsd</code>, which is <code>[1.541, -0.293]</code>, exactly the <code>eps</code> that was drawn. With the randomness moved outside, it's a constant that the gradient flows <em>past</em>, where before it was an operation the gradient had to flow <em>through</em>. Without this trick the encoder half of a VAE couldn't be trained at all.</div>
+    </details>
+
+    <p>Now we have a generator that trains reliably and a loss with a clear meaning. Its weakness is sharpness, and section 04 shows with numbers where the blur comes from. For now, a second idea from a year later took a different route to sharper pictures.</p>
+
+    <h3 id="gans-two-networks-playing-a-game">GANs: two networks playing a game</h3>
+    <p>A <strong>GAN</strong> skips the compression and trains two networks against each other. A <strong>generator</strong> maps random noise to a fake photo and tries to fool the other network. A <strong>discriminator</strong> looks at real photos from our folder and fakes from the generator, and tries to tell them apart. Train both at once and, in the ideal case, the generator is pushed until its photos can't be told from real ones. Notice that no density is ever written down. Instead the generator learns to sample well without ever saying how likely a photo is.</p>
+
+    <p>That objective can look like an arbitrary game somebody invented. Below, a derivation shows what it's secretly minimising when the discriminator is as good as it can be, and where the theory and the practice part company.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">What the GAN loss is secretly minimising</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">The minimax objective looks like an arbitrary game somebody invented. It is not. Hold the discriminator at its optimum and the whole thing collapses into a recognisable distance between two distributions.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} \min_G \max_D V(D, G) \;=\;\; & \mathbb{E}_{x \sim p_{\text{data}}}\!\left[\log D(x)\right] \\[2pt] +\;\; & \mathbb{E}_{z \sim p_z}\!\left[\log\big(1 - D(G(z))\big)\right] \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>The setup.</strong> The discriminator wants to output 1 on real data and 0 on fakes, so it maximises. The generator wants the opposite, so it minimises. Notice what is absent: no density is ever written down. <span>$G$</span> only produces samples.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} V(D, G) = \int_x \Big[\;\; & p_{\text{data}}(x) \log D(x) \\[2pt] +\;\; & p_g(x) \log\big(1 - D(x)\big) \Big]\, dx \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why this is legal:</strong> pushing <span>$z$</span> through <span>$G$</span> induces <em>some</em> distribution <span>$p_g$</span> over samples, even though we cannot write it down. Re-expressing the second expectation over <span>$p_g$</span> rather than <span>$p_z$</span> puts both terms under a single integral in <span>$x$</span>. We never need a formula for <span>$p_g$</span>. We only need it to exist.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} &\text{maximise} \quad f(y) = a \log y + b \log(1 - y) \\[2pt] &\text{where } \; a = p_{\text{data}}(x), \quad b = p_g(x) \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why we may optimise pointwise:</strong> <span>$D$</span> is free to return whatever value it likes at each <span>$x$</span>, independently of every other <span>$x$</span>. An integral of independent terms is maximised by maximising each term separately. This step needs <span>$D$</span> to range over <em>all</em> functions, and that is precisely where the theory quietly parts company with a finite network.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} f'(y) &= \frac{a}{y} - \frac{b}{1-y} = 0 \\[4pt] \Longrightarrow \quad D^*(x) &= \frac{p_{\text{data}}(x)}{p_{\text{data}}(x) + p_g(x)} \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> solve for the stationary point, then check <span>$f''(y) = -a/y^2 - b/(1-y)^2 < 0$</span>, so it is a maximum rather than a minimum. Read the answer aloud. The best possible discriminator reports the <strong>fraction of the density at <span>$x$</span> that is real</strong>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} C(G) = V(D^*, G) \;=\;\; & \mathbb{E}_{p_{\text{data}}}\!\left[\log \frac{p_{\text{data}}}{p_{\text{data}} + p_g}\right] \\[2pt] +\;\; & \mathbb{E}_{p_g}\!\left[\log \frac{p_g}{p_{\text{data}} + p_g}\right] \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> substitute <span>$D^*$</span> back in. The second term works because <span>$1 - D^*(x) = p_g/(p_{\text{data}} + p_g)$</span>, which makes it a mirror image of the first. The generator now faces a fixed objective with no discriminator left in it.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$C(G) = 2 \cdot D_{\mathrm{JS}}\!\left(p_{\text{data}} \,\|\, p_g\right) - \log 4$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> Jensen-Shannon divergence is <span>$\tfrac{1}{2}D_{\mathrm{KL}}(P\|M) + \tfrac{1}{2}D_{\mathrm{KL}}(Q\|M)$</span> with <span>$M = (P+Q)/2$</span>. Each expectation above is one of those KL terms missing a factor of 2 inside its logarithm. Insert the 2 and compensate, and each term sheds a <span>$\log 2$</span>. Two of them give <span>$-\log 4$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned} \min_G C(G) = -\log 4 \quad &\text{iff} \quad p_g = p_{\text{data}} \\[2pt] &\text{at which } \; D^*(x) = \tfrac{1}{2} \end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> JSD is non-negative, and zero only when the two distributions match exactly. So the game has one global optimum, and at it the discriminator is reduced to a coin flip. It is not being fooled. It genuinely cannot tell.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff"><strong>Now the honest part.</strong> That result is elegant, and it describes a procedure you are not running. It assumes <span>$D$</span> sits at its optimum for every <span>$G$</span>. In practice you train <span>$D$</span> for a handful of steps between generator updates, so you descend a rough estimate of JSD rather than JSD itself. The theory also works against you at the start. When <span>$D$</span> is confidently correct, <span>$\log(1 - D(G(z)))$</span> saturates and the generator's gradient nearly vanishes. That is why almost nobody implements the loss as written. The standard fix is to have the generator <em>maximise</em> <span>$\log D(G(z))$</span> instead: same fixed point, far stronger gradients early on. Knowing exactly where the derivation and the code diverge is the part worth carrying into an interview.</div>
+      </div>
+    </details>
+
+    <p>That gap between theory and practice shows up as two well-documented failure modes, and neither was ever fully solved in general. One is <strong>mode collapse</strong>. Here the generator finds a handful of outputs that reliably fool the current discriminator and stops producing anything else, so the diversity collapses even while each individual sample looks fine. Our generator might learn one convincing tabby and never draw anything else. Another is <strong>training instability</strong>. Two networks chase a moving target with no natural stopping point, so the pair tends to oscillate. It's also vulnerable to a discriminator that gets too good too fast, leaving the generator with almost no gradient signal to learn from. Careful architectures and loss variants (Wasserstein GANs, spectral normalization and others) made these failures less frequent, but "will this GAN converge nicely" was never something you could assume.</p>
+
+    <p>So here's where we stand. VAEs train stably and blur. GANs sharpen and wobble. Is there a way to get a stable training signal and sharp results? Next we take a different view of the whole problem, one that probably looks odd at first.</p>
+  </section>
+
+  <section id="diffusion-idea">
+    <h2><span class="num">02</span>Diffusion: un-shred the photo one step at a time</h2>
+
+    <h3 id="destroy-a-photo-then-learn-to-undo-a-little-of-it">Destroy a photo, then learn to undo a little of it</h3>
+    <p>The idea behind diffusion is to never ask a network to go straight from noise to a perfect image in one shot. Instead, take a real cat photo and destroy it. Add a small amount of Gaussian noise (random numbers from a bell curve, added to every pixel), then a bit more, then a bit more, hundreds of times, until what's left is indistinguishable from pure static. This is the <strong>forward process</strong>, and nothing in it is learned. It's a fixed, known recipe.</p>
+
+    <p>Now train a network to do the single easiest version of the reverse job. Show it a photo that's a little too noisy, ask it to predict what noise was added, and remove a little of that. It isn't asked to generate the whole image, only to make this one step less noisy. Chain that easy step backward, starting from pure noise and going all the way to <span>$t{=}0$</span>, and you've generated a new image, one small, well-defined denoising decision at a time.</p>
+
+    <h4 class="why">Why is that easier to learn than drawing the whole cat?</h4>
+    <p>It helps on both of the problems we just met. For GANs, the trouble was a moving target. Here, at every step there's a well-defined right answer, the noise that was added, so the network is doing ordinary supervised regression and has no adversary to chase. For VAEs, the trouble was blur. A VAE asks one decoder to get the entire reconstruction right in a single forward pass, and when that's uncertain it hedges toward a blurry average. Diffusion spreads the work across hundreds of small, low-stakes corrections, each of which the network can learn to do well.</p>
+
+    <p>That's the whole idea, and it seems almost too simple. To make it concrete we need to say what the two processes look like together, and what network does the denoising. That's next.</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">03</span>How the data flows</h2>
+
+    <p>Two processes run in opposite directions over the same sequence of increasingly noisy images, <span>$x_0, x_1, \dots, x_T$</span>, where <span>$x_0$</span> is the clean cat photo and <span>$x_T$</span> is pure noise. On one side, the <strong>forward process</strong> <span>$q$</span> is fixed and needs no learning: it adds a bit of Gaussian noise at each step, according to a known schedule. On the other, the <strong>reverse process</strong> <span>$p_\theta$</span> is the one neural network in this whole picture, trained to undo one forward step at a time. Below, the diagram shows both over the same trajectory, and the network at the bottom is a single set of weights reused at every timestep.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Forward noising (fixed) vs. reverse denoising (learned) over the same trajectory
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg">
+        <text x="380" y="24" text-anchor="middle" font-size="11.5" fill="#f472b6">forward noising q(xₜ | xₜ₋₁) — fixed, adds a little Gaussian noise each step →</text>
+        <path d="M132,40 L188,40" stroke="#f472b6" stroke-width="2" fill="none" opacity="0.85" class="flow-line"/>
+        <path d="M282,40 L338,40" stroke="#f472b6" stroke-width="2" fill="none" opacity="0.85" class="flow-line"/>
+        <path d="M432,40 L488,40" stroke="#f472b6" stroke-width="2" fill="none" opacity="0.85" class="flow-line"/>
+        <path d="M582,40 L638,40" stroke="#f472b6" stroke-width="2" fill="none" opacity="0.85" class="flow-line"/>
+
+        <g>
+          <!-- box 0: clean -->
+          <rect x="40" y="60" width="92" height="92" rx="10" fill="#14141d" stroke="#34d399" stroke-width="1.6"/>
+          <g opacity="1"><path d="M56,128 L76,96 L92,116 L104,102 L116,128 Z" fill="none" stroke="#34d399" stroke-width="1.6"/><circle cx="108" cy="80" r="7" fill="none" stroke="#fbbf24" stroke-width="1.6"/></g>
+          <g opacity="0.06"><circle cx="60" cy="72" r="1.4" fill="#e9e9ef"/><circle cx="90" cy="140" r="1.4" fill="#e9e9ef"/><circle cx="115" cy="70" r="1.4" fill="#e9e9ef"/><circle cx="70" cy="110" r="1.4" fill="#e9e9ef"/></g>
+          <text x="86" y="168" text-anchor="middle" font-size="11" fill="#34d399">x₀ (clean)</text>
+
+          <!-- box 1 -->
+          <rect x="190" y="60" width="92" height="92" rx="10" fill="#14141d" stroke="#24242f" stroke-width="1.6"/>
+          <g opacity="0.7"><path d="M206,128 L226,96 L242,116 L254,102 L266,128 Z" fill="none" stroke="#a3a3b2" stroke-width="1.6"/><circle cx="258" cy="80" r="7" fill="none" stroke="#fbbf24" stroke-width="1.4" opacity="0.7"/></g>
+          <g opacity="0.3" fill="#e9e9ef">
+            <circle cx="210" cy="75" r="1.5"/><circle cx="230" cy="140" r="1.5"/><circle cx="255" cy="68" r="1.5"/><circle cx="272" cy="120" r="1.5"/><circle cx="200" cy="115" r="1.5"/><circle cx="245" cy="90" r="1.5"/><circle cx="265" cy="145" r="1.5"/><circle cx="218" cy="132" r="1.5"/>
+          </g>
+          <text x="236" y="168" text-anchor="middle" font-size="11" class="dim">x_T/4</text>
+
+          <!-- box 2 -->
+          <rect x="340" y="60" width="92" height="92" rx="10" fill="#14141d" stroke="#24242f" stroke-width="1.6"/>
+          <g opacity="0.4"><path d="M356,128 L376,96 L392,116 L404,102 L416,128 Z" fill="none" stroke="#a3a3b2" stroke-width="1.6"/></g>
+          <g opacity="0.6" fill="#e9e9ef">
+            <circle cx="358" cy="72" r="1.5"/><circle cx="378" cy="140" r="1.5"/><circle cx="405" cy="66" r="1.5"/><circle cx="420" cy="118" r="1.5"/><circle cx="350" cy="112" r="1.5"/><circle cx="395" cy="88" r="1.5"/><circle cx="415" cy="145" r="1.5"/><circle cx="366" cy="132" r="1.5"/><circle cx="386" cy="105" r="1.5"/><circle cx="426" cy="80" r="1.5"/><circle cx="345" cy="140" r="1.5"/>
+          </g>
+          <text x="386" y="168" text-anchor="middle" font-size="11" class="dim">x_T/2</text>
+
+          <!-- box 3 -->
+          <rect x="490" y="60" width="92" height="92" rx="10" fill="#14141d" stroke="#24242f" stroke-width="1.6"/>
+          <g opacity="0.12"><path d="M506,128 L526,96 L542,116 L554,102 L566,128 Z" fill="none" stroke="#a3a3b2" stroke-width="1.6"/></g>
+          <g opacity="0.85" fill="#e9e9ef">
+            <circle cx="500" cy="70" r="1.5"/><circle cx="512" cy="140" r="1.5"/><circle cx="530" cy="65" r="1.5"/><circle cx="548" cy="118" r="1.5"/><circle cx="565" cy="75" r="1.5"/><circle cx="575" cy="130" r="1.5"/><circle cx="495" cy="110" r="1.5"/><circle cx="520" cy="95" r="1.5"/><circle cx="540" cy="145" r="1.5"/><circle cx="558" cy="90" r="1.5"/><circle cx="578" cy="65" r="1.5"/><circle cx="505" cy="145" r="1.5"/><circle cx="570" cy="110" r="1.5"/>
+          </g>
+          <text x="536" y="168" text-anchor="middle" font-size="11" class="dim">x_3T/4</text>
+
+          <!-- box 4: pure noise -->
+          <rect x="640" y="60" width="92" height="92" rx="10" fill="#14141d" stroke="#818cf8" stroke-width="1.6"/>
+          <g opacity="1" fill="#e9e9ef">
+            <circle cx="652" cy="70" r="1.5"/><circle cx="665" cy="140" r="1.5"/><circle cx="680" cy="65" r="1.5"/><circle cx="695" cy="118" r="1.5"/><circle cx="712" cy="75" r="1.5"/><circle cx="722" cy="130" r="1.5"/><circle cx="648" cy="110" r="1.5"/><circle cx="670" cy="95" r="1.5"/><circle cx="690" cy="145" r="1.5"/><circle cx="708" cy="90" r="1.5"/><circle cx="726" cy="68" r="1.5"/><circle cx="655" cy="145" r="1.5"/><circle cx="718" cy="110" r="1.5"/><circle cx="700" cy="70" r="1.5"/><circle cx="660" cy="120" r="1.5"/><circle cx="730" cy="140" r="1.5"/>
+          </g>
+          <text x="686" y="168" text-anchor="middle" font-size="11" fill="#818cf8">x_T (noise)</text>
+        </g>
+
+        <path d="M638,190 L582,190" stroke="#4f8cff" stroke-width="2" fill="none" opacity="0.85" class="flow-line-rev"/>
+        <path d="M488,190 L432,190" stroke="#4f8cff" stroke-width="2" fill="none" opacity="0.85" class="flow-line-rev"/>
+        <path d="M338,190 L282,190" stroke="#4f8cff" stroke-width="2" fill="none" opacity="0.85" class="flow-line-rev"/>
+        <path d="M188,190 L132,190" stroke="#4f8cff" stroke-width="2" fill="none" opacity="0.85" class="flow-line-rev"/>
+        <text x="380" y="212" text-anchor="middle" font-size="11.5" fill="#4f8cff">← reverse denoising p_θ(xₜ₋₁ | xₜ) — learned, predicts &amp; removes noise each step</text>
+
+        <rect x="330" y="230" width="112" height="34" rx="8" fill="#14141d" stroke="#4f8cff" stroke-width="1.6" class="pulse-node"/>
+        <text x="386" y="251" text-anchor="middle" font-size="11.5" fill="#4f8cff">ε_θ(xₜ, t)</text>
+        <text x="386" y="282" text-anchor="middle" font-size="10.5" class="dim">the one trained network — same weights reused at every timestep</text>
+      </svg>
+      <div class="diagram-caption">Top row, left to right: the fixed forward process, in which a real image (x₀) is gradually buried under Gaussian noise until it's indistinguishable from static (x_T). Bottom row, right to left: the learned reverse process, in which a single network ε_θ, reused at every timestep, predicts the noise at each step so it can be subtracted off. Start the reverse process from pure random noise and you've generated a new image.</div>
+    </div>
+
+    <div class="ref-figure">
+      <div class="rf-img-wrap"><img src="https://lilianweng.github.io/posts/2021-07-11-diffusion-models/DDPM.png" alt="The Markov chain of forward and reverse diffusion process" loading="lazy"></div>
+      <div class="rf-caption"><span class="rf-label">Reference figure</span>The forward (reverse) diffusion Markov chain, as drawn in the DDPM paper. Source: Ho et al. 2020, via Lilian Weng, <a href="https://lilianweng.github.io/posts/2021-07-11-diffusion-models/" target="_blank" rel="noopener">What are Diffusion Models?</a></div>
+    </div>
+
+    <h3 id="what-the-denoising-network-looks-like">What the denoising network looks like</h3>
+    <p>So what does <span>$\epsilon_\theta$</span> look like as a network? There have been two answers, a few years apart. First came the <strong>U-Net</strong>, a convolutional encoder-decoder with skip connections between matching resolutions, the same backbone family used in image segmentation. It's a natural fit, because the input and output are both full images: a noisy image goes in and a predicted noise map comes out.</p>
+
+    <p>More recent large-scale systems use a <strong>Diffusion Transformer (DiT)</strong>. Chop the image into patches (usually of a latent-space image, which section 05 explains), treat the patches like tokens, and run ordinary transformer blocks. It's the same architecture from chapter 08, applied to image patches instead of text tokens, with cross-attention or embedded conditioning bringing in the prompt at every block. DiT tends to scale more predictably with more compute and data, the same lesson the field had already learned from the original NLP transformers, so it seems to be where large systems are heading.</p>
+
+    <h3 id="steering-it-with-a-prompt-or-a-pose">Steering it with a prompt or a pose</h3>
+    <p>Either network has to be told what to draw, and that conditioning gets folded in at every denoising step. It might be text, a pose skeleton, a depth map or an edge map. Two common mechanisms are cross-attention, where the query comes from the image and the key and value come from the conditioning, and directly adding a conditioning embedding into the network.</p>
+
+    <p><strong>ControlNet</strong>-style approaches take this further. Freeze a pretrained diffusion model entirely, then train a small parallel branch that reads an extra conditioning signal (edges, pose, depth) and injects its influence into the frozen network's intermediate activations. That gives precise structural control, exact pose and exact layout, without retraining or damaging what the original model already learned.</p>
+
+    <p>We've been saying "add noise according to a schedule" without the formula. It's short, and it turns out to hold the key to why training is cheap.</p>
+  </section>
+
+  <section id="math">
+    <h2><span class="num">04</span>The equations</h2>
+
+    <h3 id="jumping-straight-to-any-noise-level">Jumping straight to any noise level</h3>
+    <p>The forward process is designed so you can jump to any noise level <span>$t$</span> in one step, without simulating the steps before it: <span>$x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\, \epsilon$</span>. Here <span>$\epsilon \sim \mathcal{N}(0, I)$</span> is fresh Gaussian noise (one random number per pixel, drawn from a bell curve of spread one), and <span>$\bar\alpha_t$</span> is a known, fixed schedule value that falls from near 1 (almost no noise) to near 0 (almost pure noise) as <span>$t$</span> grows. That's the whole forward process, with no network involved and only algebra.</p>
+
+    <p>Is the shortcut the same as taking all the steps? Let's check. For this check we use a four-pixel "image" instead of a cat photo, so the numbers fit on a line. <code>betas</code> holds the small amount of noise added at each of 1000 steps, and <code>abar</code> is the running product of <code>1 - beta</code>, written <span>$\bar\alpha_t$</span>. A loop does 400 real noising steps on 20,000 copies of the image at once, so we can measure the average and spread of the result. After it, one line gets the same quantities from the closed form at <code>abar[399]</code>, the value after 400 steps, with no loop. A last loop prints a noisy version of the image at four noise levels.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Jump 400 noising steps in one multiply, and watch the signal go</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+T = 1000
+betas = np.linspace(1e-4, 0.02, T)      # the DDPM linear schedule
+abar = np.cumprod(1.0 - betas)          # alpha-bar_t, one per step
+x0 = np.array([0.9, -0.7, 0.5, -0.3])   # a 4-pixel &quot;image&quot;
+
+# The slow way: 400 real noising steps, on 20k copies at once.
+x = np.repeat(x0[None], 20000, axis=0)
+for t in range(400):
+    z = rng.normal(size=x.shape)
+    x = np.sqrt(1 - betas[t]) * x + np.sqrt(betas[t]) * z
+print(&quot;x&quot;, tuple(x.shape))
+print(&quot;400 steps:&quot;, np.round(x.mean(0), 3),
+      &quot;+/-&quot;, round(float(x.std(0).mean()), 3))
+
+a = abar[399]                           # the same law, no loop at all
+print(&quot;1 step:   &quot;, np.round(np.sqrt(a) * x0, 3),
+      &quot;+/-&quot;, round(float(np.sqrt(1 - a)), 3))
+
+for t in (0, 250, 500, 999):
+    xt = np.sqrt(abar[t]) * x0 + np.sqrt(1 - abar[t]) * rng.normal(size=4)
+    print(f&quot;t={t:4d} sqrt(abar)={np.sqrt(abar[t]):.3f}&quot;,
+          &quot;x_t=&quot;, np.round(xt, 2))</code></pre>
+      <div class="tryit-out">The two middle lines agree. Four hundred chained noising steps land on mean <code>[0.392 -0.307 0.223 -0.126]</code> with spread <code>0.895</code>, and the closed form gets <code>[0.398 -0.309 0.221 -0.133]</code> and <code>0.897</code> from a single multiply and no loop. That agreement is roughly why training is affordable: each image gets one random <span>$t$</span>, never a whole trajectory. Now read the <code>sqrt(abar)</code> column. By <code>t=500</code>, the halfway point, only <code>0.279</code> of the original signal is left, and by <code>t=999</code> it's <code>0.006</code> and <code>x_t</code> has no visible relation to <code>x0</code>. A linear <span>$\beta$</span> schedule does most of its damage early, which is the complaint that later cosine schedules were built to fix.</div>
+    </details>
+
+    <h3 id="the-vae-loss-which-diffusion-inherits">The VAE loss, which diffusion inherits</h3>
+    <p>Before the diffusion loss comes the VAE's. Diffusion inherits its whole argument, so we need this one straight before moving on. Below, a derivation shows where the VAE loss comes from, starting from <span>$\log p(x)$</span>, the quantity we'd like to maximise but can't compute, and ending with two terms that we can.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">Where the VAE loss comes from, line by line</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">We want to maximise <span>$\log p(x)$</span>. We cannot: it requires <span>$p(x) = \int p(x \mid z)\, p(z)\, dz$</span>, an integral over every possible latent. The way out is to stop computing it and start bounding it.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\log p(x) = \mathbb{E}_{q(z \mid x)}\!\left[\log p(x)\right]$$</span></div>
+            <div class="drv-why"><strong>Why this is legal:</strong> there is no <span>$z$</span> anywhere in <span>$\log p(x)$</span>. Taking an expectation over <span>$z$</span> of something that does not depend on <span>$z$</span> changes nothing. This looks like it does no work, but it is the move that lets us introduce <span>$q$</span> at all.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= \mathbb{E}_{q}\!\left[\log \frac{p(x, z)}{p(z \mid x)}\right]$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> Bayes' rule, rearranged. Since <span>$p(z \mid x) = p(x,z)/p(x)$</span>, we can write <span>$p(x) = p(x,z)/p(z \mid x)$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= \mathbb{E}_{q}\!\left[\log \left( \frac{p(x, z)}{q(z \mid x)} \cdot \frac{q(z \mid x)}{p(z \mid x)} \right)\right]$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> multiply and divide by <span>$q(z \mid x)$</span>. This is the entire trick. It manufactures one term we can actually compute and one term we can bound.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$= \underbrace{\mathbb{E}_{q}\!\left[\log \frac{p(x, z)}{q(z \mid x)}\right]}_{\text{ELBO}} \;+\; \underbrace{\mathbb{E}_{q}\!\left[\log \frac{q(z \mid x)}{p(z \mid x)}\right]}_{D_{\mathrm{KL}}(q \,\|\, p(z \mid x))}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> the log of a product splits into a sum, and expectation is linear. The second term is exactly the definition of KL divergence between your encoder and the true posterior.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\log p(x) \;\geq\; \text{ELBO}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> KL divergence is never negative. Drop a non-negative term from a sum and what remains is a lower bound. That inequality is the "LB" in ELBO.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\text{ELBO} = \underbrace{\mathbb{E}_{q}\!\left[\log p(x \mid z)\right]}_{\text{reconstruction}} \;-\; \underbrace{D_{\mathrm{KL}}\!\left(q(z \mid x) \,\|\, p(z)\right)}_{\text{regulariser}}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> expand <span>$p(x,z) = p(x \mid z)\,p(z)$</span> inside the ELBO, then group the two terms that depend only on <span>$z$</span>. Both pieces are now computable: the first by decoding a sample, the second in closed form for Gaussians.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff">The gap between the true log-likelihood and the ELBO is <em>exactly</em> <span>$D_{\mathrm{KL}}(q \,\|\, p(z \mid x))$</span>. So maximising the ELBO does two jobs at once: it pushes the likelihood up, and it drags your encoder toward the true posterior. And it does the second one without ever computing that posterior, which was the intractable thing you started out trying to avoid.</div>
+      </div>
+    </details>
+
+    <p>So the loss has two competing parts: a reconstruction term that wants the code to carry everything about the photo, and the KL term that wants the code to look like the prior. Can we see them compete? In the code below, a single data point <code>x = 2.0</code> goes through a decoder that is the identity (it hands the code back unchanged), so the reconstruction error has a closed form, <code>(mu - x)**2 + sd**2</code>, and so does the KL. Each run trains the encoder's mean and log-spread to minimise <code>recon + beta * kl</code>, and <code>beta</code> is the dial. At <code>beta=1</code> that's the true VAE loss, and the other values turn the KL term down or up.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Turn the KL dial and watch the other half of the ELBO pay for it</span>
+      </summary>
+<pre><code>import torch
+
+x = torch.tensor(2.0)      # one data point; the decoder is the identity
+
+def terms(mu, logsd):
+    sd = logsd.exp()
+    recon = (mu - x) ** 2 + sd ** 2          # E_q[(x - z)^2], exactly
+    kl = 0.5 * (mu ** 2 + sd ** 2 - 1) - logsd
+    return recon, kl
+
+print(f&quot;{&#x27;beta&#x27;:&gt;5}{&#x27;mu&#x27;:&gt;8}{&#x27;sigma&#x27;:&gt;8}{&#x27;recon&#x27;:&gt;8}{&#x27;KL&#x27;:&gt;8}&quot;)
+for beta in [0.01, 0.1, 1.0, 4.0, 50.0]:
+    p = torch.zeros(2, requires_grad=True)   # [mu, log sigma]
+    opt = torch.optim.Adam([p], lr=0.02)
+    for _ in range(4000):                    # this is all training does
+        recon, kl = terms(p[0], p[1])
+        opt.zero_grad()
+        (recon + beta * kl).backward()       # the only knob is beta
+        opt.step()
+    recon, kl = terms(p[0], p[1])
+    print(f&quot;{beta:5.2f}{p[0]:8.3f}{p[1].exp():8.3f}&quot;
+          f&quot;{recon:8.3f}{kl:8.3f}&quot;)</code></pre>
+      <div class="tryit-out">Read the last two columns against each other. At <code>beta=0.01</code> the reconstruction term is <code>0.005</code> and the KL is <code>4.134</code>. At <code>beta=50</code> they've swapped places, <code>4.660</code> and <code>0.003</code>, and no setting buys both. The <code>beta=50</code> row is <em class="term">posterior collapse</em> in two numbers: <code>mu=0.077</code> and <code>sigma=0.981</code>. The encoder has stopped encoding and emits the prior <span>$\mathcal{N}(0,1)$</span> whatever the input, which costs nothing on the KL term and is worth nothing to the decoder. Notice too that the honest VAE, <code>beta=1</code>, already drags <span>$\mu$</span> to <code>1.333</code> for a point sitting at <code>2.0</code>. That gap is where the blur comes from.</div>
+    </details>
+
+    <h3 id="the-diffusion-loss">The diffusion loss</h3>
+    <p>With the VAE straight, the diffusion objective is short. Training the reverse process reduces, once the derivation settles, to one line:</p>
+    <div class="eq-block">
+      <span>$$\mathcal{L} = \mathbb{E}_{x_0,\, t,\, \epsilon}\left[\, \lVert \epsilon - \epsilon_\theta(x_t, t) \rVert^2 \,\right]$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">x_0</span> a real training image, sampled from the dataset.</li>
+      <li><span class="sym">t</span> a timestep sampled uniformly at random from <span>$1$</span> to <span>$T$</span>, so every training step picks a different noise level to work on.</li>
+      <li><span class="sym">ε</span> the Gaussian noise you drew and added to <span>$x_0$</span> to build <span>$x_t$</span> with the formula above. It's the ground-truth label.</li>
+      <li><span class="sym">x_t</span> the resulting noisy image at that timestep. This is what the network sees as input, along with <span>$t$</span> itself.</li>
+      <li><span class="sym">ε_θ(x_t, t)</span> the network's prediction: "given this noisy image and this timestep, what noise do I think was added?"</li>
+      <li><span class="sym">‖·‖²</span> plain L2 distance between the true noise and the predicted noise, an ordinary regression loss with nothing adversarial in it.</li>
+    </ul>
+    <p>Below, a derivation treats diffusion as a VAE whose latents are the whole noising trajectory, and shows how the variational bound we just met turns into that single squared error.</p>
+
+    <details class="derivation">
+      <summary>
+        <span class="drv-label">Derivation</span>
+        <span class="drv-goal">How a variational bound collapses into that one MSE line</span>
+      </summary>
+      <div class="drv-body">
+        <p class="drv-given">Diffusion is a VAE whose latents are the whole noising trajectory <span>$x_1, \dots, x_T$</span>, and whose encoder <span>$q$</span> is fixed by hand rather than learned. So it inherits the bound above, and the work is in simplifying it.</p>
+        <ol class="drv-steps">
+          <li>
+            <div class="drv-eq"><span>$$\log p(x_0) \;\geq\; \mathbb{E}_q\!\left[\log \frac{p_\theta(x_{0:T})}{q(x_{1:T} \mid x_0)}\right]$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> identical to the ELBO step above. The only change is that the latent is now a sequence, not a single <span>$z$</span>.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\begin{aligned}\mathcal{L} = \mathbb{E}_q\Big[\;&amp;\underbrace{D_{\mathrm{KL}}\big(q(x_T \mid x_0)\,\|\,p(x_T)\big)}_{\text{no parameters}} \\[2pt] &amp;+ \sum_{t>1} D_{\mathrm{KL}}\big(q(x_{t-1} \mid x_t, x_0)\,\|\,p_\theta(x_{t-1} \mid x_t)\big) \\[2pt] &amp;- \log p_\theta(x_0 \mid x_1)\Big]\end{aligned}$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> both the forward and reverse joints factor into per-step terms, so the bound regroups into one KL per timestep. The first term contains no learnable parameters at all: both sides are fixed. It is a constant you can ignore.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$q(x_{t-1} \mid x_t, x_0) = \mathcal{N}\big(x_{t-1};\, \tilde\mu_t(x_t, x_0),\, \tilde\beta_t I\big)$$</span></div>
+            <div class="drv-why"><strong>Why this step matters most:</strong> the reverse of a noising step is intractable on its own. Conditioned <em>also</em> on <span>$x_0$</span> it becomes an ordinary Gaussian with a closed-form mean. That is the entire reason <span>$x_0$</span> is carried through the derivation.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$D_{\mathrm{KL}} = \frac{1}{2\sigma_t^2}\left\lVert \tilde\mu_t(x_t, x_0) - \mu_\theta(x_t, t) \right\rVert^2 + C$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> fix the reverse process to have the same variance as the forward posterior, and the KL between two Gaussians collapses to a scaled squared distance between their means. Every KL in the sum is now a regression target.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\left\lVert \tilde\mu_t - \mu_\theta \right\rVert^2 \;\longrightarrow\; w_t \left\lVert \epsilon - \epsilon_\theta(x_t, t) \right\rVert^2$$</span></div>
+            <div class="drv-why"><strong>Why:</strong> <span>$x_t$</span> is an invertible function of <span>$(x_0, \epsilon)$</span>. Substituting that relation into <span>$\tilde\mu_t$</span> rewrites the mean-matching problem as a noise-matching problem. Same objective, different coordinates, and the noise coordinates turn out to be much easier to learn in.</div>
+          </li>
+          <li>
+            <div class="drv-eq"><span>$$\mathcal{L}_{\text{simple}} = \mathbb{E}_{x_0, t, \epsilon}\left[\left\lVert \epsilon - \epsilon_\theta(x_t, t) \right\rVert^2\right]$$</span></div>
+            <div class="drv-why"><strong>Why — and this is the honest part:</strong> the weights <span>$w_t$</span> are simply dropped. That is not a mathematical simplification. Ho et al. found the unweighted version trains better, so the objective everyone uses is deliberately <em>not</em> the tight variational bound.</div>
+          </li>
+        </ol>
+        <div class="drv-payoff">The MSE is not a heuristic somebody guessed. It is a variational bound on log-likelihood, made tractable by conditioning on <span>$x_0$</span>, reparameterised into noise coordinates, and then knowingly un-weighted because that trains better. Only the last step is unprincipled, and knowing precisely which step that is separates reciting the loss from understanding it.</div>
+      </div>
+    </details>
+
+    <p>Look at what's missing from this loss: no discriminator, no generator fighting anything, no minimax. For our cat photos, one training step is to pick a random photo, pick a random timestep, add the matching amount of noise, ask the network to predict that noise, compute the mean squared error and backpropagate. It's supervised regression with an unusually clever choice of label.</p>
+
+    <h3 id="sampling-walking-back-from-static">Sampling: walking back from static</h3>
+    <p>At sampling time you start from <span>$x_T \sim \mathcal{N}(0, I)$</span>, pure noise. Then you use <span>$\epsilon_\theta(x_t, t)$</span> again and again to estimate and subtract off a bit of noise, stepping from <span>$x_T$</span> to <span>$x_{T-1}$</span>, then <span>$x_{T-2}$</span>, and so on down to <span>$x_0$</span>. Original <strong>DDPM</strong> sampling does this stochastically, adding a little fresh noise back at each step to match the forward process exactly, and needs on the order of hundreds to a thousand steps.</p>
+
+    <p>That's a lot of steps to wait for. <strong>DDIM</strong> reformulates the reverse process as non-Markovian (a step no longer depends only on the one before it) and deterministic. It uses the same trained network but a sampling procedure that can skip steps and still land close to a good sample. That cuts generation from hundreds of steps to a few dozen with the same weights. That's the difference between diffusion being usable in a real product and not.</p>
+  </section>
+
+  <section id="why">
+    <h2><span class="num">05</span>Why this architecture</h2>
+
+    <p>Two design choices carry most of the weight in a modern diffusion system: the regression objective we just derived, and running the whole process in a compressed latent space. Each one answers a specific cost.</p>
+
+    <h4 class="why">Why does diffusion train more stably than a GAN?</h4>
+    <p>A GAN's loss is defined by two networks trying to outmanoeuvre each other, so there's no fixed target. Every time the discriminator updates, the correct gradient for the generator changes, and nothing guarantees the pair converges instead of oscillating. Diffusion training has none of that, because at every step there's a single, fixed, correct answer, the noise that was added. There's no adversary, so there's no oscillation and no mode collapse in the GAN sense. It also means the loss curve corresponds to the model getting better. That makes debugging and hyperparameter tuning tractable in a way GAN training famously isn't.</p>
+
+    <h4 class="why">Why run diffusion in a compressed space?</h4>
+    <p>There's still the cost of all those steps. Running the forward and reverse process directly on pixels means every one of the hundreds of denoising steps is a full forward pass of a large network over a full-resolution image. At 512×512×3 or larger, that's expensive to the point of being impractical on consumer hardware.</p>
+
+    <p><strong>Latent diffusion</strong> gets around this by first training a VAE-style encoder and decoder pair that compresses images into a much smaller latent grid. A common choice is 8× spatial downsampling, so a 512×512 image becomes something like a 64×64 latent. Then the <em>entire</em> diffusion process runs inside that compressed space, forward noising and reverse denoising alike, and the final denoised latent is decoded back to pixels with the VAE decoder once, at the very end. This is the single change that took diffusion from a research curiosity needing serious compute to something that runs on a single consumer GPU. That's why it's called Stable Diffusion. And it explains the VAE's lasting role: even in a diffusion system, it's what makes generating affordable.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">06</span>Complexity, failure modes, and what breaks</h2>
+
+    <p>We now have three families, and each has traded something away. Here's a table that puts them side by side on four things you'd care about when choosing one: how good the samples look, how stable training is, how fast sampling is, and whether you can measure the likelihood of a photo.</p>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>GAN</th><th>VAE</th><th>Diffusion</th></tr></thead>
+        <tbody>
+          <tr><td>Sample quality</td><td>Sharp, high-fidelity when it works</td><td>Often visibly blurrier</td><td>Sharp, currently state of the art</td></tr>
+          <tr><td>Training stability</td><td>Notoriously unstable — adversarial balance</td><td>Stable — single well-behaved loss</td><td>Stable — plain regression loss</td></tr>
+          <tr><td>Sampling speed</td><td>Fast — one forward pass</td><td>Fast — one forward pass</td><td>Slow — many iterative steps (DDIM/distillation narrow this)</td></tr>
+          <tr><td>Likelihood estimation</td><td>No explicit likelihood at all</td><td>Approximate — optimizes a lower bound (ELBO)</td><td>Approximate — also a (reweighted) variational bound</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 id="what-breaks">What breaks</h3>
+    <p>Each cell where a family looks bad has a mechanism behind it, and it helps to know the mechanisms. For GANs we've met mode collapse already: the generator finds a small set of outputs that reliably fool the current discriminator and stops exploring the rest of the data distribution, so you get samples that are individually convincing and collectively fail to cover the real diversity of the folder. Wasserstein loss, minibatch discrimination and spectral normalization reduce how often it happens, and none of them eliminates it.</p>
+
+    <p>For VAEs, the blur comes from the loss. A pixel-wise reconstruction loss, averaged over every plausible way an ambiguous region could look, is minimised by outputting something close to the average of those possibilities, and that average looks blurry. Stronger decoders, and adversarial or perceptual losses added on top of the VAE objective, help. Even so, the core tension never fully goes away: KL regularization is needed for a latent space you can sample from, and it pulls against sharp reconstruction. That's the pull you watched in the <code>beta</code> table.</p>
+
+    <p>For diffusion, the cost is slow multi-step sampling. Plain DDPM needs hundreds to a thousand sequential network evaluations per sample. Each one is a full forward pass, and they can't be parallelised, because each step depends on the output of the last. DDIM is the direct first response: deterministic, skip steps, same weights. Further speedups come from distillation, where a student model is trained to match what the multi-step teacher would have produced in far fewer steps, sometimes down to single digits.</p>
+
+    <h3 id="two-other-families">Two other families</h3>
+    <p>Two more model families deserve a mention, even though they see less production use today. <strong>Normalizing flows</strong> build a generative model out of a sequence of invertible transformations (steps that can be run backwards). That gives an <em>exact</em> log-likelihood through the change-of-variables formula, a real advantage over the approximate bounds every other family here relies on. In return, every layer has to be restricted to invertible operations whose Jacobian determinant (a number measuring how much the transformation stretches or squeezes space) is easy to compute. That constrains the architecture, and has kept flows from matching GAN or diffusion sample quality at scale.</p>
+
+    <p><strong>Energy-based models</strong> don't define how to sample directly. Instead they define a scalar "energy" function that should be low for realistic data and high for everything else, and generation means searching for low-energy points, typically with iterative gradient-based sampling such as Langevin dynamics. It's a conceptually elegant idea, and closely related to score-based views of diffusion. But training them (typically via contrastive divergence) and sampling from them efficiently are both hard. That has limited their production use relative to diffusion.</p>
+
+    <h3 id="how-do-you-know-the-samples-are-good">How do you know the samples are good?</h3>
+    <p>One last problem affects all of these. Unlike a classifier, a generative model has no single clean accuracy number. There are two imperfect options. <strong>FID</strong> (Fréchet Inception Distance) compares the statistics of real and generated image features under a pretrained classifier network. It's the most commonly reported number in papers, and it's also a proxy: it's sensitive to the reference dataset and the feature extractor used, and it's known not to always track what humans prefer. <strong>Human preference evaluation</strong>, with pairwise comparisons such as "which image do you prefer", is closer to what matters for a product, but it's expensive, slow, and still noisy across raters.</p>
+
+    <p>Use both as proxies to triangulate with. Neither is ground truth, and a model can win on FID and still look worse to people, or the reverse. Next comes the practical side: steering diffusion with guidance and building a small one yourself.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">07</span>Summary</h2>
+    <ol>
+      <li><strong>A generative model learns P(data), not a boundary.</strong> A classifier learns <span>$P(\text{label}\mid\text{data})$</span> and can ignore what a plausible photo looks like. A generative model has to capture it well enough that you can sample a new example.</li>
+      <li><strong>Autoregressive generation is exact but slow and can't revise.</strong> It predicts one pixel or token at a time, so one image takes thousands of sequential steps and an early guess is fixed once made.</li>
+      <li><strong>A VAE makes the latent space samplable.</strong> Its encoder outputs a distribution over codes and a KL term pulls it toward a standard Gaussian, so any point drawn from the prior decodes into something plausible.</li>
+      <li><strong>Reparameterization makes the encoder trainable.</strong> Writing the code as <code>mu + sd * eps</code> moves the randomness into an input, so gradients can flow through the draw.</li>
+      <li><strong>VAEs blur because of the loss.</strong> A reconstruction loss averaged over plausible versions is minimised by their average, and the KL term pulls against sharpness. With the KL weight turned far up, the encoder collapses to the prior.</li>
+      <li><strong>GANs trade a stable loss for sharp samples.</strong> Generator and discriminator play a game with no fixed target, and that leads to mode collapse and unstable training, even though the ideal optimum matches the data distribution.</li>
+      <li><strong>Diffusion destroys images with a fixed forward process and learns to undo it.</strong> Its network only ever predicts the noise added at one step, and that step has a well-defined right answer.</li>
+      <li><strong>One equation reaches any noise level.</strong> <span>$x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\, \epsilon$</span> means training picks one random <span>$t$</span> per image instead of simulating a trajectory.</li>
+      <li><strong>Training uses a plain squared error on the noise.</strong> It comes from a variational bound, with the weights dropped because the unweighted version trains better, and it has no adversary in it.</li>
+      <li><strong>Samplers decide how many steps you pay for.</strong> DDPM needs hundreds to a thousand, DDIM a few dozen with the same weights, and distillation can go lower.</li>
+      <li><strong>Latent diffusion runs the whole process on a compressed grid.</strong> An 8× downsampling turns 512×512 into about 64×64. That's why Stable Diffusion runs on a consumer GPU. Evaluation is still weak, since FID and human preference are both imperfect proxies.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">08</span>Build this</h2>
+    <h3 id="classifier-free-guidance">Classifier-free guidance</h3>
+    <p>This is the single most practically important diffusion concept if you are using these models, and it is simpler than it sounds.</p>
+    <p>During training, the conditioning signal (a text prompt's embedding, say) is randomly dropped and replaced with a fixed "empty" token some fraction of the time. A common choice is around 10%. So the exact same network learns to predict noise two ways:</p>
+    <ul>
+      <li><span>$\epsilon_\theta(x_t, t, c)$</span>: the <strong>conditional</strong> prediction, given the prompt.</li>
+      <li><span>$\epsilon_\theta(x_t, t, \varnothing)$</span>: the <strong>unconditional</strong> prediction, ignoring the prompt entirely.</li>
+    </ul>
+    <p>At sampling time, compute both predictions and extrapolate <em>away</em> from the unconditional one, <em>toward</em> the conditional one, by more than the conditional prediction alone would give you:</p>
+    <div class="eq-block">
+      <span>$$\epsilon_{\text{cfg}} = \epsilon_\theta(x_t, t, \varnothing) + w \cdot \big(\epsilon_\theta(x_t, t, c) - \epsilon_\theta(x_t, t, \varnothing)\big)$$</span>
+    </div>
+    <p>where <span>$w$</span> is the <strong>guidance scale</strong>. Illustrative: at <span>$w{=}1$</span> you get the plain conditional prediction, with no extrapolation.</p>
+    <p>Push <span>$w$</span> higher and you exaggerate the direction the prompt is already pulling the prediction, which produces images that adhere to the prompt much more strongly. Values in roughly the 7–15 range are commonly used defaults in practice; Stable Diffusion's original default sat around 7.5.</p>
+    <p>Push it too far and you trade away diversity, and start seeing oversaturated colors and artifacts. Guidance scale is a real dial with a real quality/adherence tradeoff, and there is no free lunch.</p>
+
+    <p class="lede">Guidance is the dial. The reverse process is the thing being steered, and it is small enough to build from scratch in an afternoon.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Denoise a Gaussian blob back into two moons</span>
+        <span class="proj-meta">~2 hours · PyTorch + scikit-learn</span>
+      </div>
+      <p>Train a diffusion model on 2D points instead of images. The data is <code>make_moons</code>: two interleaved crescents. With two dimensions you can plot the <em>entire</em> distribution at every timestep, so the reverse process stops being a diagram and becomes something you watch happen, with no U-Net, no latent space and no GPU.</p>
+      <ol class="proj-steps">
+        <li>Sample a few thousand points from <code>make_moons</code> with a little noise. Scatter-plot them. That plot is your ground truth for the rest of the project.</li>
+        <li>Write the forward process <strong>straight from section 04</strong>: a linear <span>$\beta$</span> schedule over a few hundred timesteps, precomputed <span>$\bar\alpha_t$</span>, then <span>$x_t = \sqrt{\bar\alpha_t}\,x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon$</span>. Plot the cloud at several values of <span>$t$</span> and watch the crescents dissolve.</li>
+        <li>Make <span>$\epsilon_\theta$</span> a small MLP. Input is the 2D point plus a sinusoidal embedding of <span>$t$</span>; output is a 2-vector, the predicted noise. Train with the plain L2 loss from section 04.</li>
+        <li>Sample. Draw <span>$x_T$</span> from <span>$\mathcal{N}(0, I)$</span>, run the reverse loop down to <span>$x_0$</span>, and scatter-plot the whole cloud every twenty steps. Stack the frames into an animation or a grid.</li>
+        <li>Now break it twice. Keep the trained weights and cut the reverse loop to a handful of steps. Then retrain with the timestep input removed from the network entirely.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the frames show a round blob stretching, then splitting, with the gap between the two crescents opening late in the run. Nothing in your code describes a crescent. The network only ever saw noisy points and was only ever asked to predict noise.</div>
+      <div class="proj-stretch"><strong>What the two breakages teach.</strong> With only a handful of reverse steps the cloud lands in a smeared version of the moons, and the gap tends to fill in. Each step assumes the correction it makes is small, and that assumption fails when the steps get large. That is the sampling cost from section 06, and what DDIM attacks. Dropping the timestep input fails harder. The network can no longer tell the start of the trajectory from the end, so it applies one average correction everywhere and the shape never resolves.</div>
+    </div>
+
+    <h3 id="where-this-runs-in-production">Where this runs in production</h3>
+    <p>Three distinct pretrained components, chained together, each doing one well-scoped job:</p>
+    <ol>
+      <li><strong>Text encoder.</strong> A pretrained language model or CLIP-style text tower turns the prompt string into a conditioning embedding.</li>
+      <li><strong>Latent diffusion U-Net or DiT.</strong> Starts from random noise in latent space and runs the reverse denoising loop, typically a few dozen steps under DDIM-style sampling, with classifier-free guidance applied at every step to sharpen prompt adherence.</li>
+      <li><strong>VAE decoder.</strong> The final denoised latent passes through once, producing the actual pixel-space image.</li>
+    </ol>
+    <p>Guidance is not a fourth model. It carries no weights of its own: it runs the same denoising network twice per step, once conditioned and once not, then extrapolates between the two predictions.</p>
+    <p>Video generation runs the same core machinery, but adds a new problem: <strong>temporal consistency</strong>. It is not enough for every individual frame to look right. Consecutive frames need to agree on where objects are, how they are moving, and what they look like. Otherwise you get flicker, and objects that subtly warp between frames.</p>
+    <p>There are two approaches. One extends the denoising network with temporal attention or convolution layers that let it look across nearby frames. The other diffuses over a whole short clip's latent representation jointly, instead of generating each frame's noise independently. Both treat time as another axis the network has to get right and not as an afterthought bolted onto single-image diffusion.</p>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">09</span>Where you meet this in the wild</h2>
+    <p class="lede">Generative modelling stopped being about pretty pictures somewhere around 2022. The interesting uses now are the ones where the thing being sampled is not an image at all.</p>
+
+    <p>The pattern to notice: <strong>diffusion works wherever you can define a sensible way to add noise and a network that can undo it.</strong> Pixels were just the first domain where that was easy. Atoms, weather states, and robot trajectories turned out to work too.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card" style="--wc:var(--c-genai)">
+        <div class="wc-domain">Text-to-image</div>
+        <div class="wc-what">Turning a prompt into an image nobody has drawn</div>
+        <div class="wc-body">The canonical use, and the one that made latent diffusion famous. Stable Diffusion, Midjourney and DALL·E all sample from a learned image distribution conditioned on text. The VAE is what makes it affordable: diffusion runs in a compressed latent space, not on raw pixels.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-sci)">
+        <div class="wc-domain">Structural biology</div>
+        <div class="wc-what">Designing a protein that does not exist yet</div>
+        <div class="wc-body">Baker Lab's <a href="https://www.nature.com/articles/s41586-023-06415-8" target="_blank" rel="noopener">RFdiffusion</a> denoises protein backbones instead of pixels: add Gaussian noise to atom coordinates, train a network to reverse it, then sample entirely new structures. It produced experimentally validated binders and symmetric assemblies, not just plausible-looking output.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-3d)">
+        <div class="wc-domain">Weather</div>
+        <div class="wc-what">Forecasting a distribution, not a single future</div>
+        <div class="wc-body">DeepMind's <a href="https://www.nature.com/articles/s41586-024-08252-9" target="_blank" rel="noopener">GenCast</a> is a diffusion transformer that samples whole 15-day weather trajectories. Because it samples rather than predicts a point estimate, running it repeatedly gives a genuine ensemble — which is exactly what you need to talk about the <em>risk</em> of an extreme event.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-speech)">
+        <div class="wc-domain">Audio</div>
+        <div class="wc-what">Getting from a spectrogram to a waveform</div>
+        <div class="wc-body">This is where GANs are still the pragmatic answer rather than a historical footnote. HiFi-GAN generates a full waveform in one forward pass, which matters when a voice agent has a latency budget measured in milliseconds. See <a href="/topics/13-speech-audio">13</a>.</div>
+      </div>
+
+      <div class="wild-card" style="--wc:var(--c-unsup)">
+        <div class="wc-domain">Quietly, everywhere</div>
+        <div class="wc-what">The VAE as a compressor, not a generator</div>
+        <div class="wc-body">Most production VAEs are not being used to generate anything. They are used for the latent space itself: a compact, smooth representation that something else operates in. That is precisely the job the VAE does inside Stable Diffusion.</div>
+      </div>
+    </div>
+
+    <div class="reach">
+      <div class="reach-col reach-yes">
+        <div class="reach-head">Reach for a generative model when</div>
+        <ul>
+          <li>You need <strong>plausible new samples</strong> and no label: data augmentation, simulation, design search.</li>
+          <li>The answer is <strong>one-to-many</strong>: many valid images fit a prompt, and many valid weather trajectories fit today's readings. A regressor forced to pick one will average them into mush.</li>
+          <li>You need <strong>calibrated uncertainty</strong> and can get it by sampling repeatedly, rather than from a single confidence score.</li>
+          <li>You want a <strong>learned latent space</strong> to work in, and generation is a side effect you may never use.</li>
+        </ul>
+      </div>
+      <div class="reach-col reach-no">
+        <div class="reach-head">Look elsewhere when</div>
+        <ul>
+          <li>You only need a <strong>decision boundary</strong>. A discriminative classifier will be smaller, faster and easier to evaluate.</li>
+          <li>You need <strong>exact likelihoods</strong>. Diffusion and GANs do not give them cleanly, while normalizing flows do at a cost in expressiveness.</li>
+          <li><strong>Latency is tight and quality is negotiable.</strong> Iterative denoising is many forward passes; a one-shot model may be the better trade.</li>
+          <li>You cannot define what <strong>"realistic"</strong> means for your data well enough to evaluate it. If you cannot tell a good sample from a bad one, you cannot train or ship this.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="deep-dive">
+    <h2><span class="num">10</span>Going deeper: the decisions that change your output</h2>
+    <p class="lede">Everything above explains why diffusion works. This section is about the handful of choices that decide what you get out of it.</p>
+
+    <h3 id="inside-stable-diffusion-at-inference">Inside Stable Diffusion, at inference</h3>
+    <p>The pipeline above listed three components, but it did not say what each one costs you at generation time, and the distribution is lopsided.</p>
+    <ul>
+      <li>The <strong>text encoder</strong> runs once and is cheap enough to ignore.</li>
+      <li>The <strong>denoising network</strong> runs once per step, and twice per step when guidance is on, so it is the entire compute budget.</li>
+      <li>The <strong>VAE decoder</strong> runs once, at the end. Also cheap next to the loop.</li>
+    </ul>
+    <p>So a 30-step generation with classifier-free guidance is 60 forward passes of a large network. Everything else rounds to zero.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">Why the latent space matters more than it sounds</span>
+      <p>The compression is 8× in each spatial dimension: a 512×512 image becomes a 64×64 latent.</p>
+      <p>Eight times in each direction means <strong>64× fewer spatial positions</strong> to process. Every one of those 60 forward passes gets 64× cheaper.</p>
+      <p>That multiplier is the difference between a model that runs on a consumer GPU and one that does not.</p>
+    </div>
+
+    <p>The knobs, roughly in order of how much they move the result:</p>
+    <ul>
+      <li><strong>Step count.</strong> Cost is linear in it. How low you can go depends entirely on the sampler.</li>
+      <li><strong>Guidance scale.</strong> Prompt adherence traded against diversity, covered above.</li>
+      <li><strong>Sampler.</strong> Changes the step floor by an order of magnitude, and costs nothing to swap.</li>
+      <li><strong>Resolution.</strong> Cost is quadratic in it, and quality also tends to degrade well away from the resolution the model was trained at.</li>
+    </ul>
+
+    <h3 id="samplers-same-weights-different-arithmetic">Samplers: same weights, different arithmetic</h3>
+    <p>A <em class="term">sampler</em> is the rule for stepping from <span>$x_t$</span> to <span>$x_{t-1}$</span>, and it is not part of the trained model at all. Swap it whenever you like.</p>
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th>Sampler</th><th>Typical steps</th><th>Deterministic</th><th>Needs training</th></tr></thead>
+        <tbody>
+          <tr><td>DDPM (ancestral)</td><td>Hundreds to ~1000</td><td>No, injects fresh noise each step</td><td>No</td></tr>
+          <tr><td><a href="https://arxiv.org/abs/2010.02502" target="_blank" rel="noopener">DDIM</a></td><td>A few dozen</td><td>Yes</td><td>No</td></tr>
+          <tr><td><a href="https://arxiv.org/abs/2206.00927" target="_blank" rel="noopener">DPM-Solver</a></td><td>10 to 20</td><td>Yes</td><td>No</td></tr>
+          <tr><td>Distilled (e.g. LCM)</td><td>1 to 4</td><td>Yes</td><td>Yes, a distillation run</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><strong>DPM-Solver</strong> treats the reverse process as an ODE and applies a higher-order numerical solver to it. Same network, same weights, better integration. Its authors report high-quality samples in 10 to 20 network evaluations, a 4 to 16× speedup over previous training-free samplers.</p>
+
+    <div class="callout callout-teach">
+      <span class="callout-label">The first three rows are the same model</span>
+      <p>DDPM, DDIM and DPM-Solver are not different models. They are different ways of numerically integrating the same learned reverse process.</p>
+      <p>You can download one checkpoint and get any of them, which is why sampler choice is the cheapest large speedup available to you.</p>
+      <p>The fourth row is different in kind. Getting below roughly ten steps means changing the weights.</p>
+    </div>
+
+    <h3 id="adaptation-without-retraining">Adaptation without retraining</h3>
+    <p>Almost nobody trains one of these from scratch, so practical work is nearly all adaptation of a checkpoint someone else paid for. Five techniques cover most of what people do, and they differ mainly in how much of the model they are willing to disturb.</p>
+    <ul>
+      <li><strong><a href="https://arxiv.org/abs/2106.09685" target="_blank" rel="noopener">LoRA</a>.</strong> Freeze the base weights and learn a small low-rank update beside them. Proposed for language models, it transfers directly to diffusion. The files are small enough to swap and stack freely.</li>
+      <li><strong><a href="https://arxiv.org/abs/2208.12242" target="_blank" rel="noopener">DreamBooth</a>.</strong> Fine-tune the model on a handful of images of one subject, bound to a rare identifier token. Strong subject fidelity. Also the heaviest option, and the most prone to overfitting a small reference set.</li>
+      <li><strong><a href="https://arxiv.org/abs/2208.01618" target="_blank" rel="noopener">Textual inversion</a>.</strong> Keep the model entirely frozen and learn one new embedding vector for one new token. The smallest possible intervention, and correspondingly limited in what it can express.</li>
+      <li><strong><a href="https://arxiv.org/abs/2302.05543" target="_blank" rel="noopener">ControlNet</a>.</strong> Clone the encoder and train the copy on a spatial conditioning signal: edges, depth, pose, segmentation. It controls <em>composition</em>, with content left to the prompt.</li>
+      <li><strong><a href="https://arxiv.org/abs/2308.06721" target="_blank" rel="noopener">IP-Adapter</a>.</strong> Add a separate cross-attention path for image features, so an image can act as a prompt alongside the text. Roughly 22M parameters, and it composes with the others.</li>
+    </ul>
+    <p>ControlNet has a detail worth stealing for your own work. The trained copy reconnects to the frozen base through <strong>zero-initialised convolutions</strong>. At the start of training those layers output nothing, so the branch is a no-op and cannot damage a working model. It grows its influence from zero as training proceeds.</p>
+
+    <h3 id="where-gans-still-win">Where GANs still win</h3>
+    <p>Not many places, but the ones that remain are real and worth being precise about.</p>
+    <p>A GAN generator produces its output in <strong>one forward pass</strong>. Diffusion needs several at absolute minimum, usually dozens. When the latency budget is small and fixed, that gap decides the architecture on its own.</p>
+    <ul>
+      <li><strong>Neural vocoding.</strong> HiFi-GAN emits a waveform in a single pass. A voice agent replying in real time cannot afford a denoising loop. See <a href="/topics/13-speech-audio">13</a>.</li>
+      <li><strong>Super-resolution and restoration.</strong> Real-ESRGAN-style models are still widely deployed for upscaling, where one pass is enough.</li>
+    </ul>
+    <p>Notice what those share: the output is tightly constrained by the input, so the one-to-many problem that drives mode collapse is much smaller to begin with. Add a hard latency budget and the trade tips toward the GAN.</p>
+
+    <h3 id="few-step-generation">Few-step generation</h3>
+    <p>Better samplers took diffusion from a thousand steps down to roughly ten, which is where training-free cleverness runs out. Going lower means changing the weights as well as integrating them more carefully.</p>
+    <p><strong><a href="https://arxiv.org/abs/2303.01469" target="_blank" rel="noopener">Consistency models</a></strong> are trained so that every point along a trajectory maps directly to that trajectory's endpoint. If that property holds, you can jump straight to the answer instead of walking to it.</p>
+    <p><strong><a href="https://arxiv.org/abs/2310.04378" target="_blank" rel="noopener">Latent consistency models</a></strong> apply the idea to an existing latent diffusion model by distilling it. The authors report 2 to 4 step generation at 768×768, distilled in roughly 32 A100-hours.</p>
+    <p>The trade is consistent across the whole family. You give up some quality and some diversity, you gain a large cut in latency, and you pay a distillation run up front.</p>
+
+    <h3 id="evaluation-is-the-bottleneck">Evaluation is the bottleneck</h3>
+    <p>The failure-modes section introduced FID and human preference. Both are weaker than their ubiquity suggests.</p>
+    <p>The <a href="https://arxiv.org/abs/2401.09603" target="_blank" rel="noopener">Rethinking FID</a> analysis lays out the specific problems:</p>
+    <ul>
+      <li>Inception features were trained for classification. They represent the content of modern text-to-image output poorly.</li>
+      <li>FID compares only the first two moments, which assumes the feature distributions are Gaussian, and typically they are not.</li>
+      <li>Sample complexity is poor, so the number you get shifts with how many samples you scored.</li>
+      <li>It can contradict human raters, and does not reliably track gradual improvement in a model.</li>
+    </ul>
+    <p>That paper proposes CMMD instead, pairing CLIP embeddings with a maximum mean discrepancy distance.</p>
+    <p>Generative quality is easy to see and hard to measure, and no automated metric settles the question today.</p>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">11</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What's the difference between a generative and a discriminative model?</summary>
+      <div class="qa-body"><p>A discriminative model learns <span>$P(\text{label}\mid\text{data})$</span> — it only needs a boundary that separates classes, and never has to represent what makes data plausible in the first place. A generative model learns <span>$P(\text{data})$</span> itself, well enough to sample brand-new, never-seen examples from that distribution.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why isn't a plain autoencoder a generative model, but a VAE is?</summary>
+      <div class="qa-body"><p>A plain autoencoder's latent space is shaped only by reconstruction loss. Nothing guarantees that a random point in it decodes to anything sensible, so you cannot sample from it. A VAE adds a KL-divergence term that pulls every input's latent distribution toward a fixed prior, usually a standard Gaussian. That forces the space to be smooth and densely packed, with no gaps, so any point drawn from the prior decodes to a plausible output rather than a memorized reconstruction.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why do diffusion models train more stably than GANs?</summary>
+      <div class="qa-body"><p>GAN training is an adversarial minimax game between two networks with no fixed target. The "correct" gradient for the generator keeps changing as the discriminator updates, and nothing guarantees convergence rather than oscillation or collapse. Diffusion training has one fixed correct answer at every step, the noise actually added, so it reduces to ordinary supervised regression with an L2 loss. There is no adversary to oscillate against, and the loss curve tracks improvement.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What does classifier-free guidance actually do at sampling time?</summary>
+      <div class="qa-body"><p>The model was trained to predict noise both with the conditioning (e.g. a prompt) and without it (conditioning replaced by an empty token). At sampling time you compute both predictions and extrapolate away from the unconditional prediction toward the conditional one, scaled by a guidance weight <span>$w>1$</span>. This exaggerates the direction the prompt is already pulling the model, producing much stronger prompt adherence at the cost of some sample diversity, and can introduce artifacts if pushed too high.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does Stable Diffusion run in latent space instead of pixel space?</summary>
+      <div class="qa-body"><p>Diffusion needs many sequential network evaluations per sample. Running that directly on full-resolution pixels makes every one of those steps a full forward pass over a large image, which is expensive enough to be impractical on consumer hardware. Latent diffusion compresses images into a much smaller latent grid with a pretrained VAE encoder first, runs the entire noising/denoising process there, and decodes back to pixels only once at the end — the compute savings are what make diffusion tractable outside a datacenter.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Walk me through the DDPM training objective — what is the network actually predicting, and why does that make it easy to train?</summary>
+      <div class="qa-body"><p>Sample a real image <span>$x_0$</span>, a random timestep <span>$t$</span>, and random Gaussian noise <span>$\epsilon$</span>. Construct the noisy image directly via <span>$x_t = \sqrt{\bar\alpha_t}\,x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon$</span> — no simulation needed. Feed <span>$x_t$</span> and <span>$t$</span> into the network and have it predict <span>$\epsilon$</span>; train with L2 loss between the true and predicted noise. It's easy to train because it's plain supervised regression with a well-defined, always-available label — you never need an adversary, a search procedure, or an intractable likelihood; you just need to be able to add noise and subtract it back off.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>What's mode collapse, and why is it still a genuinely hard, unsolved problem for GANs?</summary>
+      <div class="qa-body"><p>Mode collapse is when the generator converges on a small set of outputs that reliably fool the current discriminator and stops exploring the rest of the real data distribution — high-quality individual samples, low overall diversity. It's hard because the generator's objective only ever asks "can I fool the discriminator right now," with no explicit term rewarding coverage of the full data distribution — so a narrow, reliable strategy is a perfectly valid local optimum of the adversarial game. Architectural and loss-level mitigations reduce how often it happens in practice, but none of them change the underlying game-theoretic incentive that makes it possible in the first place.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">12</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/2006.11239" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Denoising Diffusion Probabilistic Models</div><div class="r-sub">Ho, Jain, Abbeel, 2020 — arXiv:2006.11239</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1406.2661" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Generative Adversarial Networks</div><div class="r-sub">Goodfellow et al., 2014 — arXiv:1406.2661</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1312.6114" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Auto-Encoding Variational Bayes</div><div class="r-sub">Kingma &amp; Welling, 2013 — arXiv:1312.6114</div></div>
+      </a>
+      <a class="resource-card" href="https://lilianweng.github.io/posts/2021-07-11-diffusion-models/" target="_blank" rel="noopener">
+        <div class="r-icon">📰</div>
+        <div class="r-body"><div class="r-kind">Article</div><div class="r-title">What are Diffusion Models?</div><div class="r-sub">Lilian Weng, Lil'Log — the derivation, done carefully</div></div>
+      </a>
+      <a class="resource-card" href="https://jalammar.github.io/illustrated-stable-diffusion/" target="_blank" rel="noopener">
+        <div class="r-icon">📰</div>
+        <div class="r-body"><div class="r-kind">Article</div><div class="r-title">The Illustrated Stable Diffusion</div><div class="r-sub">Jay Alammar — the pipeline, in pictures</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/401" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Exponential Moving Average (EMA) for Diffusion Model Weights</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/696" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Logit-Normal Sampling for Diffusion Timesteps</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/694" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Multi-Signal Conditioning for Diffusion Transformers</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/302" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Diffusion Reconstruction Loss</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/304" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Forward &amp; Backward Diffusion Process</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/303" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Forward Diffusion Process</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">13</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/04-neural-network-fundamentals"><div class="rc-sec" style="color:var(--c-nn)">04 · Underpins this</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">U-Nets, encoders, decoders — all built from this machinery.</div></a>
+      <a class="related-card" href="/topics/08-attention-transformers"><div class="rc-sec" style="color:var(--c-attention)">08 · Powers DiT</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">The Diffusion Transformer is this exact block, denoising image patches.</div></a>
+      <a class="related-card" href="/topics/06-modern-vision-foundation-models"><div class="rc-sec" style="color:var(--c-visionfm)">06 · Related</div><div class="rc-title">Vision Foundation Models</div><div class="rc-hook">The CLIP-style encoders that turn prompts into conditioning vectors.</div></a>
+      <a class="related-card" href="/topics/14-multimodal-ai"><div class="rc-sec" style="color:var(--c-multimodal)">14 · Next</div><div class="rc-title">Multimodal AI</div><div class="rc-hook">Generation is one half of multimodal — understanding across modalities is the other.</div></a>
+    </div>
+  </section>

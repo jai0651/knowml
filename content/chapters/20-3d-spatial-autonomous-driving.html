@@ -1,0 +1,366 @@
+---
+title: "3D, Spatial AI & Autonomous Driving"
+dek: "Follow one traffic cone through a self-driving car's cameras, LiDAR and radar, from the pixel it lights up to the braking decision. You'll learn the camera geometry and the learned representations that turn partial views into one 3D picture."
+readingTime: "~26 min"
+prereqs: "CNNs & detection basics (05), attention & transformers (08)"
+group: "Embodied & Frontier"
+label: "Chapter 20"
+description: "Camera geometry, SLAM, LiDAR detection, BEV transformers and occupancy networks, sensor fusion, trajectory prediction, and the modular-vs-end-to-end debate — how a self-driving stack turns 2D pixels and sparse point clouds into a safe plan."
+---
+<section id="tldr">
+    <p>Picture a car driving down a street with an orange traffic cone sitting in its lane, ten metres ahead and a metre to the right of where the front camera points. Now the car has to decide whether that cone is something to brake for, steer around or ignore, and maybe the answer changes with its position. To decide, it needs to know where the cone is in three dimensions, roughly how big it is, and whether it's moving. This chapter follows that one cone through the car's sensors and software, from the pixel it lights up to the braking decision, and on the way it covers the geometry and the learned models that make up a modern self-driving stack.</p>
+
+    <p>The car has three kinds of sensors for this job: cameras, LiDAR (a laser range finder) and radar. Each one tells us something about the cone and hides something else, so no single sensor gives a trustworthy answer. The central problem of the field is combining them. We take pixels from several cameras, laser points and radar returns, express all of them in one shared 3D coordinate system, and run detection, tracking, forecasting and planning on that shared picture instead of building a separate pipeline for every sensor. Camera geometry is the mathematics that makes the sharing possible. Learned models, which we'll meet by name later, do the combining.</p>
+
+    <p>We'll go in the order the cone's information travels. First we see what each sensor can and can't say about the cone, then the geometry that turns a 3D point into a pixel and back, then the stack itself, piece by piece: where the car is, what's around it, where everything is going, and what to do about it. After that comes the design question that shapes the whole field: why the stack fuses features into a top-down picture before detecting anything, and why almost every deployed system keeps its stages separate instead of training one network from pixels to steering. The chapter closes with the failures that show up in production.</p>
+
+    <p>We assume you know the basics of convolutional networks and object detection from chapter 05, and attention from chapter 08. If you want one sentence for an interview, it's this: autonomous driving is a real-time 3D perception problem wearing a robotics costume, and its central engineering tension is fusing complementary, imperfect sensors into one consistent world model fast enough, and reliably enough, to plan around safely.</p>
+  </section>
+
+  <section id="intuition">
+    <h2><span class="num">01</span>Three sensors, one traffic cone</h2>
+
+    <p>Start with the camera, since it's the cheapest and the most familiar. A camera image is a grid of <strong>pixels</strong>, and each pixel records the light that arrived along one direction. That makes the image a 2D projection of the world, and by the time light reaches the sensor, depth is already gone. Our cone and a taller object far behind it could land on exactly the same pixel, and a single camera has no way to tell them apart. To get distance back, it needs extra assumptions (a cone is probably about this tall) or a second view to triangulate against.</p>
+
+    <p>LiDAR fixes this directly. The name stands for light detection and ranging: the unit fires short laser pulses, times how long each takes to bounce back, and converts that time into a distance. A rotating unit sweeps in a circle and returns a <strong>point cloud</strong>, a set of 3D points, one for each place a pulse hit something. For our cone at ten metres, that means a precise distance but only a handful of points on it, because the cloud is dense up close and sparse at range. It also says nothing about the cone's color or fine texture, and it's the most expensive sensor in the stack.</p>
+
+    <p>Radar sends out radio waves instead of light, and its advantage is speed. A moving object shifts the frequency of the wave it reflects, an effect called the <strong>Doppler shift</strong>, so radar measures velocity directly and immediately. Cameras and LiDAR can only infer velocity by comparing several frames. The price is spatial resolution: radar is coarse enough that it often can't tell an object's exact shape, or whether two nearby objects are one or two.</p>
+
+    <p>So for our cone, the camera knows what it looks like but not how far away it is, LiDAR knows how far but not what it is, and radar knows whether it's moving but little else. Two questions organize everything that follows. First, how to turn what one sensor sees into a 3D fact about the world, and that's camera geometry, stereo depth and LiDAR point-cloud processing. Second, how to combine facts from sensors that measure different things at different rates and sometimes disagree, and that's sensor fusion, bird's-eye-view representations and occupancy networks. Get the first right and you have accurate individual readings that still don't agree with each other. Get the second right and the disagreement turns from a source of confusion into a source of robustness, because each sensor covers the others' blind spots.</p>
+
+    <p>Let's make the camera's loss of depth concrete with the cone. Below, the code places a point on the cone 1 m to the right of the camera's axis and 0.5 m below it, then moves it to three different distances and prints the pixel it lands on. Its <code>project</code> function is the whole camera model: divide the sideways and vertical offsets by the distance <code>Z</code>, scale by the focal length <code>f</code> (a lens property, measured here in pixels), and add the image center <code>(cx, cy)</code> so that a point straight ahead lands in the middle of the image.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Project a 3D point onto a camera image</span>
+      </summary>
+<pre><code>f = 800.0                                    # focal length in pixels
+cx, cy = 320.0, 240.0                        # image center
+
+def project(X, Y, Z):
+    return f * X / Z + cx, f * Y / Z + cy    # x = f X / Z
+
+for Z in (5, 10, 20):
+    u, v = project(1.0, 0.5, Z)
+    print(f&quot;{Z:&gt;2} m away -&gt; pixel ({u:.0f}, {v:.0f})&quot;)</code></pre>
+      <div class="tryit-out"><strong>The same point, 1 m right and 0.5 m down, lands at pixel <code>(480, 320)</code> at 5 m, <code>(400, 280)</code> at 10 m and <code>(360, 260)</code> at 20 m.</strong> Moving it further away pulls it toward the image center at <code>(320, 240)</code>. Going the other way, from a pixel back to a 3D position, needs the distance, and one image doesn't contain it.</div>
+    </details>
+
+    <p>Look at what moved and what didn't. The point is always 1 m right and 0.5 m down, yet its pixel slides toward the image center as it recedes, from (480, 320) at 5 m to (360, 260) at 20 m. That division by <code>Z</code> is why far things look small. It also shows the one-way nature of the projection: going forward, a distance gives a pixel, but going backward, a pixel fits every distance along a ray, so one image can't give the cone's position, and you've probably guessed that a second view is the way out. Recovering that distance is what the rest of the geometry is for, and it starts with writing the projection down properly for a real car, which has many cameras that aren't all pointing the same way.</p>
+  </section>
+
+  <section id="math">
+    <h2><span class="num">02</span>The math: from a 3D point to a pixel</h2>
+
+    <h3 id="intrinsics-and-extrinsics">Intrinsics and extrinsics</h3>
+
+    <p>The little <code>project</code> function assumed the cone's position was given in the camera's own coordinate frame, with the origin at the lens and the Z axis pointing straight out. A <strong>coordinate frame</strong> is just a choice of origin and axes for writing positions down. A real car has six to eight cameras, each mounted at a different spot and angle, plus a LiDAR and radars, and each sensor naturally reports the cone in its own frame. To combine them we need a conversion between frames, and then the projection itself, and these are two separate jobs.</p>
+
+    <p>The first job belongs to the <em class="term">extrinsic transform</em>, a rotation <span>$R$</span> and a translation <span>$t$</span> that describe where a camera sits and which way it points relative to the vehicle. It converts a point from world (or vehicle) coordinates into that camera's frame. And the second job belongs to the <em class="term">intrinsic matrix</em> <span>$K$</span>, which holds properties fixed by the lens and sensor: the focal length, and the principal point, the pixel where the camera's axis meets the image. It maps a point already in the camera's frame down to a 2D pixel, exactly what <code>project</code> did with <code>f</code>, <code>cx</code> and <code>cy</code>. A single camera needs only its own pair. A multi-camera rig needs every camera's extrinsics measured against <strong>one shared reference frame</strong>, typically the vehicle's own center. That shared frame is what lets us place features from six differently mounted cameras correctly relative to each other, instead of keeping six disconnected pixel grids.</p>
+
+    <p>Chaining the two jobs gives the camera projection equation:</p>
+
+    <div class="eq-block">
+      <span>$$\lambda \begin{bmatrix}u\\v\\1\end{bmatrix} = K \big[R \mid t\big] \begin{bmatrix}X\\Y\\Z\\1\end{bmatrix}$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">X, Y, Z</span> a point's coordinates in the world (or vehicle) frame.</li>
+      <li><span class="sym">R, t</span> the camera's extrinsics: a rotation and translation converting that world-frame point into the camera's own coordinate frame.</li>
+      <li><span class="sym">K</span> the camera's intrinsic matrix (focal length and principal point), projecting the camera-frame 3D point down onto the 2D image plane.</li>
+      <li><span class="sym">u, v</span> the resulting pixel coordinates, up to the scale factor <span>$\lambda$</span>. That scale factor is the point's depth, and the projection alone throws it away. Hence depth estimation being a separate, hard problem.</li>
+    </ul>
+
+    <p>Our earlier code is the special case where the camera sits at the vehicle's origin and looks straight ahead, so <span>$R$</span> and <span>$t$</span> do nothing. Here the scale factor <span>$\lambda$</span> is the <code>Z</code> we divided by, and the equation makes the loss of depth precise: given <span>$(u, v)$</span> and the matrices, every value of <span>$\lambda$</span> is consistent with the pixel. If one camera can't recover <span>$\lambda$</span>, can two?</p>
+
+    <h3 id="epipolar-geometry-stereo-and-depth">Epipolar geometry, stereo and depth</h3>
+
+    <p>Take two cameras with a known, fixed offset between them, and look at the same real-world point, our cone. It appears in both images, and we'd like to find it in the second image given where it is in the first. Searching the whole second image would be slow. Epipolar geometry says we don't need to: once we know the two cameras' relative pose, a point's location in the first image constrains its possible location in the second to a single line, the <strong>epipolar line</strong>. For two calibrated cameras viewing the same point, that constraint is:</p>
+
+    <div class="eq-block">
+      <span>$$x'^{\top} F x = 0$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">x, x'</span> the same real-world point's pixel coordinates in the first and second camera respectively.</li>
+      <li><span class="sym">F</span> the fundamental matrix, encoding the two cameras' relative geometry: their relative <span>$R, t$</span> plus intrinsics.</li>
+      <li>Given <span>$x$</span> and <span>$F$</span>, this equation defines a single line in the second image, the epipolar line, that <span>$x'$</span> is guaranteed to lie on. This is why stereo matching needs only a 1D search along a line and not a full 2D image search.</li>
+    </ul>
+
+    <p>That collapses stereo matching from a 2D search into a 1D one. That's the difference between computing it on every frame in real time and not computing it at all. Once a match is found, depth falls out of the geometry directly. A far point shifts only slightly between the two images, and a near point shifts a lot. That shift is called the <strong>disparity</strong>, and for a fixed baseline (the distance between the cameras) disparity is inversely proportional to depth. So the projection equation told us one camera loses depth, and the epipolar constraint tells us how a second camera gets it back. How does all of this fit into a working driving system?</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">03</span>The stack, piece by piece</h2>
+
+    <p>A modern autonomous driving stack is a pipeline, much like the robotics pipeline in chapter 21, but with 3D geometry doing more of the early work. Raw sensors feed geometric and learned perception, and the perception output gets fused into one shared representation. That representation feeds prediction, prediction feeds planning, and planning's output becomes control commands for the steering and pedals. The diagram shows the flow, and the sections below take the stages in the order the cone's information passes through them.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Sensors → shared 3D representation → plan — one pipeline, several sensor streams
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 640 300" xmlns="http://www.w3.org/2000/svg" style="max-width:640px;display:block;margin:0 auto">
+        <text x="80" y="24" text-anchor="middle" font-size="10.5" fill="#9a9aa8">sensors</text>
+        <rect x="20" y="34" width="120" height="30" rx="7" fill="#14141d" stroke="#60a5fa" stroke-width="1.5"/>
+        <text x="80" y="53" text-anchor="middle" font-size="11" fill="#60a5fa">Cameras (×N)</text>
+        <rect x="20" y="74" width="120" height="30" rx="7" fill="#14141d" stroke="#4ade80" stroke-width="1.5"/>
+        <text x="80" y="93" text-anchor="middle" font-size="11" fill="#4ade80">LiDAR</text>
+        <rect x="20" y="114" width="120" height="30" rx="7" fill="#14141d" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="80" y="133" text-anchor="middle" font-size="11" fill="#fbbf24">Radar</text>
+
+        <path d="M140,49 L230,90" stroke="#60a5fa" stroke-width="1.6" fill="none" opacity="0.7" class="flow-line"/>
+        <path d="M140,89 L230,100" stroke="#4ade80" stroke-width="1.6" fill="none" opacity="0.7" class="flow-line"/>
+        <path d="M140,129 L230,110" stroke="#fbbf24" stroke-width="1.6" fill="none" opacity="0.7" class="flow-line"/>
+
+        <rect x="230" y="60" width="180" height="70" rx="9" fill="#14141d" stroke="#818cf8" stroke-width="1.8"/>
+        <text x="320" y="90" text-anchor="middle" font-size="12" font-weight="700" fill="#818cf8">Fusion: BEV grid /</text>
+        <text x="320" y="106" text-anchor="middle" font-size="12" font-weight="700" fill="#818cf8">occupancy volume</text>
+        <text x="320" y="148" text-anchor="middle" font-size="9.5" fill="#9a9aa8">one shared 3D frame</text>
+
+        <path d="M410,95 L470,95" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line-slow"/>
+        <rect x="470" y="65" width="150" height="60" rx="9" fill="#14141d" stroke="#f472b6" stroke-width="1.6"/>
+        <text x="545" y="92" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">Detection</text>
+        <text x="545" y="108" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">&amp; tracking</text>
+
+        <path d="M545,125 L545,165" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line-slow"/>
+        <rect x="440" y="165" width="180" height="45" rx="9" fill="#14141d" stroke="#fca5a5" stroke-width="1.6"/>
+        <text x="530" y="192" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fca5a5">Trajectory prediction</text>
+
+        <path d="M440,187 L360,187" stroke="#fca5a5" stroke-width="2" fill="none" class="flow-line-slow"/>
+        <rect x="180" y="165" width="180" height="45" rx="9" fill="#14141d" stroke="#34d399" stroke-width="1.6"/>
+        <text x="270" y="192" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">Motion planning</text>
+
+        <path d="M270,210 L270,250" stroke="#34d399" stroke-width="2" fill="none" class="flow-line-slow"/>
+        <rect x="180" y="250" width="180" height="34" rx="8" fill="#14141d" stroke="#e5e5ea" stroke-width="1.3" stroke-dasharray="4 3"/>
+        <text x="270" y="272" text-anchor="middle" font-size="11" fill="#e5e5ea">Control (21's PID/MPC)</text>
+      </svg>
+      <div class="diagram-caption">Three sensor streams, running at different rates and with different failure modes, get lifted into one shared bird's-eye-view or occupancy representation before anything downstream runs. Detection and tracking, prediction, and planning are almost always kept as separate stages, and section 04 explains why.</div>
+    </div>
+
+    <h3 id="slam-and-visual-inertial-odometry">SLAM and visual-inertial odometry</h3>
+    <p>Before the car can say where the cone is in the world, it has to know where it is itself. <strong>Simultaneous localization and mapping</strong> (SLAM) is a genuine chicken-and-egg problem. To know where you are, it helps to already have a map, and to build a map, it helps to already know where you are. SLAM solves both at once, jointly estimating the camera's trajectory and a map of tracked landmarks (distinctive points it can recognize again), and refining both as new observations arrive.</p>
+
+    <p>Visual-inertial SLAM tightly couples camera tracking with an <strong>IMU</strong>, an inertial measurement unit that reports acceleration and angular velocity. ORB-SLAM3 is the well-known open-source reference implementation. The two sensors cover for each other: the IMU fills in fast, high-frequency motion between camera frames, and it stays useful through the camera's worst moments: motion blur, brief occlusion, a tunnel, and the camera in turn corrects the IMU's slow drift whenever it can see stable landmarks again. With the car's own motion known, we can turn to the cone.</p>
+
+    <h3 id="3d-object-detection-from-lidar-and-from-cameras">3D object detection from LiDAR and from cameras</h3>
+    <p>Detecting the cone in a LiDAR point cloud means solving an awkward data-structure problem first. A point cloud is sparse, unordered, and wildly uneven in density, while a standard CNN is built for dense, regular pixel grids and can't consume it directly. <strong>PointPillars</strong> answers this in three moves. It discretizes the ground plane into a grid of vertical columns, the "pillars". It runs a small shared network over the points inside each pillar to produce one feature vector per pillar. Then it arranges those vectors into a 2D pseudo-image that an entirely ordinary 2D CNN detector can process. That turns an irregular 3D problem into a regular 2D one, with no 3D convolutions at all, so it runs fast enough for a moving vehicle.</p>
+
+    <p>Camera-based 3D detection has the harder job, because it must estimate depth that was never directly measured. It can do that per camera, through monocular (single-camera) depth estimation (generally less accurate), or jointly across camera views, the way the bird's-eye-view methods below do. That accuracy gap is a large part of why multi-camera approaches displaced monocular 3D detection as the camera-only default. So what exactly do those methods build?</p>
+
+    <h3 id="bird-s-eye-view-representations">Bird's-eye-view representations</h3>
+    <p><em class="term">Bird's-eye-view</em> (BEV) is a top-down 2D grid over the ground plane around the vehicle, with the car in the middle. Each cell of the grid covers a small patch of road, and our cone would occupy a cell ten metres up and one to the right.</p>
+
+    <h4 class="why">Why a top-down grid, when we could keep full 3D coordinates?</h4>
+
+    <p>Mostly because it's the natural shared frame for driving. Planning a route and reasoning about lanes are inherently top-down problems, and nobody plans a maneuver by thinking in raw camera-pixel coordinates. If every sensor's features land in the same top-down grid, then the planner, the tracker and the predictor all work in the frame they need.</p>
+
+    <p><strong>BEVFormer</strong> builds this grid directly with attention (chapter 08). It starts with a fixed grid of learned BEV queries, one per top-down cell, and uses two attention mechanisms. <strong>Spatial cross-attention</strong> lets each cell pull in the relevant image features from whichever camera views see that patch of ground. <strong>Temporal self-attention</strong> fuses the current BEV grid with the previous timestep's grid. That temporal half matters more than it first looks: it noticeably helps estimate a moving object's velocity, and it recovers objects that were briefly occluded a frame ago, because the model isn't restarting perception from zero every frame.</p>
+
+    <h3 id="occupancy-networks-past-the-bounding-box">Occupancy networks: past the bounding box</h3>
+    <p>So far we've assumed the cone is something a detector can name and draw a box around. A <strong>bounding box</strong> is a rectangular 3D box that a detector draws around an object, and it assumes the world is made of a fixed, known set of object categories with roughly box-shaped extents.</p>
+
+    <h4 class="why">What happens to a fallen ladder, or a spilled load of cargo?</h4>
+
+    <p>A detector's training set never named it, so the detector may not register it at all. An <strong>occupancy network</strong> sidesteps the problem. For every cell in a grid around the vehicle (in 3D, a cell is called a voxel, a small cube of space), it predicts whether the cell is occupied and, if so, by roughly what kind of thing. That turns "list the objects" into "describe free space directly", which degrades far more gracefully on anything unusual.</p>
+
+    <p><strong>TPVFormer</strong> makes this tractable with a trick. Instead of one dense 3D voxel grid, it represents the volume as three orthogonal 2D planes: the top-down view plus the two perpendicular side views. Combining the three planes recovers the full 3D structure at meaningfully lower cost than predicting every voxel directly.</p>
+
+    <h3 id="sensor-fusion-camera-lidar-and-radar-together">Sensor fusion: camera, LiDAR and radar together</h3>
+    <p>We now have good ways to use cameras and LiDAR separately, and radar still sits to the side. Maybe you're wondering why it's in the stack at all, given its coarse resolution, and we'll get to that. Fusion can happen at three points in the pipeline, and where you put it is the whole design decision. In <strong>early fusion</strong> we combine near-raw sensor data before much processing. It's the hardest to get right, but no information is thrown away before the combination. In <strong>late fusion</strong> we run separate full detectors per sensor and combine only their final outputs. It's the simplest to build and debug, but each detector may already have discarded a cue that is only visible when signals are considered jointly. In between sits fusing intermediate features, and BEVFormer-style camera fusion, extended to also ingest LiDAR or radar features into the same shared grid, is the currently favored middle ground.</p>
+
+    <h4 class="why">Why these three sensors specifically?</h4>
+
+    <p>Camera, LiDAR and radar are a deliberately complementary trio, and "more sensors are better" doesn't describe them. Camera data supplies rich semantic detail that the other two structurally can't: what is this, what color is it, what does the sign say. LiDAR supplies precise geometry that monocular camera depth estimation can't match. Radar supplies direct, instantaneous velocity, and it keeps working through fog, rain and glare that badly degrade cameras and, to a lesser extent, LiDAR. Each one's weakness is another's strength. That's why the trio works, and why fusion has to be done carefully, as we'll see at the end of the chapter.</p>
+
+    <h3 id="scene-graphs-and-spatial-reasoning">Scene graphs and spatial reasoning</h3>
+    <p>Once the fused representation gives us a list of tracked things, the planner needs to ask questions about how they relate. A <strong>scene graph</strong> represents the world as nodes (vehicles, pedestrians, lanes, traffic signals) connected by labeled relational edges: "in front of," "yielding to," "occupies this lane." That's richer than a flat, unstructured list of detections, and it makes higher-level spatial queries answerable directly. "Which vehicles are relevant to my current lane change" becomes a graph query over relationships, and the car doesn't have to re-derive it from raw geometry every time it's asked.</p>
+
+    <h3 id="trajectory-prediction-and-motion-planning">Trajectory prediction and motion planning</h3>
+    <p>Our cone doesn't move, but the pedestrian next to it might. <strong>Trajectory prediction</strong> takes each tracked agent's recent motion history plus map context (lanes, right-of-way, traffic controls) and forecasts several plausible future paths. <strong>Tracking</strong> here means keeping the same identity on an object from frame to frame, so that "recent motion history" exists at all.</p>
+
+    <h4 class="why">Why predict several futures instead of one?</h4>
+
+    <p>Because "what will that pedestrian do" is inherently <strong>multimodal</strong>, meaning there are several distinct likely outcomes. They might cross or they might not, and a model that averages both possibilities into a single path is wrong in exactly the way chapter 21's behavioral-cloning discussion describes: the average of "step out" and "stay put" is a pedestrian standing half in the road, which nobody will do. MotionNet illustrates one clean way to structure the forecast. It takes BEV maps as input and predicts, per grid cell, both a category and a short-horizon motion vector, so detection and near-term prediction live inside one shared BEV representation instead of two disconnected models.</p>
+
+    <p><strong>Motion planning</strong> then takes the ego vehicle's goal (the <strong>ego vehicle</strong> is our own car, as opposed to the other agents) plus every predicted agent trajectory, and searches for a path that's safe, comfortable and legal. Safe means it doesn't intersect anyone else's likely future path. Comfortable means bounded acceleration and jerk, where jerk is how quickly the acceleration changes. Legal means it obeys lane and traffic-control constraints. Conceptually this is the same constrained trajectory-optimization idea as model predictive control (MPC) in chapter 21. Scope is what differs: one long route instead of one short re-planned step, re-run continuously as new predictions arrive. That winning trajectory then goes to a classical controller to turn it into steering and braking.</p>
+
+    <h3 id="closed-loop-evaluation-and-simulating-from-real-drives">Closed-loop evaluation, and simulating from real drives</h3>
+    <p>How do we know the planner is any good? The same open-loop versus closed-loop distinction from chapter 21 applies here, with higher stakes. <strong>Open-loop evaluation</strong> replays a fixed recorded log and checks whether the planner's outputs match what happened. It's cheap, fast and fully reproducible, and it's also blind to compounding error, because the ego vehicle's hypothetical actions never change what the scenario does next. A bad early decision never gets the chance to cascade. <strong>Closed-loop evaluation</strong> lets the planner's decisions affect the simulated scenario going forward, and it's the only way to catch failures that appear after the car has already made one small mistake.</p>
+
+    <p>Closed-loop needs a simulator that looks like the real world, and this is where NeRF and Gaussian splatting (chapter 06 covers how they work as general 3D scene representations) get their driving-specific use: <strong>reconstruction for simulation</strong>. Take a real recorded driving log, reconstruct the scene the car drove through as a NeRF or a set of Gaussians, then re-render it from camera viewpoints the car never took, or with other actors inserted or removed. That gets much closer to testing against reality than a purely synthetic simulator, because the environment was reconstructed from a real drive and not hand-modeled. World models (chapter 22) increasingly play a similar role as fast, learned simulators: instead of testing planning only against a fixed replay log or a hand-built physics simulator, you roll candidate plans forward inside a learned model of how the scene evolves, cheaply and safely, before anything touches the real world.</p>
+
+    <h3 id="end-to-end-driving">End-to-end driving</h3>
+    <p>Every stage above has its own inputs, outputs and losses. <strong>End-to-end driving</strong> asks whether that separation is necessary, and trains one network to map sensor inputs directly to a planned trajectory, or even to control outputs. It optimizes jointly against one end-task loss instead of stage-by-stage intermediate losses. In principle that lets it discover something the modular pipeline structurally can't see: that a slightly different detection threshold would have produced a much better downstream plan. Whether that promise outweighs what it costs is the question the next section takes up.</p>
+  </section>
+
+  <section id="why">
+    <h2><span class="num">04</span>Why BEV and occupancy, and why modular over end-to-end</h2>
+
+    <p>It helps to see the stack as the end of a short history. Through the 2000s and early 2010s, depth came from structure-from-motion and classical stereo, tracking from SIFT-style features and Kalman filters, and planning from explicit rules. All of it was rigorous and interpretable, and each piece degraded in glare, rain and unanticipated object shapes. Then learning took over the pieces. PointPillars (2018) made LiDAR detection fast and learnable, ORB-SLAM3 (2020) fused camera and IMU in one optimization, and BEVFormer (2022) lifted several camera views into one bird's-eye-view grid with learned cross-attention, so features are fused first and detection happens once. Since 2023, occupancy networks have predicted free space and semantics per voxel, so odd obstacles still show up as occupied, and whether the stack should be modular-but-learned or end-to-end is still unsettled. Two of those choices deserve a closer look.</p>
+
+    <p>Start with where fusion happens. Fusing per-camera detections after the fact is the obvious first design, and it's also a worse one. Each camera's detector has already thrown information away by the time it commits to a final box. Suppose two cameras jointly saw a partially occluded object, but neither alone saw enough to be confident. Late fusion never gets to combine their partial evidence, because it was discarded before fusion ran. Lifting features into a shared BEV grid before detecting anything keeps that partial evidence alive long enough to combine, and that's why BEVFormer-style architectures displaced "detect per camera, then merge boxes" as the default.</p>
+
+    <p>Occupancy networks push the same logic further. A bounding-box vocabulary is a closed set of categories decided at training time, and the real world reliably produces obstacles outside that set. Predicting occupancy directly, without committing to "this is definitely a car, definitely this size," degrades gracefully on exactly the long-tail shapes a fixed category list can't name.</p>
+
+    <p>The modular-versus-end-to-end question is harder, because it doesn't have a settled answer, and treating it as settled is a tell that someone hasn't thought about the actual tradeoff. A <strong>modular pipeline</strong> keeps perception, prediction and planning as separate stages with separate losses, so every stage is independently testable. If the car braked unnecessarily, you can inspect whether perception mis-detected something, prediction mis-forecast a trajectory, or planning made a bad call given otherwise-correct inputs, and each stage validates against its own held-out data. An <strong>end-to-end network</strong> optimized on one final task loss can in principle find a jointly better solution across all three at once, a slightly different detection behavior that happens to produce much better downstream plans. But that joint optimum arrives with no clean way to say why the network did what it did, and that's precisely the property regulators, safety cases and post-incident investigations need.</p>
+
+    <p>The tension is global optimality against stage-by-stage interpretability. End-to-end can reach a better solution, and modular can tell you why it reached the one it did. For a safety-critical system, the second property isn't a nice-to-have you trade away for accuracy. That single tension is why modular pipelines remain the deployed standard, while end-to-end stays a very active, not-yet-dominant research direction. Choosing a design is one thing. Knowing how each choice fails once it's on the road is the next.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">05</span>Complexity, failure modes and what breaks</h2>
+
+    <p>The table lines the three sensors up on the properties that matter for our cone. Read it column by column to see each sensor's weakness, and row by row to see why no single column wins.</p>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>Camera</th><th>LiDAR</th><th>Radar</th></tr></thead>
+        <tbody>
+          <tr><td>Depth accuracy</td><td>Poor alone; inferred, not measured</td><td>Excellent, directly measured</td><td>Moderate, coarse resolution</td></tr>
+          <tr><td>Velocity</td><td>Inferred across frames</td><td>Inferred across frames</td><td>Measured directly (Doppler)</td></tr>
+          <tr><td>Cost</td><td>Cheapest</td><td>Most expensive</td><td>Cheap</td></tr>
+          <tr><td>Weakness</td><td>Bad in low light/glare; no direct depth</td><td>Sparse at range; expensive; weather-sensitive</td><td>Coarse spatial resolution; hard to classify objects</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 id="what-shows-up-in-production">What shows up in production</h3>
+    <p>The first failure is <strong>sensor miscalibration</strong>. Extrinsics drift out of alignment over time, from a bump, a temperature change or a minor collision. Every downstream fusion step then silently trusts a wrong camera-to-vehicle transform, producing subtly wrong 3D positions that look entirely plausible. Our cone would still be detected, but a metre away from where it is.</p>
+
+    <p>The second is <strong>long-tail object shapes</strong> that a bounding-box detector's training categories never covered. Occupancy networks are built to catch these, and pure bounding-box pipelines fail on them quietly instead of loudly.</p>
+
+    <p>The third is <strong>radar and camera disagreement</strong> in edge cases. A large stationary metal object can produce a weak or ambiguous radar return. If the fusion logic over-trusts radar's usually reliable velocity signal, a real stationary hazard can be under-weighted.</p>
+
+    <p>The fourth is <strong>compounding error across stages</strong>. Prediction errors feed straight into planning as if they were ground truth, so an overconfident, wrong trajectory forecast for another vehicle produces a planning decision that is optimal for the wrong predicted future.</p>
+
+    <p>These failures share a lesson that cuts against a common belief, namely that more sensors are strictly more robust. They aren't, automatically, because fusion has to correctly handle sensors that disagree. A fusion system with a bad prior, one that over-trusts a modality or works from a subtly miscalibrated extrinsic transform, can produce a worse combined estimate than the single best sensor would have given alone. Sensor diversity only helps if the fusion logic knows how much to trust each sensor under current conditions, and that's a real design problem that doesn't come free with more data streams.</p>
+
+    <p>As for where things stand in 2026, BEV transformers and occupancy networks are the deployed standard for perception on modern multi-camera (and camera plus LiDAR) stacks. Modular pipelines, meaning separate perception, prediction and planning stages, remain the deployed default for safety-critical systems. End-to-end driving is an active, fast-moving research area with promising benchmark results. It hasn't broadly displaced modular pipelines in safety-certified production systems, and claims that it has should be treated skeptically absent a specific, verifiable source.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">06</span>Summary</h2>
+
+    <ol>
+      <li><strong>A camera loses depth, and the projection equation says exactly how.</strong> The scale factor <span>$\lambda$</span> in <span>$K[R\mid t]$</span> is the depth, and a single pixel is consistent with every distance along its ray.</li>
+      <li><strong>Intrinsics and extrinsics do two different jobs.</strong> Extrinsics move a point from the vehicle frame into a camera's frame, intrinsics project it to a pixel, and a multi-camera rig needs every extrinsic measured against one shared frame.</li>
+      <li><strong>A second camera gets depth back through epipolar geometry.</strong> The constraint <span>$x'^{\top}Fx=0$</span> reduces matching to a 1D search along a line, and disparity is inversely proportional to depth for a fixed baseline.</li>
+      <li><strong>Camera, LiDAR and radar are complementary, not redundant.</strong> The camera brings semantics, LiDAR brings precise geometry, and radar brings direct velocity through Doppler, and each fails where another succeeds.</li>
+      <li><strong>SLAM and PointPillars solve awkward problems with simple moves.</strong> SLAM estimates the trajectory and the map together, with an IMU and a camera covering each other, and PointPillars turns a sparse point cloud into a 2D pseudo-image an ordinary CNN can read.</li>
+      <li><strong>A bird's-eye-view grid is the shared frame for driving.</strong> BEVFormer fills it with spatial cross-attention over the cameras and temporal self-attention over the previous grid, which helps with velocity and with briefly occluded objects.</li>
+      <li><strong>Occupancy networks describe space instead of naming objects.</strong> Predicting occupied cells survives shapes no category list names, and TPVFormer keeps it affordable with three orthogonal 2D planes.</li>
+      <li><strong>Fuse features before detection, in the middle.</strong> Late fusion discards partial evidence before it can be combined, and intermediate-feature fusion in a shared grid is the favored compromise.</li>
+      <li><strong>Prediction must be multimodal, and planning must be safe, comfortable and legal.</strong> Averaging two plausible futures gives a path nobody takes, and the planner searches for a trajectory against all the predicted ones.</li>
+      <li><strong>Modular stays the deployed default because it can explain itself.</strong> End-to-end may find a jointly better solution, but regulators and post-incident investigations need to know which stage was responsible.</li>
+      <li><strong>Calibration and fusion trust are where stacks fail.</strong> A drifted extrinsic produces confident, plausible, wrong geometry, and over-trusting one sensor can leave the fused estimate worse than the best single sensor.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">The projection equation in section 02 throws depth away in a single line. Recovering it from two photographs, with your own code, is what makes the rest of this page feel mechanical instead of magical.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Recover depth from a stereo pair, then break the calibration</span>
+        <span class="proj-meta">~3 hours · NumPy</span>
+      </div>
+      <p>Take one rectified stereo pair from a public driving dataset and compute a disparity map by hand. Turn it into depth, then drop the result into the smallest possible bird's-eye-view grid. Two real photographs, about a hundred lines. Everything BEVFormer adds on top of this is learned. This part is not, and it is worth seeing that <strong>geometry alone already puts objects roughly where they belong</strong>.</p>
+      <ol class="proj-steps">
+        <li>Download one rectified stereo pair and its calibration from a public benchmark. KITTI's stereo set is the usual choice. Rectified means corresponding pixels already sit on the same image row. Note the focal length <span>$f$</span> in pixels and the baseline <span>$b$</span> in metres.</li>
+        <li>Write <strong>block matching</strong> yourself. For each pixel in the left image, slide a small window along the same row of the right image. Score each shift by sum of absolute differences and keep the best. That 1D search along a row is the epipolar constraint from section 02, cashed in. No <code>cv2.StereoBM</code>. Downscale the pair if the loop crawls.</li>
+        <li>Convert with <span>$\text{depth} = fb/d$</span> and show the disparity map beside the left image. Pick a few pixels by hand: a car just ahead, a car further down the road, a building at the end of the street. Compare their depths against each other.</li>
+        <li>Back-project every pixel into vehicle-frame 3D by inverting the projection equation from section 02. Bin the points into a top-down grid of, say, 20 cm cells and plot the counts. That grid is a BEV with no learning in it at all.</li>
+        <li>Now break the calibration. Change the baseline by a few percent and rerun everything, with the images untouched.</li>
+        <li>Restore the baseline. Instead rotate the assumed camera extrinsic by a fraction of a degree, rerun, and look at the BEV again.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the disparity map is bright on near surfaces and dark on far ones, with edges where object edges are. The BEV grid should put a blob near the bottom for the car ahead, and a band at the far edge for the buildings. Nothing you wrote knows what a car is. That layout came out of geometry.</div>
+      <div class="proj-stretch"><strong>What the two breakages teach.</strong> A wrong baseline scales every depth by a constant, so the disparity map looks exactly as convincing as before and the BEV is uniformly wrong. Nothing in either picture flags it. A small extrinsic rotation is nastier. It tilts the whole point cloud, so the ground plane slopes and far points slide sideways much further than near ones. That is the miscalibration failure mode from section 05, reproduced in a few lines. Calibration errors do not look like errors. They look like confident, plausible, wrong geometry, which is why a real stack spends so much effort on staying calibrated.</div>
+    </div>
+
+    <h3 id="where-this-runs-in-production">Where this runs in production</h3>
+    <p>A representative modern stack runs five stages:</p>
+
+    <ul>
+      <li><strong>Sense.</strong> Six to eight cameras around the vehicle, sometimes paired with LiDAR.</li>
+      <li><strong>Fuse.</strong> A BEV transformer lifts every camera's features into one shared top-down grid, fusing across cameras and across the last few timesteps in the same step.</li>
+      <li><strong>Detect and track.</strong> Running on the fused BEV grid, producing tracked objects with position, velocity and a class.</li>
+      <li><strong>Predict.</strong> A trajectory predictor takes those tracks plus map context and forecasts several plausible short-horizon futures per agent.</li>
+      <li><strong>Plan and execute.</strong> A planner searches candidate ego trajectories against all those predictions plus map and traffic-rule constraints. The winning trajectory goes to a classical trajectory-tracking controller (21).</li>
+    </ul>
+
+    <p>Public benchmarks like nuScenes and the Waymo Open Dataset exist so different groups' perception and prediction stacks can be compared against the same real, sensor-synchronized driving logs, rather than each group's own private data.</p>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">08</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why do self-driving cars need multiple sensor types instead of just one really good camera?</summary>
+      <div class="qa-body"><p>Because each sensor fails differently. Cameras are cheap and semantically rich but only give a 2D projection — depth has to be inferred, not measured, and they degrade badly in low light or glare. LiDAR measures 3D geometry directly and precisely, but it's expensive, sparse at range, and tells you nothing about color or texture. Radar measures velocity directly via Doppler shift — something neither camera nor LiDAR does without inferring it across multiple frames — but at coarse spatial resolution. No single sensor covers all three needs (rich semantics, precise geometry, direct velocity), so fusion isn't a nice-to-have, it's structurally required.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What's the difference between a camera's intrinsics and extrinsics?</summary>
+      <div class="qa-body"><p>Intrinsics describe properties fixed by the camera itself — focal length and principal point — and map a 3D point already in the camera's own coordinate frame to a 2D pixel. Extrinsics describe where the camera is physically mounted and how it's oriented relative to some external reference frame — a rotation and translation converting a point from that external frame into the camera's frame, before intrinsics take over. A multi-camera rig needs every camera's extrinsics relative to one shared frame so their detections can be placed consistently relative to each other.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How does BEVFormer turn several camera images into one shared representation?</summary>
+      <div class="qa-body"><p>It defines a fixed grid of learned query vectors, one per cell of a top-down bird's-eye-view grid. Each query uses spatial cross-attention to pull in features from whichever camera views actually observe that patch of ground, using known camera geometry to know where to look. It also uses temporal self-attention against the previous timestep's BEV grid, which helps estimate velocity and recover briefly-occluded objects, since the model isn't reconstructing the scene from scratch every single frame. The result is one shared top-down feature grid that detection, tracking, and everything downstream can consume, instead of per-camera detections that have to be merged after the fact.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why would you use an occupancy network instead of a standard 3D object detector?</summary>
+      <div class="qa-body"><p>A bounding-box detector assumes a fixed, closed set of object categories decided at training time, and real driving reliably produces obstacles that don't fit any of them — a fallen ladder, spilled cargo, debris. An occupancy network predicts, per grid cell, whether space is occupied and roughly what kind of thing occupies it, which degrades gracefully on unusual shapes instead of failing to detect them at all, because it never had to commit to a specific named category to register that the space is occupied.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why hasn't the industry converged on end-to-end driving despite its promise of joint optimization?</summary>
+      <div class="qa-body"><p>End-to-end driving optimizes one network against a single end task loss, which can in principle discover jointly better solutions a modular pipeline's separately-trained stages can't see — a slightly different detection behavior that happens to produce a much better downstream plan, for instance. The cost is interpretability: when a modular pipeline makes a bad decision, you can inspect which stage — perception, prediction, or planning — was responsible, and validate each stage independently against held-out data for that specific sub-problem. An end-to-end network's decision doesn't decompose that way. For a safety-critical system that needs a debuggable, auditable answer to "why did the car do that," that loss of interpretability is a real cost, which is why modular pipelines remain the deployed default even though end-to-end methods post competitive results on research benchmarks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why is stereo depth estimation less reliable at long range than short range?</summary>
+      <div class="qa-body"><p>Depth is inversely proportional to disparity for a fixed camera baseline and focal length. At long range, disparity is already small — a handful of pixels — so a fixed amount of pixel-matching noise (say, one pixel of error) is a much larger relative error on a small disparity value than the same one-pixel error would be on the large disparity of a nearby object. That's a direct geometric consequence of the depth-disparity relationship, not a fixable calibration issue — it's why LiDAR, which measures range directly rather than through disparity, tends to be trusted more than stereo camera depth at longer distances.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">09</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/2203.17270" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">BEVFormer: Learning Bird's-Eye-View Representation from Multi-Camera Images via Spatiotemporal Transformers</div><div class="r-sub">Li et al., 2022 — arXiv:2203.17270</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1812.05784" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">PointPillars: Fast Encoders for Object Detection from Point Clouds</div><div class="r-sub">Lang et al., 2018 — arXiv:1812.05784</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2007.11898" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">ORB-SLAM3: An Accurate Open-Source Library for Visual, Visual-Inertial and Multi-Map SLAM</div><div class="r-sub">Campos et al., 2020 — arXiv:2007.11898</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2302.07817" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">TPVFormer: Tri-Perspective View for Vision-Based 3D Semantic Occupancy Prediction</div><div class="r-sub">Huang et al., 2023 — arXiv:2302.07817</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2003.06754" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">MotionNet: Joint Perception and Motion Prediction for Autonomous Driving Based on Bird's Eye View Maps</div><div class="r-sub">Wu et al., 2020 — arXiv:2003.06754</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/118" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Compute the Cross Product of Two 3D Vectors</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1190" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Random Rotation Matrix and a Rotation Layer</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1005" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">BatchNorm1d Supporting 2D and 3D Inputs</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/499" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Novel View Synthesis with Depth Reprojection</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1212" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Quaternion SLERP Interpolation</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/230" target="_blank" rel="noopener"><span class="dm-diff dm-hard">hard</span><span class="dm-title">3D CNN Forward Pass Implementation</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">10</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/06-modern-vision-foundation-models"><div class="rc-sec" style="color:var(--c-visionfm)">06 · Reused directly</div><div class="rc-title">Modern Vision Foundation Models</div><div class="rc-hook">NeRF and Gaussian splatting's core mechanics, applied here to driving-log reconstruction.</div></a>
+      <a class="related-card" href="/topics/21-robotics-embodied-ai"><div class="rc-sec" style="color:var(--c-world)">21 · Shared control ideas</div><div class="rc-title">Robotics &amp; Embodied AI</div><div class="rc-hook">The same open/closed-loop and modular-vs-end-to-end questions, for robot arms instead of cars.</div></a>
+      <a class="related-card" href="/topics/22-world-models"><div class="rc-sec" style="color:var(--c-world)">22 · What changed next</div><div class="rc-title">World Models</div><div class="rc-hook">Learned simulators, increasingly used for driving-scenario planning and testing.</div></a>
+      <a class="related-card" href="/topics/05-cnn-vision-foundations"><div class="rc-sec" style="color:var(--c-vision)">05 · Underpins detection</div><div class="rc-title">CNNs &amp; Vision Foundations</div><div class="rc-hook">The 2D detection backbones this page's 3D detectors build on.</div></a>
+    </div>
+  </section>

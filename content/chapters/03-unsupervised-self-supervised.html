@@ -1,0 +1,388 @@
+---
+title: "Unsupervised & Self-Supervised"
+dek: "Follow a folder of unlabeled photos through the two ways of learning without labels: finding the structure that's already there, and inventing a task out of the data itself. You'll learn how clustering, autoencoders and contrastive and masked pretraining work, and why they win."
+readingTime: "~30 min"
+prereqs: "eigenvectors, SVD & mutual information (01) — the encoder/backprop machinery used informally here gets its full treatment in 04"
+group: "Foundations"
+label: "Chapter 03"
+description: "Clustering, PCA, autoencoders, and the contrastive and masked-prediction pretext tasks — SimCLR, BERT-style masking — that let a model learn useful structure from data with zero human labels."
+---
+<section id="tldr">
+    <p>Imagine a folder holding a million photos that nobody has labeled. Nobody has written "dog" or "beach" next to any of them. In the supervised learning of chapter 02, every training example came with an answer to learn from, called a <strong>label</strong>, and the model's job was to predict it. Here there are no answers at all, so it's fair to ask whether a model can learn anything useful from the folder.</p>
+
+    <p>It can, in two different ways. The first is to look for structure that's already in the data: photos that look alike can be grouped together, and the thousands of numbers that describe each photo can often be summarized with far fewer. That's <strong>unsupervised learning</strong>, and there's no target anywhere in it. The second way is to invent a question out of the data itself, one whose answer you already know. Cover a patch of a photo and ask the model to fill it in, and the answer is the patch you covered. That's <strong>self-supervised learning</strong>, one strategy inside the larger world of learning from unlabeled data.</p>
+
+    <p>The second way matters a lot, because the invented question gives you a real loss and a real gradient (a <strong>loss</strong> is a number that says how wrong the model currently is, and training nudges the model to shrink it) without a person ever writing a label. Almost every foundation model trained since 2018 begins with a self-supervised phase like this.</p>
+
+    <p>This chapter follows our folder of photos through both ideas. We'll start with the older methods that look for structure, move through autoencoders, which are a bridge between the two ideas, and then build up to the methods that invent their own tasks. After that we'll see the loss they train with, why they won, and what goes wrong when there's no label to grade the result against.</p>
+  </section>
+
+  <section id="intuition">
+    <h2><span class="num">01</span>Two ways to learn without labels</h2>
+
+    <h3 id="finding-structure-that-s-already-there">Finding structure that's already there</h3>
+    <p>Take the unsupervised idea first. Suppose we run a method called k-means on a set of customer purchase records, or on our folder of photos. It splits the records into groups, and that's the whole output. There's no correct grouping that it checks its answer against, and no loss that compares a prediction with a ground truth, because nobody ever supplied one. What it hands back is structure that was sitting in the data all along, such as clusters, a description of the data with fewer numbers, or an estimate of where the data is dense. A method like that is what we call <em class="term">unsupervised</em>.</p>
+
+    <p>To see how little it needs, here are six numbers with no labels at all. Looking at them, you can probably see two clumps, one near 1.5 and one near 9. The code below finds the same two clumps without being told. It starts with a deliberately poor guess for where the two group centers are, <code>[1.0, 2.0]</code>, which puts both of them in the small clump. Each pass then does two things. It assigns every number to its nearest center (that's the <code>argmin</code> line), and then it moves each center to the mean of the numbers assigned to it.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Find two groups in six unlabeled numbers with k-means</span>
+      </summary>
+<pre><code>import numpy as np
+
+x = np.array([1.0, 1.5, 2.0, 8.0, 9.0, 9.5])   # no labels, just numbers
+centers = np.array([1.0, 2.0])                  # a poor starting guess
+
+for step in range(4):
+    dist = np.abs(x[:, None] - centers[None, :])   # distances
+    group = dist.argmin(axis=1)                    # nearest center wins
+    centers = np.array([x[group == k].mean() for k in (0, 1)])
+    print(f&quot;step {step}: groups {group}  centers {np.round(centers, 2)}&quot;)</code></pre>
+      <div class="tryit-out">The groups settle after two steps. The first step moves <code>2.0</code> into the large group and puts the centers at <code>1.25</code> and <code>7.12</code>. The second moves it back, and the centers land at <code>1.5</code> and <code>8.83</code>. Nothing changes after that. Nobody told the algorithm which numbers belong together; it found the two clumps from distances alone.</div>
+    </details>
+
+    <p>Look at what the first pass did. The poor starting centers sit at 1 and 2, so the number 2.0 is closer to the second center than to the first, and it joined the three large numbers. That group's mean is pulled down to 7.12, while the first group's mean is 1.25. Now 2.0 is closer to 1.25 than to 7.12, so on the second pass it moves back, and the centers land at 1.5 and 8.83. After that, nothing moves. Our algorithm never saw a label. It found the two clumps from distances alone, and that's the kind of result the unsupervised family is after.</p>
+
+    <h3 id="inventing-the-label">Inventing the label</h3>
+    <p>The second idea sounds like a cheat the first time you hear it. <em class="term">Self-supervised</em> learning still uses zero human-provided labels, but it does have a target. Here the model makes that target itself, out of the data, and then trains with an ordinary supervised loss against it.</p>
+
+    <p>Here's where the label comes from when nobody wrote one. Take a sentence and hide one word, then ask a model to predict it from the rest. Its label is the word you already had and chose to hide. Or take one photo from our folder, produce two randomly cropped, colour-jittered versions of it, and ask a model to recognise that both came from the same photo. Its label is the fact that you know which crops came from which photo, because you made them. Both of these are most likely familiar territory: ordinary gradient descent on an ordinary loss, such as cross-entropy (the usual loss for picking the right answer out of many options). What's unusual is only where the label came from. A made-up task like this, whose only purpose is to force the model to learn something useful, is called a <strong>pretext task</strong>.</p>
+
+    <h4 class="why">Which one should I reach for?</h4>
+    <p>It depends on what you want out of the folder. If you want to explore it or compress it, you're asking an unsupervised question, so PCA or clustering is the place to start. If you want a representation (a vector for each photo) that will transfer to a task you haven't seen yet, you're asking a self-supervised question, because contrastive and masked-prediction pretext tasks are the objectives that have been shown to produce features that generalize, as far as anyone can tell from benchmarks so far. Mixing the two up is probably the most common stumble in this area.</p>
+
+    <p>There's a single idea behind everything we'll cover, and chapter 01 approached it from the information-theory side. A good learned representation, roughly, keeps high <strong>mutual information</strong> with whatever you care about downstream, meaning it keeps what's informative about it, and throws away nuisance variation such as sensor noise, the exact pixel values of a background, or the particular synonym a sentence happened to use. Clustering, PCA, contrastive learning and masked prediction all chase that same goal, and none of them is ever told what "what you care about" is.</p>
+
+    <p>A short history explains why the order of this chapter looks the way it does. For decades, "no labels" meant k-means, PCA and their relatives. They were useful for exploration and compression, but they relied on hand-designed features and couldn't produce representations that a downstream network could reuse. Then BERT (2018) masked words and predicted them, and SimCLR and MoCo (2020) trained an encoder to place two augmentations of the same image close together, so both turned unlabeled data into a training signal. By the mid-2020s that had become the standard pipeline, with GPT-style next-token prediction, BERT-style masked prediction and CLIP's image-text contrast doing the pretraining, and labeled fine-tuning as a small last step. So we'll start with the older family and work our way toward that.</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">02</span>From clusters to learned representations</h2>
+    <p>"Unsupervised and self-supervised" covers a wide family of methods that share no single architecture. It helps to group them by what they do. Clustering partitions the data directly. Dimensionality reduction finds a lower-dimensional description of it. Autoencoders compress the data and then reconstruct it. And self-supervised methods invent a prediction task and solve it with an encoder. That last group is where most representation-learning research of the 2020s lives, so it gets the most space here, and the diagram. We'll go in order, starting with the simplest.</p>
+
+    <h3 id="clustering-with-k-means-and-its-relatives">Clustering with k-means and its relatives</h3>
+    <p>We just watched <strong>k-means</strong> work on six numbers. In general it starts by picking k initial cluster centers, called <strong>centroids</strong>, and alternates two steps until nothing changes: assign every point to its nearest centroid, then recompute each centroid as the mean of the points now assigned to it. Each round can only lower the total distance from points to their centers, or leave it flat, so the process always converges. But it doesn't necessarily converge to the best possible partition. A bad random start can trap it in a poor <strong>local optimum</strong>, a solution that no small change improves even though a better one exists elsewhere. That's why, in practice, you would probably run k-means from several starting points and keep the best result, or you use <strong>k-means++</strong>, a smarter initialization that spreads the starting centroids out.</p>
+
+    <p>A natural complaint about k-means is that a centroid is a computed average, and one extreme point can drag an average a long way. <strong>k-medoids</strong> solves the same problem but forces each cluster's center to be an actual data point, called a medoid. An extreme point can't become the medoid unless it's central, so the method is far less sensitive to outliers.</p>
+
+    <p>Another complaint is that you have to pick k before you start. <strong>Hierarchical (agglomerative) clustering</strong> avoids that. It begins with every point as its own cluster and repeatedly merges the two closest clusters until everything is one cluster. What "closest" means is set by a <strong>linkage</strong> rule: the closest pair of points, the farthest pair, or the average distance across all pairs. You end up with a <strong>dendrogram</strong>, a tree that records every merge, and you choose k afterwards by cutting the tree at whatever height gives you the number of groups you want. What it costs you is scale, because computing and updating all the pairwise distances grows with the square of the number of points in the naive version.</p>
+
+    <p>A third complaint is that k-means only finds roughly round blobs. <strong>DBSCAN</strong> drops the idea of a center altogether and defines clusters by density. A point is a <em>core point</em> if at least <code>minPts</code> other points sit within a small radius <code>eps</code> of it, and a cluster grows by chaining together core points that are close to each other. Points that belong to no dense region are labeled noise, so they aren't forced into a cluster they don't belong in. That gets you two things k-means structurally can't do, which are clusters of arbitrary shape and automatic outlier detection, with no k to specify. The catch is that <code>eps</code> and <code>minPts</code> aren't always easy to choose, and DBSCAN struggles badly when different real clusters in the same dataset have very different densities, because one <code>eps</code> can't be right for both a tight cluster and a sparse one.</p>
+
+    <h3 id="gaussian-mixture-models-and-em">Gaussian mixture models and EM</h3>
+    <p>All of these give each point a hard answer: it belongs to exactly this cluster. What if a point sits between two groups? A <strong>Gaussian Mixture Model</strong> (GMM) is what you get when you make k-means probabilistic. Instead of assuming every cluster is a hard, spherical blob, it assumes the data was generated by a mixture of k Gaussians (bell-shaped distributions). Each has its own mean, its own covariance (so clusters can be elliptical as well as round) and its own mixing weight. Every point then gets a soft, probabilistic membership across all k of them, where k-means gives a hard assignment to one.</p>
+
+    <p>Fitting a GMM is trickier than k-means because there's a circularity in it. You don't know which Gaussian generated which point, and you don't know the Gaussians' parameters, and each of those depends on the other, so there's no closed-form formula. <strong>Expectation-Maximization</strong> (EM) breaks the circle the same way k-means does, by alternating, but with soft numbers in place of hard ones.</p>
+    <ul>
+      <li><strong>E-step.</strong> It fixes the current parameters and, for every point, computes the <em>responsibility</em>: the posterior probability that the point came from each of the k Gaussians, given where the Gaussians currently sit.</li>
+      <li><strong>M-step.</strong> It fixes those responsibilities and re-fits each Gaussian's mean, covariance and mixing weight, using the responsibilities as per-point soft weights in place of hard 0/1 membership.</li>
+    </ul>
+    <p>Repeat the two steps and the data's likelihood under the model provably increases every round until it converges. As with k-means, that only guarantees a local optimum of the likelihood, so you probably want to run it from several starting points (often seeded with a quick k-means pass) and keep the best result by final log-likelihood. Still, the two methods are closely related. Force every Gaussian to be spherical, tiny and equally weighted, and the soft responsibilities collapse into hard 0/1 assignments while the M-step's weighted mean becomes an ordinary mean. That's the same alternating logic, so k-means is a limit of EM.</p>
+
+    <h3 id="dimensionality-reduction">Dimensionality reduction</h3>
+    <p>Clustering describes the folder by groups of photos. A different question is whether each photo, described by thousands of numbers, can be described with far fewer. PCA, ICA and NMF all answer that, and they differ in what counts as a good small description. The eigenvector and SVD machinery behind PCA is covered in chapter 01, and the <a href="https://www.youtube.com/playlist?list=PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab" target="_blank" rel="noopener">Essence of Linear Algebra</a> series is the best visual build-up of it if eigenvectors still feel abstract.</p>
+    <ul>
+      <li><strong>PCA</strong> finds the orthogonal directions of maximum variance and projects onto the top few. It decorrelates the data, and it's the optimal linear projection if the only goal is preserving variance, and that's the same as minimizing squared reconstruction error.</li>
+      <li><strong>ICA</strong> (Independent Component Analysis) asks for something strictly stronger: statistically <em>independent</em> components, a stronger condition than uncorrelated.</li>
+      <li><strong>NMF</strong> (Non-negative Matrix Factorization) adds a different constraint. Every factor and every coefficient has to be non-negative.</li>
+    </ul>
+    <p>The ICA distinction matters because decorrelated is a much weaker condition than independent. Two variables can have zero correlation and still be tightly, nonlinearly dependent. ICA needs the underlying sources to be non-Gaussian to be identifiable at all. It's the tool behind the classic cocktail-party problem: given several microphone recordings, each a different mixture of the same underlying voices, recover the original independent voice signals.</p>
+    <p>NMF's constraint sounds small but has a big effect. Because components can only add and never cancel, NMF tends to discover parts-based, additive representations, such as facial features that combine into a face, or topics that combine into a document. Those are often far more interpretable than PCA's components, which mix positive and negative contributions and are hard to read one at a time.</p>
+    <p><strong>Spectral methods</strong> start from a different place. You build a graph in which nearby data points are connected, weighted by similarity, compute that graph's Laplacian (a matrix that describes how the graph is connected), and use its eigenvectors as a new coordinate system for the data. <strong>Spectral clustering</strong> then runs ordinary k-means in that new coordinate system instead of in raw feature space. This lets it separate clusters that are non-convex or intertwined, such as two concentric rings, which k-means can't do directly because it only draws straight-line, Euclidean boundaries.</p>
+    <p>Every method so far is a fixed recipe. PCA is linear, and clustering uses a fixed notion of distance. To get something that can learn nonlinear descriptions, we can bring in a neural network.</p>
+
+    <h3 id="autoencoders-denoising-autoencoders-and-vaes">Autoencoders, denoising autoencoders and VAEs</h3>
+    <p>A <strong>plain autoencoder</strong> is a pair of networks trained end to end to reconstruct their own input through a bottleneck. The first, the <strong>encoder</strong>, compresses an input x down to a low-dimensional code z. The second, the <strong>decoder</strong>, turns z back into something close to x, and training minimizes the reconstruction error. It's unsupervised in the sense we defined above, since there are no labels and x is predicting x. The code z lives in what's called the <strong>latent space</strong>, "latent" because it holds hidden factors that nobody observed directly.</p>
+
+    <p>Nothing in that training asks the latent space to be well behaved. It only has to take whatever shape makes reconstruction loss small. So a plain autoencoder isn't a generative model: sample a random point in its latent space and, unless it happens to land near where a real training example landed, the decoder produces garbage. Nothing during training ever asked the latent space to be smooth or densely packed.</p>
+
+    <p>Before fixing that, there's a second problem to deal with. An autoencoder with enough capacity can get a low error by learning something close to the identity function, copying its input through. A <strong>denoising autoencoder</strong> makes one small, effective change. It corrupts the input before it reaches the encoder (by masking patches or adding noise) but still asks the decoder to reconstruct the clean original. Now the network can't get away with copying. It has to learn the real structure and correlations in the data, because the corrupted parts can only be inferred from everything else. Keep that idea in mind, because it comes back later in this chapter as BERT-style masked language modeling and MAE-style masked image modeling, which use the same mechanism in a different modality.</p>
+
+    <p>The latent-space problem needs a different fix. A <strong>Variational Autoencoder</strong> (VAE) changes what the encoder outputs. Instead of encoding x to a single point z, the encoder outputs the parameters of a distribution over z, a mean and a variance, and a sample is drawn from that distribution. A KL-divergence term (a measure of how different two distributions are) in the loss then pulls every input's latent distribution toward a fixed, simple <strong>prior</strong>, almost always a standard Gaussian. That regularization term forces the latent space to be smooth and densely packed, with no gaps, so sampling from the prior, and not only encoding a real example, reliably decodes into something plausible. The full latent-variable setup and the derivation behind it get their complete treatment in chapter 12, and the equation itself is recapped in section 03 below.</p>
+
+    <p>So far the training signal has been "reconstruct the input". The self-supervised methods we turn to next ask for something smarter.</p>
+
+    <h3 id="self-supervised-learning-inventing-a-task-then-solving-it-wi">Self-supervised learning: inventing a task, then solving it with an encoder</h3>
+    <p>Everything from here on is self-supervised in the specific sense from section 01: no human label, but a real, invented target. There are two broad families, and the distinction between them (joint-embedding versus generative objectives) matters more than the list of model names attached to each.</p>
+
+    <p><strong>Joint-embedding methods</strong> are the ones the diagram below covers, and <strong>contrastive learning</strong> is the clearest version of the idea. In our photo folder it runs in four moves.</p>
+    <ul>
+      <li>Take one unlabeled image. Apply two different random augmentations, such as a random crop, a colour jitter or a horizontal flip. You get two different-looking images that are still, semantically, the same underlying thing.</li>
+      <li>Run both through the same encoder. Literally the same weights, applied twice.</li>
+      <li>Those two embeddings are a <strong>positive pair</strong>. The objective pulls them together.</li>
+      <li>Every other image in the same batch gives embeddings that are <strong>negatives</strong>. The objective pushes those apart.</li>
+    </ul>
+    <p>An <strong>embedding</strong> here is just the vector the encoder outputs for an image. No human ever labeled anything. The label is "these two crops came from the same source image and these others didn't," a fact you know for free because you generated the crops yourself. In the diagram, follow one image on the left through its two augmentations and the shared encoder, and watch where the two resulting embeddings end up relative to the others.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Contrastive learning — two augmented views, one shared encoder, pulled together vs. pushed apart
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 760 340" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="50" cy="170" r="24" fill="none" stroke="#fbbf24" stroke-width="2" class="pulse-scale"/>
+        <text x="50" y="175" text-anchor="middle" font-size="12" font-weight="700" fill="#fbbf24">x</text>
+        <text x="50" y="208" text-anchor="middle" font-size="10" fill="#9a9aa8">unlabeled image</text>
+
+        <path d="M72,160 L150,80" stroke="#f472b6" stroke-width="1.8" fill="none" opacity="0.85" class="flow-line"/>
+        <path d="M72,180 L150,260" stroke="#818cf8" stroke-width="1.8" fill="none" opacity="0.85" class="flow-line"/>
+        <text x="76" y="130" font-size="10" fill="#f472b6">augment A</text>
+        <text x="98" y="228" font-size="10" fill="#818cf8">augment B</text>
+
+        <circle cx="150" cy="80" r="18" fill="none" stroke="#f472b6" stroke-width="2"/>
+        <text x="150" y="85" text-anchor="middle" font-size="11" fill="#f472b6">x̃₁</text>
+        <text x="150" y="112" text-anchor="middle" font-size="9.5" fill="#9a9aa8">view 1</text>
+
+        <circle cx="150" cy="260" r="18" fill="none" stroke="#818cf8" stroke-width="2"/>
+        <text x="150" y="265" text-anchor="middle" font-size="11" fill="#818cf8">x̃₂</text>
+        <text x="150" y="292" text-anchor="middle" font-size="9.5" fill="#9a9aa8">view 2</text>
+
+        <path d="M168,80 L280,80" stroke="#f472b6" stroke-width="1.8" fill="none" opacity="0.85" class="flow-line"/>
+        <path d="M168,260 L280,260" stroke="#818cf8" stroke-width="1.8" fill="none" opacity="0.85" class="flow-line"/>
+
+        <rect x="280" y="60" width="110" height="40" rx="8" fill="#14141d" stroke="#4f8cff" stroke-width="1.6"/>
+        <text x="335" y="84" text-anchor="middle" font-size="11" fill="#4f8cff">encoder f(·)</text>
+        <rect x="280" y="240" width="110" height="40" rx="8" fill="#14141d" stroke="#4f8cff" stroke-width="1.6"/>
+        <text x="335" y="264" text-anchor="middle" font-size="11" fill="#4f8cff">encoder f(·)</text>
+
+        <path d="M335,100 L335,240" stroke="#4f8cff" stroke-width="1.6" fill="none" stroke-dasharray="5 6" opacity="0.5" class="flow-line"/>
+        <circle r="3.5" fill="#4f8cff" class="roll" style="offset-path: path('M335,100 L335,240')"></circle>
+        <text x="345" y="174" font-size="9.5" fill="#4f8cff">shared weights</text>
+
+        <path d="M390,80 L520,132" stroke="#f472b6" stroke-width="1.8" fill="none" opacity="0.8" class="flow-line-slow"/>
+        <path d="M390,260 L580,168" stroke="#818cf8" stroke-width="1.8" fill="none" opacity="0.8" class="flow-line-slow"/>
+
+        <ellipse cx="610" cy="170" rx="135" ry="140" fill="none" stroke="#24242f" stroke-width="1.4" stroke-dasharray="4 5"/>
+        <text x="610" y="42" text-anchor="middle" font-size="11" fill="#9a9aa8">embedding space</text>
+
+        <circle cx="545" cy="135" r="14" fill="#14141d" stroke="#f472b6" stroke-width="2" class="pulse-node"/>
+        <text x="545" y="139" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">z₁</text>
+        <circle cx="575" cy="165" r="14" fill="#14141d" stroke="#818cf8" stroke-width="2" class="pulse-node"/>
+        <text x="575" y="169" text-anchor="middle" font-size="10.5" font-weight="700" fill="#818cf8">z₂</text>
+        <text x="588" y="128" font-size="10" fill="#34d399">pull (positive)</text>
+
+        <circle cx="680" cy="80" r="10" fill="#14141d" stroke="#fb923c" stroke-width="1.8"/>
+        <text x="680" y="84" text-anchor="middle" font-size="9.5" fill="#fb923c">n₁</text>
+        <circle cx="700" cy="180" r="10" fill="#14141d" stroke="#fb923c" stroke-width="1.8"/>
+        <text x="700" y="184" text-anchor="middle" font-size="9.5" fill="#fb923c">n₂</text>
+        <circle cx="655" cy="255" r="10" fill="#14141d" stroke="#fb923c" stroke-width="1.8"/>
+        <text x="655" y="259" text-anchor="middle" font-size="9.5" fill="#fb923c">n₃</text>
+        <text x="622" y="222" font-size="10" fill="#fb923c">push (negatives)</text>
+
+        <path d="M556,127 L670,83" stroke="#fb923c" stroke-width="1.3" fill="none" stroke-dasharray="3 4" opacity="0.55" class="flow-line-rev"/>
+        <path d="M558,138 L690,177" stroke="#fb923c" stroke-width="1.3" fill="none" stroke-dasharray="3 4" opacity="0.55" class="flow-line-rev"/>
+        <path d="M551,147 L648,249" stroke="#fb923c" stroke-width="1.3" fill="none" stroke-dasharray="3 4" opacity="0.55" class="flow-line-rev"/>
+      </svg>
+      <div class="diagram-caption">Two different random augmentations of the same source image pass through the identical, shared-weight encoder f(·), producing embeddings z₁ and z₂, the positive pair. Every other image's embedding in the same batch (n₁, n₂, n₃) is a negative. InfoNCE pulls the positive pair's similarity up and pushes every negative's similarity down, simultaneously, with every image in the batch taking a turn as the anchor.</div>
+    </div>
+
+    <p>This setup, with two or more branches that share weights and are trained so that distance in embedding space means something, is a <strong>Siamese network</strong>. It predates SimCLR by decades, and it's the same architecture behind face-verification systems (are these two photos the same person?) and one-shot signature or fingerprint matching. <strong>Metric learning</strong> is the general name for training an embedding space where distance is meaningful this way. It usually uses a <strong>contrastive loss</strong> (pull positives together, push negatives apart by at least some margin) or a <strong>triplet loss</strong> (take an anchor, a positive and a negative, and push the anchor-negative distance to exceed the anchor-positive distance by a margin).</p>
+
+    <p>Three joint-embedding methods follow, in order of how much machinery they need. <strong>SimCLR</strong> (2020) is close to the diagram in its purest form: large batches supply the negatives directly, and in the original paper's own ablations, augmentation strategy turned out to be a bigger lever than architecture. Large batches are expensive, so <strong>MoCo</strong> (2020) gets a large number of negatives without needing enormous batches. It keeps a running queue of embeddings from recent batches, computed by a slowly updated momentum encoder, as a large, cheap pool of negatives. And <strong>BYOL</strong> and <strong>SimSiam</strong>, both 2020, asked a surprising question: do you need negative pairs at all? Both train with only positive pairs and still avoid collapsing to a trivial solution. How that works, and why it's a nontrivial claim, is the subject of the section on representation collapse below.</p>
+
+    <p>The other broad family generates its supervision by masking and then reconstructing, in input space and not in embedding space. <strong>BERT-style masked language modeling</strong> (2018) hides about 15% of the tokens in a sentence and trains the model to predict them from the surrounding context. That prediction is bidirectional, since the model can look both left and right of the masked token, which a left-to-right autoregressive model can't do. <strong>MAE-style masked image modeling</strong> (2021) is the visual analogue. It masks out a large majority of an image's patches (MAE's own default is a striking 75%) and trains a decoder to reconstruct the missing pixels from the small number of visible patches an encoder was allowed to see. That very high masking ratio is deliberate. Images have far more spatial redundancy than text, so a much more aggressive mask is needed to make the reconstruction hard enough to force useful learning. Otherwise the model could solve it by copying nearby pixels.</p>
+
+    <p>Both families are self-supervised, and they differ in where the prediction target lives. Joint-embedding methods (SimCLR, MoCo, BYOL, SimSiam) never reconstruct anything in input space, and the entire objective lives in embedding space, comparing representations to each other. Generative or reconstruction methods (denoising autoencoders, BERT, MAE) predict directly in the original input space, with actual tokens and actual pixels as the target.</p>
+
+    <h4 class="why">Why would anyone choose the harder-looking joint-embedding route?</h4>
+    <p>Because the tradeoff cuts both ways. Reconstruction objectives are simple and stable to train, since they're ordinary regression or classification against a well-defined target, and a trivial constant-output encoder fails at reconstructing real detail, so collapse isn't a live risk. But they can spend a lot of model capacity getting low-level detail right that may not matter downstream. Take the exact texture of grass in the background doesn't matter for classifying "dog." Joint-embedding objectives sidestep that waste, since they only ever have to make the right high-level things end up close together. But that freedom is exactly what opens the door to a failure mode we'll meet in section 05, representation collapse. First, though, we need the loss that turns the pull and push in the diagram into a number.</p>
+  </section>
+
+  <section id="math">
+    <h2><span class="num">03</span>The equations</h2>
+    <h3 id="infonce">InfoNCE</h3>
+    <p><strong>InfoNCE</strong> turns the pull/push picture from the diagram into one loss function. It was introduced for representation learning by van den Oord et al. (2018), and it's the loss SimCLR uses directly, where it's sometimes called NT-Xent (normalized temperature-scaled cross-entropy). It's a softmax over the batch in which the right answer is the positive pair. For a positive pair (i, j) drawn from a batch of 2N augmented examples, meaning N images with two augmentations each:</p>
+    <div class="eq-block">
+      <span>$$\ell_{i,j} = -\log \frac{\exp(\mathrm{sim}(z_i,z_j)/\tau)}{\sum_{k=1}^{2N} \mathbb{1}_{[k \neq i]}\, \exp(\mathrm{sim}(z_i,z_k)/\tau)}$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">z_i, z_j</span> the two embeddings of the positive pair, from the same source image under two different augmentations, both L2-normalized so their dot product is a cosine similarity.</li>
+      <li><span class="sym">sim(·,·)</span> cosine similarity between two embeddings, ranging from -1 to 1, which measures how aligned the two vectors are.</li>
+      <li><span class="sym">τ</span> temperature, a scalar that rescales similarities before the softmax. Small τ sharpens the distribution so the loss reacts much more strongly to hard, nearby negatives, and large τ flattens it so every negative contributes more evenly. The project in section 07 has you sweep τ and watch the embedding clusters tighten or smear.</li>
+      <li><span class="sym">numerator</span> the positive pair's similarity, exponentiated. It's the one term gradient descent is trying to make as large as possible relative to everything else.</li>
+      <li><span class="sym">denominator</span> the sum over every other embedding in the batch except i itself. Normalizing against the whole batch is what pushes every negative's similarity down, since increasing the numerator's share of that sum requires decreasing everyone else's relative share.</li>
+    </ul>
+
+    <h3 id="the-elbo-recapped">The ELBO, recapped</h3>
+    <p>The other loss we met was the VAE's. It's built from the <strong>evidence lower bound</strong>, or ELBO, the standard variational-inference objective from Kingma &amp; Welling (2013). It makes an otherwise-intractable log p(x) practical to train by gradient descent. The full derivation, and the reparameterization trick that makes sampling z differentiable, live in chapter 12. Here's the equation and what each term does:</p>
+    <div class="eq-block">
+      <span>$$\log p(x) \geq \mathbb{E}_{q_\phi(z|x)}\big[\log p_\theta(x|z)\big] - D_{\mathrm{KL}}\big(q_\phi(z|x)\,\|\,p(z)\big)$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">q_φ(z|x)</span> the encoder's output distribution over latents given the input, typically a Gaussian whose mean and variance are predicted by the encoder network.</li>
+      <li><span class="sym">E[log p_θ(x|z)]</span> expected log-likelihood of reconstructing x from a sampled z. In practice, this is the reconstruction loss.</li>
+      <li><span class="sym">p(z)</span> the fixed prior being regularized toward, almost always a standard Gaussian.</li>
+      <li><span class="sym">D_KL(·‖·)</span> the penalty for how far the encoder's per-input distribution strays from that prior. A plain autoencoder doesn't have this term, and it's what makes the latent space smooth and samplable.</li>
+    </ul>
+    <p>With both losses in hand, we can ask why this whole approach displaced the obvious alternative.</p>
+  </section>
+
+  <section id="why">
+    <h2><span class="num">04</span>Why self-supervised pretraining won</h2>
+    <p>The obvious alternative to inventing a pretext task is to label more data. That doesn't scale the way self-supervision does, mostly for economic reasons and not algorithmic ones. Raw text, images, audio and video are abundant, and the internet produces them continuously at a cost close to zero per example. Labels aren't cheap, since every one requires a human decision, at a rate and cost that grows with dataset size. Doubling an unlabeled dataset is usually a storage and compute problem, while doubling a labeled dataset is a headcount and time problem, and headcount doesn't scale the way GPUs do.</p>
+
+    <p>Self-supervised pretraining sidesteps that bottleneck. Pretraining probably does its most useful work early, extracting structure from the raw, abundant data (what a well-formed sentence looks like, what a real natural image looks like, what tends to co-occur with what) before a single labeled example is involved. Fine-tuning on labels then only has to teach the specific task on top of representations that already understand the domain, so it typically needs orders of magnitude fewer labeled examples than training the same architecture from a random initialization would. It also means label-quality issues matter less than they used to. Inconsistent annotators, ambiguous categories and ordinary noise in any large human-labeled dataset all have less effect, because the representation doing most of the heavy lifting was never trained on those noisy labels in the first place.</p>
+
+    <p>None of this makes labels obsolete. You still need them to point the model at the specific task you want, and to check whether pretraining worked at all. What changed is the ratio. A small, carefully curated labeled set on top of a good self-supervised backbone now reliably beats a much larger labeled set feeding a model trained from scratch, and that shift is the practical reason this happened as fast as it did. But a method that never sees a label has a cost of its own: it's much harder to tell when it has gone wrong.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">05</span>Failure modes, evaluation and what breaks</h2>
+    <p>This is where "no labels" becomes a problem. Without a ground-truth answer to check against, most of what can silently go wrong here doesn't throw an error. It quietly produces a plausible-looking, wrong result. Picking a clustering algorithm, in particular, is mostly a matter of picking which assumption you're comfortable making. The table lines up the four we met in section 02.</p>
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>k-means</th><th>GMM (EM)</th><th>Hierarchical</th><th>DBSCAN</th></tr></thead>
+        <tbody>
+          <tr><td>Cluster shape assumed</td><td>Roughly spherical, similar-sized</td><td>Gaussian — can be elliptical</td><td>None explicit — driven by linkage rule</td><td>Arbitrary — defined by density</td></tr>
+          <tr><td>Need to pick k upfront</td><td>Yes, fixed in advance</td><td>Yes, number of components</td><td>No — cut the dendrogram after the fact</td><td>No, but needs <code>eps</code>/<code>minPts</code></td></tr>
+          <tr><td>Handles outliers</td><td>Poorly — every point forced into a cluster</td><td>Soft assignment helps some, still assumes Gaussian shape</td><td>Sensitive — outliers can distort early merges</td><td>Explicitly labels outliers as noise</td></tr>
+          <tr><td>Rough cost</td><td>Fast, scales well</td><td>Heavier — fits full covariances</td><td>Quadratic in n, naively — doesn't scale to huge n</td><td>Near-linear with a spatial index; struggles with mixed densities</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 id="representation-collapse">Representation collapse</h3>
+    <p>The worst failure belongs to the joint-embedding methods. Suppose the encoder ignores its input and outputs the exact same constant vector for every image. The positive pairs are then trivially identical, which gives perfect similarity and a minimized loss. A naive loss function can't tell that apart from a good representation, so it's a shortcut that gradient descent will probably take unless something forbids it. That failure is called <em class="term">representation collapse</em>, and avoiding it is the central design problem in this whole family of methods.</p>
+
+    <p>Contrastive methods like SimCLR and MoCo avoid it directly. Negative pairs are explicitly pushed apart, so the collapsed solution scores as badly as possible on every negative term in the loss. Collapsing destroys the part of the loss that pushes negatives apart just as much as it satisfies the part that pulls positives together, so there's no net incentive to take the shortcut.</p>
+
+    <p>BYOL and SimSiam remove negative pairs entirely and still, empirically, don't collapse, and that's surprising. Both rely on an <strong>asymmetry between the two branches</strong> instead.</p>
+    <ul>
+      <li><strong>BYOL.</strong> One branch, the <em>online network</em>, trains normally by gradient descent and ends with an extra predictor layer that tries to predict the other branch's output. The other branch, the <em>target network</em>, never receives a gradient at all. Its weights are only ever updated as a slow exponential moving average (a running average that weights recent values most) of the online network's weights, with gradients explicitly stopped from flowing into it.</li>
+      <li><strong>SimSiam.</strong> It simplifies further, dropping the momentum-averaged target network altogether and showing that a predictor plus stop-gradient alone is enough.</li>
+    </ul>
+    <p>The <strong>stop-gradient</strong>, which blocks gradients from flowing into one branch, is the load-bearing piece in both. Without it, both branches could collapse to the same constant together and call it solved. With it, one branch is deliberately prevented from copying or trivially chasing the other. Why stop-gradient plus a predictor reliably prevents collapse is still an open research question. The SimSiam paper offers an EM-like interpretation, but "guaranteed by a clean proof" would be an overclaim. What's solid is the empirical result, replicated many times over, that this specific asymmetric architecture reliably avoids collapse without ever needing a negative pair.</p>
+
+    <h3 id="reading-t-sne-and-umap-plots">Reading t-SNE and UMAP plots</h3>
+    <p>A related trap shows up when you try to look at what an encoder learned. To see high-dimensional embeddings you project them down to two dimensions with an algorithm such as t-SNE or UMAP, and it's tempting to read the plot literally: clusters far apart in the plot are far apart in the real data, and clusters close together are similar. That's only reliable for which points fall into which local neighborhood, because both algorithms are designed to preserve <em>local</em> structure and make no promise about global distances. Cluster size, the distance between two separate clusters, and even the density of points within a cluster can all be artifacts of the algorithm's hyperparameters (perplexity for t-SNE, n_neighbors for UMAP) and not anything real in the underlying data. Treat these plots as evidence that points are each other's neighbors, and never as evidence for exactly how different two well-separated blobs are. van der Maaten &amp; Hinton flag this limitation directly in the original t-SNE paper, and citing it is a strong answer if it comes up in an interview.</p>
+
+    <h3 id="curse-of-dimensionality-for-distance-based-methods">Curse of dimensionality, for distance-based methods</h3>
+    <p>k-means, DBSCAN and anything else built on Euclidean distance share a specific, well-documented failure as dimensionality grows. In high dimensions, <strong>the ratio between the distance to the nearest point and the distance to the farthest point tends toward 1</strong>. Everything ends up roughly equidistant from everything else, and "nearest neighbor" stops being a meaningful concept. This is why clustering raw pixel-space or raw high-dimensional feature vectors directly is usually a bad idea. A standard fix is to reduce dimensionality first, with PCA or with a learned embedding from an autoencoder or a self-supervised encoder, and then cluster in that lower-dimensional, more meaningful space.</p>
+
+    <h3 id="why-unsupervised-evaluation-is-hard">Why unsupervised evaluation is hard</h3>
+    <h4 class="why">How do you know a clustering or an embedding is any good?</h4>
+    <p>Supervised learning has a built-in success metric: does the prediction match the label? Unsupervised and self-supervised methods have no such thing by construction. There's no ground truth to check a clustering or a learned embedding against, which makes "is this good?" a harder question here than almost anywhere else in ML. In practice you fall back on proxy metrics, and each has specific limits.</p>
+    <ul>
+      <li><strong>Silhouette score</strong> measures, for each point, how much closer it is to its own cluster than to the next-nearest one, averaged over all points and ranging from -1 to 1. It's useful for comparing different values of k on the same algorithm. But it still assumes roughly convex, well-separated clusters, so it can penalize a correct DBSCAN-style non-convex clustering for the wrong reasons.</li>
+      <li><strong>Linear probe</strong> is the standard proxy for self-supervised representations. Freeze the pretrained encoder entirely, train only a small linear classifier on top using a labeled dataset, and report that accuracy.</li>
+    </ul>
+    <p>The linear probe is the evaluation protocol SimCLR, and nearly every contrastive-learning paper since, uses to report results. There's no other honest way to say "these representations are good" without eventually testing them against a real task.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">06</span>Summary</h2>
+    <ol>
+      <li><strong>Unsupervised learning has no target.</strong> Clustering, dimensionality reduction and density estimation expose structure that's already in the data, and nothing is checked against a ground truth.</li>
+      <li><strong>Self-supervised learning invents its target from the data.</strong> Hide a word, or make two crops of one photo, and the answer is something you already know, so ordinary gradient descent applies with no human labels.</li>
+      <li><strong>k-means alternates assigning and averaging.</strong> It always converges but only to a local optimum, so you restart it from several starting points or use k-means++. k-medoids, hierarchical clustering and DBSCAN each remove one of its assumptions.</li>
+      <li><strong>A Gaussian mixture model is k-means made soft.</strong> EM alternates computing responsibilities and re-fitting the Gaussians, and k-means is the hard-assignment limit of it.</li>
+      <li><strong>PCA, ICA and NMF differ in what counts as a good small description.</strong> PCA keeps variance, ICA asks for independence, and NMF forces non-negative parts.</li>
+      <li><strong>Autoencoders learn by reconstructing.</strong> Denoising versions have to learn real structure instead of copying, and a VAE adds a KL term so that the latent space can be sampled from.</li>
+      <li><strong>Contrastive learning pulls positive pairs together and pushes negatives apart.</strong> InfoNCE does it with one softmax over the batch, and the temperature sets how hard the loss focuses on near negatives.</li>
+      <li><strong>Joint-embedding and reconstruction methods put the target in different places.</strong> Joint-embedding methods compare embeddings, and masked methods like BERT and MAE predict tokens or pixels.</li>
+      <li><strong>Representation collapse is the central failure.</strong> Negatives prevent it in SimCLR and MoCo, and an asymmetry with a stop-gradient prevents it in BYOL and SimSiam, though why that works is still an open question.</li>
+      <li><strong>Pretraining won on economics.</strong> Unlabeled data is nearly free, so a small labeled set on a good self-supervised backbone beats a large labeled set on a model trained from scratch.</li>
+      <li><strong>Evaluation needs proxies.</strong> Use silhouette score for clusters and a linear probe for representations, and read t-SNE and UMAP plots only for local neighborhoods.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">07</span>Build this</h2>
+    <p class="lede">Representation collapse is the failure this whole family of methods is designed around. Reading about it is one thing. Watching every embedding in your batch slide onto the same point is another.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Collapse a contrastive encoder on purpose</span>
+        <span class="proj-meta">~3 hours · PyTorch</span>
+      </div>
+      <p>Train a SimCLR-style encoder on a toy image set where you already know what the right answer looks like. Then delete the negatives and watch the representation die. The embedding is two-dimensional, so it plots directly. It avoids t-SNE on purpose, since section 05 warns that distances in a t-SNE plot are not distances in your data, and this project needs a picture you can trust.</p>
+      <ol class="proj-steps">
+        <li>Generate the data: a few hundred 32×32 images, each one solid shape on a black background, in one of four colors. Color is the only semantic content. Keep the color labels aside, for plotting and nothing else.</li>
+        <li>Define two augmentations that preserve color: random resized crop and horizontal flip. Two views per image, one shared encoder, exactly the diagram in section 02.</li>
+        <li>Encoder: three small conv layers down to a 2-D output, L2-normalized. Two dimensions means every embedding is plottable with no projection step in between.</li>
+        <li>Write <strong>InfoNCE by hand</strong> from the equation in section 03. Cosine similarity matrix over the 2N views, mask the diagonal, divide by <span>$\tau$</span>, cross-entropy against the index of the matching view. Train at <span>$\tau = 0.1$</span>, then again at <span>$\tau = 1.0$</span>.</li>
+        <li>Plot the trained embeddings on the unit circle, colored by the labels you set aside. Log the standard deviation of the embeddings across each batch as training runs.</li>
+        <li>Now break it by dropping the negatives entirely: replace the loss with the negative cosine similarity of the positive pair alone, and retrain from scratch.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the embeddings sit in four separated clumps on the circle, one per color. The encoder was never shown a single color label. Put the two temperatures side by side too. They should not produce the same picture, because <span>$\tau$</span> decides how much of the gradient goes into separating nearby negatives (section 03).</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> With the negatives gone, the constant-output encoder is a perfect solution, and gradient descent finds it. The clumps drift together, the batch standard deviation you logged falls toward zero, and every image lands on the same point. That is <strong>representation collapse</strong> from section 05, reproduced by deleting one term. It also makes the BYOL and SimSiam result legible. They drop the negatives too, and the stop-gradient is the only thing standing between them and this plot.</div>
+    </div>
+
+    <h3 id="where-this-runs-in-production">Where this runs in production</h3>
+    <p>This is a common real pipeline. You have a large pool of unlabeled images from your own domain (product photos, medical scans, satellite imagery, whatever is abundant) and only a small, expensive-to-produce labeled set for the task you care about, say defect classification. Three steps:</p>
+    <ul>
+      <li><strong>Pretrain</strong> a vision encoder on the full unlabeled pool, using a contrastive objective (SimCLR/MoCo-style) or a masked-reconstruction objective (MAE-style). No labels are used yet.</li>
+      <li><strong>Attach a small task-specific head</strong> to that pretrained encoder and fine-tune on the small labeled set.</li>
+      <li><strong>Or, cheaper still</strong>, train only a linear probe on the frozen features.</li>
+    </ul>
+    <p>In practice this consistently beats training the same architecture from a random initialization directly on the small labeled set alone. The encoder already learned general visual structure (edges, textures, object parts, shape) from the much larger unlabeled pool before ever seeing a single label. Fine-tuning only has to adapt that structure to the specific task, and does not have to learn vision from scratch on too little data.</p>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">08</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What's the actual difference between unsupervised and self-supervised learning?</summary>
+      <div class="qa-body"><p>Both use unlabeled data, but only one produces a real training target. Unsupervised learning has no target at all — clustering and PCA just expose structure already in the data, with no loss comparing a prediction to a ground truth. Self-supervised learning manufactures a target directly from the data itself — mask a word and predict it, compare two augmented views of an image — and then trains with an ordinary supervised loss against that manufactured target.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Walk me through the k-means algorithm.</summary>
+      <div class="qa-body"><p>Pick k initial centroids. Alternate two steps until nothing changes: assign every point to its nearest centroid, then recompute each centroid as the mean of the points now assigned to it. It's guaranteed to converge but only to a local optimum, so in practice you run it from several random initializations (or use k-means++ for a smarter start) and keep the best result.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Explain what happens in the E-step and M-step of EM for a Gaussian mixture model.</summary>
+      <div class="qa-body"><p>The E-step fixes the current Gaussian parameters and computes, for every point, the responsibility — the posterior probability it came from each of the k Gaussians. The M-step fixes those responsibilities and re-fits each Gaussian's mean, covariance, and mixing weight, using the responsibilities as soft, per-point weights. Repeating this alternation increases the data's likelihood under the model monotonically, but only to a local optimum — k-means is the hard-assignment special case of exactly this same alternation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does temperature matter in the InfoNCE loss?</summary>
+      <div class="qa-body"><p>Temperature rescales similarities before the softmax inside the loss. A small temperature sharpens the distribution, so the loss and gradient become dominated by whichever negative is currently closest to the positive — forcing the encoder to focus on separating confusable, hard negatives. A large temperature flattens the distribution, treating every negative roughly equally regardless of how close it actually is, which is a much weaker training signal.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What's the practical difference between a plain autoencoder and a VAE?</summary>
+      <div class="qa-body"><p>A plain autoencoder's latent space has no guaranteed structure beyond whatever shape minimizes reconstruction loss, so sampling a random point from it and decoding usually produces garbage — it's not a generative model. A VAE's encoder outputs a distribution over the latent instead of a single point, and a KL-divergence term pulls that distribution toward a fixed prior (usually a standard Gaussian), which forces the latent space to be smooth and densely packed — that's what makes sampling from the prior actually generate plausible outputs. Full ELBO derivation is on 12.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>What is representation collapse, and how do BYOL/SimSiam avoid it without negative pairs?</summary>
+      <div class="qa-body"><p>Representation collapse is the trivial failure mode where the encoder outputs the same constant vector for every input, which vacuously satisfies "positive pairs are close" without learning anything useful. Contrastive methods prevent it with negative pairs — collapsing would also destroy the part of the loss pushing negatives apart. BYOL and SimSiam use no negatives at all; instead they rely on an asymmetry between two branches — a predictor network on one branch plus a stop-gradient (and, for BYOL, a momentum-averaged target network) on the other — that empirically prevents collapse. The exact theoretical reason this specific asymmetry works is still an active research question; what's well-established is the empirical result, replicated widely, that it reliably works.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Why is evaluating an unsupervised or self-supervised model harder than evaluating a supervised one, and what do you actually do about it?</summary>
+      <div class="qa-body"><p>Supervised evaluation just checks predictions against ground-truth labels. There's no equivalent ground truth for a clustering or a learned embedding, so you're reduced to proxy metrics. For clustering, something like silhouette score — but it assumes roughly convex clusters, so it can penalize a correct non-convex (DBSCAN-style) result. For self-supervised representations, the standard proxy is a linear probe: freeze the encoder, train only a small linear classifier on top using labeled data, and report that accuracy — this is the exact protocol SimCLR-style papers use to claim their representations are actually useful.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">09</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/2002.05709" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">A Simple Framework for Contrastive Learning of Visual Representations</div><div class="r-sub">Chen et al. (SimCLR), 2020 — arXiv:2002.05709</div></div>
+      </a>
+      <a class="resource-card" href="https://jmlr.org/papers/v9/vandermaaten08a.html" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Visualizing Data using t-SNE</div><div class="r-sub">van der Maaten &amp; Hinton, JMLR 2008</div></div>
+      </a>
+      <a class="resource-card" href="https://www.youtube.com/playlist?list=PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab" target="_blank" rel="noopener">
+        <div class="r-icon">▶</div>
+        <div class="r-body"><div class="r-kind">Video · Playlist</div><div class="r-title">Essence of Linear Algebra</div><div class="r-sub">3Blue1Brown — the eigenvector/SVD intuition PCA leans on directly</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/17" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">K-Means Clustering</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/19" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Principal Component Analysis (PCA) Implementation</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/254" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Silhouette Score for Clustering Evaluation</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/349" target="_blank" rel="noopener"><span class="dm-diff dm-hard">hard</span><span class="dm-title">Implement Kernel PCA with RBF Kernel</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/191" target="_blank" rel="noopener"><span class="dm-diff dm-hard">hard</span><span class="dm-title">PCA Color Augmentation</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">10</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/01-math-foundations"><div class="rc-sec" style="color:var(--c-math)">01 · Prerequisite</div><div class="rc-title">Math &amp; Stats Foundations</div><div class="rc-hook">Eigenvectors, SVD, and mutual information — the language PCA and representation learning are written in.</div></a>
+      <a class="related-card" href="/topics/12-generative-models"><div class="rc-sec" style="color:var(--c-genai)">12 · Deeper on VAEs</div><div class="rc-title">Generative Models</div><div class="rc-hook">Full ELBO derivation and the reparameterization trick, plus GANs and diffusion.</div></a>
+      <a class="related-card" href="/topics/04-neural-network-fundamentals"><div class="rc-sec" style="color:var(--c-nn)">04 · Underlying machinery</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">The backprop and MLP machinery every encoder on this page leans on.</div></a>
+      <a class="related-card" href="/topics/08-attention-transformers"><div class="rc-sec" style="color:var(--c-attention)">08 · Same trick, different task</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">Masked prediction here is exactly BERT's pretraining objective, built on this architecture.</div></a>
+    </div>
+  </section>

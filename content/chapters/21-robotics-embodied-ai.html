@@ -1,0 +1,433 @@
+---
+title: "Robotics & Embodied AI"
+dek: "This chapter follows one robot arm trying to pick up a mug, and asks at each step how much of the work to hand-engineer with classical control, learn from demonstrations, learn by trial and error, or inherit from a pretrained vision-language model. You'll learn how the pieces fit together, from PID controllers and simulation to diffusion policies and vision-language-action models."
+readingTime: "~31 min"
+prereqs: "reinforcement learning basics (15), diffusion model mechanics (12), transformer architecture (08)"
+group: "Embodied & Frontier"
+label: "Chapter 21"
+description: "The robot learning stack end to end: classical control (PID, LQR, MPC), sim-to-real and domain randomization, imitation learning and diffusion policies, vision-language-action models, and cross-embodiment robot foundation models."
+---
+<section id="tldr">
+    <p>Picture a robot arm on a table with a coffee mug in front of it. A person says "pick up the mug." Somewhere between that sentence and the arm closing its gripper around the handle, a piece of software has to look at what a camera sees, work out what's being asked, and produce a stream of motor commands. That piece of software is called a <strong>policy</strong>: a function that takes in what the robot currently sees and what it's been told to do, and returns what it should do next. We'll follow this one mug through the chapter.</p>
+
+    <p>The hard part is how to build that function, because there are several very different answers. You can derive it from physics and write it by hand. Robotics did exactly that for decades, and it still keeps the arm's joints steady today. You can record a person doing the task and train a network to copy them. You can let the robot try things in simulation and learn from what works. Or you can start from a large model that has already learned from the internet to recognize mugs and understand instructions, and teach it to output motor commands as well. Each answer fixes something the one before it gets wrong, and most of this chapter is about what each one fixes and what it costs.</p>
+
+    <p>One fact sits underneath all of them. A language model can be trained on a trillion tokens scraped from the web, but a robot can't download more of the real world. Why not just collect more? We'll see. Its training data comes from a physical arm moving in real time, and every failed attempt risks a dropped mug, a broken gripper or, with a person nearby, an injury. Simulation, imitation learning and the hierarchy of controllers that real robots use all grew out of that constraint.</p>
+
+    <p>The history fits in a few lines. Robots were controlled by classical control theory with hand-built perception and known CAD models. That's reliable for narrow factory tasks and brittle once an object, the lighting or an instruction falls outside what was programmed. From 2015 onward, deep reinforcement learning and imitation learning learned policies from demonstrations or trial and error. In 2023, Diffusion Policy represented multimodal action distributions better than regression, and RT-2-style vision-language-action models fine-tuned a vision-language model to output robot actions directly. The frontier now is robot foundation models, one policy across many robot bodies, with world models (chapter 22) increasingly used as learned simulators for planning and for training policies more safely than trial and error on hardware.</p>
+  </section>
+
+  <section id="intuition">
+    <h2><span class="num">01</span>A policy, and the constraint behind everything else</h2>
+
+    <h3 id="what-goes-in-and-what-comes-out">What goes in and what comes out</h3>
+    <p>Strip away every acronym and a robot policy is a function. Two things go in. The first is what the robot currently sees: a camera image, a depth map, the readings from the encoders that report each joint's angle. The second is what it's being asked to do, which can be an instruction, a goal position, or sometimes nothing explicit at all. One thing comes out, a specific action: motor commands, a target pose, or a change in gripper position.</p>
+
+    <p>For our mug, the input is a camera image of the table plus the words "pick up the mug", and the output is a small movement of the arm toward the handle. The policy gets called again a fraction of a second later with a fresh image, and so on until the mug is in the air. Every topic in this chapter is an answer to the same question: how do you build that function, and how much of it should be physics we derive by hand instead of behavior we learn from data?</p>
+
+    <h3 id="why-data-is-the-scarce-thing">Why data is the scarce thing</h3>
+    <p>Learning is attractive because hand-derivation stops working once the world gets messy, and you've probably seen the same thing with hand-written image filters. Nobody has written down the equations for "what does a mug look like in every kind of light". But learning needs data, and here robots are in a worse position than almost any other machine learning system. A language model reads a trillion tokens in a few weeks of pretraining. A robot generating its own training data has to physically move its own arm, in real time, one demonstration or one attempt at a time. Real-world data is slower, messier and more expensive to collect than any set of scraped images or text.</p>
+
+    <p>That single constraint explains most of the rest of the chapter. <strong>Sim-to-real</strong> transfer exists because simulated data is fast, cheap and safe, and real data isn't. <strong>Imitation learning</strong> exists because trial and error directly on real hardware is slow and can be destructive. <strong>Hierarchical planning</strong> exists so that one giant learned function doesn't have to make every decision, from millisecond-level motor torques up to "what task should I even be doing". The working rule is to learn only where learning earns its keep, and to lean on fast, verified classical control everywhere it doesn't need to be reinvented.</p>
+
+    <h3 id="joint-angles-and-where-the-gripper-ends-up">Joint angles and where the gripper ends up</h3>
+    <p>Before going further, we need one piece of geometry. A robot arm's joints have angles, but the task is described by where the tip of the arm should go: the handle of the mug is at a point on the table, not at a set of angles. Going from angles to tip position is called <strong>forward kinematics</strong>, and for a simple arm it's trigonometry.</p>
+
+    <p>The code below models a flat two-link arm, with a 1.0 m link followed by a 0.7 m link. <code>a1_deg</code> is the angle of the first joint from the horizontal, and the second joint's angle is measured relative to the first link, so the second link's absolute angle is <code>a1_deg + a2_deg</code>. The tip is the sum of the two links' horizontal and vertical components, and the loop tries four poses.</p>
+
+<details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Compute where a two-link robot arm ends up</span>
+      </summary>
+<pre><code>import numpy as np
+
+l1, l2 = 1.0, 0.7                             # link lengths in metres
+
+def tip(a1_deg, a2_deg):
+    a1, a2 = np.radians(a1_deg), np.radians(a1_deg + a2_deg)
+    return (l1 * np.cos(a1) + l2 * np.cos(a2),
+            l1 * np.sin(a1) + l2 * np.sin(a2))
+
+for a1, a2 in ((0, 0), (90, 0), (45, 45), (45, -45)):
+    x, y = tip(a1, a2)
+    print(f&quot;angles ({a1:&gt;3}, {a2:&gt;3}) -&gt; tip at ({x:.2f}, {y:.2f}) m&quot;)</code></pre>
+      <div class="tryit-out"><strong>A 1.0 m link followed by a 0.7 m link reaches <code>(1.70, 0.00)</code> when straight out and <code>(0.00, 1.70)</code> when raised 90 degrees.</strong> At <code>(45, 45)</code> the tip is at <code>(0.71, 1.41)</code>, and at <code>(45, -45)</code> it is at <code>(1.41, 0.71)</code>. Every set of angles gives exactly one tip position. The reverse question, which angles reach a given point, can have several answers or none, so control is harder than this.</div>
+    </details>
+
+    <p>Look at what the four rows say. With both joints at zero the arm is straight out and the tip sits 1.70 m away, the two link lengths added together. Raise the first joint by 90 degrees and the same arm points straight up. Every set of angles gives exactly one tip position, so this direction is easy. Can you see why the reverse is harder? The question the robot has to answer runs the other way: which angles put the tip on the mug handle? That probably has several answers, or none, and we'll come back to it. First, though, we need to see how a robot's software is organized, because the mug task isn't solved by one function.</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">02</span>The classical stack, and the part of it that stays</h2>
+
+    <h3 id="four-stages-in-a-loop">Four stages in a loop</h3>
+    <p>Any robot's software can be described as <strong>four stages running in a tight loop</strong>, fast enough to keep up with a moving, physical world. <strong>Perception</strong> turns raw sensor data (camera images, depth, joint encoders, force and torque readings) into something usable, such as object positions, a segmentation mask or a point cloud. For us, it's where "a mug is at this spot" comes from. <strong>State estimation</strong> fuses that noisy, partial sensor stream over time into a best current estimate of what's true. Classically that's a <em class="term">Kalman filter</em> or one of its nonlinear variants, which combines what the sensors say with what a model of the dynamics predicts, weighted by how much you trust each. <strong>Planning</strong> decides what to do next to make progress toward the goal, from a high-level "pick up the mug" down to a concrete trajectory. And <strong>control</strong> turns that plan into motor commands, moment to moment, correcting for disturbances as they happen.</p>
+
+    <p>Deep learning has steadily taken over pieces of this pipeline: perception first, then increasingly planning and parts of control. It hasn't taken over all of it, and knowing which parts are still classical, and why, is most of what separates real understanding here from hand-waving. The next diagram shows how the stages are arranged by speed.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Hierarchical planning stack — three timescales, one loop
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 620 260" xmlns="http://www.w3.org/2000/svg">
+        <rect x="40" y="14" width="460" height="42" rx="8" fill="#14141d" stroke="#818cf8" stroke-width="1.5"/>
+        <text x="270" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#818cf8">Language / Task Planner</text>
+
+        <rect x="40" y="56" width="460" height="22" rx="6" fill="#14141d" stroke="#24242f"/>
+        <text x="270" y="71" text-anchor="middle" font-size="10.5" fill="#9a9aa8">↓ sub-goal, e.g. "grasp the mug"  ·  ~1 Hz</text>
+
+        <rect x="40" y="78" width="460" height="42" rx="8" fill="#14141d" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="270" y="104" text-anchor="middle" font-size="13" font-weight="700" fill="#fbbf24">Skill Policy (learned — VLA / diffusion policy)</text>
+
+        <rect x="40" y="120" width="460" height="22" rx="6" fill="#14141d" stroke="#24242f"/>
+        <text x="270" y="135" text-anchor="middle" font-size="10.5" fill="#9a9aa8">↓ target pose / short trajectory  ·  ~10 Hz</text>
+
+        <rect x="40" y="142" width="460" height="42" rx="8" fill="#14141d" stroke="#34d399" stroke-width="1.5"/>
+        <text x="270" y="168" text-anchor="middle" font-size="12.5" font-weight="700" fill="#34d399">Low-Level Controller — PID / LQR / MPC</text>
+
+        <rect x="40" y="184" width="460" height="22" rx="6" fill="#14141d" stroke="#24242f"/>
+        <text x="270" y="199" text-anchor="middle" font-size="10.5" fill="#9a9aa8">↓ motor torques  ·  ~100–1000 Hz</text>
+
+        <rect x="40" y="206" width="460" height="42" rx="8" fill="#14141d" stroke="#fca5a5" stroke-width="1.5"/>
+        <text x="270" y="232" text-anchor="middle" font-size="13" font-weight="700" fill="#fca5a5">Robot + Environment</text>
+
+        <path d="M500,227 L560,227 L560,20 L500,20" stroke="#4f8cff" stroke-width="1.6" fill="none" class="flow-line"/>
+        <polygon points="500,20 512,14 512,26" fill="#4f8cff"/>
+        <text x="585" y="123" text-anchor="middle" font-size="10" fill="#9a9aa8" transform="rotate(-90 585 123)">sensor feedback — vision · proprioception · force</text>
+      </svg>
+      <div class="diagram-caption">Three systems run at three clock speeds and cooperate, where one model could have tried to do everything. The task planner replans a few times a minute, the skill policy replans several times a second, and the low-level controller runs hundreds to thousands of times a second. It's very often still classical control, even underneath a fully learned skill policy above it.</div>
+    </div>
+
+    <p>Notice the three clock speeds. The task planner picks a sub-goal like "grasp the mug" about once a second. The skill policy turns that into a target pose or a short trajectory about ten times a second. The low-level controller turns the target into motor torques somewhere between a hundred and a thousand times a second. The slowest layer can afford to think, maybe for a whole second. The fastest can't, and as we're about to see, it's very often still classical control even when everything above it is learned.</p>
+
+    <h3 id="classical-control-still-runs-the-last-mile">Classical control still runs the last mile</h3>
+    <p>Suppose the skill policy has decided the gripper should move to a point just above the mug handle. Something has to drive each joint's motor so the joint gets there and stays there. Three controllers do this job, in increasing order of how much they assume about the system.</p>
+
+    <p><strong>PID</strong> (proportional-integral-derivative) is the simplest and by far the most common. It reacts in proportion to the current error, meaning how far the joint is from its target. It adds a term proportional to the accumulated (integral) error over time, which removes any steady offset that the first term alone would leave behind. And it adds a term proportional to how fast the error is changing (the derivative), which damps oscillation before it happens. That's three gains and no dynamics model, simple enough to run on the microcontroller inside a single motor.</p>
+
+    <p><strong>LQR</strong> (linear-quadratic regulator) assumes more and gives more. You write down a linear model of the system's dynamics and a quadratic cost function that penalizes deviation from the target and also penalizes control effort. LQR then hands you the mathematically optimal linear feedback controller for that model, in closed form. There's no search, and the result is provably optimal for the model you gave it.</p>
+
+    <p><strong>MPC</strong> (model predictive control) goes further still. At every timestep it uses a model of the system to plan a short trajectory a few steps into the future, minimizing a cost subject to constraints like joint limits and obstacle avoidance. It executes only the first action of that plan, throws the rest away, and re-plans from scratch at the next timestep with fresh sensor data.</p>
+
+    <h4 class="why">Why not let one learned model handle all of this?</h4>
+    <p>All three controllers are decades old and unglamorous, and they still do an enormous amount of the actual work in modern robots, including robots with state-of-the-art learned perception and a learned high-level policy on top. The loop that keeps an arm from swinging wildly, or a legged robot from faceplanting, has to be fast (kilohertz-range control rates), provably stable within its operating envelope, and completely predictable. A learned policy doesn't have those properties by default, and getting them would take substantial extra engineering. Learning earns its keep at the level of what the robot should try to do: recognizing the mug, choosing a grasp, sequencing tasks. It earns much less at the level of exactly how many newton-meters of torque to apply right now to keep this joint where it was told to be.</p>
+
+    <h3 id="inverse-kinematics-and-trajectory-optimization">Inverse kinematics and trajectory optimization</h3>
+    <p>Back to the question we left open. Forward kinematics told us where the tip goes for given angles. <strong>Inverse kinematics</strong> (IK) asks the harder and more useful question backwards: given a desired end-effector pose, which joint angles achieve it? For our mug, the desired pose is the one that puts the gripper around the handle. For arms with more joints than the six degrees of freedom needed to reach an arbitrary pose, there are often infinitely many valid solutions, so an IK solver has to pick one, typically by optimizing for something like minimal joint movement or staying away from joint limits.</p>
+
+    <p><strong>Trajectory optimization</strong> extends IK over time. Instead of one static joint configuration, it solves for a whole sequence of configurations that moves the arm from where it is to where it needs to be: smoothly, without collisions, while respecting velocity and acceleration limits. It's a constrained optimization problem, solved once or, in the MPC case above, continuously re-solved.</p>
+
+    <p>So a fully classical system can already pick up the mug, provided someone has told it exactly where the mug is, what it weighs and how the camera is mounted. What it can't do is cope when the mug is a different shape, the light changes, or the instruction is in words it wasn't programmed for. To handle that we want to learn the higher layers from data, and the first place to get data cheaply is a simulator.</p>
+  </section>
+
+  <section id="sim-to-real">
+    <h2><span class="num">03</span>Practicing the mug in simulation</h2>
+
+    <h3 id="what-simulation-buys-and-what-it-costs">What simulation buys, and what it costs</h3>
+    <p>Real robots produce data at the speed of the real world, no faster. One demonstration of picking up the mug takes exactly as long as physically picking it up. The arm wears down, and every attempt risks damaging the robot or the object or, with a person nearby, someone's safety. Simulation removes all three constraints. Thousands of simulated arms can run in parallel, faster than real time, on a GPU cluster, and a simulated arm that slams its gripper into the table costs nothing but compute.</p>
+
+    <p>The catch is the <em class="term">sim-to-real gap</em>. A policy trained against one simulator's specific rendering, a specific friction model, and slightly wrong mass and inertia values for the mug will quietly learn to rely on those exact, wrong details. It then tends to fail in the real world in ways that look arbitrary from the outside, perhaps on the very first mug it meets, because it was solving the specific simulated instance and never the general task.</p>
+
+    <h3 id="domain-randomization">Domain randomization</h3>
+    <p>If the problem is that the policy latches onto one particular simulated world, the fix is to stop giving it just one. <strong>Domain randomization</strong> does this on purpose, and it's more than adding some noise. During training, you aggressively randomize exactly the simulation parameters the real world is uncertain about: textures and lighting, camera pose and intrinsics, object mass and friction coefficients, motor latency and sensor noise. For our mug, that means a different mug color, table texture, camera angle, weight and grip friction on every episode.</p>
+
+    <p>Randomize across a range wide enough and the policy is forced to become invariant to all of those, because it can't exploit any one specific value. Done aggressively enough, the real world stops looking like a novel, out-of-distribution input and looks like one more randomized simulation, sampled from the same wide distribution the policy already trained across.</p>
+
+    <p>Simulation answers the question of where to get data cheaply. It doesn't answer what the policy should learn from that data, or what to do about the cases where we have a human who can show the robot how it's done. That second route has its own failure mode, and it's an interesting one.</p>
+  </section>
+
+  <section id="imitation">
+    <h2><span class="num">04</span>Copying a demonstrator, and how copying goes wrong</h2>
+
+    <h3 id="behavioral-cloning">Behavioral cloning</h3>
+    <p><strong>Imitation learning</strong> trains a policy by direct supervised learning. A person teleoperates the arm to pick up the mug, and we record every observation and the action the person took at that moment. Then we train the policy to reproduce the expert's action given the observation. This is <em class="term">behavioral cloning</em>, and it's probably the most tempting place to start, for good reasons: there's no reward function to design and no exploration problem, just ordinary supervised learning on a dataset we already know how to collect.</p>
+
+    <h3 id="compounding-error">Compounding error</h3>
+    <p>Its weakness is <strong>compounding error</strong>. The expert's demonstrations only show near-perfect trajectories, so the trained policy will make small mistakes the expert never made. Say it's maybe a centimeter off to the left on the way to the handle. Each such mistake nudges the robot into a state slightly outside anything the demonstrations covered. The policy was never trained on that state, so its next prediction there is probably worse, and the next mistake compounds on top of the last one.</p>
+
+    <p>Compare that with misclassifying a held-out image. There, one wrong answer is one wrong answer. Here, a bad action changes the world the policy has to act in next, and nothing in a dataset of only successful, on-distribution demonstrations tells the policy how to recover once it's off-distribution. Behavioral cloning is supervised learning wearing a robot costume, and it inherits supervised learning's central assumption that training and test distributions match. A robot's own actions break that assumption.</p>
+
+    <h3 id="two-patches-dagger-and-action-chunking">Two patches: DAgger and action chunking</h3>
+    <p>One well-known mitigation is <strong>DAgger</strong> (dataset aggregation). Instead of training purely on offline expert demonstrations, you run the current policy and have the expert label the states it visits, mistakes included. Those corrections go back into the training set. That closes the distribution-shift gap by training on the policy's own error states, and it no longer depends on the original demonstrations happening to cover them.</p>
+
+    <p><strong>Action chunking</strong> helps in a different, complementary way. Instead of predicting one action at a time, the policy predicts a short sequence of several future actions at once, conditioned on the current observation. That reduces how many independent decision points there are per unit of task progress. A whole chunk is generated jointly and is internally consistent, whereas single-step guesses stitched together can each drift on their own. Fewer decision points leave fewer places for compounding error to start.</p>
+
+    <p>Both patches deal with drift. Neither touches a second problem that shows up as soon as our demonstrators don't all do the task the same way, and the mug is a good example of it.</p>
+  </section>
+
+  <section id="diffusion">
+    <h2><span class="num">05</span>Diffusion policies: when there's more than one right answer</h2>
+
+    <h3 id="the-two-grasp-problem">The two-grasp problem</h3>
+    <p>A mug's handle can be grasped equally well from the left or from the right, and both show up in our demonstrations. Train a plain regression policy to minimize squared error against both, and it doesn't pick one. It averages them, and the average is a grasp from the middle, through the body of the mug. That's physically invalid at both extremes and unhelpful in between.</p>
+
+    <h4 class="why">Why does averaging two good grasps give a bad one?</h4>
+    <p>Because a single output trained with squared error can only be one point, and the one point that's closest on average to a left grasp and a right grasp is halfway between them. The demonstrations never went there. The problem is the shape of the answer: we asked for one number when the true answer is a choice between two. So the fix has to let the policy represent a distribution over actions, with a bump at the left grasp and a bump at the right, and then sample one coherent action from it.</p>
+
+    <h3 id="denoising-actions-instead-of-images">Denoising actions instead of images</h3>
+    <p><strong>Diffusion Policy</strong> (Chi et al., 2023) does exactly that, using the diffusion machinery from chapter 12 and pointing it at a different target. Instead of denoising an image, the network denoises a sequence of future robot actions, conditioned on the current observation. You sample pure noise over an action chunk and run the same iterative learned-denoising process. What comes out is a plausible, coherent action sequence given what the robot currently sees. It's the same math with a different object being generated, and it's the same property that lets image diffusion models produce several different plausible pictures from one prompt without blending them into something nobody drew.</p>
+
+    <p>Because it represents <strong>multimodal action distributions</strong> (distributions with more than one peak) in a way a single regression output structurally can't, it fits robot control well. It also gives a bonus we'll use later: the shape of the predicted distribution, tight and confident versus spread out and uncertain, is itself a signal about how much to trust the policy. A single regression output is just a number, with no attached sense of how far to trust it.</p>
+  </section>
+
+  <section id="math">
+    <h2><span class="num">06</span>The two objectives side by side</h2>
+    <p>Now that we have both ideas in words, it's worth seeing the difference in the loss functions. Plain behavioral cloning trains a policy with ordinary regression: <span>$\mathcal{L}_{BC} = \mathbb{E}_{(o,a)\sim\mathcal{D}}\big[\lVert \pi_\theta(o) - a\rVert^2\big]$</span>. Given the observation <span>$o$</span>, predict the expert's action <span>$a$</span>, and minimize squared error.</p>
+
+    <p>The mode-averaging problem from the last section shows up mathematically right here. If the demonstration data contains two equally valid ways to grasp the mug, the single point estimate that minimizes squared error against both lands between them, and that's valid for neither. That's a separate failure from compounding error, and it's the specific thing diffusion policies fix.</p>
+
+    <p>A diffusion policy's training objective is the DDPM loss from chapter 12, with one substitution: the thing being denoised is now a chunk of future actions, conditioned on the current observation, instead of an image.</p>
+
+    <div class="eq-block">
+      <span>$$\mathcal{L} = \mathbb{E}_{a_0,\, t,\, \epsilon,\, o}\left[\, \lVert \epsilon - \epsilon_\theta(a_t, t, o) \rVert^2 \,\right], \qquad a_t = \sqrt{\bar\alpha_t}\, a_0 + \sqrt{1-\bar\alpha_t}\, \epsilon$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">a_0</span> is the ground-truth action chunk, a short window of future actions read off a demonstration and not a single timestep's action.</li>
+      <li><span class="sym">o</span> the current observation (image plus proprioception) — the conditioning signal, playing exactly the role a text prompt plays in 12's conditional diffusion.</li>
+      <li><span class="sym">t, ε, ᾱ_t</span> identical machinery to 12: a random diffusion timestep, the Gaussian noise added, and the fixed noise schedule. See that page for the full derivation — this is the same objective with "image" swapped for "action sequence."</li>
+    </ul>
+
+    <p>At sampling time you start from pure noise over the action chunk, run the learned reverse process conditioned on the current observation, execute some of the resulting actions on the robot, re-observe, and denoise again for the next chunk. DDIM-style fast samplers (chapter 12) apply here too, and they matter more in robotics than in image generation, because a policy that takes several seconds to decide on its next action is often unusable at a real control rate.</p>
+
+    <p>So far every policy has learned from robot data, either simulated or demonstrated. That data is scarce, and our mug policy still has no idea what a knife is or what "the smallest object" means. For that, we'd like to borrow knowledge from somewhere with far more data.</p>
+  </section>
+
+  <section id="vla">
+    <h2><span class="num">07</span>Borrowing the internet: vision-language-action models</h2>
+
+    <h3 id="actions-as-tokens">Actions as tokens</h3>
+    <p>A <strong>VLA model</strong> (vision-language-action) takes in an image and a natural-language instruction and outputs robot actions directly. You build one by taking an already-pretrained vision-language model, one that can look at an image and produce text, and fine-tuning it to also emit action tokens alongside the text tokens it already knew how to produce. The diagram shows the flow.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">A VLA model — image + instruction tokens in, action tokens out
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg">
+        <text x="80" y="24" text-anchor="middle" font-size="11" fill="#9a9aa8">image + instruction tokens</text>
+        <circle cx="80" cy="60" r="16" fill="none" stroke="#60a5fa" stroke-width="2"/>
+        <text x="80" y="64" text-anchor="middle" font-size="11" fill="#60a5fa">i₁</text>
+        <circle cx="80" cy="140" r="16" fill="none" stroke="#60a5fa" stroke-width="2"/>
+        <text x="80" y="144" text-anchor="middle" font-size="11" fill="#60a5fa">i₂</text>
+        <circle cx="80" cy="220" r="16" fill="none" stroke="#4ade80" stroke-width="2"/>
+        <text x="80" y="224" text-anchor="middle" font-size="11" fill="#4ade80">t₁</text>
+        <circle cx="80" cy="300" r="16" fill="none" stroke="#4ade80" stroke-width="2"/>
+        <text x="80" y="304" text-anchor="middle" font-size="11" fill="#4ade80">t₂</text>
+
+        <path d="M96,60  L260,140" stroke="#60a5fa" stroke-width="1.6" fill="none" opacity="0.45" class="flow-line"/>
+        <path d="M96,140 L260,150" stroke="#60a5fa" stroke-width="2.2" fill="none" opacity="0.8"  class="flow-line"/>
+        <path d="M96,220 L260,190" stroke="#4ade80" stroke-width="2.2" fill="none" opacity="0.8"  class="flow-line"/>
+        <path d="M96,300 L260,200" stroke="#4ade80" stroke-width="1.6" fill="none" opacity="0.45" class="flow-line"/>
+
+        <rect x="260" y="110" width="200" height="120" rx="10" fill="#14141d" stroke="#818cf8" stroke-width="1.5"/>
+        <text x="360" y="163" text-anchor="middle" font-size="12" font-weight="700" fill="#818cf8">Pretrained Vision-Language</text>
+        <text x="360" y="180" text-anchor="middle" font-size="12" font-weight="700" fill="#818cf8">Model backbone (transformer)</text>
+
+        <path d="M460,150 L600,110" stroke="#f472b6" stroke-width="1.8" fill="none" opacity="0.6" class="flow-line-slow"/>
+        <path d="M460,170 L600,170" stroke="#f472b6" stroke-width="2.4" fill="none" opacity="0.9" class="flow-line-slow"/>
+        <path d="M460,190 L600,230" stroke="#f472b6" stroke-width="1.8" fill="none" opacity="0.6" class="flow-line-slow"/>
+
+        <text x="600" y="80" text-anchor="middle" font-size="11" fill="#9a9aa8">action tokens (discretized)</text>
+        <circle cx="600" cy="110" r="16" fill="none" stroke="#f472b6" stroke-width="2"/>
+        <text x="600" y="114" text-anchor="middle" font-size="11" fill="#f472b6">a₁</text>
+        <circle cx="600" cy="170" r="16" fill="none" stroke="#f472b6" stroke-width="2"/>
+        <text x="600" y="174" text-anchor="middle" font-size="11" fill="#f472b6">a₂</text>
+        <circle cx="600" cy="230" r="16" fill="none" stroke="#f472b6" stroke-width="2"/>
+        <text x="600" y="234" text-anchor="middle" font-size="11" fill="#f472b6">a₃</text>
+
+        <path d="M600,246 L610,260" stroke="#f472b6" stroke-width="1.4" fill="none" opacity="0.7"/>
+        <rect x="540" y="260" width="140" height="34" rx="7" fill="#14141d" stroke="#f472b6" stroke-width="1.3" stroke-dasharray="4 3"/>
+        <text x="610" y="281" text-anchor="middle" font-size="10.5" fill="#f472b6">Δx, Δy, Δz, Δyaw, gripper</text>
+      </svg>
+      <div class="diagram-caption">Image patch tokens (i₁, i₂ …) and instruction tokens (t₁, t₂ …) flow into the same pretrained vision-language backbone that already knows how to produce text tokens. Fine-tune it to also emit action tokens (a₁, a₂ …), each one a discretized bin of a continuous action dimension, and decode those bins back into an actual motor command. Actions become another entry in the output vocabulary.</div>
+    </div>
+
+    <p><strong>RT-2</strong> (Brohan et al., 2023, Google DeepMind) is the model that made this idea concrete. Each dimension of a continuous robot action is discretized into bins: small changes in end-effector position, orientation, gripper openness. Each bin is represented as a token drawn from the model's existing vocabulary. The model is then fine-tuned on a mix of web-scale vision-language data and robot trajectory data, predicting those action tokens the same way it predicts the next word in a sentence. This is the everything-is-tokens idea from chapter 10 pushed one step further, because the vocabulary is no longer only sub-words and also has entries that mean "move the gripper slightly left."</p>
+
+    <p>The payoff is large. Broad visual and semantic knowledge learned from internet-scale image-text data transfers directly into robot control: what a knife looks like, what "the smallest object" means, common object affordances. That lets the model follow instructions and recognize objects far outside anything a robot-specific dataset alone could have taught it. Our mug robot might be told to "pick up the one you'd drink from" and have a chance.</p>
+
+    <h3 id="one-policy-for-many-robot-bodies">One policy for many robot bodies</h3>
+    <p>A model trained on one robot's data doesn't automatically work on a different robot. Its specific arm geometry, gripper and camera placement are baked in, and a new robot has a different action space and different dynamics. <strong>Cross-embodiment learning</strong> trains a single policy on data pooled from many different robot bodies at once, in place of a bespoke policy per robot. The bet is that a policy exposed to enough variety learns something closer to a general, embodiment-agnostic notion of "how to manipulate objects" and doesn't memorize one robot's quirks.</p>
+
+    <p>It mirrors what made large language and vision models generalize well: scale and diversity of training data beating a narrow, hand-curated dataset. Here the idea is applied to the harder problem of physical bodies that don't even share an action space. This remains an active, unresolved research direction. Getting one policy to transfer skill across a wheeled arm, a legged robot and a humanoid hand is a much harder generalization problem than transferring across different image resolutions.</p>
+
+    <h3 id="language-navigation-and-mobile-manipulation">Language, navigation and mobile manipulation</h3>
+    <p><strong>Language-conditioned manipulation</strong> means the policy takes a natural-language instruction as an additional input alongside the visual observation. The same underlying model then performs different tasks depending on what it's told, without a separately trained policy per task. Our "pick up the mug" is one instruction among many.</p>
+
+    <p><strong>Navigation</strong> is the distinct problem of moving the robot's base through space. You build or use a map (classically via <em>SLAM</em>, simultaneous localization and mapping), plan a collision-free path, and follow it. <strong>Mobile manipulation</strong> combines the two, and the coordination between them is the hard part. If the mug is on a counter across the room, the robot has to navigate to a position from which the mug is reachable and visible, and "close enough" isn't good enough. That means the navigation planner and the manipulation planner can't be designed in isolation from each other.</p>
+
+    <h3 id="humanoids-and-the-sense-of-touch">Humanoids and the sense of touch</h3>
+    <p><strong>Humanoid robots</strong> add a constraint most manipulators don't have: the robot has to balance itself while doing everything else. Locomotion, meaning walking and recovering from a push, is typically handled by an RL-trained or classical whole-body controller running underneath and enforcing balance constraints. Manipulation and higher-level task policies sit on top of it. It's the same hierarchical pattern again, with fast safety-critical control at the bottom and learned, flexible decision-making above.</p>
+
+    <p><strong>Tactile sensing</strong> fills a gap that vision structurally can't close. Once the hand closes around the mug handle, the hand itself occludes the camera's view of the contact point, and vision alone often can't tell a firm grip from a slipping one until the mug is already falling. Tactile sensors measure contact force, pressure distribution and slip directly at the fingertip. Some designs turn touch into an image, using a camera behind a soft deformable membrane, which lets the same vision architectures used elsewhere in the stack process touch data too.</p>
+  </section>
+
+  <section id="system">
+    <h2><span class="num">08</span>Putting the pieces together: planning, safety and evaluation</h2>
+
+    <h3 id="world-models-and-the-hierarchy">World models and the hierarchy</h3>
+    <p>There's one more learned component to add. A <strong>world model</strong>, in the robotics sense, is a learned function that predicts what happens next: given the current observation or state and an action, it predicts the next one, without needing to execute that action in the real world or a hand-built simulator. Once you have that, you can plan by imagining rollouts inside it. Try several candidate action sequences for reaching the mug, see which one the model predicts leads somewhere good, and execute only that one for real. Chapter 22 covers this in depth, and it's probably the better place to go if world models are new to you. The short version is that a good learned world model turns planning into a search problem you can run cheaply and safely inside the model's imagination first.</p>
+
+    <p>This connects back to the diagram from section 02. Three different systems operate at three different timescales and cooperate, where the alternative would be one giant end-to-end model making every decision from "what task to do" down to "how many newton-meters, right now." A <strong>language or task-level planner</strong> picks a sub-goal a few times a minute. A <strong>skill policy</strong>, which might itself be a diffusion policy or a VLA model, figures out how to achieve that sub-goal, replanning several times a second. And a <strong>low-level controller</strong>, often still classical, stabilizes and executes the resulting motion hundreds to thousands of times a second. Each layer solves a different problem at a different rate, and that's likely why this arrangement has lasted. Forcing one model to do all three tends to produce something simultaneously too slow for the fast layer and too myopic for the slow one.</p>
+
+    <h3 id="safety-uncertainty-and-recovery">Safety, uncertainty and recovery</h3>
+    <p>A learned policy that's confidently wrong is more dangerous than one that knows it's uncertain. Real deployed systems need the policy, or a layer wrapped around it, to recognize when it's operating outside anything it was trained on. It should then fall back to a safe, conservative behavior: stop, ask for help, or hand control back to a human or a classical safety controller. Any of these beats confidently executing an action from a part of the input space it has never seen. This is where the earlier point about diffusion policies pays off, since a spread-out predicted distribution can serve as the warning sign.</p>
+
+    <p>On top of whatever the learned policy does, most real systems still keep a hard, classical safety layer underneath: force and torque limits, joint limit enforcement, emergency-stop conditions. It can override the learned policy's output before it ever reaches the motors, because a safety-critical guarantee shouldn't rest entirely on a learned system behaving well.</p>
+
+    <h3 id="open-loop-and-closed-loop-evaluation">Open-loop and closed-loop evaluation</h3>
+    <p>How do we know the mug policy works? <strong>Open-loop evaluation</strong> checks a policy against a fixed, pre-recorded scenario: replay a logged sequence of observations and check whether the policy's predicted actions match the expert's logged actions at each step. It's cheap, fast and reproducible, but it can't catch compounding error, because the robot's own actions never change what it sees next. Every input it's evaluated on was generated by the expert and not by the policy.</p>
+
+    <p><strong>Closed-loop evaluation</strong> runs the policy for real, in simulation or on hardware, and lets its own actions determine what it sees at the next step, the way it will be evaluated in deployment. It's more informative and it's the only way to catch compounding-error failures before they show up in the real world. It's also slower, more expensive, and on real hardware perhaps riskier to run at scale. The practical pattern is to iterate fast on open-loop metrics and closed-loop simulation, then treat real-hardware closed-loop evaluation as the final, expensive gate before deployment and not the primary development loop.</p>
+  </section>
+
+  <section id="why">
+    <h2><span class="num">09</span>Which fix goes with which problem</h2>
+    <p>We've now met several remedies, and it helps to line them up against the failures they address. Start with imitation. A wrong prediction doesn't just cost one bad label. It moves the robot into a state the training data never covered, and there's no signal anywhere in a dataset of only successful demonstrations telling the policy how to get back. Three techniques attack that from different angles. <strong>Diffusion policies</strong> model the full action distribution in place of one averaged point estimate, which avoids confidently executing a physically invalid average. <strong>Action chunking</strong> reduces the number of independent decision points per unit of task progress where drift can start. And <strong>RL fine-tuning</strong> optimizes directly for task success using the robot's own on-policy experience, including its failure states. That's exactly the recovery signal pure imitation never gets, because a human demonstrator basically never produces a demonstration that starts from "the robot already made a mistake."</p>
+
+    <p>The other half of the question is why we don't just collect more real data. Real robot data collection is bounded by four things. Real time, since a demonstration takes as long as physically doing the task. Physical wear, which accumulates on motors and grippers. Safety around fragile objects and people. And cost, because a fleet of real robots running around the clock is an enormous capital expense next to thousands of parallel simulated instances running faster than real time on a shared GPU cluster.</p>
+
+    <p>Simulation flips every one of those constraints, at the price of the sim-to-real gap, and domain randomization is the direct answer to that gap. If you randomize exactly the simulation parameters the real world is uncertain about, aggressively and across a wide range, the policy is forced to become invariant to them. Push that range wide enough and the real world looks like one more sample from the training distribution and is no longer a novel input. No single technique removes the need for the others, so the next section compares them.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">10</span>Complexity, failure modes, and what breaks</h2>
+    <p>Here are the four approaches from this chapter, compared on what they need, how far they generalize, and what safety they come with.</p>
+
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>Classical control</th><th>Imitation learning (BC)</th><th>RL</th><th>VLA models</th></tr></thead>
+        <tbody>
+          <tr><td>Data requirement</td><td>None — hand-derived model &amp; gains</td><td>Hundreds to thousands of demonstrations</td><td>Large volume of trial-and-error rollouts, sim or real</td><td>Web-scale pretraining + robot demo/rollout data</td></tr>
+          <tr><td>Generalization</td><td>None beyond the specified task/model</td><td>Weak — only as good as demo coverage</td><td>Can exceed demos, but only if the reward is well-specified</td><td>Strongest to new objects/instructions — inherits the VLM's priors</td></tr>
+          <tr><td>Safety guarantees</td><td>Strong, provable stability margins for known/linear systems</td><td>None inherent — as unpredictable as the demos it copied</td><td>None inherent — can find high-reward but unintended behavior</td><td>None inherent — also inherits the VLM's confidently-wrong tendencies</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 id="what-shows-up-in-production">What shows up in production</h3>
+    <p>Each column of the table has its own signature failure. <strong>Compounding error</strong> appears in naive behavioral cloning: small mistakes push the robot off the demonstrated distribution, and there's no recovery signal in the training data to pull it back. The <strong>sim-to-real gap</strong> appears when domain randomization isn't aggressive or wide enough. The policy quietly relies on some specific simulated detail, such as a friction value or a camera intrinsic, that doesn't hold in reality, and then fails in a way that looks arbitrary from the outside.</p>
+
+    <p><strong>Inherited hallucination</strong> appears in VLA models, now applied to physical actions. A language model hallucinating a fact is embarrassing. A VLA model misjudging whether an object is graspable, or misreading which object an ambiguous instruction refers to, moves a real gripper into a real, possibly damaging action, so the stakes are higher than with text. And <strong>reward hacking</strong> appears in RL, where the policy optimizes what you specified and not what you meant. A degenerate but technically rewarded motion found on physical hardware is a safety issue, however amusing it reads in a paper.</p>
+
+    <h4 class="why">If it's built on a strong vision-language model, doesn't it understand physics?</h4>
+    <p>Not necessarily. A VLA model inherited strong visual recognition and instruction-following, so it's good at telling you what's in the scene and what you asked for. Physical competence is a different thing: whether a grasp will hold, whether an object is too heavy, whether a plan is dynamically feasible. That has to come from the action-prediction fine-tuning on real robot interaction data, and that data is orders of magnitude smaller than the web-scale pretraining corpus. "Built on a strong VLM" is a claim about perception and instruction-following, and it gives no guarantee of physical grounding.</p>
+
+    <h3 id="where-things-stand-in-2026">Where things stand in 2026</h3>
+    <p>Diffusion policies and VLA models are the leading research directions, and they're increasingly used in early production for structured tasks like warehouse pick-and-place. They haven't replaced classical control at the low level, though. Nearly every deployed robot, however modern its perception or planning stack, still stabilizes its own joints with PID, LQR or MPC running underneath. Robust cross-embodiment generalization, meaning one policy performing well across different robot bodies without extra fine-tuning, remains an open research problem. Strong claims of a single "generalist robot policy" working out of the box on a brand-new robot body should be treated as an overclaim unless they're backed by specific, verifiable evaluation.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">11</span>Summary</h2>
+    <ol>
+      <li><strong>A robot policy is a function from observation and instruction to action.</strong> Almost everything in robotics is an argument about how much of that function to derive by hand and how much to learn.</li>
+      <li><strong>Real-world data is the scarce resource.</strong> A robot can't download more of the physical world, and every failed attempt costs time, wear or safety.</li>
+      <li><strong>Robot software runs four stages in a loop:</strong> perception, state estimation, planning and control, with learning creeping into each without replacing the stage below.</li>
+      <li><strong>Classical control still runs the last mile.</strong> PID, LQR and MPC are fast, predictable and provably stable, so even fully learned robots usually keep them for joint-level control.</li>
+      <li><strong>Simulation trades cost for realism.</strong> It's fast, cheap and safe, and domain randomization makes a policy invariant to whatever the simulator gets wrong.</li>
+      <li><strong>Behavioral cloning suffers from compounding error.</strong> Small mistakes lead to states the demonstrations never covered, and DAgger and action chunking reduce the drift.</li>
+      <li><strong>Squared-error regression averages modes.</strong> Two equally good grasps become one bad grasp in between, and diffusion policies fix this by modeling a distribution over action chunks.</li>
+      <li><strong>VLA models turn actions into tokens.</strong> Fine-tuning a vision-language model to emit discretized actions transfers web-scale visual and semantic knowledge into control.</li>
+      <li><strong>A strong VLM backbone doesn't guarantee physical competence.</strong> Grasp stability and dynamic feasibility come from far smaller robot datasets.</li>
+      <li><strong>Real systems are hierarchies.</strong> A task planner, a learned skill policy and a classical controller run at about 1 Hz, 10 Hz and 100 to 1000 Hz, with a hard safety layer underneath.</li>
+      <li><strong>Evaluate closed-loop.</strong> Open-loop replay can't catch compounding error, so real-hardware closed-loop testing is the last gate before deployment.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">12</span>Build this</h2>
+    <p class="lede">Action chunking reads like a batching trick. Plot the actions a chunked policy executes next to a single-step one, and it stops looking like plumbing.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Watch action chunking take the jitter out of a reach</span>
+        <span class="proj-meta">~4 hours · PyTorch + Gymnasium</span>
+      </div>
+      <p>Clone the same expert twice on a simulated reach task. One policy predicts the next action. The other predicts a chunk of the next several. The two share data, loss and network and differ in one way. A reach suits this because there is exactly one sensible motion, so anything ugly in the executed trajectory came from the policy and the task is not to blame.</p>
+      <ol class="proj-steps">
+        <li>Pick a reach task with a low-dimensional state, such as Gymnasium's <code>Reacher</code>. Write the expert as a simple PD controller driving the tip toward the target, then record a few hundred episodes of <code>(observation, action)</code>. That expert is the classical control layer from section 02, and it costs you nothing to write.</li>
+        <li>Train policy A straight from the behavioural-cloning loss in section 06. An MLP maps the observation to the single next action, squared error against the expert's.</li>
+        <li>Train policy B. It uses the same MLP, data and loss, except that the output layer emits the next <span>$K$</span> actions at once. Read the targets off each demonstration as a sliding window. Try <span>$K$</span> around 8 or 16.</li>
+        <li>Roll both out closed-loop. A acts once per observation, and B executes its whole chunk, then re-observes and predicts the next one. Record every action that reached the simulator.</li>
+        <li>Plot the executed action for each joint against time, A and B on the same axes. Plot the two tip paths beside them.</li>
+        <li>Now break it deliberately by rewriting the expert so it reaches the target two different ways at random, swinging clockwise or anticlockwise around the midpoint. Retrain both policies on that data and plot again.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the two traces differ in a way you can see without computing a metric. A's line tends to chatter between adjacent steps. B's is smooth inside each chunk, with a visible step at every boundary where the robot re-observed. If A comes out smooth, add a little noise to the observations during rollout, which is the realistic case anyway, and look again. Each of A's actions is an independent guess conditioned on one noisy observation. B commits to a whole window from one.</div>
+      <div class="proj-stretch"><strong>What the breakage teaches.</strong> With two valid routes in the demonstrations, squared error puts the prediction between them. Between them is the one place neither demonstrator ever went. Expect both policies to head for the midpoint. Chunking does not rescue B here, and that is the point. <strong>Averaging is a property of the loss, not of the horizon.</strong> It is why section 09 lists diffusion policies and action chunking as separate fixes. They repair different failures.</div>
+    </div>
+
+    <h3 id="where-this-runs-in-production">Where this runs in production</h3>
+    <p>A common real deployment pattern runs in three layers:</p>
+    <ul>
+      <li>A <strong>learned perception-and-policy module</strong> looks at a bin of mixed, previously-unseen items and outputs where and how to grasp: position, approach angle, gripper width. That's a high-level decision that needs generalization.</li>
+      <li>A <strong>classical trajectory-optimization and IK layer</strong> computes the joint-space path to reach the chosen grasp.</li>
+      <li>A <strong>low-level PID or MPC controller</strong> executes that path and stabilizes the arm against disturbances in real time.</li>
+    </ul>
+    <p>The learned part handles what requires generalization. Classical control handles what doesn't need to be learned at all, and benefits from being fast, predictable, and easy to verify.</p>
+    <p>This split, learn the high-level decision and keep the low-level execution classical, is the dominant pattern in deployed robotics right now. That split is a durable design, and it explains why the tradeoffs table above has no single winner.</p>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">13</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Walk me through the perception → state estimation → planning → control pipeline.</summary>
+      <div class="qa-body"><p>Perception turns raw sensor data — camera images, depth, joint encoders — into something usable, like object positions or a point cloud. State estimation fuses that noisy, partial data over time into a best current estimate of the true state, classically with a Kalman filter or a nonlinear variant. Planning decides what to do next to reach a goal, from a high-level instruction down to a concrete trajectory. Control turns that plan into actual motor commands, correcting for disturbances moment to moment. Learning has replaced pieces of each stage over time, but not uniformly — perception first, planning and control more gradually.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why do modern robots still use PID controllers when we have deep learning?</summary>
+      <div class="qa-body"><p>Because the low-level stabilization loop needs to be fast (kilohertz-range), provably stable within its operating envelope, and completely predictable — properties a learned policy doesn't inherently have. PID, LQR, and MPC give you those guarantees directly from a known model, with no training data required. Learning earns its keep at the level of deciding what the robot should try to do, not necessarily at the level of exactly how much torque to apply right now to hold a joint in place.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does behavioral cloning suffer from compounding error, and how do you mitigate it?</summary>
+      <div class="qa-body"><p>Behavioral cloning trains on demonstrations that are near-perfect, so the training distribution only contains on-track states. The learned policy will still make small mistakes, and each one nudges the robot into a state slightly outside the demonstrated distribution — a state the policy was never trained on, so its next prediction there is probably worse, and the error compounds. Nothing in a dataset of only successful demonstrations shows how to recover. Mitigations: DAgger, which queries the expert for corrective labels on states the current policy actually visits, closing the distribution-shift gap directly; action chunking, which predicts several actions jointly per observation instead of one at a time, reducing the number of independent points where drift can start; and RL fine-tuning, which gives the policy a direct success signal from its own on-policy experience, including failure states imitation data never contains.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What does domain randomization actually do, mechanistically?</summary>
+      <div class="qa-body"><p>It randomizes simulation parameters the real world is uncertain about — textures, lighting, camera pose and intrinsics, object mass, friction, motor latency, sensor noise — aggressively and across a wide range during training. That forces the policy to become invariant to those parameters instead of overfitting to one specific simulated value. If the randomization range is wide enough, the real world doesn't look like a novel, out-of-distribution input to the policy — it just looks like one more randomized simulation instance, sampled from the same broad training distribution.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why are diffusion policies better suited to robot control than a plain regression policy head?</summary>
+      <div class="qa-body"><p>A plain regression head trained with MSE against multimodal demonstration data — say, two equally valid ways to grasp an object — doesn't pick a mode, it averages them, producing an output that's physically invalid at both extremes and unhelpful in between. A diffusion policy models the full distribution over action sequences and can sample from one mode coherently instead of blending across modes. It's the same reason image diffusion models can produce several genuinely different valid images from one prompt rather than one blurry average.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How would you evaluate a robot policy before deploying it on real hardware?</summary>
+      <div class="qa-body"><p>Start with open-loop evaluation against logged expert trajectories — cheap and fast, but it can't catch compounding error, since every input it's tested on came from the expert, not from the policy's own actions. Move to closed-loop evaluation in simulation, where the policy's own actions actually determine its next observation, which is the only way to expose distribution-shift failures before they happen on hardware. Only after that would you run closed-loop evaluation on real hardware, treated as the final, expensive gate rather than the primary development loop, ideally with a hard classical safety layer — force limits, joint limits, an e-stop condition — that can override the policy regardless of what it outputs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>How does a VLA model like RT-2 turn a language model into something that outputs robot actions?</summary>
+      <div class="qa-body"><p>By discretizing each continuous dimension of the robot's action — small changes in end-effector position, orientation, gripper openness — into bins, and representing each bin as a token drawn from the model's existing vocabulary. The pretrained vision-language model is then fine-tuned on a mix of web-scale vision-language data and robot trajectory data to predict those action tokens the same way it predicts the next word in a sentence — actions become just another entry in the output vocabulary, the same everything-is-tokens framing used for text. That's also why VLA models transfer broad visual and semantic knowledge from web pretraining directly into robot control, and why they can inherit a language model's confidently-wrong failure modes, now applied to a physical action instead of a sentence.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">14</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/2307.15818" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control</div><div class="r-sub">Brohan et al., 2023, Google DeepMind — arXiv:2307.15818</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2303.04137" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Diffusion Policy: Visuomotor Policy Learning via Action Diffusion</div><div class="r-sub">Chi et al., 2023 — arXiv:2303.04137</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/167" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Calculate the Discounted Return for a Given Trajectory</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/471" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Epsilon-Soft On-Policy Monte Carlo Control</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/476" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Expected SARSA Algorithm for Policy Evaluation and Control</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/478" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">n-Step SARSA Q-Value Update from Episode Trajectory</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/470" target="_blank" rel="noopener"><span class="dm-diff dm-hard">hard</span><span class="dm-title">First-Visit Monte Carlo Control with Exploring Starts</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/360" target="_blank" rel="noopener"><span class="dm-diff dm-hard">hard</span><span class="dm-title">MDN with Label Collinearity Control</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">15</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/15-reinforcement-learning"><div class="rc-sec" style="color:var(--c-rl)">15 · Prerequisite</div><div class="rc-title">Reinforcement Learning</div><div class="rc-hook">Trial-and-error policy learning without a labeled expert — RL-for-control.</div></a>
+      <a class="related-card" href="/topics/12-generative-models"><div class="rc-sec" style="color:var(--c-genai)">12 · Reused directly</div><div class="rc-title">Generative Models</div><div class="rc-hook">Diffusion policies are this page's DDPM math, applied to actions instead of pixels.</div></a>
+      <a class="related-card" href="/topics/08-attention-transformers"><div class="rc-sec" style="color:var(--c-attention)">08 · Powers VLA models</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">Every vision-language-action model is a transformer fine-tuned to also emit action tokens.</div></a>
+      <a class="related-card" href="/topics/22-world-models"><div class="rc-sec" style="color:var(--c-world)">22 · What changed next</div><div class="rc-title">World Models</div><div class="rc-hook">Learned simulators for planning and training robots without touching real hardware.</div></a>
+    </div>
+  </section>

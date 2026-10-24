@@ -1,0 +1,574 @@
+---
+title: "Efficient AI & Systems"
+dek: "Follow one chat request on a single GPU to see why generating text waits on memory instead of math, and how paging, batching, quantization and splitting a model across GPUs each respond to that."
+readingTime: "~33 min"
+prereqs: "attention & KV cache (08), LLM training basics (10)"
+group: "Systems, Safety & Interview"
+label: "Chapter 23"
+description: "GPU fundamentals, parallelism, ZeRO/FSDP sharding, mixed precision, KV cache, PagedAttention, continuous batching, FlashAttention, speculative decoding, quantization — the systems layer that makes LLMs fast and cheap to run."
+---
+<section id="tldr">
+    <p>Suppose you've put Llama-3-8B, a language model with about 8 billion parameters, on a single H100 GPU with 80 GB of memory, and a user types a question into your chat product. An H100 is among the most powerful chips you can buy. Yet for the few seconds it spends writing the answer, almost all of its arithmetic units will be sitting idle, waiting for something. This chapter is about what they're waiting for, and about the handful of ideas that keep a GPU like this busy when it's serving real traffic.</p>
+
+    <p>A GPU can be slow in two different ways. It can run out of arithmetic, meaning it can't multiply and add fast enough. Or it can run out of data, meaning the numbers it needs haven't arrived from memory yet. The two problems look the same from outside, since in both cases the answer comes back late, but they need opposite fixes, and a fix aimed at the wrong one does nothing. Training a model is mostly the first kind. Generating text for one user is mostly the second, and we'll see exactly how lopsided it is with numbers from our 8B model.</p>
+
+    <p>We'll use that one request as our running example. First we'll put numbers on the two limits (sections 1 to 3). Then we'll follow the request through the serving stack: the cache that grows with every token, and the four techniques built to manage it: paged memory, continuous batching, FlashAttention and speculative decoding (sections 4 and 5). After that we'll make the model itself cheaper to move, by storing it in fewer bits (sections 6 and 7). Finally, for the case where the model is too big for one GPU to train, we'll split the work across many (sections 8 and 9), and then look at what goes wrong and how to find out which limit you're up against (sections 10 to 12).</p>
+
+    <p>This chapter assumes the attention mechanism and KV cache from chapter 08 and the training basics from chapter 10. New terms get defined where they first appear. If one idea has to stick, make it this one: LLM inference is usually limited by memory bandwidth and rarely by arithmetic, so almost every serving optimization is a way to move fewer bytes for each useful token generated.</p>
+  </section>
+
+  <section id="intuition">
+    <h2><span class="num">01</span>Two ways a GPU can be slow</h2>
+
+    <h3 id="two-limits-measured-in-different-units">Two limits, measured in different units</h3>
+    <p>A GPU has two separate hard limits, and they're measured in different units. First there's <strong>compute throughput</strong>: how many floating-point operations, or <strong>FLOPs</strong>, it can execute per second. One FLOP is a single addition or multiplication on decimal numbers. Second comes <strong>memory bandwidth</strong>: how many bytes per second can move between HBM, the GPU's main memory (the 80 GB on our card), and the chip's arithmetic units. Arithmetic units can only work on numbers that have already arrived, so both limits apply to everything you run, and whichever one you hit first sets the speed.</p>
+
+    <p>Let's see what that means for one step of our request. To produce a single new token, the model multiplies that token's vector by every weight matrix in the network. Each weight takes part in one multiplication and one addition, so that's 2 FLOPs per parameter. For 8.03 billion parameters, that comes to roughly 16 billion FLOPs. But the weights are stored in 16-bit (fp16) form, 2 bytes each, so the same 8.03 billion parameters occupy 16.06 GB, and every one of those bytes has to travel from HBM to the arithmetic units before it can be used.</p>
+
+    <p>Now compare the two costs, using the H100 figures we'll use throughout the chapter: 989 trillion FLOP/s of peak compute and 3.35 trillion bytes/s of peak memory bandwidth. The 16 billion FLOPs take about 0.016 milliseconds. Moving 16.06 GB takes about 4.8 milliseconds. Data takes roughly 295 times longer to arrive than the math takes to finish, so the arithmetic units spend nearly the whole step waiting. (If the data took 4.8 ms and nothing else got in the way, the card could produce at most around 208 tokens a second for one user, however many FLOPs it had.)</p>
+
+    <h3 id="compute-bound-and-memory-bound">Compute-bound and memory-bound</h3>
+    <p>This gives us two regimes, and it helps to have names for them. A workload is <strong>compute-bound</strong> when its data arrives long before the arithmetic on it finishes. More bandwidth wouldn't help it, and what it needs is fewer FLOPs or faster ones. A workload is <strong>memory-bound</strong> when the arithmetic finishes almost instantly and the chip then sits idle for the next chunk of data. More compute units wouldn't help it at all, and what it needs is to move less data, or to move it faster.</p>
+
+    <p>One number tells you which regime you're in: the <strong>arithmetic intensity</strong>. It counts how many FLOPs you get for each byte moved. Lots of math per byte fetched means compute-bound, and a little math per byte means memory-bound. Our token step does about one FLOP per byte (we'll compute it exactly in section 3), which is very little.</p>
+
+    <h3 id="why-training-looks-different-and-what-batching-does">Why training looks different, and what batching does</h3>
+    <p>Training a large model sits on the other side. It runs big batched matrix multiplications, so each weight you load gets reused across every example in the batch, and each byte fetched does a lot of work. Generating one token for one user is the opposite extreme. Every step drags the entire set of weights, plus the growing KV cache, through memory, to compute output for often a single new token per sequence. That's huge byte traffic for a comparatively tiny amount of arithmetic, and it's the most important systems fact for anyone building or interviewing on LLM serving.</p>
+
+    <p>It also tells us what to try first. Suppose the GPU served 32 users' requests in the same step. It would load the weights once, paying the same memory cost as for one user, and get 32 times the useful compute out of them. That moves the work back toward the compute-bound side, where the GPU is earning its keep. So the question for the rest of this part is how far batching can take us, and why decoding is so much worse than processing the prompt in the first place.</p>
+  </section>
+
+  <section id="why">
+    <h2><span class="num">02</span>Why generating text waits on memory</h2>
+    <p>To see why decoding is the bad case, we first need to know what the GPU is good at. Modern GPUs have <strong>tensor cores</strong>, hardware units built for exactly one operation: a multiply-accumulate on small tiles of a matrix, done extremely fast and in parallel, in a single instruction. Most deep learning compute is matrix multiplication. Every linear layer, every attention projection and every feed-forward block reduces to it, so dedicated silicon for that one operation pays off a great deal. But a tensor core can only run as fast as data reaches it, and that's the constraint that bites during generation.</p>
+
+    <p>Our request has two phases. Say the user's prompt is 2048 tokens long. Before the model writes anything, it processes the whole prompt in one go, a step called <strong>prefill</strong>. All 2048 tokens go through the model together, so a large batch of tokens gets multiplied against the same loaded weights, and each weight fetched is reused across thousands of tokens' worth of arithmetic. That's high arithmetic intensity, and prefill is comfortably compute-bound. Training has the same shape, which is why both run well.</p>
+
+    <p>Then the model starts writing the answer, and the picture inverts. In <strong>autoregressive decoding</strong> the model generates one token at a time, one per sequence per step, because each new token depends on the one before it. Every forward pass pulls the whole set of weights through memory (tens or hundreds of gigabytes for bigger models), and the growing KV cache comes along too. All of that is moved to compute output for typically one new token per sequence. You pay the full cost of moving the weights and get only a sliver of arithmetic per byte, so single-request decoding is memory-bandwidth-bound. Tensor cores finish their multiply-accumulate work almost instantly and then wait for the next chunk of weights to arrive from HBM.</p>
+
+    <h4 class="why">Why not buy a GPU with more FLOPs?</h4>
+    <p>Because decoding isn't waiting on FLOPs. If the arithmetic units are already idle most of the time, adding more of them leaves the wait exactly where it was, and the wait is most likely data arriving at 3.35 trillion bytes a second. What helps is, roughly, anything that reduces the bytes moved per token or raises the useful work done per byte, and batching is the first example. When several requests are batched together, one load of the weights is reused across all of their tokens in a single pass. That raises the useful compute per byte moved and pushes decoding back toward the compute-bound side of the ridge point, where the expensive tensor cores stop idling.</p>
+
+    <p>That word, the ridge point, is where the line between the two regimes sits, and so far we've only been waving at it. In the next section we write it down as a formula and then counts the bytes and FLOPs for our model.</p>
+  </section>
+
+  <section id="math">
+    <h2><span class="num">03</span>The one number that decides everything</h2>
+    <p>Everything so far has been about one ratio, so let's write it as an equation.</p>
+    <div class="eq-block">
+      <span>$$\text{Arithmetic Intensity} = \frac{\text{FLOPs}}{\text{Bytes moved}}$$</span>
+    </div>
+    <ul class="eq-explain">
+      <li><span class="sym">FLOPs</span> total floating-point operations the computation performs. The numerator: how much math you're asking the chip to do.</li>
+      <li><span class="sym">Bytes moved</span> total bytes read from and written to memory to perform that computation. The denominator: how much data has to physically travel.</li>
+      <li><span class="sym">Threshold</span> every GPU has a <strong>ridge point</strong>, its peak compute throughput divided by its peak memory bandwidth, in FLOPs/byte. Above that ridge point you're compute-bound, because the chip's math units are the limit. Below it you're memory-bound, because the chip finishes the math and then waits on data.</li>
+      <li><span class="sym">Practical read</span> operations that reuse each loaded byte many times, like the big batched matrix multiplications in most of training, sit above the ridge point. Operations that load a lot of data to do comparatively little math with it, like a single-token decoding step, sit well below it. That's the formal version of "LLM inference is memory-bound."</li>
+    </ul>
+
+    <p>A picture makes the ridge point easier to hold on to. The chart below is called a roofline. Both axes are logarithmic. Arithmetic intensity runs along the horizontal axis, and the vertical axis shows how many FLOP/s an operation achieves. Two lines come straight off the GPU's datasheet and form a roof over everything: a diagonal for peak memory bandwidth, because at low intensity the data supply caps your speed, and a flat ceiling for peak compute. They meet at the ridge point. Anything to the left of it is memory-bound, and anything to the right is compute-bound.</p>
+
+<div class="diagram">
+      <div class="diagram-title">The roofline — one chart that tells you which resource you are wasting
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 380" xmlns="http://www.w3.org/2000/svg">
+        <line x1="86" y1="296" x2="656" y2="296" stroke="rgba(255,255,255,.28)" stroke-width="1.4"/>
+        <line x1="86" y1="56"  x2="86"  y2="296" stroke="rgba(255,255,255,.28)" stroke-width="1.4"/>
+        <text x="371" y="368" text-anchor="middle" font-size="11" class="dim">arithmetic intensity — FLOPs per byte moved (log)</text>
+        <text x="22" y="176" font-size="11" class="dim" transform="rotate(-90 22 176)" text-anchor="middle">achieved FLOP/s (log)</text>
+
+        <!-- the roof -->
+        <line x1="86" y1="296" x2="386" y2="96" stroke="#fbbf24" stroke-width="2.5"/>
+        <line x1="386" y1="96" x2="656" y2="96" stroke="#f472b6" stroke-width="2.5"/>
+        <text x="196" y="176" font-size="10.5" fill="#fbbf24" transform="rotate(-33.7 196 176)" text-anchor="middle">slope = peak memory bandwidth</text>
+        <text x="524" y="86" text-anchor="middle" font-size="10.5" fill="#f472b6">peak compute — tensor cores saturated</text>
+        <text x="371" y="70" text-anchor="middle" font-size="9.5" class="dim">nothing can run above this line</text>
+
+        <!-- ridge -->
+        <line x1="386" y1="96" x2="386" y2="296" stroke="rgba(255,255,255,.2)" stroke-width="1.2" stroke-dasharray="4 4"/>
+        <circle cx="386" cy="96" r="5" fill="#e9e9ef" class="pulse-node"/>
+
+        <!-- plotted operations, sitting on the roof -->
+        <circle cx="132" cy="265" r="6" fill="#4f8cff"/>
+        <text x="144" y="262" font-size="10.5" fill="#4f8cff">decode, batch 1</text>
+        <text x="144" y="276" font-size="9.5" class="dim">one token per weight load</text>
+
+        <circle cx="242" cy="192" r="6" fill="#4f8cff"/>
+        <text x="254" y="189" font-size="10.5" fill="#4f8cff">decode, batch 32</text>
+        <text x="254" y="203" font-size="9.5" class="dim">same weights, 32× the useful work</text>
+
+        <circle cx="500" cy="96" r="6" fill="#34d399"/>
+        <text x="500" y="122" text-anchor="middle" font-size="10.5" fill="#34d399">prefill / training</text>
+        <text x="500" y="136" text-anchor="middle" font-size="9.5" class="dim">thousands of tokens per weight load</text>
+
+        <!-- batching slides you ALONG the roof, it does not lift you off it -->
+        <path d="M143,257 L231,200" stroke="#4f8cff" stroke-width="1.8" fill="none" opacity="0.8" class="flow-line"/>
+        <text x="150" y="228" font-size="9.5" fill="#4f8cff" transform="rotate(-33 150 228)">batching</text>
+
+        <!-- regions annotated under the axis, where nothing can collide -->
+        <line x1="90" y1="312" x2="380" y2="312" stroke="#fbbf24" stroke-width="1.4"/>
+        <text x="235" y="330" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fbbf24">MEMORY-BOUND</text>
+        <text x="235" y="344" text-anchor="middle" font-size="9.5" class="dim">math units idle, waiting on data</text>
+
+        <line x1="392" y1="312" x2="652" y2="312" stroke="#f472b6" stroke-width="1.4"/>
+        <text x="522" y="330" text-anchor="middle" font-size="10.5" font-weight="700" fill="#f472b6">COMPUTE-BOUND</text>
+        <text x="522" y="344" text-anchor="middle" font-size="9.5" class="dim">bandwidth to spare, math is the limit</text>
+
+        <text x="386" y="330" text-anchor="middle" font-size="10.5" font-weight="700" fill="#e9e9ef">▲</text>
+        <text x="386" y="344" text-anchor="middle" font-size="9.5" fill="#e9e9ef">ridge</text>
+      </svg>
+      <div class="diagram-caption">Both axes are logarithmic, and the two straight lines come off a datasheet: the diagonal is peak memory bandwidth, the flat ceiling is peak compute. Where they meet is the <strong>ridge point</strong>, and which side of it an operation falls on is what "memory-bound" means. Batching doesn't lift decode off the roof. It slides decode along the roof toward the ridge, so the win is real but bounded: once you reach the ridge, more batching buys nothing. Prefill sits over on the right because it has high intensity inherently, and nobody had to batch it harder.</div>
+    </div>
+
+    <p>Now let's count, for our 8B model. Here's code that computes the bytes and FLOPs of one decode step on an H100, at batch sizes 1, 8, 32 and 256. Each step reads every weight (<code>w_bytes</code>) plus the KV cache of every sequence in the batch, each holding 4096 tokens (<code>kv_tok * CTX * B</code>), and does 2 FLOPs per parameter per token. Ridge is the H100's peak FLOP/s divided by its peak bytes/s. A final line computes the 2048-token prefill from section 2 for comparison. The per-token KV figure comes from a formula we'll derive in section 4, so take it as given for now.</p>
+
+<details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Count the bytes and the FLOPs in one decode step, at batch 1 and batch 256</span>
+      </summary>
+<pre><code># Llama-3-8B shapes, fp16 weights, decoding on one H100.
+P = 8.03e9                      # parameters
+L, KVH, HD = 32, 8, 128         # layers, KV heads (GQA), head dim
+CTX = 4096                      # tokens already sitting in the cache
+
+w_bytes = P * 2                 # every weight is read on every step
+kv_tok = L * KVH * HD * 2 * 2   # K and V, fp16, per token, per seq
+ridge = 989e12 / 3.35e12        # peak FLOP/s divided by peak bytes/s
+
+print(&quot;weights&quot;, w_bytes / 1e9, &quot;GB   KV per token&quot;, kv_tok / 1024, &quot;KB&quot;)
+print(&quot;ridge point&quot;, round(ridge, 1), &quot;FLOPs/byte\n&quot;)
+
+for B in (1, 8, 32, 256):
+    moved = w_bytes + kv_tok * CTX * B   # weights plus the whole cache
+    flops = 2 * P * B                    # 2 FLOPs per param per token
+    ai = flops / moved
+    side = &quot;compute&quot; if ai &gt; ridge else &quot;MEMORY&quot;
+    print(f&quot;batch {B:4d}  {moved/1e9:6.1f} GB moved  AI {ai:6.2f}&quot;
+          f&quot;  {side}-bound&quot;)
+
+pre = 2 * P * 2048 / (w_bytes + kv_tok * 2048)   # a 2048-token prefill
+print(f&quot;\nprefill 2048   AI {pre:6.2f}  compute-bound&quot;)</code></pre>
+      <div class="tryit-out">At batch 1 the intensity is <code>0.97</code> FLOPs per byte, close to our estimate of about one. Batch 32 gets <code>15.46</code>, and batch 256 gets <code>26.78</code>. Eight times the batch from 32 to 256 bought only 1.7x the intensity, and the middle column explains why. The weights are a fixed <code>16.06</code> GB, but the KV cache costs <code>128.0</code> KB per token per sequence, so its bytes grow with the batch exactly as the useful work does. Around batch 30 the cache bytes overtake the weight bytes, and past that you're mostly paying to re-read cache. Every decode row is still memory-bound against an H100 ridge of <code>295.2</code>. Last, one pass over 2048 prompt tokens gets <code>2014.33</code>, the only number here that clears the ridge.</div>
+    </details>
+
+    <p>Read the output as a story about batching. Going from batch 1 to batch 32 does move the point up the roof, from 0.97 to 15.46. But the roof is steep to climb and batching alone never gets us near 295, because every extra sequence brings its own cache that has to be read as well. Prefill gets there for free, since its thousands of tokens share a single read of the weights.</p>
+
+    <h4 class="why">If batching stops helping, what does?</h4>
+    <p>Anything that cuts the bytes. Shrinking the weights shrinks the largest term in the denominator, and that's the idea behind quantization in section 6. Managing the KV cache well lets us fit more sequences into the batch without wasting memory, and that's the subject of the next section. You don't need to memorize ridge-point numbers for specific chips. What matters is that this ratio, and not raw FLOPs or raw bandwidth taken alone, decides where your bottleneck is.</p>
+  </section>
+
+  <section id="inference-stack">
+    <h2><span class="num">04</span>Serving many users: the KV cache and what's built around it</h2>
+    <p>Training happens once, and inference happens continuously, at whatever your product's traffic is, for the whole life of the model in production. That's why the serving stack gets so much systems attention. Its pieces all trace back to one object, the KV cache, so we start there.</p>
+
+    <h3 id="the-kv-cache-grows-with-every-token">The KV cache grows with every token</h3>
+    <p>Chapter 08 covered the mechanism. During generation, every new token's attention needs the key and value vectors of all the tokens before it, so instead of recomputing them at each step the model stores them. That store is the KV cache. What matters for systems is its size. For each request it grows linearly with the number of tokens, the number of layers, the number of heads and the head dimension, and the stored numbers come in two kinds (keys and values) at a given precision in bytes. For long conversations or long contexts it routinely becomes the biggest consumer of GPU memory during serving, often larger than the model's own weights.</p>
+
+    <p>Here's code that applies that formula to our model. It has 32 layers, 8 KV heads and a head dimension of 128. The 8 comes from <strong>grouped-query attention</strong> (GQA), a design in which several query heads share one key/value head, so far fewer keys and values need storing. <code>kv_tok</code> is the cache per token, with the factor of 2 for K and V. A loop then asks, for four context lengths, how big the cache is for one sequence and for 32 at once, and flags the point where it overtakes the 16.1 GB of weights or overflows the 80 GB card. The final lines redo one case as if the model had 32 KV heads, which would be the plain multi-head attention (MHA).</p>
+
+<details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Size the KV cache from the formula and find where it overtakes the weights</span>
+      </summary>
+<pre><code># Llama-3-8B: 32 layers, 8 KV heads after GQA, head dim 128, fp16.
+L, KVH, HD, BY = 32, 8, 128, 2
+W_GB = 8.03e9 * BY / 1e9              # fp16 weights: 16.1 GB, and fixed
+
+kv_tok = L * KVH * HD * 2 * BY        # x2 because K and V are both cached
+print(&quot;KV per token per sequence:&quot;, kv_tok / 1024, &quot;KB&quot;)
+print(&quot;weights&quot;, round(W_GB, 1), &quot;GB on an 80 GB card\n&quot;)
+
+print(f&quot;{&#x27;ctx&#x27;:&gt;7} {&#x27;batch 1&#x27;:&gt;9} {&#x27;batch 32&#x27;:&gt;10}&quot;)
+for ctx in (2048, 8192, 32768, 131072):
+    one = kv_tok * ctx / 1e9
+    b32 = one * 32
+    tag = &quot;&quot;
+    if b32 &gt; W_GB:
+        tag = &quot;1 seq &gt; weights&quot; if one &gt; W_GB else &quot;b32 &gt; weights&quot;
+    if b32 &gt; 80 - W_GB:
+        tag += &quot;  OOM&quot;
+    print(f&quot;{ctx:&gt;7} {one:8.1f}G {b32:9.1f}G  {tag}&quot;)
+
+mha = L * 32 * HD * 2 * BY * 32768 / 1e9   # the same model without GQA
+print(f&quot;\n32k ctx, 1 seq:  GQA {kv_tok*32768/1e9:.1f} GB&quot;
+      f&quot;   MHA {mha:.1f} GB&quot;)</code></pre>
+      <div class="tryit-out">The crossover arrives earlier than it feels like it should. At <code>128.0</code> KB per token per sequence, 32 concurrent requests at an 8k context need <code>34.4</code> GB of cache, more than double the <code>16.1</code> GB of weights that all 32 share. At 32k it's <code>137.4</code> GB and the card is long gone. A single 131,072-token sequence carries <code>17.2</code> GB by itself, more than the whole model. That last line shows what GQA buys: the same 32k sequence costs <code>17.2</code> GB under plain multi-head attention and <code>4.3</code> GB with GQA's 8 KV heads. That's a 4x cut to the thing that decides how many users fit on the box, and it's more than a modelling nicety.</div>
+    </details>
+
+    <p>So the cache is large, it grows unpredictably (nobody knows in advance how long an answer will be), and it has to live in the same 80 GB as the weights. Four techniques respond to a different part of that problem.</p>
+
+    <h3 id="pagedattention-no-memory-reserved-in-advance">PagedAttention: no memory reserved in advance</h3>
+    <p>The plain way to store a request's cache is one contiguous block of memory, sized for the longest sequence it might reach. That wastes a lot. Most requests probably never get that long, so most of the reserved memory goes unused, and because the block is contiguous, nobody else can use the unused part in the meantime.</p>
+
+    <p>Operating systems ran into this decades ago and solved it with virtual memory paging. <strong>PagedAttention</strong>, introduced with the vLLM serving system, applies the same idea to KV caches. Memory is divided into fixed-size blocks, or <em>pages</em>. A request's cache lives across blocks that needn't be next to each other, and a <strong>block table</strong> records which physical blocks hold which positions of each sequence. Fragmentation goes away, and memory is handed out exactly as needed instead of reserved upfront. As a bonus, sharing blocks between requests becomes cheap. That helps when many requests begin with the same system prompt.</p>
+
+    <h3 id="continuous-batching-no-waiting-for-stragglers">Continuous batching: no waiting for stragglers</h3>
+    <p>Batching gets a bit harder in practice because requests finish at very different lengths: a one-sentence answer ends long before a detailed explanation. With <em>static batching</em>, the server waits for a whole fixed-size batch to finish before starting the next. By then most of the batch is finished requests waiting on one straggler, and the capacity they freed is wasted.</p>
+
+    <p><strong>Continuous batching</strong>, also called in-flight batching, removes that lockstep. At every generation step, finished requests are evicted and new ones from the queue slot in immediately, so the batch's membership changes all the time. The GPU stays close to fully used instead of swinging between busy and mostly idle. It seems to be one of the largest practical throughput wins in serving, and it works for the reason from section 1: more real work per byte of weights moved is what pushes you toward compute-bound.</p>
+
+    <h3 id="flashattention-no-wasted-traffic-inside-attention">FlashAttention: no wasted traffic inside attention</h3>
+    <p>Those first two techniques decide where cache bytes live and who shares the batch. This one removes waste inside attention itself. <strong>FlashAttention</strong> computes exactly the same attention output as the standard formula. It changes nothing about the math. It changes the memory-access pattern.</p>
+
+    <p>A standard implementation computes the full <span>$n \times n$</span> matrix of attention scores and writes it out to HBM, the GPU's large but relatively slow main memory, before applying the softmax and multiplying by V. FlashAttention instead works through attention in small tiles that fit in SRAM, the GPU's much faster but much smaller on-chip memory, and the full score matrix never gets written out. During the backward pass it recomputes what it needs on the fly and doesn't store that intermediate matrix at all. This is called IO-aware exact attention: the same result with far less data shuffled between slow and fast memory. Since memory bandwidth is usually the real bottleneck, that turns into wall-clock speedups with no approximation.</p>
+
+    <h3 id="speculative-decoding-fewer-sequential-steps">Speculative decoding: fewer sequential steps</h3>
+    <p>One limit survives all of this. Decoding is sequential: token <span>$t{+}1$</span> can't exist until token <span>$t$</span> does, so you can't spread the steps of a single sequence across the GPU the way you can spread a batch of requests. Speculative decoding works around that indirectly. A small, cheap <strong>draft model</strong> proposes several tokens in a row. Then the large <strong>target model</strong> checks all of them in one parallel forward pass, because verifying a guess can be done in parallel even though generating one can't. It accepts the proposed tokens up to the first one that differs from what it would have produced anyway, then rejects and corrects from there.</p>
+
+    <h4 class="why">Is speculative decoding an approximation?</h4>
+    <p>No. Its output distribution is provably identical to running the large model alone, so this is an exact sampling procedure and no trade of quality for speed. It's faster whenever the draft model's guesses are often right, because you get several tokens of large-model-verified output for close to the cost of one large-model forward pass. We'll see in section 10 what happens when the guesses are wrong.</p>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="num">05</span>Putting the serving stack together</h2>
+    <p>None of these pieces is exotic by itself, and the interesting part is how they stack. Follow our request through. It's folded into a <strong>running batch</strong> immediately instead of waiting in a queue. Its <strong>KV cache</strong> lives in non-contiguous pages instead of one reserved block. Its <strong>attention computation</strong> never writes the full score matrix to slow memory. And optionally, a small model proposes tokens that the big model <strong>verifies in bulk</strong> instead of generating them one at a time.</p>
+
+<div class="diagram">
+      <div class="diagram-title">LLM serving pipeline — a request's path through a modern stack
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 900 260" xmlns="http://www.w3.org/2000/svg">
+        <rect x="10" y="100" width="120" height="60" rx="8" fill="#14141d" stroke="#4f8cff"/>
+        <text x="70" y="126" text-anchor="middle" font-size="12" font-weight="700" fill="#4f8cff">Incoming</text>
+        <text x="70" y="144" text-anchor="middle" font-size="11" fill="#e9e9ef">requests</text>
+
+        <path d="M132,130 L192,130" stroke="#4f8cff" stroke-width="2" fill="none" class="flow-line"/>
+        <path d="M182,124 L192,130 L182,136" stroke="#4f8cff" stroke-width="2" fill="none"/>
+
+        <rect x="196" y="90" width="150" height="80" rx="8" fill="#14141d" stroke="#f472b6"/>
+        <text x="271" y="118" text-anchor="middle" font-size="12" font-weight="700" fill="#f472b6">Continuous</text>
+        <text x="271" y="134" text-anchor="middle" font-size="12" font-weight="700" fill="#f472b6">batching</text>
+        <text x="271" y="153" text-anchor="middle" font-size="10.5" fill="#a3a3b2">scheduler</text>
+
+        <path d="M348,130 L408,130" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+        <path d="M398,124 L408,130 L398,136" stroke="#f472b6" stroke-width="2" fill="none"/>
+
+        <rect x="412" y="90" width="150" height="80" rx="8" fill="#14141d" stroke="#fbbf24"/>
+        <text x="487" y="118" text-anchor="middle" font-size="12" font-weight="700" fill="#fbbf24">Paged</text>
+        <text x="487" y="134" text-anchor="middle" font-size="12" font-weight="700" fill="#fbbf24">KV cache</text>
+        <text x="487" y="153" text-anchor="middle" font-size="10.5" fill="#a3a3b2">block table</text>
+
+        <path d="M564,130 L624,130" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+        <path d="M614,124 L624,130 L614,136" stroke="#fbbf24" stroke-width="2" fill="none"/>
+
+        <rect x="628" y="90" width="150" height="80" rx="8" fill="#14141d" stroke="#818cf8"/>
+        <text x="703" y="118" text-anchor="middle" font-size="12" font-weight="700" fill="#818cf8">FlashAttention</text>
+        <text x="703" y="134" text-anchor="middle" font-size="11" fill="#a3a3b2">kernel</text>
+        <text x="703" y="153" text-anchor="middle" font-size="10.5" fill="#a3a3b2">SRAM-tiled</text>
+
+        <path d="M780,130 L840,130" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+        <path d="M830,124 L840,130 L830,136" stroke="#34d399" stroke-width="2" fill="none"/>
+
+        <rect x="844" y="100" width="50" height="60" rx="8" fill="#14141d" stroke="#34d399"/>
+        <text x="869" y="134" text-anchor="middle" font-size="20" fill="#34d399">→</text>
+
+        <rect x="412" y="10" width="150" height="56" rx="8" fill="#14141d" stroke="#f87171" stroke-dasharray="4 4"/>
+        <text x="487" y="32" text-anchor="middle" font-size="11" font-weight="700" fill="#f87171">Speculative decode</text>
+        <text x="487" y="48" text-anchor="middle" font-size="10" fill="#a3a3b2">draft → verify (optional)</text>
+        <path d="M487,66 L487,88" stroke="#f87171" stroke-width="1.6" fill="none" stroke-dasharray="3 4" class="flow-line"/>
+
+        <text x="271" y="210" text-anchor="middle" font-size="10.5" fill="#a3a3b2">requests join/leave the</text>
+        <text x="271" y="224" text-anchor="middle" font-size="10.5" fill="#a3a3b2">batch every step, not in lockstep</text>
+
+        <text x="487" y="210" text-anchor="middle" font-size="10.5" fill="#a3a3b2">fixed-size blocks,</text>
+        <text x="487" y="224" text-anchor="middle" font-size="10.5" fill="#a3a3b2">no contiguous reservation</text>
+
+        <text x="703" y="210" text-anchor="middle" font-size="10.5" fill="#a3a3b2">recompute, don't store —</text>
+        <text x="703" y="224" text-anchor="middle" font-size="10.5" fill="#a3a3b2">stay in fast on-chip memory</text>
+      </svg>
+      <div class="diagram-caption">Each stage attacks a different bottleneck. Scheduling attacks GPU idle time, the paged KV cache attacks memory fragmentation, FlashAttention attacks wasted memory traffic inside attention, and speculative decoding (dashed, optional) attacks the number of sequential steps itself. They compose, and production stacks run all four together. A kernel, in the labels, is a function that runs on the GPU.</div>
+    </div>
+
+    <p>It took a few years to get here. Early transformer serving ran full-precision forward passes, materialized the entire attention matrix in memory and processed one fixed batch at a time. That became wasteful and then impossible as context lengths and models grew. FlashAttention (2022) computed the same attention without writing the huge intermediate matrix to slow memory, PagedAttention (vLLM, 2023) managed the KV cache with OS-style virtual paging, and continuous batching slotted requests in and out at every step. Modern stacks add quantization, speculative decoding and MoE-aware routing on top of that. These days the field increasingly optimizes cost per token, because a model that is 2x faster but not cheaper per useful token doesn't change the economics.</p>
+
+    <p>Every technique so far left the model alone and arranged how it runs. But the biggest term in our byte count was the weights themselves, 16.06 GB moved on every step, and we can attack those directly by storing them in fewer bits.</p>
+  </section>
+
+  <section id="compression">
+    <h2><span class="num">06</span>Moving fewer bytes: quantization, distillation, pruning</h2>
+    <p><strong>Quantization</strong> reduces the numeric precision used to store and compute with weights, and sometimes activations (the intermediate values the layers pass along). Instead of FP16, you represent each weight as an int8 or int4, an integer of 8 or 4 bits. Here's the idea in its simplest form. The code below takes a million random weights and squeezes them from 32 bits to 8. It picks a <strong>scale</strong> so that the largest weight maps to 127, divides every weight by the scale and rounds to the nearest integer (<code>q</code>, one byte each), then multiplies back by the scale (<code>back</code>) to see what the model would effectively use. The last two lines measure the damage.</p>
+
+<details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Store a million weights in 8 bits instead of 32</span>
+      </summary>
+<pre><code>import numpy as np
+
+rng = np.random.default_rng(0)
+w = rng.normal(0, 0.02, 1_000_000).astype(np.float32)   # fake weights
+
+scale = np.abs(w).max() / 127                 # largest weight maps to 127
+q = np.round(w / scale).astype(np.int8)       # 1 byte per weight
+back = q.astype(np.float32) * scale
+
+print(f&quot;float32: {w.nbytes / 1e6:.1f} MB   int8: {q.nbytes / 1e6:.1f} MB&quot;)
+print(f&quot;mean absolute error per weight: {np.abs(w - back).mean():.6f}&quot;)
+print(f&quot;typical weight size:            {np.abs(w).mean():.6f}&quot;)</code></pre>
+      <div class="tryit-out">Memory drops from 4.0 MB to 1.0 MB, and the average weight changes by <code>0.000186</code>. The typical weight has a size of about <code>0.016</code>, so the rounding error is around 1% of it. These are neat random numbers, and real trained weights are probably less well-behaved, so treat this as a best case.</div>
+    </details>
+
+    <p>A quarter of the memory for about 1% error looks like a pretty good bargain. In practice there are two ways to quantize a model. <strong>Post-training quantization (PTQ)</strong> takes an already-trained model and quantizes it afterward. A calibration step runs a small representative dataset through the model to pick good scaling factors for mapping continuous weight values into the reduced integer range. <strong>Quantization-aware training (QAT)</strong> instead simulates quantization during training itself, so the weights adapt to tolerate the reduced precision. It's generally more accurate at very low bit-widths, at the cost of retraining or fine-tuning where PTQ just post-processes a finished checkpoint.</p>
+
+    <h4 class="why">Why do int4 weights barely hurt an LLM?</h4>
+    <p>Weight-only int8 or int4 quantization works surprisingly well for LLM inference specifically, and the explanation follows from everything above. Inference is memory-bandwidth-bound, so shrinking the weights shrinks exactly the thing you're bottlenecked on: bytes moved through memory. Keeping the activations at higher precision keeps the actual arithmetic reasonably accurate. You get most of the speed and memory benefit without touching the more precision-sensitive parts of the computation.</p>
+
+    <p>The one place the bargain breaks is the scale. In the first experiment a single scale covered every weight. Real LLMs often have a few outlier channels with much larger weights, and an outlier sets the scale for everyone else. The next experiment builds a 512x512 weight matrix, makes row 7 forty times larger than the rest, and quantizes it two ways. <code>per_channel=False</code> uses one scale for the whole tensor, and <code>per_channel=True</code> gives each row its own. For each, it prints the largest and mean error, and how many of the 255 available int8 codes an ordinary row (row 0) ends up using.</p>
+
+<details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Quantize a weight matrix to int8 and watch one outlier row wreck the rest</span>
+      </summary>
+<pre><code>import torch
+torch.manual_seed(0)
+
+W = torch.randn(512, 512) * 0.02  # a plausible weight matrix
+W[7] *= 40                        # one outlier channel -- real LLMs
+                                  # have them, and they set the scale
+
+def fake_quant(w, per_channel):
+    if per_channel:
+        amax = w.abs().amax(dim=1, keepdim=True)  # one scale per row
+    else:
+        amax = w.abs().max()                      # one scale for all
+    s = amax / 127                                # symmetric int8
+    q = torch.clamp((w / s).round(), -127, 127).to(torch.int8)
+    return q, q.float() * s                       # dequantised back
+
+for name, pc in ((&quot;per-tensor&quot;, False), (&quot;per-channel&quot;, True)):
+    q, deq = fake_quant(W, pc)
+    err = (W - deq).abs()
+    codes = q[0].unique().numel()   # distinct levels a normal row uses
+    print(f&quot;{name:12s} q {tuple(q.shape)} {q.dtype}&quot;)
+    print(f&quot;  max err {err.max():.5f}  mean err {err.mean():.6f}&quot;
+          f&quot;  row 0 uses {codes:3d}/255 codes&quot;)
+
+print(&quot;fp16&quot;, W.numel() * 2 / 1e6, &quot;MB  -&gt;  int8&quot;, W.numel() / 1e6, &quot;MB&quot;)</code></pre>
+      <div class="tryit-out">One row ruins it for everyone. Row 7 is 40x larger than the rest, and under a single per-tensor scale it alone sets the step size, so row 0, a completely ordinary row, lands on only <code>8</code> of the 255 available int8 codes. Give every row its own scale and row 0 uses <code>132</code>, and mean absolute error drops from <code>0.005321</code> to <code>0.000139</code>, 38x better for the cost of one extra float per row. Max error barely moves (<code>0.01066</code> to <code>0.01065</code>) because it belongs to the outlier row itself, and that row is poorly served either way, so the mean is the number to look at here. Both versions cost the same <code>0.262144</code> MB, half of fp16.</div>
+    </details>
+
+    <p>Quantization changes how many bits each weight has. Two other techniques change which weights exist at all. <strong>Distillation</strong> trains a smaller "student" model to match the behavior of a larger "teacher", typically on the teacher's output distribution and not only on hard labels. That gives a smaller, cheaper model, and no longer a compressed version of the same one. <strong>Pruning and sparsity</strong> remove weights, or whole structural components like attention heads and neurons, that contribute little to the output. Unstructured sparsity removes individual scattered weights. That's hard to accelerate on standard hardware without specialized kernels. Structured sparsity removes aligned blocks, which is easier to get speedups from.</p>
+
+    <p>These three techniques complement each other. A real deployment might well run a distilled model that's also quantized and has some structural sparsity applied, stacking savings from three directions at once. Quantization has a cousin on the training side, where the question is how few bits you can use while the model is still learning, and that's next.</p>
+  </section>
+
+  <section id="mixed-precision">
+    <h2><span class="num">07</span>Mixed precision: doing arithmetic in fewer bits</h2>
+    <p>Numbers in deep learning don't need to be stored or computed at the same precision everywhere. Fewer bits is a direct, compounding win. There's less memory to store and move, and that matters a great deal given the bandwidth story above. Arithmetic is faster too, since modern GPUs execute lower-precision matrix multiplications at higher throughput than full FP32. To compare the formats we need one fact about floating-point numbers. Each one is stored as an <em>exponent</em>, which sets how large or small the number can be (its range), plus a <em>mantissa</em>, which holds the significant digits (its precision). The formats differ in how many of their bits go to each.</p>
+
+    <ul>
+      <li><strong>FP32</strong> (32-bit float) is the traditional default: high precision and high range, but expensive in both memory and compute.</li>
+      <li><strong>FP16</strong> (16-bit float) halves both. But its exponent range is narrow, so very large or very small values (common in gradients) can overflow or underflow to zero during training. That historically required <em class="term">loss scaling</em>: multiply the loss by a constant before backprop, then divide it back out so that small gradient values stay representable.</li>
+      <li><strong>BF16</strong> (bfloat16) also uses 16 bits but divides them differently. It keeps FP32's wide exponent range and gives up mantissa precision instead. That wider range is why BF16 tends to be numerically stable for training without loss scaling at all. It represents the same enormous dynamic range as FP32, just less precisely, and range turns out to matter far more than precision for training stability.</li>
+      <li><strong>FP8</strong> pushes further. It's mostly used for inference, and increasingly for training the least precision-sensitive parts of the computation, trading more precision for more speed and memory savings.</li>
+    </ul>
+
+    <p>In practice the precision is mixed and not uniform. A master copy of the weights stays in FP32, or at least higher precision, for the optimizer's accumulation step, where small updates need to register. Forward and backward passes themselves run in FP16 or BF16. That gives you the speed and memory benefit of low precision where it barely costs anything, in the bulk of the matrix multiplications, and it protects the one part of training that is sensitive to precision loss: the accumulation of many small weight updates over time.</p>
+
+    <p>All of this assumed the model still fits on one GPU. For a frontier model it doesn't, and the rest of the chapter is about what to do then.</p>
+  </section>
+
+  <section id="training-parallelism">
+    <h2><span class="num">08</span>Training: splitting the model across devices</h2>
+    <p>A frontier model's parameters, gradients and optimizer state don't fit on one GPU. Even if they did, training on a single GPU would take years. So the work has to be divided, and there are four common ways to divide it. They answer different questions about <em>what to split</em>, and real training runs use several at once because each one alone hits a wall.</p>
+
+    <h3 id="data-parallelism-split-the-batch">Data parallelism: split the batch</h3>
+    <p><strong>Data parallelism</strong> is the simplest. You replicate the entire model on every GPU, split the training batch across them, run forward and backward passes independently, then average the gradients before the optimizer step. It scales well, perhaps better than any other strategy here, as long as the model fits in one GPU's memory, and the communication cost is one gradient sync per step. It does nothing when the model is too big for a single device, and that's the situation for every modern frontier LLM.</p>
+
+    <h3 id="tensor-parallelism-split-each-matrix">Tensor parallelism: split each matrix</h3>
+    <p>So the next idea is to split the model itself. <strong>Tensor parallelism</strong> splits individual matrix multiplications across devices. If you split a weight matrix by columns, each GPU computes part of the output, and the partial results get exchanged mid-layer. You need this when a single layer's weights are too large for one GPU, and data parallelism offers no way around that. The price is that GPUs now communicate within every single layer, so it demands very fast interconnects, and devices doing tensor parallelism are usually on the same physical node.</p>
+
+    <h3 id="pipeline-parallelism-split-the-layers">Pipeline parallelism: split the layers</h3>
+    <p><strong>Pipeline parallelism</strong> splits the layers across devices instead. GPU 1 holds layers 1 to 8, GPU 2 holds layers 9 to 16, and activations flow through like an assembly line. It needs far less bandwidth than tensor parallelism, since only activations cross stage boundaries, so it's a bit more workable over the slower links between nodes. The catch is the <em class="term">pipeline bubble</em>: early stages sit idle waiting for the first microbatch (a small slice of the batch) to reach later stages, and later stages sit idle waiting for the first to start. You need many microbatches in flight to keep the idle fraction small.</p>
+
+    <h3 id="expert-parallelism-split-the-experts">Expert parallelism: split the experts</h3>
+    <p><strong>Expert parallelism</strong> is specific to mixture-of-experts (MoE) models, where a layer's feed-forward part is divided into many separate sub-networks called experts. Different experts live on different devices, and a router sends each token over the network, mid-forward-pass, to only the handful of experts it needs. This scales total parameter count far beyond what any single accelerator could hold, while compute per token stays roughly fixed. The extra capacity costs communication and leaves compute cost alone.</p>
+
+    <h4 class="why">Why combine them?</h4>
+    <p>Each strategy solves a different constraint, and none is sufficient alone at real scale. A frontier training run typically uses tensor parallelism within a node, where links are fastest, pipeline parallelism across nodes, and data parallelism across many copies of that whole pipeline. Expert parallelism sometimes layers on top for MoE architectures. Stacking them is how a few thousand GPUs become one coherent training job. Even then, data parallelism's copies carry a waste of their own, and that's the next section.</p>
+  </section>
+
+  <section id="zero-fsdp">
+    <h2><span class="num">09</span>ZeRO and FSDP: sharding what data parallelism duplicates</h2>
+    <p>Plain data parallelism has a wasteful property. Every replica holds a full copy of three things: the model's parameters, its gradients and its optimizer state. For Adam, that optimizer state is itself roughly twice the size of the parameters, because it stores momentum and variance terms for every weight. For a large model, that redundancy alone can make data parallelism impossible before compute even comes into it.</p>
+
+    <p><strong>ZeRO</strong> (Zero Redundancy Optimizer), and its widely used implementation in PyTorch's <strong>FSDP</strong> (Fully Sharded Data Parallel), attacks exactly that redundancy. Instead of every device holding a full copy, each of the three things is <em class="term">sharded</em>, meaning split into pieces across the data-parallel devices. Each device permanently holds only its own shard. When a layer's full parameters are needed for a forward or backward computation, the devices briefly gather the missing pieces from each other, use them, and discard them again instead of keeping a persistent full copy.</p>
+
+    <p>What this buys you is significant. You can train models far larger than any single GPU's memory could hold, using ordinary data-parallel-style training, without hand-designing a tensor-parallel or pipeline-parallel split of the architecture. It doesn't replace tensor or pipeline parallelism at the largest scales, and you still combine them, but it removes a lot of unnecessary memory duplication that would otherwise push you into more complex parallelism sooner than needed. It's usually the first lever pulled before reaching for more invasive splitting strategies.</p>
+
+    <p>We now have a toolbox for both training and serving, and each tool has a price. The next section lines up the parallelism strategies side by side and then looks at three ways these optimizations fail in practice.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">10</span>Tradeoffs, and what breaks</h2>
+    <p>The table compares the four parallelism strategies from section 8 along the same four questions: what each one splits, how its devices communicate, when you need it and what it costs.</p>
+    <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th></th><th>Data parallel</th><th>Tensor parallel</th><th>Pipeline parallel</th><th>Expert parallel</th></tr></thead>
+        <tbody>
+          <tr><td>What's split</td><td>The batch, across full model replicas</td><td>Individual weight matrices, within a layer</td><td>Layers, across devices</td><td>Experts (MoE sub-networks), across devices</td></tr>
+          <tr><td>Communication pattern</td><td>One gradient all-reduce per step</td><td>Frequent, mid-layer, needs fast interconnect</td><td>Activations at stage boundaries only</td><td>Token routing to remote experts, mid-forward</td></tr>
+          <tr><td>When you need it</td><td>Model fits on one GPU, you want more throughput</td><td>A single layer's weights don't fit on one GPU</td><td>Many layers, moderate cross-node bandwidth</td><td>MoE architecture, want capacity without proportional compute</td></tr>
+          <tr><td>Main cost</td><td>Full parameter/optimizer redundancy per replica (unless sharded via ZeRO/FSDP)</td><td>Needs very fast, usually intra-node, links</td><td>Pipeline bubble — idle stages without enough microbatches in flight</td><td>Routing imbalance can stall some experts while others queue up</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Three failure modes show up in real deployments and in interview follow-ups. The first comes from stacking the compression techniques of section 6. Drop weight precision, then also use speculative decoding, then also run a distilled model: each step is individually reasonable, but together they can add up to a noticeably degraded model if nobody tracks the combined effect as well as each optimization in isolation. The second is that speculative decoding can backfire. If the draft model's proposals are often wrong, you pay for its forward passes and get little acceptance benefit back, so it helps exactly when draft and target agree often and can slow things down when they don't.</p>
+
+    <p>The third is <strong>MoE routing imbalance</strong>, a hard serving problem of its own. If the router sends a disproportionate share of tokens to a handful of popular experts, those devices become bottlenecks while others sit underused, and the expert-parallel overhead of shipping tokens to remote experts can dominate when routing isn't reasonably balanced. That one deserves a closer look, along with two other deployment settings.</p>
+  </section>
+
+  <section id="moe-edge-deploy">
+    <h2><span class="num">11</span>MoE serving, edge inference, and deployment tooling</h2>
+    <p>Serving a mixture-of-experts model adds two problems that dense models don't have. The first is routing imbalance. Some experts get far more tokens than others, because the router's choices are learned and not guaranteed to be even. That makes it a pure load-balancing problem, and an overloaded expert becomes a serving-time bottleneck no matter how fast the underlying hardware is. The second is expert-parallel communication overhead. When experts live on different devices, routed tokens physically travel over the network to reach their assigned expert, and results travel back. A dense model, with everything colocated, doesn't pay that cost. Both are why MoE serving infrastructure is meaningfully more complex than dense-model serving, even though MoE's whole appeal is cheaper compute per token at a given parameter count.</p>
+
+    <p><strong>Edge and mobile inference</strong> operates under a different constraint entirely. The question isn't how to maximize throughput across a data center's worth of GPUs, but how to fit and run anything useful inside a phone's tight memory, power and thermal budget. That usually means small models to begin with, aggressive quantization (often int4 or lower), and hardware-specific compiled kernels instead of a general-purpose serving framework. The optimization target shifts from throughput at scale to fitting inside a hard, fixed resource ceiling.</p>
+
+    <p><strong>ONNX and TensorRT-style deployment tools</strong> sit at yet another layer: graph compilation and kernel fusion. A trained model is a graph of many small operations: a matrix multiply, then an activation function, then a normalization, and so on. Run naively, each one is a separate kernel launch, with its own overhead and its own round trip to memory for the intermediate results. Compiling the graph lets the tool fuse adjacent operations into single kernels, skipping the memory round trip between them, and pick optimized kernel implementations for the specific target hardware. It's similar in spirit to what FlashAttention does for attention, applied across an entire model's computation graph.</p>
+
+    <p>With so many possible fixes, the remaining question is which one to reach for first.</p>
+  </section>
+
+  <section id="profiling">
+    <h2><span class="num">12</span>Profiling: find the bottleneck before you fix it</h2>
+    <p>The first diagnostic step, before applying any optimization from this chapter, is to find out whether the workload is compute-bound or memory-bound. Profiling tools report GPU utilization, memory bandwidth utilization and time spent in each kernel, and you can read the result two ways.</p>
+
+    <p>If compute utilization is high and bandwidth is low, you're compute-bound. Look at reducing FLOPs, with a smaller model, fewer layers or algorithmic changes, or at faster numeric formats. If bandwidth is near its ceiling and the compute units are idle, you're memory-bound. Look at reducing bytes moved through quantization, better batching and KV cache management, and leave alone the arithmetic that was never the bottleneck. Applying a compute-side fix to a memory-bound problem, or the reverse, is a common and completely avoidable mistake, so profile first and optimize second. That's the whole chapter in one habit, and the Summary below collects the pieces.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">13</span>Summary</h2>
+    <ol>
+      <li><strong>A GPU has two limits, compute and memory bandwidth,</strong> and whichever you hit first sets the speed. The fix for one does nothing for the other.</li>
+      <li><strong>Arithmetic intensity, FLOPs per byte moved, tells you which limit you're at.</strong> Compared with the GPU's ridge point (peak FLOP/s divided by peak bytes/s), it says whether you're compute-bound or memory-bound.</li>
+      <li><strong>Decoding is memory-bound.</strong> Each step reads every weight and the whole KV cache to produce one token per sequence, and for our 8B model that's about 1 FLOP per byte against an H100 ridge of 295.</li>
+      <li><strong>Prefill and training are compute-bound</strong> because thousands of tokens share a single read of the weights.</li>
+      <li><strong>Batching slides decode along the roof, then stops helping,</strong> because every extra sequence brings its own KV cache to read.</li>
+      <li><strong>The KV cache can outgrow the weights.</strong> GQA cuts it 4x for this model, PagedAttention stops it wasting reserved memory, and continuous batching keeps the batch full as requests come and go.</li>
+      <li><strong>FlashAttention and speculative decoding are exact.</strong> FlashAttention keeps the score matrix in fast on-chip memory, and speculative decoding verifies a draft model's tokens in one pass, with output identical to the large model alone.</li>
+      <li><strong>Quantization shrinks exactly what decoding is bottlenecked on.</strong> Weight-only int8 or int4 cuts bytes moved, but outlier channels need per-channel scales to avoid wrecking the other rows.</li>
+      <li><strong>Mixed precision uses fewer bits where it's safe.</strong> BF16 keeps FP32's range for stability, and a higher-precision master copy protects the optimizer's small updates.</li>
+      <li><strong>Large training runs combine data, tensor, pipeline and expert parallelism,</strong> and ZeRO/FSDP removes the replicas' redundant copies of parameters, gradients and optimizer state.</li>
+      <li><strong>Optimizations stack, and so do their costs.</strong> Quantization, distillation and speculative decoding together can degrade quality, MoE routing can be imbalanced, and a bad draft model slows decoding. Profile first, optimize second.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">14</span>Build this</h2>
+    <p class="lede">The roofline turns "memory-bound" from a phrase you repeat into a place on a graph. Your GPU has one, and you can measure it yourself in an afternoon.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Measure your GPU's roofline with one matmul</span>
+        <span class="proj-meta">~3 hours · PyTorch + one NVIDIA GPU</span>
+      </div>
+      <p>Benchmark a single operation, <span>$y = Wx$</span>, across a sweep of batch sizes. That is the whole experiment: one frozen weight matrix, one growing batch, and the <strong>arithmetic intensity</strong> from section 03 worked out by hand from the shapes.</p>
+    <p>As the batch grows, the same loaded weights do more useful work per byte fetched. The operation walks out of one regime and into the other, and you get to watch it. This one needs a GPU. A free Colab T4 is enough.</p>
+      <ol class="proj-steps">
+        <li>Fix <span>$W$</span> at something like 4096×4096 in FP16. Sweep the batch size <span>$B$</span> over powers of two, from 1 up to whatever still fits in memory.</li>
+        <li>Time each size with <code>torch.cuda.Event</code>. Warm up first, average over many repeats, and call <code>torch.cuda.synchronize()</code> before you trust any timing.</li>
+        <li>Compute both quantities <strong>by hand from the shapes</strong> and skip the profiler. FLOPs is <span>$2 \cdot 4096 \cdot 4096 \cdot B$</span>. Bytes is the weight matrix plus the input and output activations, 2 bytes apiece. Divide one by the other.</li>
+        <li>Plot achieved FLOP/s against arithmetic intensity, both axes logarithmic. Then draw two straight lines from your GPU's datasheet: a diagonal at its peak memory bandwidth, and a flat ceiling at its peak FP16 throughput.</li>
+        <li>Now change one thing. Store <span>$W$</span> in int8, rerun the identical sweep, recompute intensity at 1 byte per weight, and plot the new points on the same axes.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> your measured points trace both roofs. At small <span>$B$</span> they climb the bandwidth diagonal. At large <span>$B$</span> they flatten out underneath the compute ceiling. The bend between the two is your GPU's <strong>ridge point</strong>, sitting where your own two datasheet lines cross. Throughput keeps rising with batch size until batching stops helping. That is the knee, and you found it by measurement rather than by argument.</div>
+      <div class="proj-stretch"><strong>What the change teaches.</strong> Halving the bytes per weight does not change the FLOP count at all. It slides every point to the right along the intensity axis. Watch which of them move. The small-batch points are pinned to the diagonal, so sliding right walks them up the bandwidth roof. The large-batch points were already pressed against the compute ceiling, so they have nowhere to go. That is the "why do int4 weights barely hurt an LLM" question from section 06, drawn rather than argued. It is also section 12's advice in one picture: which fix helps depends entirely on which side of the knee you started.</div>
+    </div>
+
+    <h3 id="where-this-runs-in-production">Where this runs in production</h3>
+    <p>Say you're standing up serving infrastructure for a chat product. Three decisions, in order:</p>
+
+    <ul>
+      <li>
+        <p><strong>The KV cache budget per GPU sets your concurrency ceiling.</strong> Work out your model's per-token cache size: layers × heads × head_dim × 2 for K and V × precision in bytes.</p>
+        <p>Multiply by your target max context length and expected concurrent conversations. That's how much GPU memory is spoken for by cache alone, before you've served a single request beyond what fits.</p>
+      </li>
+      <li><strong>Continuous batching determines how efficiently you use that concurrency.</strong> With static batching you leave a large fraction of GPU time on the table waiting for stragglers. With continuous batching you keep the batch close to full almost all the time.</li>
+      <li><strong>PagedAttention lets you hit the budget.</strong> No memory wasted on over-reserved, under-used contiguous blocks, and cheap cache sharing for a common system prompt across many concurrent users.</li>
+    </ul>
+
+    <p>Together these determine realized throughput: tokens served per second per GPU. Combine that with your GPU's hourly cost and you get <strong>cost-per-token</strong>.</p>
+
+    <p>That's the number that decides whether the product is economically viable at the traffic you expect. Not whether any single request feels fast in isolation.</p>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">15</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Is LLM inference compute-bound or memory-bound, and why does that matter?</summary>
+      <div class="qa-body"><p>Autoregressive decoding is usually memory-bandwidth-bound, not compute-bound. Each generation step moves the entire set of model weights (and the growing KV cache) through memory to compute output for typically just one new token per sequence — a lot of bytes moved for comparatively little arithmetic, i.e. low arithmetic intensity, which lands you below the GPU's compute/bandwidth ridge point. It matters because it tells you which class of optimization actually helps: reducing bytes moved (quantization, better cache management, batching) helps a memory-bound workload; reducing FLOPs alone does not, since the tensor cores were already sitting idle waiting on data, not on math.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is arithmetic intensity, in plain terms?</summary>
+      <div class="qa-body"><p>FLOPs of computation divided by bytes of data moved to support that computation. High arithmetic intensity means you're doing a lot of math per byte fetched, which tends to be compute-bound. Low arithmetic intensity means you're fetching a lot of data to do comparatively little math with it, which tends to be memory-bound. It's the single number that tells you which of the GPU's two hard limits — compute throughput or memory bandwidth — you're actually up against for a given operation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Explain PagedAttention and why it matters for serving.</summary>
+      <div class="qa-body"><p>Naive KV cache allocation reserves one contiguous block per request sized for the worst-case sequence length, which wastes memory (most requests don't reach that length) and fragments memory (that reserved space can't be reused for other requests in the meantime). PagedAttention, from the vLLM paper, borrows the OS virtual-memory idea of paging: the cache is divided into fixed-size blocks, a request's cache can live across non-contiguous blocks, and a block table tracks the mapping. This eliminates fragmentation, lets memory be allocated on demand rather than reserved upfront, and enables efficient sharing of cache blocks across requests — e.g. a shared system prompt — which directly increases how many concurrent requests you can serve out of a fixed pool of GPU memory.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does continuous batching improve GPU utilization over static batching?</summary>
+      <div class="qa-body"><p>Static batching waits for every request in a fixed batch to finish generating before starting the next batch, but requests finish at very different lengths — so for much of the batch's lifetime, the GPU is doing useful work for only the few requests still generating while capacity freed up by finished requests sits unused. Continuous batching evicts finished requests and admits new ones from the queue at every generation step instead of at fixed batch boundaries, keeping the batch close to full essentially continuously. Since memory-bound decode steps benefit hugely from batching (more useful compute extracted per byte of weights moved), keeping the batch full translates directly into much higher realized throughput.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does speculative decoding not change the output distribution, even though it's using a different, smaller model to help?</summary>
+      <div class="qa-body"><p>The draft model only proposes candidate tokens; it never gets to unilaterally decide what's actually output. The large target model verifies every proposed token in one parallel forward pass and only accepts a proposed token if it matches (via an exact, correct acceptance/rejection procedure) what the target model itself would have sampled. Anything the target model wouldn't have produced gets rejected and regenerated from the target model directly. The math guarantees the final sampled sequence has exactly the same distribution as running the target model alone — the draft model only affects how many large-model forward passes you need, not what gets generated.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Design a cost-efficient serving system for a high-traffic chat product. What do you actually decide, in order?</summary>
+      <div class="qa-body"><p>Start by profiling to confirm you're memory-bound at your expected sequence lengths and batch sizes — that dictates the rest of the priorities. Pick a quantization level (often int8 weights, sometimes int4) that shrinks memory traffic without unacceptable quality loss, calibrated on representative data. Use PagedAttention-style KV cache management sized against your target max context and expected concurrency, so memory isn't wasted on over-reserved blocks. Run continuous batching so the GPU stays close to fully utilized instead of oscillating with request completions. Use FlashAttention-class kernels so attention itself isn't burning extra memory bandwidth beyond what's structurally necessary. Consider speculative decoding if you have a cheap, reasonably accurate draft model available and users are latency-sensitive. Then measure realized tokens/second/GPU under realistic traffic, multiply by GPU hourly cost, and that gives cost-per-token — the number to actually optimize against, since it captures throughput, latency, and hardware cost together rather than any one of those in isolation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>You quantize a model, add speculative decoding, and serve a distilled version of it — and quality drops more than any single change would predict. What's going on, and how do you debug it?</summary>
+      <div class="qa-body"><p>Each optimization was validated in isolation, but their errors can compound rather than simply add: a distilled model already approximates the teacher's behavior, quantizing it further compounds that approximation, and if the draft model used for speculative decoding was itself calibrated against the original full-precision model, its acceptance behavior may now be miscalibrated against the new quantized-distilled target, changing acceptance rates and effectively changing what gets generated in edge cases. Debug by isolating variables — evaluate the distilled model alone, then distilled+quantized, then the full stack with speculative decoding, at each step measuring quality on the same eval set, to find where the compounding actually happens rather than assuming it's evenly distributed across all three changes.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">16</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/2205.14135" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness</div><div class="r-sub">Dao et al., 2022 — arXiv:2205.14135</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Efficient Memory Management for Large Language Model Serving with PagedAttention</div><div class="r-sub">Kwon et al., 2023 — the vLLM paper — arXiv:2309.06180</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1910.02054" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">ZeRO: Memory Optimizations Toward Training Trillion Parameter Models</div><div class="r-sub">Rajbhandari et al., 2019 — arXiv:1910.02054</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Fast Inference from Transformers via Speculative Decoding</div><div class="r-sub">Leviathan et al., 2022 — arXiv:2211.17192</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1710.03740" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Mixed Precision Training</div><div class="r-sub">Micikevicius et al., 2017 — arXiv:1710.03740</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/495" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Analyzing Memory Fragmentation in LLM Serving</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/781" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Micro-batch Inference Throughput Estimation</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/789" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Model FLOPs Utilization (MFU) Calculator</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/294" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Implement INT8 Quantization</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/233" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Inference Head Pruning for Transformers</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/160" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Mixed Precision Training</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">17</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/08-attention-transformers"><div class="rc-sec" style="color:var(--c-attention)">08 · Goes deep on this</div><div class="rc-title">Attention &amp; Transformers</div><div class="rc-hook">KV cache and FlashAttention introduced there — this page is the full systems-level treatment.</div></a>
+      <a class="related-card" href="/topics/10-llm-architecture-training"><div class="rc-sec" style="color:var(--c-llm)">10 · Related</div><div class="rc-title">LLM Architecture &amp; Training</div><div class="rc-hook">Quantization and serving were touched briefly there — deep dive here.</div></a>
+      <a class="related-card" href="/topics/04-neural-network-fundamentals"><div class="rc-sec" style="color:var(--c-nn)">04 · Prerequisite</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">Where mixed-precision basics and the training loop itself are introduced.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-interview)">24 · What changed next</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">Everything on this page, now running in production and being operated day to day.</div></a>
+      <a class="related-card" href="/attention-lab.html#paged"><div class="rc-sec" style="color:var(--accent-text)">Interactive</div><div class="rc-title">Attention Lab</div><div class="rc-hook">The PagedAttention block table, worked in real numbers — plus KV cache, MQA, GQA, MLA and FlashAttention.</div></a>
+    </div>
+  </section>

@@ -1,0 +1,738 @@
+---
+title: "LLM Inference at Scale"
+dek: "Follow one long prompt on a 70B model as the serving unit grows from a GPU to a fleet: why prefill and decode move to separate machines, when shipping the KV cache is cheaper than recomputing it, and how four-bit weights, shared adapters and expert parallelism fit around that."
+readingTime: "~35 min"
+prereqs: "prefill, decode and the four serving numbers (31), roofline and KV cache (23)"
+group: "Hands-on"
+label: "Chapter 38"
+description: "The 2025-26 production serving frontier: prefill/decode disaggregation and the break-even bandwidth that decides it, KV cache quantization and offload, multi-LoRA serving, FP8 and MXFP4, decode-time attention kernels, expert-parallel MoE and SLA-aware scheduling for goodput."
+---
+<section id="tldr">
+    <p>Imagine a chat product built on a 70-billion-parameter model. A user pastes in a long document, about 8,192 tokens, and asks a question about it. A couple of seconds later the first word of the answer appears, and the rest streams out at a steady pace. We'll follow that one request through the chapter, and the prompt will stay 8,192 tokens long the whole way so the numbers are easy to compare.</p>
+
+    <p>Page <a href="/topics/31-llm-inference-serving">31</a> explained what happens to that request on a single GPU server. The engine first runs <strong>prefill</strong>, one parallel pass over the whole prompt that builds the <strong>KV cache</strong>, the saved keys and values of every earlier token, so later steps don't have to recompute them. Then it runs <strong>decode</strong>, which produces one token at a time and re-reads the weights and the cache at every step. That page also gave us four numbers for judging a server: time to first token (TTFT), the gap between consecutive tokens (inter-token latency, or ITL), throughput (tokens per second across all users), and goodput (throughput that counts only the requests that met their latency target). Everything in it, continuous batching included, is about getting the most out of one machine.</p>
+
+    <p>A real service gets thousands of such requests a minute, and no single machine can hold that load, so the unit we reason about stops being a GPU and becomes a fleet of them. That raises three questions page 31 had no reason to ask. Where should the two phases run, given that they want opposite things from a GPU? How many bits should each stored number use, now that bytes are both the memory bill and the network bill? And how can hundreds of customer-specific variants of a model, or a model split into hundreds of experts, share the same hardware? Those are the questions of <strong>placement</strong>, <strong>precision</strong> and <strong>sharing</strong>.</p>
+
+    <p>One small calculation ties the answers together. Each token leaves behind some number of bytes of KV cache, and producing it cost some amount of compute. Dividing the first by the second gives a bandwidth, the link speed at which shipping the cache costs the same as recomputing it. We'll call it the <strong>break-even bandwidth</strong>, derive it in section 02, and use it again in section 03. If you need one sentence for an interview, it's this: at fleet scale you stop tuning a server and start deciding which bytes move, how wide they are, and who they belong to.</p>
+  </section>
+
+  <section id="fleet">
+    <h2><span class="num">01</span>What changes when the unit is a fleet</h2>
+
+    <p>Let's start from where page 31 left off. Continuous batching lets requests join and leave the batch at every step, so the GPU never waits for the slowest request to finish. Chunked prefill cuts a long prompt into pieces, so decode steps for other users can slip in between the pieces. Both interleave the two phases so that neither starves the other, and inside a single engine that's about the best you can do.</p>
+
+    <p>Even so, the two phases still share one device. When our 8,192-token prompt arrives, its prefill needs the GPU's <strong>streaming multiprocessors</strong> (SMs, the units that do the matrix arithmetic), its <strong>HBM</strong> bandwidth (high-bandwidth memory, where the weights and the cache live), and room in the pool of memory blocks that holds the KV cache. Everyone else's decode steps need those same three things. Chunking makes each piece of interference smaller and more even, but it can't remove it, because a prefill chunk and a decode step still run on the same hardware.</p>
+
+    <p>So the move at fleet scale is to stop sharing. We give prefill its own GPUs, give decode its own GPUs, and pay a transfer cost to carry the KV cache from the first group to the second. Each pool can then be sized, sharded and batched for its own phase. Both layouts are drawn below, and the bottom row holds costs that we'll derive in the next section.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">One pool, or two pools and a wire
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+        <text x="24" y="26" font-size="12.5" font-weight="700" fill="#e9e9ef">AGGREGATED</text>
+        <text x="24" y="44" font-size="10.5" class="dim">both phases, same GPUs, same step</text>
+
+        <rect x="24" y="60" width="288" height="118" rx="8" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="1.4"/>
+        <text x="168" y="196" text-anchor="middle" font-size="10" class="dim">one pool · 8 GPUs</text>
+
+        <rect x="44" y="84" width="118" height="70" rx="6" fill="#f472b6" opacity="0.16"/>
+        <rect x="44" y="84" width="118" height="70" rx="6" fill="none" stroke="#f472b6" stroke-width="1.5"/>
+        <text x="103" y="112" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">prefill</text>
+        <text x="103" y="130" text-anchor="middle" font-size="9.5" class="dim">compute-bound</text>
+        <text x="103" y="144" text-anchor="middle" font-size="9.5" class="dim">wants low latency</text>
+
+        <rect x="174" y="84" width="118" height="70" rx="6" fill="#fbbf24" opacity="0.16"/>
+        <rect x="174" y="84" width="118" height="70" rx="6" fill="none" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="233" y="112" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">decode</text>
+        <text x="233" y="130" text-anchor="middle" font-size="9.5" class="dim">bandwidth-bound</text>
+        <text x="233" y="144" text-anchor="middle" font-size="9.5" class="dim">wants a big batch</text>
+
+        <text x="168" y="72" text-anchor="middle" font-size="9.5" fill="#f87171">they contend, every step</text>
+
+        <line x1="340" y1="16" x2="340" y2="206" stroke="rgba(255,255,255,.14)" stroke-width="1" stroke-dasharray="4 5"/>
+
+        <text x="372" y="26" font-size="12.5" font-weight="700" fill="#e9e9ef">DISAGGREGATED</text>
+        <text x="372" y="44" font-size="10.5" class="dim">separate pools, one transfer between them</text>
+
+        <rect x="372" y="84" width="114" height="70" rx="6" fill="#f472b6" opacity="0.16"/>
+        <rect x="372" y="84" width="114" height="70" rx="6" fill="none" stroke="#f472b6" stroke-width="1.5"/>
+        <text x="429" y="112" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">prefill pool</text>
+        <text x="429" y="132" text-anchor="middle" font-size="9.5" class="dim">sized for TTFT</text>
+        <text x="429" y="172" text-anchor="middle" font-size="10" class="dim">3 GPUs</text>
+
+        <path d="M492,119 L556,119" stroke="#34d399" stroke-width="2.2" fill="none" class="flow-line"/>
+        <text x="524" y="106" text-anchor="middle" font-size="9.5" fill="#34d399">KV cache</text>
+
+        <rect x="562" y="84" width="114" height="70" rx="6" fill="#fbbf24" opacity="0.16"/>
+        <rect x="562" y="84" width="114" height="70" rx="6" fill="none" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="619" y="112" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">decode pool</text>
+        <text x="619" y="132" text-anchor="middle" font-size="9.5" class="dim">sized for ITL</text>
+        <text x="619" y="172" text-anchor="middle" font-size="10" class="dim">5 GPUs</text>
+
+        <text x="372" y="196" font-size="9.5" fill="#34d399">each pool gets its own parallelism, batch size and hardware</text>
+
+        <line x1="24" y1="228" x2="676" y2="228" stroke="rgba(255,255,255,.14)" stroke-width="1"/>
+        <text x="24" y="250" font-size="10.5" class="dim">what the wire carries, for a 70B model with GQA and an 8,192-token prompt (section 02 derives all four):</text>
+        <text x="24" y="272" font-size="11" fill="#e9e9ef">2.5 GiB of KV</text>
+        <text x="170" y="272" font-size="11" fill="#34d399">NVLink 4: 0.2% of the prefill</text>
+        <text x="404" y="272" font-size="11" fill="#34d399">InfiniBand NDR: 1.9%</text>
+        <text x="588" y="272" font-size="11" fill="#f87171">25 GbE: 30%</text>
+        <text x="24" y="296" font-size="10.5" class="dim">The transfer is not a fixed tax. It is a fraction of the prefill that produced it, and the link decides the fraction.</text>
+      </svg>
+      <div class="diagram-caption">The left half is every single-pool server, including one running chunked prefill: the two phases share a box and one slows the other down. The right half buys independence with a wire. Whether that trade works is shown by the bottom row, where on NVLink the KV transfer costs under a percent of the prefill that produced it, and on a commodity network it costs about a third.</div>
+    </div>
+
+    <p>Read that bottom row carefully, because it says the transfer isn't a fixed tax. It's a fraction of the prefill that produced it, and the link between the pools decides the size of that fraction. Three more things change once you have a fleet, and each gets its own section. Bytes become the budget, since weights and cache can be stored in 8 or 4 bits, and that changes both what fits and what moves. One model has to serve many jobs, which means hundreds of adapters on one base or hundreds of experts across many GPUs. And throughput stops being the target, because a fleet is provisioned against a latency contract. That contract is called a <strong>service-level objective</strong> (SLO), for example "first token within 2 seconds and each later token within 25 milliseconds", and the metric that respects it is goodput. First, though, the question the diagram raises: when is that wire cheap enough to be worth it?</p>
+  </section>
+
+  <section id="disagg">
+    <h2><span class="num">02</span>Prefill/decode disaggregation, and where the crossover is</h2>
+
+    <p>Splitting the phases is attractive for two reasons that reinforce each other. Besides contending for the same GPU, the phases want different machines. Prefill is compute-bound (the arithmetic units are the limit) and latency-sensitive, so it prefers wide <strong>tensor parallelism</strong>, where each weight matrix is cut across several GPUs that all work on one prompt, together with small batches. Decode is bandwidth-bound (reading memory is the limit), so it prefers the largest batch the KV pool will hold. A single pool has to pick one configuration for both, while two pools can each be tuned for their own phase, and the prefill-to-decode GPU ratio can follow the traffic.</p>
+
+    <p>Published results agree that the win can be large. <strong><a href="https://arxiv.org/abs/2401.09670" target="_blank" rel="noopener">DistServe</a></strong> reports serving "7.4x more requests or 12.6x tighter SLO" than the systems it compared against, while staying inside the latency constraints for over 90% of requests. <strong>Splitwise</strong> reports "1.4x higher throughput at 20% lower cost", or "2.35x more throughput with the same cost and power budgets". At production scale, Moonshot's <strong>Mooncake</strong> describes a KV-cache-centric disaggregated architecture and reports that it "enables Kimi to handle 75% more requests" under real workloads, and NVIDIA's <strong>Dynamo</strong> packages the same idea as an orchestration layer above vLLM, SGLang and TensorRT-LLM.</p>
+
+    <p>Before reaching for any of this, read vLLM's own caveat. Its documentation states plainly that "Disaggregated prefill DOES NOT improve throughput", and it marks the feature experimental. What splitting buys is separate control over TTFT and inter-token latency, and it doesn't manufacture any extra FLOPs. If your problem is cost per million tokens and not a latency contract, a bigger batch is the right tool and disaggregation is the wrong one.</p>
+
+    <h3 id="the-cost-derived">The cost, derived</h3>
+
+    <p>Prefill produces a KV cache and decode consumes it, so splitting the phases means the cache has to cross a wire. How big is it? That size is fixed by the architecture. For every token, every layer stores one key vector and one vector of values for each <strong>KV head</strong>. Modern models use <strong>grouped-query attention</strong> (GQA), where several query heads share one KV head, so the number of KV heads is much smaller than the number of attention heads. Multiplying it all out gives the bytes per token:</p>
+
+    <div class="eq-block"><span>$$c \;=\; 2 \cdot n_{\text{layers}} \cdot n_{\text{kv heads}} \cdot d_{\text{head}} \cdot b \quad \text{bytes per token}$$</span></div>
+
+    <p>The leading 2 is for K and V, <span>$d_{\text{head}}$</span> is the length of each head's vector, and <span>$b$</span> is bytes per element, so 2 in FP16 and 1 in FP8 (an 8-bit floating-point format, covered in section 05). For our 70B model (80 layers, 8 KV heads, 128 numbers per head, 2 bytes each) that's 2 × 80 × 8 × 128 × 2 = 327,680 bytes, or 320 KiB per token. Our 8,192-token prompt therefore leaves 2.5 GiB of cache behind, and that's what has to cross the wire.</p>
+
+    <p>Now we need the cost of making it. Prefill on a prompt of <span>$L$</span> tokens takes roughly <span>$2PL$</span> floating-point operations, where <span>$P$</span> is the number of parameters active per token (each parameter takes part in one multiply and one add per token). If the pool sustains <span>$F$</span> FLOP/s and the link carries <span>$W$</span> bytes per second, the transfer as a fraction of the prefill is:</p>
+
+    <div class="eq-block"><span>$$\frac{t_{\text{transfer}}}{t_{\text{prefill}}} \;=\; \frac{cL / W}{2PL / F} \;=\; \frac{cF}{2PW}$$</span></div>
+
+    <h4 class="why">Why doesn't the prompt length matter?</h4>
+
+    <p>Look at the middle expression: <span>$L$</span> appears in both the numerator and the denominator and cancels. Both the cache and the compute grow linearly with the prompt, so a 100,000-token prompt pays the same proportional transfer cost as a 1,000-token one, and that's why disaggregation scales to long prompts. Attention makes prefill grow faster than linearly in <span>$L$</span>, so at very long contexts the ratio improves.</p>
+
+    <p>Setting the ratio to 1 gives the link speed at which shipping the cache costs as much as making it:</p>
+
+    <div class="eq-block"><span>$$W^{*} \;=\; \frac{cF}{2P}$$</span></div>
+
+    <p>This is the break-even bandwidth from the opening. It depends on the model and the GPU but not on the workload, so we can compute it once per deployment. The code below does that for three configurations, then prices four real interconnects for our 70B request. NVLink is the fast link between GPUs inside one server, PCIe is the bus between a GPU and the host machine, and InfiniBand and 25 GbE are networks between servers. The code uses an assumed prefill rate <code>F</code> of 4.0e14 FLOP/s, which is a placeholder: yours will differ, and the project at the end of the chapter shows how to measure it. Here <code>kv_per_token</code> is the equation above, and the last loop divides the 2.5 GiB by each link speed and compares that with the prefill time.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Compute the break-even bandwidth, then price four real interconnects against it</span>
+      </summary>
+<pre><code>import numpy as np
+
+# KV bytes per token = 2 (K and V) x layers x kv_heads x head_dim x dtype
+def kv_per_token(layers, kv_heads, head_dim, nbytes):
+    return 2 * layers * kv_heads * head_dim * nbytes
+
+F = 4.0e14        # assumed achieved prefill rate, FLOP/s. Yours differs.
+
+# name, layers, kv_heads, head_dim, bytes/elem, params active per token
+cfgs = [(&quot;Llama-3.1-8B &quot;, 32, 8, 128, 2,  8.0e9),
+        (&quot;Llama-3.1-70B&quot;, 80, 8, 128, 2, 70.0e9),
+        (&quot;70B, FP8 KV  &quot;, 80, 8, 128, 1, 70.0e9)]
+
+print(&quot;model          KV per token   break-even link&quot;)
+for name, L, h, d, nb, P in cfgs:
+    c = kv_per_token(L, h, d, nb)
+    print(f&quot;{name}   {c/1024:6.0f} KiB     {c*F/(2*P)/1e9:6.2f} GB/s&quot;)
+
+c70 = kv_per_token(80, 8, 128, 2)
+print(&quot;\n70B, an 8k-token prompt: KV =&quot;,
+      round(c70 * 8192 / 2**30, 2), &quot;GiB to move.&quot;)
+print(&quot;shipping it costs this share of the prefill that made it:&quot;)
+for link, bw in [(&quot;NVLink 4, one direction&quot;, 450e9),
+                 (&quot;PCIe Gen5 x16          &quot;, 64e9),
+                 (&quot;InfiniBand NDR 400G    &quot;, 50e9),
+                 (&quot;25 GbE                 &quot;, 3.125e9)]:
+    print(f&quot;  {link} {c70*F/(2*70e9*bw)*100:7.1f} %&quot;)</code></pre>
+      <div class="tryit-out">The break-even for the 70B is <code>0.94 GB/s</code>, and every datacentre interconnect sits one to three orders of magnitude above it. Hence <code>0.2 %</code> on NVLink and <code>1.9 %</code> on InfiniBand NDR. At <code>25 GbE</code> it reads <code>30.0 %</code>, and disaggregation has stopped being free. The 8B's break-even is higher, <code>3.28 GB/s</code>, because a small model makes prefill cheap and the same transfer then looks expensive.</div>
+    </details>
+
+    <p>Start with the break-even column. For the 70B it's 0.94 GB/s, and every datacentre link in the list sits one to three orders of magnitude above that, so the transfer costs 0.2% of the prefill on NVLink and 1.9% on InfiniBand. At 25 GbE it's 30%, and disaggregation has stopped being free. Notice also that the 8B model has a higher break-even, 3.28 GB/s. A small model makes prefill cheap, which makes the same cache look expensive to move. In the FP8 row, halving <span>$b$</span> halves the break-even too.</p>
+
+    <p>Link bandwidths come from vendor specifications. NVLink 4 is listed at 900 GB/s total on an H100 SXM, which we've halved to get one direction. PCIe Gen5 x16 is 128 GB/s bidirectional, also halved. InfiniBand NDR is 400 Gb/s per port.</p>
+
+    <p>So when does disaggregation stop being worth it? Only the first of four cases is about bandwidth. A slow link is the obvious one, meaning anything within about 10x of <span>$W^{*}$</span>. Short prompts are another, because the per-transfer overhead isn't amortised and the prefill was cheap anyway. A small fleet is a third, because two pools of one GPU each can't rebalance, and a shift in traffic strands one of them. Uniform traffic is the last, since if no request is long enough to block anyone, chunked prefill has already solved the problem for free. In other words, disaggregation is the expensive answer to interference and chunked prefill is the cheap one, which page <a href="/topics/31-llm-inference-serving">31</a> covers. Chunked prefill may still be enough for you, so measure that it has run out before you buy the expensive answer.</p>
+
+    <p>Keep the break-even number in mind, because the same cache and the same quantity decide a completely different question next. If a cache is going to sit around, should it stay on the GPU, shrink, or go elsewhere?</p>
+  </section>
+
+  <section id="kv">
+    <h2><span class="num">03</span>The KV cache: make it narrower, or move it off the GPU</h2>
+
+    <p>There are two independent ways to shrink the GPU's KV bill. One changes the bytes per token, and the other changes where those bytes live. NVIDIA's <a href="https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/" target="_blank" rel="noopener">inference optimization guide</a> gives the size directly: "Size of KV cache per token in bytes = 2 * (num_layers) * (num_heads * dim_head) * precision_in_bytes". Under grouped-query attention the head count there means the number of <em>KV</em> heads, the <span>$n_{\text{kv heads}}$</span> from section 02. Three of the four terms are fixed by the architecture, and only the last, the precision, is yours to change.</p>
+
+    <h3 id="quantizing-the-cache">Quantizing the cache</h3>
+
+    <p><strong>Quantizing</strong> means storing each number in fewer bits, usually with a shared <strong>scale factor</strong> that stretches the small range of stored values back to the true range. Section 05 looks at the formats closely, so for now it's enough to know that FP8 is an 8-bit floating-point format. vLLM's <a href="https://docs.vllm.ai/en/stable/features/quantization/quantized_kvcache/" target="_blank" rel="noopener">quantized KV cache</a> supports <code>fp8_e4m3</code> and <code>fp8_e5m2</code>, which halves <span>$c$</span> compared with FP16. That doubles how many tokens fit in the block pool, and it also halves the break-even bandwidth from section 02.</p>
+
+    <p>Below eight bits the cache stops behaving like a generic tensor, because keys and values have different shapes of outliers. <strong>KIVI</strong> found that the two halves need opposite treatment: "the key cache should be quantized per-channel" while "the value cache should be quantized per-token". Per-channel means one scale for each column of the key matrix, and per-token means one scale for each row of the value matrix. With that asymmetry it reports 2-bit KV at "2.6x less peak memory" and "2.35x ~ 3.47x throughput". <strong>KVQuant</strong> attacks the same problem from the accuracy side and reports "&lt; 0.1 perplexity degradation with 3-bit quantization" (perplexity measures how surprised a model is by held-out text, and lower is better). It turns that into context length: "serving LLaMA-7B with a context length of up to 1 million on a single A100-80GB GPU".</p>
+
+    <p>Be careful with how you read those results. vLLM recommends calibrating FP8 KV scales and not leaving them at 1.0, and it notes that "some attention layer types (e.g. sliding-window) are more sensitive to KV-cache quantization". It publishes no blanket accuracy figure, and you shouldn't assume one either. KV quantization is the one compression on this page whose damage is invisible in a smoke test. It hurts long-context recall first, and a 200-token chat exchange won't show it, so evaluate it at the context length you serve.</p>
+
+    <h3 id="offloading-the-cache">Offloading the cache</h3>
+
+    <p>The second approach leaves the precision alone and moves the bytes to host memory (the CPU's RAM) or NVMe storage. Whether that helps comes down to arithmetic, and there are two completely different cases.</p>
+
+    <p>Case one is KV that decode is actively reading. Every decode step reads the whole cache of every request in the batch. Take 32 requests like ours at 8,192 tokens on the 70B, at 320 KiB per token. That's roughly 85.9 GB read <em>for every token generated</em>. Over H100 HBM3 at 3.35 TB/s that read takes 25.6 ms. Over PCIe Gen5 x16 at 64 GB/s it takes 1.34 seconds, a 52x slowdown of the inner loop. That's no tradeoff. It's a different product.</p>
+
+    <p>Case two is KV that nobody is reading yet, such as a cached prefix from a previous turn sitting in host RAM. Now the question isn't one memory bus against another. It's whether fetching the cache beats recomputing it, which is exactly the comparison we solved in section 02:</p>
+
+    <div class="eq-block"><span>$$\underbrace{\frac{cL}{W}}_{\text{fetch it}} \;&lt;\; \underbrace{\frac{2PL}{F}}_{\text{recompute it}} \quad\Longleftrightarrow\quad W \;&gt;\; \frac{cF}{2P} \;=\; W^{*}$$</span></div>
+
+    <p>It's the same break-even bandwidth, now answering a question that looks nothing like the first one. For the 70B, <span>$W^{*}$</span> was 0.94 GB/s and PCIe Gen5 x16 runs at 64 GB/s, about 68 times higher. Fetching a cached prefix over PCIe is far cheaper than recomputing it, and that's the entire case for KV offload. <strong>LMCache</strong> productised it. Its paper describes storing KV "out of the GPU memory" and sharing it "across engines and queries", supporting "both cache offloading (prefix reuse across queries) and prefill-decode (PD) disaggregation", and reports "up to 15x improvement in throughput" on workloads like multi-round question answering.</p>
+
+    <p><strong>FlexGen</strong> is the extreme version of case two:, it aggregates GPU, CPU and disk to run OPT-175B on a single 16 GB GPU at "1 token/s ... with an effective batch size of 144". It's a throughput system for offline work, and its latency is roughly what the arithmetic above predicts. Both cases boil down to a short rule, and it probably deserves to be memorised. Offload KV that will be read once, later, because that's a fetch racing a recompute and it wins comfortably. Don't offload KV that will be read on every step, because that's a memory bus racing a peripheral bus and it loses by a factor of about 50.</p>
+
+    <p>So far we've treated the fleet as serving one model. In practice a product often serves a base model plus a long tail of customer-specific versions of it, and that changes what has to be stored.</p>
+  </section>
+
+  <section id="lora">
+    <h2><span class="num">04</span>Multi-LoRA: hundreds of models, one set of weights</h2>
+
+    <p>Suppose our chat product sells a fine-tuned version of the model to each of a thousand customers. Giving every customer a private copy of the weights is out of the question, as the numbers below will show, so the only affordable approach is to share the base model and keep each customer's changes separate. Page <a href="/topics/29-finetuning-llms">29</a> covers what a LoRA adapter is: instead of changing a large weight matrix, you train two thin matrices whose product is a small correction to it. Serving asks something different. Given a batch of requests where each one wants a <em>different</em> adapter, what does that cost?</p>
+
+    <p>Start with memory. A LoRA on a weight of shape <span>$(d_{\text{out}}, d_{\text{in}})$</span> adds two matrices, <span>$A \in \mathbb{R}^{r \times d_{\text{in}}}$</span> and <span>$B \in \mathbb{R}^{d_{\text{out}} \times r}$</span>, where the <strong>rank</strong> <span>$r$</span> is how thin they are. That's <span>$r(d_{\text{in}} + d_{\text{out}})$</span> parameters per adapted matrix. To keep the arithmetic small, the code switches from our 70B to Llama-3-8B, adapts its four attention projections (query, key, value and output) in all 32 layers, and counts the bytes. Its second half asks what a decode step pays when the batch contains several distinct adapters, with the base weights being 16.0 GB that every step reads.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">What a thousand adapters cost, and what a batch of distinct ones costs per step</span>
+      </summary>
+<pre><code>import numpy as np
+
+# LoRA on a weight of shape (d_out, d_in) adds A (r, d_in) and
+# B (d_out, r): r * (d_in + d_out) new parameters.
+def adapter_params(r, shapes):
+    return sum(r * (d_in + d_out) for d_out, d_in in shapes)
+
+H, KV, LAYERS = 4096, 1024, 32          # Llama-3-8B, 32 q heads, 8 kv
+attn = [(H, H), (KV, H), (KV, H), (H, H)]        # q, k, v, o
+
+for r in (8, 16, 64):
+    p = adapter_params(r, attn) * LAYERS
+    print(f&quot;rank {r:3d}: {p/1e6:6.2f}M params, {p*2/1e6:6.1f} MB in BF16&quot;
+          f&quot;   1000 of them = {p*2*1000/1e9:6.1f} GB&quot;)
+
+print(f&quot;\nbase model in BF16 = {8e9*2/1e9:.0f} GB;&quot;
+      f&quot; 1000 full fine-tunes = {8e9*2*1000/1e12:.0f} TB&quot;)
+
+print(&quot;\ndecode step reads 16.0 GB of base weights, plus, for n&quot;
+      &quot;\nDISTINCT adapters in the batch:&quot;)
+for r in (16, 64):
+    mb = adapter_params(r, attn) * LAYERS * 2 / 1e6
+    for n in (1, 32, 128):
+        print(f&quot;  rank {r:3d}, {n:3d} distinct: {n*mb/1000:6.2f} GB&quot;
+              f&quot;  -&gt; step is {1 + n*mb/16000:5.3f}x longer&quot;)</code></pre>
+      <div class="tryit-out">A rank-16 adapter is <code>27.3 MB</code>, so a thousand of them take <code>27.3 GB</code> against <code>16 TB</code> for a thousand full fine-tunes. In the second table the adapter bytes scale with the number of <em>distinct</em> adapters in the batch and not with the batch size, because a shared adapter is read once. At rank 64 with 128 distinct adapters, the step is <code>1.872x</code> longer.</div>
+    </details>
+
+    <p>Why are adapters practical? The first table answers it: a rank-16 adapter is 27.3 MB, so a thousand of them take 27.3 GB, against 16 TB for a thousand full fine-tunes of the 8B. The second table is the one people miss. Adapter bytes read per step scale with the number of <em>distinct</em> adapters in the batch and not with the batch size, because an adapter shared by several requests is read once. At rank 64 with 128 distinct adapters in the batch, the step is 1.872x longer.</p>
+
+    <p>That result is the design constraint. One big matrix multiplication on the base path is shared by the entire batch. The LoRA path can't be shared, because each sequence needs its own <span>$A$</span> and <span>$B$</span> gathered and applied. Done naively, that becomes a Python loop over requests, which destroys the batching we worked to build. <strong>Punica</strong> solved it with a kernel, "Segmented Gather Matrix-Vector Multiplication (SGMV)", which "allows batching GPU operations for the concurrent execution of multiple, different LoRA models". It reports "12x higher throughput ... while only adding 2ms latency per token". <strong>S-LoRA</strong> added the memory-management half. Its "Unified Paging" puts adapter weights of different ranks and KV tensors of different lengths in one pool. That's PagedAttention generalised to a second kind of variable-size object, and it reports up to 4x throughput over prior LoRA serving.</p>
+
+    <p>One more cost catches teams late. vLLM's documentation says to set <code>--max-lora-rank</code> "to the maximum rank among all LoRA adapters you plan to use", and that if your ranks are 16, 32 and 64, you should use <code>--max-lora-rank 64</code> and not 256. Buffers are sized for the maximum, so one customer who trained at rank 256 makes every other adapter in the fleet pay for it. Rank is a fleet-wide decision, and it has to be capped at training time, because by serving time it's no longer negotiable.</p>
+
+    <p>Adapters are small precisely because they're thin. Base weights are the opposite, the largest block of bytes in the whole system, and the way to shrink them is to store each weight in fewer bits.</p>
+  </section>
+
+  <section id="fp">
+    <h2><span class="num">05</span>FP8 and MXFP4: where the scale factors live</h2>
+
+    <p>FP8 comes first and is the easy case. In the format paper, two encodings are defined: "E4M3 (4-bit exponent and 3-bit mantissa) and E5M2 (5-bit exponent and 2-bit mantissa)". A floating-point number is stored as a sign, an exponent that sets its rough size, and a mantissa that sets its precision within that size, so E4M3 spends more bits on precision and E5M2 on range. It reports "effectively matching the result quality achieved by 16-bit training sessions". There's a hardware reason to care, and it's on the datasheet. An H100 SXM lists 1,979 TFLOPS for BF16 tensor cores and 3,958 for FP8, both quoted with sparsity and both halved without it. That's exactly 2x, and it comes from the format and not from the silicon generation.</p>
+
+    <h3 id="what-gets-quantized">What gets quantized</h3>
+
+    <p>"The model is in FP8" is three separate decisions with different risk profiles. <strong>Weights</strong> are static, so they're quantized once, offline. vLLM's <a href="https://docs.vllm.ai/en/latest/features/quantization/llm_compressor/fp8/" target="_blank" rel="noopener">llm-compressor FP8 scheme</a> is "static, per-channel quantization on the weights", meaning one scale per output channel, stored alongside them. <strong>Activations</strong>, the intermediate values computed from each input, have a range that depends on the input, so their scale is computed at runtime. vLLM uses "dynamic, per-token quantization on the activations". Third comes the <strong>KV cache</strong> from section 03, which has a separate flag and a separate risk, and it's the one that breaks long context first.</p>
+
+    <p>TensorRT-LLM's <a href="https://nvidia.github.io/TensorRT-LLM/reference/precision.html" target="_blank" rel="noopener">precision reference</a> names the same three granularities: "per-tensor" with a single scaling factor for all elements, "per-token", and "per-channel". Finer granularity costs more storage for scales and buys tolerance to outliers, which are the few values far larger than the rest. That tradeoff is what explains the four-bit formats.</p>
+
+    <h3 id="microscaling-the-scale-moves-inside-the-tensor">Microscaling: the scale moves inside the tensor</h3>
+
+    <p>At four bits there are only 16 distinct values per element, so a single scale for a whole tensor is too coarse, and the natural fix is a scale for every small block of elements. OCP's <em class="term">Microscaling</em> (MX) specification v1.0 builds that granularity into the format itself. <strong>MXFP4</strong> stores each element as an E2M1 number, four bits, and gives every block of 32 elements one shared E8M0 scale. E8M0 is a bare Float32 exponent with no sign and no mantissa, so the scale is always a power of two. Counting the bits, four per element plus eight per block of 32 is <span>$4 + 8/32 = 4.25$</span> bits per weight. NVIDIA's <strong>NVFP4</strong> halves the block "from 32 values to 16" and upgrades the scale to E4M3, giving 4.5 bits, plus a per-tensor FP32 scale on top.</p>
+
+    <h4 class="why">Why does one outlier hurt a single tensor scale so badly?</h4>
+
+    <p>Next, some code. It builds 4,096 normally distributed weights and plants one outlier of 50, as real weights have. Then it quantizes them two ways. <code>int4_tensor</code> uses one scale for the whole tensor, so the step between representable values is set by the largest weight, 50 divided by 7. <code>mxfp4</code> does the block version: it reshapes the weights into rows of 32, picks a power-of-two scale per row from that row's largest value, and snaps each scaled weight to the nearest of the eight E2M1 magnitudes in <code>E2M1</code>. A <code>snap</code> helper does that nearest-value search, and the last lines count the storage cost of the scales.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">One outlier weight, and what block scaling does about it that a tensor scale cannot</span>
+      </summary>
+<pre><code>import numpy as np
+
+# MXFP4 (OCP Microscaling v1.0): 32 elements share one E8M0 scale
+# (a raw power of two); each element is E2M1, four bits.
+E2M1 = np.array([0., .5, 1., 1.5, 2., 3., 4., 6.])   # magnitudes
+
+def snap(q, grid):
+    i = np.abs(np.subtract.outer(np.abs(q), grid)).argmin(axis=-1)
+    return np.sign(q) * grid[i]
+
+def mxfp4(x, blk=32):
+    y = x.reshape(-1, blk)
+    s = 2.0 ** np.floor(np.log2(np.abs(y).max(1, keepdims=True) / 6))
+    return (snap(y / s, E2M1) * s).ravel()
+
+def int4_tensor(x):                    # one scale for the whole tensor
+    s = np.abs(x).max() / 7.0
+    return np.clip(np.round(x / s), -7, 7) * s
+
+rng = np.random.default_rng(0)
+w = rng.normal(0, 1, 4096)
+w[137] = 50.0                          # one outlier, as real weights have
+
+for name, q in [(&quot;MXFP4, 32-elem blocks &quot;, mxfp4(w)),
+                (&quot;INT4, one tensor scale&quot;, int4_tensor(w))]:
+    e = q - w
+    print(f&quot;{name}  rms err {np.sqrt((e**2).mean()):6.3f}&quot;
+          f&quot;   weights flushed to zero {(q == 0).mean():6.1%}&quot;)
+
+print(&quot;\nbits per weight, scale included:&quot;)
+for nm, elem, blk, sc in [(&quot;MXFP4&quot;, 4, 32, 8), (&quot;NVFP4&quot;, 4, 16, 8)]:
+    b = elem + sc / blk
+    print(f&quot;  {nm}  {b:.2f} bits   {16/b:.2f}x smaller than BF16&quot;)</code></pre>
+      <div class="tryit-out">One weight at 50 forces a per-tensor INT4 step of 50/7, so <code>99.9%</code> of the tensor rounds to zero and the RMS error is <code>0.997</code>, the standard deviation of the data. The model is ruined. MXFP4 confines that outlier to its own block of 32 and lands at <code>0.220</code>. Both formats store four bits per element; one has 128 scales and the other has one.</div>
+    </details>
+
+    <p>That outlier forces a per-tensor step of 50/7, about 7, larger than almost every ordinary weight, so 99.9% of the tensor rounds to zero and the error is as large as the data itself. Blocks contain the damage: the outlier lives in one block of 32 and the other 127 blocks keep fine scales, so MXFP4 lands at 0.220. Both formats store four bits per element, and the difference is that one has a single scale and the other has 128.</p>
+
+    <p>Does the damage show up in real models? NVIDIA reports NVFP4 against FP8 on DeepSeek-R1-0528 at "1% or less accuracy degradation", with MMLU-Pro at 85 against 84 and GPQA Diamond at 81 against 80. OpenAI's <strong>gpt-oss</strong>. Its model card states the models "were post-trained with MXFP4 quantization of the MoE weights, making <code>gpt-oss-120b</code> run on a single 80GB GPU ... and the <code>gpt-oss-20b</code> model run within 16GB of memory". That sentence follows from the 4.25 bits above. 120 billion weights at 4.25 bits each is 63.75 GB, and only the MoE weights are at that width, so the real footprint is somewhat higher. In BF16 the same weights would be 240 GB and would need four cards.</p>
+
+    <p>Why the MoE weights specifically? A <strong>mixture of experts</strong> (MoE) layer replaces one feed-forward network with many smaller ones, the experts, and sends each token to only a few of them. In a sparse MoE the expert networks hold the overwhelming majority of the parameters, and each one is read only by the tokens routed to it. They're the biggest, coldest, most redundant weights in the model, which makes them the cheapest place to spend accuracy. Attention projections, embeddings and the router are left at higher precision. The router decides which experts run at all, and an error there costs a whole expert, where other layers lose only a few low-order bits. That brings us to the machinery that makes placement, precision and sharing run at speed, starting with the attention computation that decode depends on.</p>
+  </section>
+
+  <section id="kernels">
+    <h2><span class="num">06</span>Decode needs its own attention kernel</h2>
+
+    <p>A <strong>kernel</strong> is a program that runs on the GPU, and the attention kernel most people know is FlashAttention, which was designed with prefill in mind. It splits the work across batch entries, attention heads, and blocks of queries, giving each piece to an SM. During prefill there are thousands of queries, one per prompt token, so there's plenty to go around. At decode each request has exactly one query, the token being generated, so that third dimension collapses to 1 and only batch times heads is left to fill the machine.</p>
+
+    <p>Here's how the <a href="https://pytorch.org/blog/flash-decoding/" target="_blank" rel="noopener">Flash-Decoding</a> authors put the consequence plainly: "if the batch size is smaller than the number of streaming multiprocessors (SMs) on the GPU (108 for an A100), the operation will only use a small part of the GPU! ... With a batch size of 1, FlashAttention will use less than 1% of the GPU!" We can check the shape of that claim ourselves. A 32-head model at batch 1 offers 32 independent work units against an A100's 108 SMs, under a third of the machine. No amount of kernel tuning recovers the other two thirds, because the work isn't there.</p>
+
+    <p>The fix is the same trick as split-K in a matrix multiplication, where the shared summation is split across workers and their partial sums are added afterwards. If there isn't enough parallelism across the output, create some across the reduction. Flash-Decoding splits the keys and values into chunks and attends to each chunk in parallel, and each chunk writes "1 extra scalar per row and per split: the log-sum-exp of the attention values", the quantity needed to merge partial softmaxes correctly. A second, cheap pass rescales the partial outputs by those log-sum-exps and sums them. Splitting the KV into 8 chunks turns 32 work units into 256, and the reported result is "up to 8x faster generation for very long sequences".</p>
+
+    <p>Splitting only pays when the KV sequence is long relative to the batch, because that's exactly when parallelism over batch and heads is scarce and parallelism over sequence is abundant. At batch 256 with 128 tokens of context there's pretty much nothing to fix. <strong>FlashInfer</strong> generalised the idea into a kernel library built for serving and not for training, and reports "29-69% inter-token-latency reduction compared to compiler backends for LLM serving benchmark, 28-30% latency reduction for long-context inference". It won a best paper award at MLSys 2025.</p>
+
+    <p>Two further decode-specific facts shape these kernels. Grouped-query attention gives each KV head several query heads, so the kernel can load the KV once and issue a small matrix multiply instead of several separate vector ones. And PagedAttention scatters the KV across non-contiguous blocks, so the kernel has to walk a block table and can't stride through it like a flat array. With the kernel in place, the remaining large pieces are communication and scheduling, and the next model we meet is one that doesn't fit on a GPU at all.</p>
+  </section>
+
+  <section id="moe">
+    <h2><span class="num">07</span>Expert-parallel MoE serving</h2>
+
+    <p>A sparse mixture of experts is a model that doesn't fit on one GPU and doesn't want to, and serving it well is a communication problem with a load-balancing problem inside it. For this section we'll swap our 70B for DeepSeek-V3, the reference point: "671B total parameters with 37B activated for each token". Each MoE layer has "1 shared expert and 256 routed experts", of which "8 experts will be activated for each token". A small <strong>router</strong> network scores the experts for each token and picks the top 8, so the question for the fleet is where those 256 experts should live.</p>
+
+    <p>Tensor parallelism, the approach from section 02, would shard every expert across every GPU, which means every GPU does a slice of all 256 experts and the activations are all-reduced (summed across GPUs) after every matrix multiplication. <em class="term">Expert parallelism</em> does the opposite: each GPU owns a few whole experts, and the tokens travel to them. For each MoE layer, every token's hidden state is dispatched to the GPUs holding its 8 experts, those GPUs compute, and the results are combined back. That takes two <strong>all-to-all</strong> exchanges, in which every GPU sends a different piece of data to every other GPU, per MoE layer and per step. So what do those exchanges cost?</p>
+
+    <h3 id="the-all-to-all-priced">The all-to-all, priced</h3>
+
+    <p>DeepEP, a communication library for expert parallelism, benchmarks this at DeepSeek-V3's configuration: "8K tokens per batch, 7168 hidden dimensions, top 8 experts, FP8 dispatching, and BF16 combining". Those numbers are enough to size the traffic. Dispatch moves <span>$8192 \times 8 \times 7168$</span> bytes at one byte each, so 470 MB. Combine moves the same count at two bytes, so 940 MB. DeepEP reports 726 GB/s dispatch and 740 GB/s combine over NVLink, against 90 and 81 GB/s over RDMA (network transfers that go straight between machines' memory). Dividing through, the intra-node case costs about 1.9 ms per MoE layer and the cross-node case about 16.8 ms. DeepEP notes these are logical bandwidths that include local traffic, so treat the ratio as the finding and neither absolute as exact.</p>
+
+    <p>That roughly 9x gap is why DeepSeek-V3's router constrains each token to "at most 4 nodes". Node-locality is a term in the routing function, and not a deployment detail added afterwards. Even with that, though, communication isn't the whole bill, because the router decides how much work each GPU gets.</p>
+
+    <h3 id="imbalance-is-the-cost">Imbalance is the cost</h3>
+
+    <p>Routing is learned, and learned routing isn't uniform: some experts become popular. LMSYS's large-scale expert-parallelism report states the consequence: "This imbalance forces the system to wait for the slowest GPU computation or communication ... As the number of GPUs (EP size) increases, the imbalance issue gets more severe."</p>
+
+    <h4 class="why">Why does the busiest expert set the speed of everyone?</h4>
+
+    <p>Each layer's results have to be combined before the next layer can start, so a step finishes when the busiest expert finishes. Mean load is irrelevant, and the maximum sets the clock. To make that concrete, the code below uses 256 experts, 8 per token and 8,192 tokens. A function <code>load</code> routes every token to its top-8 experts and counts how many tokens each expert receives. It runs three routers. A uniform one gives every expert equal affinity in expectation. A popularity-skewed one adds a fixed per-expert bonus, <code>pop</code>, so some experts are favoured. The third one applies DeepSeek-V3's auxiliary-loss-free fix, a per-expert bias <code>b</code> that's added to the score for routing only and nudged down by <code>gamma</code> whenever an expert is overloaded.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Watch a skewed router create a straggler, then fix it with one bias vector</span>
+      </summary>
+<pre><code>import numpy as np
+
+E, K, T = 256, 8, 8192        # experts, experts per token, tokens
+rng = np.random.default_rng(0)
+
+def load(scores):             # tokens per expert after top-K routing
+    top = np.argpartition(-scores, K, axis=1)[:, :K]
+    return np.bincount(top.ravel(), minlength=E)
+
+def report(tag, c):
+    print(f&quot;{tag:22s} mean {c.mean():6.1f}  busiest {c.max():5d}&quot;
+          f&quot;  imbalance {c.max()/c.mean():5.2f}x&quot;)
+
+aff = rng.normal(0, 1, (T, E))                 # router affinities
+report(&quot;uniform router&quot;, load(aff))
+
+pop = rng.normal(0, 0.6, E)                    # some experts are popular
+report(&quot;popularity-skewed&quot;, load(aff + pop))
+
+# DeepSeek-V3's auxiliary-loss-free fix: a per-expert bias, added to
+# the score for ROUTING ONLY, nudged down when an expert is overloaded.
+b, gamma = np.zeros(E), 0.05
+for step in range(60):
+    c = load(aff + pop + b)
+    b -= gamma * np.sign(c - c.mean())
+report(&quot;after bias correction&quot;, load(aff + pop + b))</code></pre>
+      <div class="tryit-out">A modest popularity skew produces an <code>8.75x</code> imbalance. The busiest expert takes 2,241 tokens against a mean of 256, and every other GPU in the group waits for it. Sixty rounds of a per-expert bias bring it to <code>1.14x</code>, below what a uniform router manages by chance. The bias touches routing only, so the gating values are untouched, and DeepSeek-V3 is explicit about that.</div>
+    </details>
+
+    <p>Read the three lines against each other. Mean load is 256 tokens per expert in every case, since the same tokens are always routed. Even the uniform router is a bit uneven, with a busiest expert at 296, or 1.16x the mean. Next, the skewed router sends 2,241 tokens to its busiest expert, an 8.75x imbalance, and every other GPU in the group waits for that one. Sixty rounds of the bias update bring it down to 1.14x, below what the uniform router manages by chance. That bias touches routing only and leaves the gating values (the weights used to mix expert outputs) untouched, and DeepSeek-V3 is explicit about that.</p>
+
+    <p>Two production mitigations sit on top of that. DeepSeek deploys "redundant experts, which duplicates high-load experts", and SGLang's report finds that "SGLang with default expert imbalance is 20% slower than DeepSeek's profile, while the simulated perfect EPLB case narrows the gap to 6%". For scale, that same deployment ran on 12 nodes of 8 H100s and reported "52.3k input tokens per second and 22.3k output tokens per second per node for 2000-token input sequences", using the prefill/decode disaggregation from section 02 alongside expert parallelism. All of this machinery exists to serve more tokens per second, but section 01 warned that tokens per second isn't what the fleet is measured on, and the last piece of the chapter is the scheduler that acts on that.</p>
+  </section>
+
+  <section id="goodput">
+    <h2><span class="num">08</span>SLA-aware scheduling, and why throughput is the wrong target</h2>
+
+    <p>Throughput rises steadily as we allow more concurrent requests, but goodput doesn't, so running at the top of the first curve puts you well past the top of the second. DistServe defines the target precisely: "per-GPU goodput, defined as the maximum request rate that can be served adhering to the SLO attainment goal (say, 90%) for each GPU provisioned". Tokens served too slowly to be useful don't count. That gap isn't small, and the arithmetic already on this page is enough to see it.</p>
+
+    <p>Next is a model and not a measurement, and it goes back to one H100 serving the 8B model in BF16. For each concurrency level <code>N</code> it imagines a cycle in which <code>N</code> prompts are prefilled and then all <code>N</code> requests decode together for 256 steps. A decode step takes the larger of two times, reading the weights from memory (<code>W / BW</code>) and the arithmetic (<code>2 * P * N / F</code>), the roofline idea from chapter 23. Prompt lengths are drawn from a lognormal distribution with a median near 900 tokens, and a request meets its SLO if its time to first token is at most 2.0 seconds and the ITL is at most 25 ms. Goodput is throughput times the share of requests that met both.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Sweep concurrency and watch goodput peak while throughput is still climbing</span>
+      </summary>
+<pre><code>import numpy as np
+
+P, W, BW, F = 8e9, 16e9, 3.35e12, 4.0e14   # 8B in BF16, one H100
+L_out = 256                                # output tokens per request
+TTFT_SLO, ITL_SLO = 2.0, 0.025             # the contract with the user
+
+rng = np.random.default_rng(0)
+L_in = rng.lognormal(np.log(900), 1.0, 4000)        # prompt lengths
+wait = (np.arange(4000) + .5) / 4000                # place in the cycle
+
+print(&quot;  N   thr tok/s   ITL ms   met SLO   goodput tok/s&quot;)
+for N in (4, 8, 16, 24, 32, 48, 64, 128, 256):
+    # one cycle = N prefills plus L_out decode steps at batch N
+    cycle = L_out * max(W / BW, 2 * P * N / F) \
+            + N * 2 * P * L_in.mean() / F
+    thr = N * L_out / cycle                          # tokens/s
+    itl = cycle / L_out
+    ttft = wait * cycle + 2 * P * L_in / F
+    met = ((ttft &lt;= TTFT_SLO) &amp; (itl &lt;= ITL_SLO)).mean()
+    print(f&quot;{N:4d} {thr:10.0f} {itl*1e3:8.1f} {met:9.0%} {thr*met:14.0f}&quot;)</code></pre>
+      <div class="tryit-out">Goodput peaks at 24 concurrent requests and <code>1741</code> tokens/s. Throughput is still climbing there and reaches <code>3736</code> at 128, where goodput is zero. Running at the throughput maximum serves 2.1x more tokens and zero useful ones. This is a model and not a measurement: the decode step is the larger of weights-over-bandwidth and compute, prefills spread evenly through the cycle, prompt lengths lognormal. Sweep yours to find it.</div>
+    </details>
+
+    <p>Start with the throughput column, which only goes up until the compute limit at about 3,736 tokens per second. Now read the "met SLO" column beside it. Up to 8 concurrent requests everyone is served on time. By 16, ITL has grown to 8.4 ms and the prefill backlog pushes some first tokens past 2 seconds, so only 90% meet the contract. Goodput peaks at 24 concurrent requests with 1,741 tokens per second, while throughput is still climbing there and reaches 3,736 at 128, where goodput is zero. Running at the throughput maximum serves 2.1x more tokens and no useful ones. Your peak will probably sit somewhere else, so sweep your own numbers to find it. The chart below draws the same sweep so you can see the gap.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">The same sweep, drawn to scale</div>
+      <svg viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg">
+        <line x1="70" y1="250" x2="70" y2="50" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
+        <line x1="70" y1="200" x2="660" y2="200" stroke="rgba(255,255,255,.08)" stroke-width="1"/>
+        <line x1="70" y1="150" x2="660" y2="150" stroke="rgba(255,255,255,.08)" stroke-width="1"/>
+        <line x1="70" y1="100" x2="660" y2="100" stroke="rgba(255,255,255,.08)" stroke-width="1"/>
+        <line x1="70" y1="50" x2="660" y2="50" stroke="rgba(255,255,255,.08)" stroke-width="1"/>
+        <line x1="70" y1="250" x2="660" y2="250" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
+
+        <text x="62" y="254" text-anchor="end" font-size="9.5" class="dim">0</text>
+        <text x="62" y="204" text-anchor="end" font-size="9.5" class="dim">1000</text>
+        <text x="62" y="154" text-anchor="end" font-size="9.5" class="dim">2000</text>
+        <text x="62" y="104" text-anchor="end" font-size="9.5" class="dim">3000</text>
+        <text x="62" y="54" text-anchor="end" font-size="9.5" class="dim">4000</text>
+        <text x="24" y="34" font-size="10" class="dim">tokens/s</text>
+
+        <rect x="392" y="24" width="11" height="11" rx="2" fill="#818cf8"/>
+        <text x="409" y="34" font-size="10.5" fill="#818cf8">throughput</text>
+        <rect x="500" y="24" width="11" height="11" rx="2" fill="#34d399"/>
+        <text x="517" y="34" font-size="10.5" fill="#34d399">goodput</text>
+
+        <rect x="80" y="214.8" width="24" height="35.2" fill="#818cf8" opacity="0.85"/>
+        <rect x="108" y="214.8" width="24" height="35.2" fill="#34d399" opacity="0.85"/>
+        <text x="106" y="266" text-anchor="middle" font-size="10" class="dim">4</text>
+
+        <rect x="152.5" y="189.3" width="24" height="60.7" fill="#818cf8" opacity="0.85"/>
+        <rect x="180.5" y="189.4" width="24" height="60.6" fill="#34d399" opacity="0.85"/>
+        <text x="178.5" y="266" text-anchor="middle" font-size="10" class="dim">8</text>
+
+        <rect x="225" y="155" width="24" height="95" fill="#818cf8" opacity="0.85"/>
+        <rect x="253" y="164.3" width="24" height="85.7" fill="#34d399" opacity="0.85"/>
+        <text x="251" y="266" text-anchor="middle" font-size="10" class="dim">16</text>
+
+        <rect x="297.5" y="132.8" width="24" height="117.2" fill="#818cf8" opacity="0.85"/>
+        <rect x="325.5" y="162.9" width="24" height="87.1" fill="#34d399" opacity="0.95"/>
+        <text x="323.5" y="266" text-anchor="middle" font-size="10" fill="#34d399" font-weight="700">24</text>
+
+        <rect x="370" y="117.3" width="24" height="132.7" fill="#818cf8" opacity="0.85"/>
+        <rect x="398" y="166.3" width="24" height="83.7" fill="#34d399" opacity="0.85"/>
+        <text x="396" y="266" text-anchor="middle" font-size="10" class="dim">32</text>
+
+        <rect x="442.5" y="97.2" width="24" height="152.8" fill="#818cf8" opacity="0.85"/>
+        <rect x="470.5" y="175.9" width="24" height="74.1" fill="#34d399" opacity="0.85"/>
+        <text x="468.5" y="266" text-anchor="middle" font-size="10" class="dim">48</text>
+
+        <rect x="515" y="84.6" width="24" height="165.4" fill="#818cf8" opacity="0.85"/>
+        <rect x="543" y="185.1" width="24" height="64.9" fill="#34d399" opacity="0.85"/>
+        <text x="541" y="266" text-anchor="middle" font-size="10" class="dim">64</text>
+
+        <rect x="587.5" y="63.2" width="24" height="186.8" fill="#818cf8" opacity="0.85"/>
+        <text x="627.5" y="247" text-anchor="middle" font-size="10" fill="#f87171">0</text>
+        <text x="613.5" y="266" text-anchor="middle" font-size="10" class="dim">128</text>
+
+        <text x="365" y="290" text-anchor="middle" font-size="10.5" class="dim">concurrent requests</text>
+
+        <path d="M337,158 L337,116" stroke="#34d399" stroke-width="1.4" fill="none"/>
+        <text x="337" y="108" text-anchor="middle" font-size="9.5" fill="#34d399">goodput peaks here</text>
+      </svg>
+      <div class="diagram-caption">Both series use the same axis at 0.05 pixels per token per second, so the bars are directly comparable. The indigo series never falls. The green one peaks at 24 concurrent requests and is at zero by 128, because past that point every request misses its time-to-first-token target. At N=64 the gap between the two bars is work the machine is doing that nobody can use.</div>
+    </div>
+
+    <p>Once goodput is the target, the scheduler gets choices it didn't have before. Four systems show the range. <strong>FastServe</strong> attacks head-of-line blocking, where one long request holds up the short ones behind it, with "a novel skip-join Multi-Level Feedback Queue scheduler", reporting up to 31.4x throughput at the same average latency requirement. <strong>Llumnix</strong> reschedules requests across model instances at runtime and reports improving "tail latencies by an order of magnitude" and accelerating "high-priority requests by up to 1.5x". <strong>QLM</strong> manages the queue and not the batch, reporting "SLO attainment by 40-90% and throughput by 20-400%". <strong>Andes</strong> optimises perceived quality of experience directly, reporting up to 4.7x average QoE at fixed GPU count, or "61% GPU resources" saved at fixed QoE. Some of these policies are built in: vLLM ships a <code>policy</code> setting where "fcfs" means arrival order and "priority" means "requests are handled based on given priority (lower value means earlier handling)".</p>
+
+    <p>Cheapest of all the SLA mechanisms is <strong>admission control</strong>, which means refusing work you can't finish on time. vLLM's <code>max_num_queued_tokens</code> documentation gives the formula outright: set it to <code>target_TTFT * prefill_throughput</code> and "you reject requests when the prefill backlog would exceed the latency target". Over the limit, new requests get an HTTP 503. Refusing a request you can't serve on time is better than accepting it and missing, because the rejected client can retry elsewhere immediately and the accepted ones keep their contract. A queue with no bound converts one slow minute into an hour of broken promises.</p>
+
+    <p>Preemption is the other half. When the KV pool fills, the scheduler evicts a request and later recomputes its prefill, which means throughput is spent twice. vLLM exposes a <code>watermark</code> that keeps a fraction of blocks free specifically to "avoid frequent KV cache eviction and the resulting repeated preemption of requests". That closes the loop with the rest of the chapter, and the summary below collects it.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">09</span>Summary</h2>
+    <ol>
+      <li><strong>At fleet scale the questions are placement, precision and sharing.</strong> Page 31's single dial, batch size on one device, becomes decisions about where each phase runs, how wide each stored number is, and which jobs share which weights.</li>
+      <li><strong>Prefill and decode can run on separate GPU pools.</strong> Each pool is then sized and sharded for its own phase, and the cost is shipping the KV cache between them.</li>
+      <li><strong>The cache has a fixed size per token,</strong> <span>$c = 2 \cdot n_{\text{layers}} \cdot n_{\text{kv heads}} \cdot d_{\text{head}} \cdot b$</span>. For the 70B model that's 320 KiB, so an 8,192-token prompt leaves 2.5 GiB behind.</li>
+      <li><strong>The break-even bandwidth is <span>$W^{*} = cF/2P$</span>.</strong> It's the link speed at which moving a token's KV costs as much as recomputing it, and the prompt length cancels out of it. For the 70B it's 0.94 GB/s, so NVLink and InfiniBand are far above it and 25 GbE is not.</li>
+      <li><strong>Disaggregation isn't free throughput.</strong> It buys separate control over TTFT and ITL, and it isn't worth it on a slow link, with short prompts, on a small fleet, or when chunked prefill already solves the interference.</li>
+      <li><strong>Offload KV that will be read once, later, and never KV that's read every step.</strong> The same break-even settles it: PCIe's 64 GB/s is about 68 times above the break-even for fetching a cached prefix, while reading active KV over PCIe is a 52x slowdown.</li>
+      <li><strong>Many adapters share one base model cheaply in memory,</strong> because a rank-16 adapter is 27.3 MB. The step cost scales with the number of distinct adapters in the batch, and one high-rank adapter taxes the whole fleet, so cap the rank at training time.</li>
+      <li><strong>Block scaling is what makes four-bit weights work.</strong> One outlier ruins a per-tensor scale, while MXFP4 keeps it inside a block of 32, at 4.25 bits per weight including the scales.</li>
+      <li><strong>Decode needs a kernel that splits the work across the sequence,</strong> because with one query per request there's little parallelism left over batch and heads.</li>
+      <li><strong>In expert-parallel serving the busiest expert sets the step time,</strong> and cross-node all-to-all costs about 9x the intra-node case, so routing is made node-aware and loads are rebalanced.</li>
+      <li><strong>Goodput peaks earlier than throughput does.</strong> Past that point you serve more tokens and fewer useful ones, and that's why fleets use SLO-aware scheduling and admission control.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">10</span>Build this</h2>
+    <p class="lede">Section 02's break-even bandwidth is three measurements away from being a number about your own hardware and not just a number on this page.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Measure your own break-even bandwidth, then predict a disaggregated split before you build it</span>
+        <span class="proj-meta">~4 hours · two GPUs and vLLM</span>
+      </div>
+      <p>The formula <span>$W^{*} = cF/2P$</span> has exactly three inputs. Two of them you can read off a config file, and the third is the one everybody guesses wrong. Measure all three, predict the transfer cost, then check the prediction against a real split.</p>
+      <ol class="proj-steps">
+        <li>Compute <span>$c$</span> from the model's <code>config.json</code>: layers, KV heads, head dimension, dtype. Cross-check it against the number of tokens your engine says the KV pool holds, because a factor-of-two error here is easy and silent.</li>
+        <li>Measure <span>$F$</span> by sending one request with a long prompt and no output, timing the first token, and dividing <span>$2PL$</span> by that time. This gives your achieved prefill rate. Expect it to be well under the datasheet, and use yours everywhere below.</li>
+        <li>Measure <span>$W$</span> on the link that would connect the pools. Not the vendor figure, the one you get: a point-to-point send and receive of a few gigabytes, timed.</li>
+        <li>Compute <span>$W^{*}$</span> and the predicted transfer share <span>$cF/2PW$</span>. Write the number down before you run anything else.</li>
+        <li>Now run vLLM's disaggregated prefill across the two GPUs and measure TTFT against a single-instance baseline at the same load.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> your measured <span>$F$</span> comes in at a fraction of the datasheet number and the predicted transfer share lands in the right order of magnitude. Both outcomes are the point. The formula is only useful with a measured <span>$F$</span>, and a prediction that is close enough to reason with is worth more than a benchmark you cannot generalise from.</div>
+      <div class="proj-stretch"><strong>When the prediction misses, that is the interesting run.</strong> The usual cause is that the KV send is serialised after the whole prefill rather than overlapped layer by layer, which turns a percentage into a full extra latency term. Then rerun with <code>fp8_e4m3</code> KV: <span>$c$</span> halves, so the predicted share should halve too. If it does not, the transfer is not what is costing you.</div>
+    </div>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">11</span>What breaks</h2>
+    <p class="lede">At fleet scale the failures are not crashes. They are a number that got worse somewhere you were not looking, for a reason that is nowhere in the logs.</p>
+
+    <ul>
+      <li><strong>The KV transfer is serialised, not overlapped.</strong> Section 02's percentage assumes the send of layer <span>$i$</span> overlaps the prefill of layer <span>$i+1$</span>. If it does not, you pay the whole transfer as added TTFT, and disaggregation looks like a regression.</li>
+      <li><strong>The pool ratio is tuned for yesterday's traffic.</strong> Prompts get longer, the prefill pool saturates, and the decode pool idles while queueing grows. The symptom is rising TTFT with flat inter-token latency, which points straight at the split.</li>
+      <li><strong>KV quantization passes every eval you ran.</strong> Short-context benchmarks will not show it. The damage lands on long-context retrieval, so it ships, and then a customer with a 100,000-token document finds it for you.</li>
+      <li><strong>One hot expert is setting the step time.</strong> Throughput falls by the imbalance factor and no component reports an error, because every GPU is healthy and most of them are waiting. Log per-expert token counts or you cannot see it.</li>
+      <li><strong>A new router checkpoint invalidates the expert placement.</strong> Yesterday's redundant-expert plan was fitted to yesterday's routing distribution. Rebalancing has to be part of deployment, not a one-off.</li>
+      <li><strong>One customer's rank-256 adapter taxes the whole fleet.</strong> LoRA buffers are sized for the maximum rank, so everyone pays for the largest adapter admitted. Cap it at training time.</li>
+      <li><strong>The decode kernel silently fell back.</strong> An unusual head dimension, dtype or block size drops you onto a generic path without the split-K, and inter-token latency worsens by a factor you will attribute to anything else.</li>
+      <li><strong>Throughput improved and goodput did not.</strong> The most common outcome of a batching change. If you are not measuring SLO attainment alongside tokens per second, you cannot tell an improvement from a degradation.</li>
+      <li><strong>KV was offloaded to the wrong side of the line.</strong> Offloading cached prefixes is a large win. Offloading the cache that decode reads every step costs a factor of about 50, and both are enabled by flags with similar names.</li>
+    </ul>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">12</span>Where you meet this in the wild</h2>
+    <p class="lede">The same techniques, in wildly different combinations, because the binding constraint is different in each.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card">
+        <div class="wild-head"><strong>A frontier-model API</strong></div>
+        <p>Huge model, enormous traffic, published latency targets. Everything on this page is in play at once: disaggregated pools, FP8 or four-bit weights, expert parallelism, cross-request prefix caching, and goodput as the provisioning metric.</p>
+        <p class="reach reach-yes">Every paper cited here was written for this workload.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>A fine-tuning platform</strong></div>
+        <p>Thousands of customers, each with a small adapter, most of them idle most of the time. The base model is shared, adapters are paged in and out, and the scarce resource is adapter bandwidth and not model memory.</p>
+        <p class="reach reach-yes">Multi-LoRA is the product, so cap the rank fleet-wide.</p>
+        <p class="reach reach-no">Disaggregation buys little here, because prompts are usually short.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>Self-hosting an open-weights MoE</strong></div>
+        <p>A 600B-class sparse model on a handful of nodes. Expert parallelism is not optional, the all-to-all is the bottleneck, and load balancing decides whether you get the throughput the model card implies.</p>
+        <p class="reach reach-yes">Budget engineering time for expert placement as well as for the deployment.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>One model, one node, internal users</strong></div>
+        <p>A few hundred requests an hour behind a company firewall. Continuous batching and prefix caching are already enough, and the KV pool will never fill.</p>
+        <p class="reach reach-no">Almost none of this page applies. Page <a href="/topics/31-llm-inference-serving">31</a> is the whole answer, and adding a second pool here buys complexity and nothing else.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">13</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is prefill/decode disaggregation, and what does it cost?</summary>
+      <div class="qa-body"><p>It runs the two phases of a request on separate GPU pools instead of sharing one. The motivation is that the phases want different machines: prefill is compute-bound and latency-sensitive, so it prefers wide tensor parallelism and small batches, while decode is memory-bandwidth-bound and prefers the largest batch the KV pool allows. A single pool must pick one configuration for both, and two pools do not. The cost is that prefill produces the KV cache and decode consumes it, so that cache has to cross an interconnect. Whether the cost is acceptable is arithmetic rather than opinion: the transfer time as a fraction of the prefill time is the KV bytes per token times the achieved FLOP rate, divided by twice the parameter count times the link bandwidth. On NVLink that fraction is well under one percent; on commodity Ethernet it is tens of percent.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why is FP8 weight quantization roughly twice as fast rather than just smaller?</summary>
+      <div class="qa-body"><p>Because the tensor cores have a separate, faster path for it. An H100 datasheet lists 1,979 TFLOPS for BF16 and 3,958 for FP8, a factor of exactly two, and that ratio comes from the numeric format rather than from any other hardware difference. The memory saving is real too and matters more during decode, which is bandwidth-bound, but the compute doubling is what helps prefill. The two encodings are E4M3, with four exponent bits and three mantissa bits, and E5M2, which trades a mantissa bit for range. E4M3 is the usual choice for weights and activations because precision matters more than range once a scaling factor is applied, and E5M2 appears more often for gradients and occasionally for KV cache.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does MXFP4 work when plain INT4 with one scale does not?</summary>
+      <div class="qa-body"><p>Because of where the scaling factor lives. A single per-tensor scale has to cover the largest magnitude in the tensor, and weight distributions have outliers, so one large value forces a step size that rounds almost everything else to zero. MXFP4 as specified by OCP puts an E8M0 scale on every block of 32 elements, so an outlier only distorts its own block and the other blocks keep sensible scales. The cost is the scale storage, which works out to four bits per element plus eight bits per thirty-two, or 4.25 bits per weight. NVFP4 halves the block to 16 elements and uses an E4M3 scale, reaching 4.5 bits with finer adaptation, and NVIDIA reports around one percent or less accuracy degradation against FP8 on reasoning benchmarks. The general principle is that low-bit quantization is a question about granularity, not about bit width alone.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>You want to serve 500 customer LoRA adapters on one base model. What dominates the cost?</summary>
+      <div class="qa-body"><p>Not storage. A rank-16 adapter on an 8B model with adapted attention projections is about 13.6M parameters, or 27 MB in BF16, so 500 of them are under 14 GB and sit comfortably beside a 16 GB base model. What dominates is bandwidth during decode, and specifically the number of <em>distinct</em> adapters in a batch rather than the batch size, because requests sharing an adapter read it once. At rank 16 with 32 distinct adapters the extra read is about five percent of the base weights; at rank 64 with 128 distinct it approaches ninety percent, and the adapters cost nearly as much as the model. The second constraint is that the LoRA path cannot be one GEMM, since each sequence needs its own matrices, which is what Punica's SGMV kernel and S-LoRA's unified paging exist to solve. Practically, cap the maximum rank fleet-wide, because serving buffers are sized for the largest adapter admitted.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why does decode need a different attention kernel from prefill?</summary>
+      <div class="qa-body"><p>Because FlashAttention parallelises over batch, heads and blocks of queries, and at decode time there is exactly one query per request, so that third dimension disappears. Only batch times heads is left to fill the GPU, and the Flash-Decoding authors note that if the batch is smaller than the SM count, 108 on an A100, the kernel uses a small part of the device, with batch one using under one percent of it. The fix is split-K applied to the sequence: divide the keys and values into chunks, attend to each in parallel, store one extra log-sum-exp scalar per row per split, then rescale and combine in a cheap second pass. The win is largest exactly when the context is long and the batch is small, which is when parallelism over batch is scarcest, and the reported speedup reaches eight times for very long sequences.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>You have 32 requests at 8k context on a 70B model and 64 GB of host RAM free. Should you offload the KV cache?</summary>
+      <div class="qa-body"><p>It depends entirely on whether that KV is being read every step, and the two answers are opposite. Active decoding KV is read in full on every token: 32 requests at 8,192 tokens and 320 KiB per token is 85.9 GB per step, which takes about 26 ms over H100 HBM at 3.35 TB/s and about 1.34 seconds over PCIe Gen5 at 64 GB/s. That is a factor of fifty on the inner loop and it destroys the product. Cached prefixes that nobody is currently reading are the opposite case, because the real comparison is fetching them against recomputing them. Fetching costs the KV bytes divided by the link bandwidth, recomputing costs twice the parameter count times the tokens divided by the achieved FLOP rate, and fetching wins whenever the link exceeds the same break-even bandwidth as before. For this model that break-even is under 1 GB/s, so PCIe is roughly seventy times faster than it needs to be. The rule is to offload KV that will be read once, later, and never KV that will be read on every step.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Your expert-parallel MoE deployment is at a third of its expected throughput. How do you diagnose it?</summary>
+      <div class="qa-body"><p>Start by logging tokens per expert per step, because expert load imbalance is the default explanation and it is invisible in ordinary metrics. A step finishes when the busiest expert finishes, so the maximum load sets the clock while the mean looks fine, and every idle GPU reports as healthy. A modest popularity skew in the router produces imbalance factors approaching an order of magnitude, which is precisely the gap you are describing. Second, check whether tokens are crossing nodes: intra-node all-to-all over NVLink and cross-node over RDMA differ by roughly a factor of nine in DeepEP's own benchmarks, which is why DeepSeek-V3 constrains each token to at most four nodes. Third, compare against a profile with simulated perfect balance; the LMSYS report found default imbalance cost twenty percent against DeepSeek's profile while perfect balance narrowed the gap to six. Mitigations are per-expert routing bias, which DeepSeek applies to routing scores only so the gating values are undistorted, and duplicating high-load experts as redundant copies.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Your server's throughput went up 40% after a change and users are complaining. Explain and fix.</summary>
+      <div class="qa-body"><p>Almost certainly the change raised concurrency, and throughput and goodput diverge past a point. Throughput rises monotonically with concurrency until the hardware saturates, but goodput, meaning the tokens delivered inside the latency contract, peaks much earlier and then falls to zero. In a simple model of an 8B on one H100 with a two-second TTFT target, goodput peaks around twenty-four concurrent requests while throughput keeps climbing to roughly twice that level at a concurrency where SLO attainment is zero. So the 40% is real and useless. The fix is to make goodput the reported metric, sweep concurrency to find its peak on your own traffic, and then defend that operating point with admission control rather than a longer queue. vLLM exposes this directly: cap queued prefill tokens at the target TTFT times the prefill throughput and reject beyond it, so clients get an immediate rejection they can retry rather than a slow response they cannot use. Keep a KV watermark as well, since preemption and recompute under cache pressure is the other way a throughput gain turns into a latency loss.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">14</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://arxiv.org/abs/2401.09670" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">DistServe: Disaggregating Prefill and Decoding for Goodput-optimized LLM Serving</div><div class="r-sub">Zhong et al. — the reference design for section 02, and the source of the goodput definition in section 08. arXiv:2401.09670</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2311.18677" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Splitwise: Efficient Generative LLM Inference Using Phase Splitting</div><div class="r-sub">Patel et al., ISCA 2024 — the same split argued from cost and power rather than latency. arXiv:2311.18677</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2407.00079" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving</div><div class="r-sub">Qin et al., FAST 2025 — what disaggregation looks like behind a production assistant. arXiv:2407.00079</div></div>
+      </a>
+      <a class="resource-card" href="https://docs.vllm.ai/en/latest/features/disagg_prefill/" target="_blank" rel="noopener">
+        <div class="r-icon">📘</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">vLLM · Disaggregated Prefilling</div><div class="r-sub">Read the caveat first: it is experimental, and it does not improve throughput.</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/ai-dynamo/dynamo" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">NVIDIA Dynamo</div><div class="r-sub">An orchestration layer above vLLM, SGLang and TensorRT-LLM rather than a replacement for them.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2402.02750" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache</div><div class="r-sub">Liu et al. — keys per-channel, values per-token, and why the asymmetry is necessary. arXiv:2402.02750</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2401.18079" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">KVQuant: Towards 10 Million Context Length LLM Inference with KV Cache Quantization</div><div class="r-sub">Hooper et al. — the accuracy side of KV compression, measured in perplexity. arXiv:2401.18079</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2510.09665" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference</div><div class="r-sub">KV offload and cross-engine cache sharing, which is section 03's second case made into a product. arXiv:2510.09665</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2303.06865" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">FlexGen: High-Throughput Generative Inference of Large Language Models with a Single GPU</div><div class="r-sub">Sheng et al. — offloading taken to its limit, and a clear view of what it costs. arXiv:2303.06865</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2311.03285" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">S-LoRA: Serving Thousands of Concurrent LoRA Adapters</div><div class="r-sub">Sheng et al. — Unified Paging, which is PagedAttention applied to a second variable-size object. arXiv:2311.03285</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2310.18547" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Punica: Multi-Tenant LoRA Serving</div><div class="r-sub">Chen et al. — the SGMV kernel that lets one batch run many different adapters. arXiv:2310.18547</div></div>
+      </a>
+      <a class="resource-card" href="https://docs.vllm.ai/en/latest/features/lora/" target="_blank" rel="noopener">
+        <div class="r-icon">📘</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">vLLM · LoRA Adapters</div><div class="r-sub">The practical version, including why <code>--max-lora-rank</code> is a fleet-wide decision.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2209.05433" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">FP8 Formats for Deep Learning</div><div class="r-sub">Micikevicius et al. — where E4M3 and E5M2 are defined. arXiv:2209.05433</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2310.10537" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Microscaling Data Formats for Deep Learning</div><div class="r-sub">Rouhani et al. — the research behind the OCP MX v1.0 specification and MXFP4's block-of-32 scaling. arXiv:2310.10537</div></div>
+      </a>
+      <a class="resource-card" href="https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Article</div><div class="r-title">Introducing NVFP4 for Efficient and Accurate Low-Precision Inference</div><div class="r-sub">NVIDIA — the 16-element block, the E4M3 scale, and per-benchmark accuracy against FP8.</div></div>
+      </a>
+      <a class="resource-card" href="https://huggingface.co/openai/gpt-oss-120b" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Model</div><div class="r-title">openai/gpt-oss-120b</div><div class="r-sub">MXFP4 on the MoE weights, and the model card sentence that puts 120B on one 80 GB card.</div></div>
+      </a>
+      <a class="resource-card" href="https://pytorch.org/blog/flash-decoding/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Article</div><div class="r-title">Flash-Decoding for long-context inference</div><div class="r-sub">Dao et al. — the clearest statement of why a query length of 1 leaves the GPU empty, and the split-K fix.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2501.01005" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving</div><div class="r-sub">Ye et al., MLSys 2025 best paper — decode-time attention kernels built for serving. arXiv:2501.01005</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2412.19437" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">DeepSeek-V3 Technical Report</div><div class="r-sub">671B total, 37B active, 256 routed experts, and the auxiliary-loss-free balancing bias in section 07. arXiv:2412.19437</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/deepseek-ai/DeepEP" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">DeepEP</div><div class="r-sub">All-to-all dispatch and combine kernels for expert parallelism, with the NVLink and RDMA bandwidth table section 07 prices.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.lmsys.org/blog/2025-05-05-large-scale-ep/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Article</div><div class="r-title">Deploying DeepSeek with PD Disaggregation and Large-Scale Expert Parallelism</div><div class="r-sub">LMSYS — a full write-up of sections 02 and 07 running together on 96 GPUs, imbalance costs included.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2305.05920" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Fast Distributed Inference Serving for Large Language Models (FastServe)</div><div class="r-sub">Wu et al. — preemptive scheduling and the skip-join multi-level feedback queue. arXiv:2305.05920</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2406.03243" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Llumnix: Dynamic Scheduling for Large Language Model Serving</div><div class="r-sub">Sun et al., OSDI 2024 — rescheduling live requests across instances, for tail latency and priority. arXiv:2406.03243</div></div>
+      </a>
+      <a class="resource-card" href="https://docs.vllm.ai/en/latest/api/vllm/config/scheduler/" target="_blank" rel="noopener">
+        <div class="r-icon">📘</div>
+        <div class="r-body"><div class="r-kind">Docs</div><div class="r-title">vLLM · SchedulerConfig</div><div class="r-sub">Priority policy, the queued-token admission formula, and the KV watermark, all in one page of field documentation.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="practice-problems">
+    <h2><span class="num">&#9679;</span>Now write it yourself</h2>
+    <p class="lede">Reading the derivation and being able to produce it are different skills. These are Deep-ML problems that exercise what this page covers &mdash; each one is checked against real test cases, not multiple choice.</p>
+    <div class="dm-list">
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1307" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Goodput vs Throughput under a P99 SLA</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1214" target="_blank" rel="noopener"><span class="dm-diff dm-easy">easy</span><span class="dm-title">Per-Token Decode Latency from Memory Bandwidth</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/417" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Classify LLM Prefill vs Decode as Compute-Bound or Memory-Bound</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/425" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Continuous Batching (In-Flight Batching) Simulator</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/418" target="_blank" rel="noopener"><span class="dm-diff dm-medium">medium</span><span class="dm-title">Estimate KV Cache Size from Model Config</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+        <a class="dm-item" href="https://www.deep-ml.com/problems/1301" target="_blank" rel="noopener"><span class="dm-diff dm-hard">hard</span><span class="dm-title">FlashDecoding: Split-K GQA Decode Attention</span><span class="dm-go">Solve <span class="arrow">&rarr;</span></span></a>
+    </div>
+    <p class="dm-foot">Matched to this page from Deep-ML's catalogue of 1,380 problems. More at <a href="https://www.deep-ml.com/problems" target="_blank" rel="noopener">deep-ml.com</a>, and <a href="/practice.html">Where to practise</a> covers the other platforms and what each one trains.</p>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">15</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/31-llm-inference-serving"><div class="rc-sec" style="color:var(--c-practice)">31 · Read this first</div><div class="rc-title">LLM Inference &amp; Serving</div><div class="rc-hook">Prefill and decode, the four serving numbers, continuous batching and chunked prefill. Everything here assumes it.</div></a>
+      <a class="related-card" href="/topics/23-efficient-ai-systems"><div class="rc-sec" style="color:var(--c-efficient)">23 · The mechanisms</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">PagedAttention, FlashAttention, speculative decoding and the roofline that makes decode bandwidth-bound.</div></a>
+      <a class="related-card" href="/topics/28-gpu-architecture-cuda-distributed"><div class="rc-sec" style="color:var(--c-gpu)">28 · The hardware</div><div class="rc-title">GPU Architecture, CUDA &amp; Distributed Training</div><div class="rc-hook">SMs, HBM, NVLink and collectives. Section 06's occupancy argument and section 07's all-to-all both live here.</div></a>
+      <a class="related-card" href="/topics/29-finetuning-llms"><div class="rc-sec" style="color:var(--c-practice)">29 · Where adapters come from</div><div class="rc-title">Fine-tuning LLMs in Practice</div><div class="rc-hook">LoRA as a training technique, including the rank choice that section 04 says you cannot renegotiate later.</div></a>
+      <a class="related-card" href="/quantization-lab.html"><div class="rc-sec" style="color:var(--accent-text)">Interactive</div><div class="rc-title">Quantization Lab</div><div class="rc-hook">Scaling factors, granularity and outliers, with the dials in your hands rather than in a code block.</div></a>
+    </div>
+  </section>

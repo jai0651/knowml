@@ -1,0 +1,543 @@
+---
+title: "Scientific & Structured AI"
+dek: "Follow one idea, that a molecule turned upside down is still the same molecule, from symmetric networks through protein structure, physics-informed models and equation discovery. You'll learn how building structure into a model replaces data, and why checking its output is the hard part."
+readingTime: "~26 min"
+prereqs: "autodiff (04), diffusion (12), a little vector calculus (01)"
+group: "Embodied & Frontier"
+label: "Chapter 19"
+description: "Inductive bias as the thing that makes scientific ML work: invariance and equivariance, equivariant interatomic potentials, AlphaFold's Evoformer and Invariant Point Attention, equivariant diffusion for molecule and protein design, physics-informed neural networks and where they fail, neural operators, symbolic regression, and the active-learning loop."
+---
+<section id="tldr">
+    <p>Pick up a water molecule, turn it upside down, and put it back. It's the same molecule, with the same energy, the same bond lengths and the same chemistry. You know that without a second thought, but a neural network that reads a molecule as a list of coordinates doesn't. Every rotated copy looks to it like a different input, and unless somebody shows it examples, it has no reason to give the same answer for both.</p>
+
+    <p>For a photo model or a language model that's a small problem, because the web supplies billions of examples for free. Science doesn't have that. A single energy from density functional theory (the standard quantum-chemistry calculation) costs CPU-hours, a crystal structure takes a lab, and a protein structure used to take months of crystallography. So scientific machine learning starts from the opposite situation, with very little data and a lot of exact knowledge about the problem: rotations don't change energies, forces come from energies, and physical laws hold at every point.</p>
+
+    <p>This chapter is about turning that knowledge into architecture. We'll keep coming back to our rotated molecule, and we'll see that a network can be built so that the rotation never matters (that property is called <strong>equivariance</strong>), measure how many training examples that saves, and follow it into models of molecules and proteins. Then we'll move to the second kind of structure, a differential equation you know the solution has to satisfy, and to models whose output is an equation or a proposal that someone can check. Along the way one question keeps coming up: how do you know the model's answer is right?</p>
+
+    <p>That last question is where these systems most often fail. A model that emits candidates nobody can cheaply check produces a list, not a discovery. Page <a href="/topics/37-ai-in-industry">37</a> argues that case across industries, and this page is the machinery underneath it.</p>
+  </section>
+
+  <section id="different-game">
+    <h2><span class="num">01</span>Why this is a different game</h2>
+
+    <h3 id="little-data-a-lot-of-knowledge">Little data, a lot of knowledge</h3>
+    <p>Start with what a model for water has to learn from. One density-functional-theory energy is CPU-hours of computing, so energies add up fast. One crystal structure is a lab. The dataset you'd like to have doesn't exist and can't be bought. That's the opposite of the situation in vision and language.</p>
+
+    <p>What you have instead is knowledge a web-scale engineer doesn't. The first kind is <strong>exact symmetries</strong>. Translate a molecule, rotate it or renumber its atoms, and the energy doesn't change, and this holds exactly, with no approximation. The second is <strong>conservation laws</strong>. Forces are the negative gradient of an energy, and mass and momentum are conserved, so a model can be built to respect these by construction. The third is <strong>cheap verifiers</strong>. A predicted structure can be scored against a held-out experiment, a forecast is scored by tomorrow, and a proposed equation can just be evaluated.</p>
+
+    <p>Now we can name the idea the whole chapter rests on. An <strong>inductive bias</strong> is an assumption a model carries before it has seen any data. Convolution assumes that a local pattern matters more than where exactly it sits in the image, and attention assumes any token may matter to any other. A symmetry is an unusually strong inductive bias, because it's exactly true. And it's a substitute for data: every symmetry you fail to build in is something the model has to learn from examples, and learning it uses up examples you don't have. In language that trade hardly matters, because examples are free and the symmetries are weak. In chemistry it decides the outcome. That's why scientific machine learning looks like a different discipline and not only a different application.</p>
+
+    <h3 id="four-ways-to-treat-a-rotated-molecule">Four ways to treat a rotated molecule</h3>
+    <p>So what are the options for our rotated water molecule? There are four, and the diagram lays them out from left to right by how much symmetry the architecture already knows. One reads raw coordinates and assumes nothing. Another reads the same raw coordinates but is shown every training sample at random poses, a technique called <strong>augmentation</strong>. Our third option throws the pose away and reads only distances between atoms, so a rotation can't be detected at all. Last, the fourth carries the pose through the network in a form that rotates correctly. Everything else in this chapter is a variation on picking one of these columns.</p>
+
+    <div class="diagram">
+      <div class="diagram-title">Four ways to handle a rotated molecule, and what each one costs
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg">
+        <text x="25" y="20" font-size="10.5" class="dim">how much symmetry the architecture already knows</text>
+        <path d="M25,30 L675,30" stroke="#9a9aa8" stroke-width="1.6" fill="none" class="flow-line"/>
+
+        <rect x="25" y="46" width="140" height="104" rx="8" fill="#f87171" opacity="0.13"/>
+        <rect x="25" y="46" width="140" height="104" rx="8" fill="none" stroke="#f87171" stroke-width="1.6"/>
+        <text x="95" y="70" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f87171">RAW COORDS</text>
+        <text x="95" y="92" text-anchor="middle" font-size="9.5" class="dim">MLP on flattened xyz</text>
+        <text x="95" y="107" text-anchor="middle" font-size="9.5" class="dim">nothing assumed</text>
+        <line x1="45" y1="118" x2="145" y2="118" stroke="rgba(255,255,255,.14)"/>
+        <text x="95" y="138" text-anchor="middle" font-size="10.5" fill="#f87171">no symmetry</text>
+
+        <path d="M169,98 L191,98" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="195" y="46" width="140" height="104" rx="8" fill="#fbbf24" opacity="0.13"/>
+        <rect x="195" y="46" width="140" height="104" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+        <text x="265" y="70" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">+ AUGMENTATION</text>
+        <text x="265" y="92" text-anchor="middle" font-size="9.5" class="dim">same MLP, every sample</text>
+        <text x="265" y="107" text-anchor="middle" font-size="9.5" class="dim">shown at random poses</text>
+        <line x1="215" y1="118" x2="315" y2="118" stroke="rgba(255,255,255,.14)"/>
+        <text x="265" y="138" text-anchor="middle" font-size="10.5" fill="#fbbf24">approximate</text>
+
+        <path d="M339,98 L361,98" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="365" y="46" width="140" height="104" rx="8" fill="#34d399" opacity="0.13"/>
+        <rect x="365" y="46" width="140" height="104" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+        <text x="435" y="70" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">DISTANCES</text>
+        <text x="435" y="92" text-anchor="middle" font-size="9.5" class="dim">invariant features only</text>
+        <text x="435" y="107" text-anchor="middle" font-size="9.5" class="dim">pose thrown away</text>
+        <line x1="385" y1="118" x2="485" y2="118" stroke="rgba(255,255,255,.14)"/>
+        <text x="435" y="138" text-anchor="middle" font-size="10.5" fill="#34d399">exact, scalars only</text>
+
+        <path d="M509,98 L531,98" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+
+        <rect x="535" y="46" width="140" height="104" rx="8" fill="#818cf8" opacity="0.13"/>
+        <rect x="535" y="46" width="140" height="104" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6" class="pulse-node"/>
+        <text x="605" y="70" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">EQUIVARIANT</text>
+        <text x="605" y="92" text-anchor="middle" font-size="9.5" class="dim">geometric tensors kept</text>
+        <text x="605" y="107" text-anchor="middle" font-size="9.5" class="dim">pose carried through</text>
+        <line x1="555" y1="118" x2="655" y2="118" stroke="rgba(255,255,255,.14)"/>
+        <text x="605" y="138" text-anchor="middle" font-size="10.5" fill="#818cf8">exact, vectors too</text>
+
+        <line x1="25" y1="172" x2="675" y2="172" stroke="rgba(255,255,255,.14)" stroke-width="1"/>
+        <text x="25" y="192" font-size="10.5" class="dim">rotate the input, and the prediction</text>
+        <text x="95" y="214" text-anchor="middle" font-size="11" fill="#f87171">changes</text>
+        <text x="265" y="214" text-anchor="middle" font-size="11" fill="#fbbf24">drifts a little</text>
+        <text x="435" y="214" text-anchor="middle" font-size="11" fill="#34d399">is identical</text>
+        <text x="605" y="214" text-anchor="middle" font-size="11" fill="#818cf8">rotates with it</text>
+
+        <line x1="25" y1="234" x2="675" y2="234" stroke="rgba(255,255,255,.14)" stroke-width="1"/>
+        <text x="25" y="254" font-size="10.5" class="dim">to reach the same error you need</text>
+        <text x="95" y="276" text-anchor="middle" font-size="11" fill="#f87171">the most data</text>
+        <text x="265" y="276" text-anchor="middle" font-size="11" fill="#fbbf24">more epochs</text>
+        <text x="435" y="276" text-anchor="middle" font-size="11" fill="#34d399">far less data</text>
+        <text x="605" y="276" text-anchor="middle" font-size="11" fill="#818cf8">far less data</text>
+
+        <text x="25" y="312" font-size="10.5" class="dim">Sections 02 and 03 measure columns one to three. Column four is what buys you forces, and section 04 is where it pays.</text>
+      </svg>
+      <div class="diagram-caption">Four ways to handle a rotated molecule, from nothing assumed on the left to the full pose carried through the network on the right. Only the two right-hand columns give an exact guarantee, and the fourth is the only one that can output a direction. Everything else in this chapter is a variation on picking a column.</div>
+    </div>
+
+    <p>Read the middle row of the diagram first. Only the right-hand two columns give an exact guarantee, and they get it from the architecture and not from examples. That last column costs the most to build, and it's the only one that can output a direction, so force fields live there. We'll measure the first three columns in sections 02 and 03, and section 04 is where the fourth earns its cost. First, though, we need to say precisely what "the rotation doesn't matter" means, because there are two different meanings and they decide what a model is allowed to output.</p>
+  </section>
+
+  <section id="equivariance">
+    <h2><span class="num">02</span>Invariance and equivariance, precisely</h2>
+
+    <h3 id="two-kinds-of-unchanged">Two kinds of "unchanged"</h3>
+    <p>Let <span>$g$</span> be a transformation from some group, meaning a collection of transformations that can be combined and undone, such as rotations, translations or relabellings of atoms. A function <span>$f$</span> is <strong>invariant</strong> if applying the transformation to the input makes no difference to the output, and <strong>equivariant</strong> if the output transforms in the same way the input did.</p>
+
+    <div class="eq-block"><span>$$f(g \cdot x) = f(x) \quad\text{invariant}\qquad f(g \cdot x) = g \cdot f(x) \quad\text{equivariant}$$</span></div>
+
+    <p>For our water molecule, the energy is invariant, since turning the molecule doesn't change how much energy it has. Each atom's force is equivariant, since it's an arrow, and when you turn the molecule the arrows turn with it. A model that predicts energy should be invariant, and a model that predicts forces has to be equivariant, so we'll need both.</p>
+
+    <p>Only a few groups matter here, and they're small and concrete. <strong>E(3)</strong> is the set of rotations, translations and reflections of 3D space, and <strong>SE(3)</strong> is the same set without reflections, and it matters when a molecule and its mirror image behave differently (chirality). <strong>Permutation</strong> covers identical atoms or graph nodes, since renumbering the atoms can't change the energy. And physics problems have gauge and scale symmetries, so a PDE residual (the amount by which a candidate solution fails to satisfy the equation) holds at every point and not only where you sampled, and that's the symmetry at work.</p>
+
+    <h3 id="the-cheap-route-throw-the-pose-away">The cheap route: throw the pose away</h3>
+    <p>Maybe the easiest way to get invariance is to give the network only things that don't depend on the pose. Distances between pairs of atoms are exactly that: rotate the molecule and every distance stays the same. If the network reads distances and never sees coordinates, it can't tell the molecule was rotated, because the information isn't there.</p>
+
+    <p>Below, we build a five-atom point cloud, rotates it 0.7 radians (about 40 degrees) around the z axis with the matrix <code>R</code>, and feeds both versions to two untrained networks. <code>coord_mlp</code> reads the 15 raw coordinates. <code>dist_mlp</code> computes all pairwise distances with <code>np.linalg.norm</code> and broadcasting, then keeps each pair once using <code>np.triu_indices(5, 1)</code>, a call that picks the entries above the diagonal, so 10 numbers go in. Both share the output layer <code>W2</code>. Nothing is trained, because we're only checking what the architecture does to a rotated input.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Rotate a point cloud and watch one network change its mind</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(0)
+
+X = rng.normal(0, 1, (5, 3))            # a 5-atom point cloud
+c, s = np.cos(0.7), np.sin(0.7)         # 0.7 rad about z, ~40 degrees
+R = np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
+Xr = X @ R.T                            # the same molecule, turned
+
+W1 = rng.normal(0, .4, (15, 8))         # 15 = 5 atoms x 3 coordinates
+V1 = rng.normal(0, .4, (10, 8))         # 10 = the pairwise distances
+W2 = rng.normal(0, .4, 8)               # shared output layer
+
+def coord_mlp(P):                       # reads raw xyz, the naive way
+    return np.tanh(P.reshape(-1) @ W1) @ W2
+
+def dist_mlp(P):                        # reads |ri - rj| instead
+    D = np.linalg.norm(P[:, None, :] - P[None, :, :], axis=-1)
+    return np.tanh(D[np.triu_indices(5, 1)] @ V1) @ W2
+
+print("coords", tuple(X.shape), " distances", (10,))
+print("coord_mlp  %.4f -&gt; %.4f" % (coord_mlp(X), coord_mlp(Xr)))
+print("dist_mlp   %.4f -&gt; %.4f" % (dist_mlp(X), dist_mlp(Xr)))
+print("dist_mlp shifted by %.2e" % abs(dist_mlp(X) - dist_mlp(Xr)))</code></pre>
+      <div class="tryit-out">Two untrained networks disagree on the raw coordinates, <code>coord_mlp</code> moving from <code>1.4112</code> to <code>1.1209</code> for a molecule that didn't change. <code>dist_mlp</code> returns <code>2.0109</code> both times, and the gap is exactly <code>0.00e+00</code>. No training happened here and none is needed.</div>
+    </details>
+
+    <p>Look at the last two printed lines. Here <code>coord_mlp</code> gave different answers for two copies of the same molecule, and <code>dist_mlp</code> gave identical ones, to the last bit. Invariance came from the representation. That's what "built into the architecture" means in practice.</p>
+
+    <p>This trick has a price. Distances are scalars, so a network that reads only distances can only produce scalars, and if you ask it for a force vector it has no way to point. To get vectors out, we have to keep the geometry inside the network and not discard it at the input.</p>
+
+    <h3 id="keeping-the-geometry-equivariant-networks">Keeping the geometry: equivariant networks</h3>
+    <p><strong>Equivariant networks</strong> do that by carrying geometric objects through the layers. Each feature is typed by how it behaves under rotation: it's a scalar (unchanged), a vector (turns like an arrow), or a higher-order tensor, written formally as irreducible representations of the rotation group. Tensor Field Networks introduced the construction for 3D point clouds. Layers combine features using spherical harmonics, a standard family of functions on the sphere, through tensor products, and the bookkeeping of types guarantees that the output rotates correctly. The <code>e3nn</code> library is the standard implementation.</p>
+
+    <h4 class="why">Why isn't augmentation enough?</h4>
+    <p>Augmentation, the second column of the diagram, also makes the model see rotated copies, and it's much easier to implement. What differs is what you get. With augmentation the model has seen rotated examples and hopes to generalise. Its guarantee is statistical, it holds only near the poses you sampled, and every new layer has to earn it again. Built-in equivariance is an algebraic identity. It holds for every rotation, at initialisation, before a single gradient step, and it can't degrade during training. One is evidence and the other is proof. Whether the proof is worth its price is something we can measure.</p>
+  </section>
+
+  <section id="what-it-buys">
+    <h2><span class="num">03</span>What the symmetry buys, measured</h2>
+
+    <p>So far the argument is qualitative, so let's put a number on it. We'll fix a target that depends only on geometry (a sum over pairs of atoms of <code>exp(-distance)</code>), then train three models on the same 32 molecules and test them on fresh molecules in arbitrary orientations. One model reads raw coordinates, the second reads raw coordinates with rotation augmentation, and the third reads pairwise distances.</p>
+
+    <p>In the code, <code>rot</code> draws a random rotation for each sample by taking the QR decomposition of a random matrix and fixing its sign so it's a proper rotation. <code>flat</code> and <code>dist</code> are the two feature maps, <code>y_of</code> is the target, and <code>fit</code> trains a small network for 1500 steps. When <code>aug</code> is true, each step draws fresh random rotations of the training set. Everything else is identical across the three runs.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">The data-efficiency gap, on 32 training examples</span>
+      </summary>
+<pre><code>import torch, torch.nn as nn
+torch.manual_seed(0)
+
+def rot(P):                            # a random 3D rotation per sample
+    Q, _ = torch.linalg.qr(torch.randn(len(P), 3, 3))
+    return P @ (Q * torch.sign(torch.det(Q))[:, None, None]).mT
+
+D    = lambda P: torch.cdist(P, P)                 # (n, 4, 4)
+dist = lambda P: D(P).flatten(1)                   # (n, 16), invariant
+flat = lambda P: P.reshape(len(P), -1)             # (n, 12), not
+y_of = lambda P: torch.exp(-D(P)).triu(1).sum((1, 2))[:, None]
+Ptr = torch.randn(32, 4, 3)            # only 32 training molecules
+Pte = rot(torch.randn(600, 4, 3))      # fresh ones, arbitrary poses
+ytr, yte = y_of(Ptr), y_of(Pte)
+
+def fit(feat, aug):
+    net = nn.Sequential(nn.Linear(feat(Ptr).shape[1], 64), nn.Tanh(),
+                        nn.Linear(64, 1))
+    opt = torch.optim.Adam(net.parameters(), lr=0.02)
+    for _ in range(1500):
+        loss = ((net(feat(rot(Ptr) if aug else Ptr)) - ytr) ** 2).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+    return ((net(feat(Pte)) - yte) ** 2).mean().sqrt().item()
+
+print("train", tuple(Ptr.shape), "| std(y) %.3f" % yte.std())
+print("coords        test RMSE %.3f" % fit(flat, False))
+print("coords + aug  test RMSE %.3f" % fit(flat, True))
+print("distances     test RMSE %.3f" % fit(dist, False))</code></pre>
+      <div class="tryit-out">The coordinate model gets <code>0.741</code>, a worse score than the <code>0.411</code> you get from predicting the mean (<code>std(y)</code>). Augmentation rescues it to <code>0.349</code>, and the distance model gets <code>0.078</code>, about nine times better than the coordinate model.</div>
+    </details>
+
+    <p>To judge the numbers, you need a reference, and <code>std(y) = 0.411</code> is it: that's the error you'd get by always predicting the mean. The coordinate model scores 0.741, and that's worse than a constant. Augmentation brings it to 0.349, only a little better than the mean. The distance model reaches 0.078, about nine times better than the coordinate model, from identical data and a near-identical network. Only one thing changed, namely what the first layer is allowed to see.</p>
+
+    <p>That gap is the field's central selling point, and it shows up in real systems. The NequIP paper reports matching or beating existing interatomic potentials with <strong>up to three orders of magnitude fewer training data</strong>. Notice also what augmentation did in our run. It helped a lot, and at a fixed number of steps it still didn't close the gap.</p>
+
+    <h3 id="when-the-bias-stops-paying-for-itself">When the bias stops paying for itself</h3>
+    <p>Equivariance is a constraint, and constraints cost throughput and engineering effort. Brehmer et al. studied the trade directly and found that augmentation <em>can</em> close the data-efficiency gap given enough epochs, while equivariant models still won at every compute budget they tested. Our strongest counterexample comes from AlphaFold 3, whose diffusion module works on raw atom coordinates with no equivariant processing at all, and whose authors say plainly that they found none was required. So enough data and enough scale can stand in for the constraint. Most scientific problems don't have enough of either, so the rest of the chapter mostly stays on the equivariant side. Let's see what that looks like on real molecules.</p>
+  </section>
+
+  <section id="molecules">
+    <h2><span class="num">04</span>Molecules: graphs, point clouds and forces</h2>
+
+    <h3 id="two-ways-to-describe-a-molecule">Two ways to describe a molecule</h3>
+    <p>A molecule is a graph with 3D coordinates attached, and which of those two things you use decides what you can predict. The <strong>2D route</strong> treats the molecule as a graph of atoms and bonds and runs message passing over it (page <a href="/topics/18-graph-ml">18</a> covers that). That's permutation-equivariant by construction, and it never sees geometry. For many property-prediction tasks that's enough, and the baseline to beat is older than any of it: extended-connectivity fingerprints hash local substructures into a bit vector, feed it to gradient boosting, and win more often than the literature admits.</p>
+
+    <p>When geometry matters, the <strong>3D route</strong> uses coordinates, and the architectures form a ladder where each rung fixes something the one below can't do. <strong>SchNet</strong> applies continuous-filter convolutions over interatomic distances, so it's invariant and produces scalars only. <strong>DimeNet</strong> adds bond angles, because distances alone can't distinguish some geometries. <strong>EGNN</strong> keeps the coordinates themselves as a feature and updates them using relative-position vectors, and that's enough for E(n) equivariance with almost no machinery. <strong>NequIP</strong> and <strong>MACE</strong> go fully equivariant with tensor features, and MACE raises the body order of each message, so a single layer captures interactions among many atoms at once.</p>
+
+    <h3 id="learned-interatomic-potentials">Learned interatomic potentials</h3>
+    <p>The largest application of these models is the <strong>machine-learned interatomic potential</strong>. Density functional theory gives accurate energies, but at a cost that makes long molecular dynamics (simulating how atoms move over time) impossible. A learned potential fits the DFT energies and forces, and then runs simulations orders of magnitude faster. For that to work, the model has to give forces as well as energies, which brings up a design choice.</p>
+
+    <h4 class="why">Why predict an energy and not the forces directly?</h4>
+    <p>You could give the network a second output head for forces, but there's a better way. Predict only the scalar energy <span>$E_\theta(\mathbf{r})$</span>, where <span>$\mathbf r$</span> holds the atom positions, and define the forces as its negative gradient, which autodiff computes for you.</p>
+
+    <div class="eq-block"><span>$$\mathbf{F}_i = -\frac{\partial E_\theta}{\partial \mathbf{r}_i}$$</span></div>
+
+    <p>Two things follow immediately. Forces defined this way are equivariant, because the gradient of an invariant scalar is a vector that turns with the molecule, exactly the property from section 02. And they're conservative, so energy is conserved along a trajectory. A separate force head gives you neither, and the simulation drifts.</p>
+
+    <p>Where this goes wrong is extrapolation. A potential fitted near equilibrium will meet configurations that no training point resembled, because molecular dynamics goes looking for them. A low force error on a held-out benchmark isn't evidence that a 100-nanosecond trajectory stays stable. Those are different claims, and only the second one matters for the simulation you wanted. So far the molecules have been small. What about the largest molecules, proteins?</p>
+  </section>
+
+  <section id="folding">
+    <h2><span class="num">05</span>Protein structure prediction, mechanism first</h2>
+
+    <p>Page <a href="/topics/37-ai-in-industry">37</a> covers what AlphaFold changed and what it didn't, and this section is about how it works. A protein is a chain of amino acids that folds into a shape, and the shape determines what the protein does. Predicting that shape from the sequence of amino acids was an open problem for fifty years.</p>
+
+    <p>AlphaFold 2 combines several priors, and it helps to name them separately because each one is a piece of knowledge handed to the network. The first is <strong>coevolution</strong>. The input isn't a single sequence but a <strong>multiple sequence alignment</strong>, a stack of the same protein's sequences from evolutionary relatives, lined up. Residue pairs (a residue is one amino acid in the chain) that mutate together across relatives are probably touching in the folded protein, so evolution did a kind of labelling for free.</p>
+
+    <p>The second is <strong>two coupled representations</strong>. The Evoformer, the core module, maintains one representation of the alignment and one of residue pairs, and passes information between them again and again. The third is <strong>geometric consistency</strong>. Triangle multiplicative updates constrain the edge between residues <span>$i$</span> and <span>$j$</span> using the edges <span>$ik$</span> and <span>$jk$</span> through a third residue <span>$k$</span>. Distances have to obey the triangle inequality, so this update enforces something that's true and not merely something learned.</p>
+
+    <p>The fourth is <strong>equivariant structure</strong>. Each residue gets a local coordinate frame, and Invariant Point Attention reasons about points in those frames, so the module is equivariant to global rotation and translation, our water-molecule symmetry again. The fifth is <strong>recycling</strong>: the whole network is run again on its own output, three times, which adds depth cheaply. AlphaFold 2 is trained end to end against a frame-aligned point error, and it outputs a per-residue confidence score, pLDDT, alongside the coordinates.</p>
+
+    <p><strong>Protein language models</strong> take a different bet. ESM-2 is a masked language model trained on sequences alone, and ESMFold predicts structure from a single sequence with no alignment. It's much faster and generally less accurate on hard targets, and that tells you how much the alignment was contributing. AlphaFold 3 then replaced the structure module with a diffusion module over raw atom coordinates, dropped the explicit equivariance (the exception we met in section 03), and extended coverage to ligands, nucleic acids and complexes.</p>
+
+    <p>One caution about that confidence score. A high pLDDT reliably marks confidently folded regions and a low one reliably marks disorder, so it's excellent for triage. But it's a ranking signal, and it isn't calibrated as the "probability this residue is within 1 Å". Teams that threshold on it as though it were, and then pass the surviving structures into a downstream pipeline, inherit an error rate nobody measured. Prediction scores a structure that somebody gave you, though. What about producing a new one?</p>
+  </section>
+
+  <section id="generation">
+    <h2><span class="num">06</span>Designing molecules and proteins</h2>
+
+    <p>Design is the reverse job, producing a structure with the properties you want, and the symmetry argument comes back in a sharper form. Page <a href="/topics/12-generative-models">12</a> has the diffusion machinery, and the scientific version changes one thing: the denoiser is equivariant.</p>
+
+    <p>That constraint has a purpose. If the noise is isotropic (the same in every direction) and the denoising network is equivariant, the learned distribution over structures is <em>invariant</em> to rotation. So the model never spends capacity on orientation, because every orientation of a molecule counts as the same sample. Equivariant Diffusion for Molecule Generation in 3D is the reference construction.</p>
+
+    <p>Protein design runs as a pipeline of several models, each handing its output to the next.</p>
+
+    <ol>
+      <li><strong>RFdiffusion</strong> generates a backbone, optionally conditioned on a binding site or a motif to scaffold.</li>
+      <li><strong>ProteinMPNN</strong> solves the inverse problem: given that backbone, which amino-acid sequence folds into it?</li>
+      <li><strong>AlphaFold</strong> is then run as an in-silico filter. Does the designed sequence fold back to the requested backbone?</li>
+      <li><strong>The wet lab</strong> expresses the survivors and measures whether they do anything.</li>
+    </ol>
+
+    <p>Step three is the interesting one, because it's a cheap verifier attached to a generator, the same pattern page <a href="/topics/37-ai-in-industry">37</a> traces across every field where this has worked. The one caveat is that the wet-lab hit rate is the only number that counts. It varies enormously by target class, and a generator's reported validity rate tells you nothing about it.</p>
+
+    <p>Everything so far has exploited symmetry. There's a second kind of structure in science that has nothing to do with rotation: many systems obey a known differential equation, and that's what we turn to next.</p>
+  </section>
+
+  <section id="pinn">
+    <h2><span class="num">07</span>Physics-informed neural networks</h2>
+
+    <h3 id="putting-the-equation-in-the-loss">Putting the equation in the loss</h3>
+    <p>Suppose you know the equation that governs a system, and you have a few measurements. Represent the solution as a network <span>$u_\theta(t, x)$</span> that takes time and position and returns the quantity of interest. Because the network is differentiable, autodiff can evaluate the differential operator on it exactly, at any point you like. That means the <strong>residual</strong> of the PDE, how far the network's output is from satisfying the equation, can be turned into a loss term.</p>
+
+    <div class="eq-block"><span>$$\mathcal{L} = \|u_\theta - u_{\text{data}}\|^2 + \lambda_b \|\mathcal{B}[u_\theta]\|^2 + \lambda_r \|\mathcal{N}[u_\theta]\|^2$$</span></div>
+
+    <p>Reading the equation from left to right, the loss has three terms. The first fits the observations. The second makes the network respect the boundary condition <span>$\mathcal{B}$</span>, and the third drives the PDE residual <span>$\mathcal{N}[u_\theta]$</span> to zero. We evaluate the residual at <strong>collocation points</strong>, points you choose yourself that needn't be data points, and there's no mesh. The <span>$\lambda$</span> weights say how much each term counts.</p>
+
+    <p>Here's the payoff: physics constrains the solution where no data exists, and probably the easiest way to see that is to take the data away. In the code below the truth is the ODE <span>$u' = \cos t$</span> with <span>$u(0)=0$</span>, whose solution is <span>$\sin t$</span>. Both networks see the same 12 data points, all in <code>[0, 2]</code>. The physics-informed one also gets a residual term, evaluated at 200 collocation points spread over <code>[0, 8]</code>. Inside <code>train</code>, <code>torch.autograd.grad</code> differentiates the network with respect to its input <code>tc</code>, and <code>create_graph=True</code> keeps that derivative differentiable so the residual can be trained on. Both are scored on <code>[2, 8]</code>, where there's no data.</p>
+
+    <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Extrapolate an ODE far outside the data, using only the equation</span>
+      </summary>
+<pre><code>import torch, torch.nn as nn
+torch.manual_seed(0)
+
+net = lambda: nn.Sequential(nn.Linear(1, 32), nn.Tanh(),
+                            nn.Linear(32, 32), nn.Tanh(),
+                            nn.Linear(32, 1))
+
+td = torch.linspace(0, 2, 12)[:, None]     # data exists only on [0, 2]
+ud = torch.sin(td)                         # truth: u' = cos t, u(0) = 0
+tc = torch.linspace(0, 8, 200)[:, None].requires_grad_(True)
+tt = torch.linspace(2, 8, 61)[:, None]     # scored where no data exists
+
+def train(physics):
+    f = net()
+    opt = torch.optim.Adam(f.parameters(), lr=0.01)
+    for _ in range(4000):
+        loss = ((f(td) - ud) ** 2).mean()
+        if physics:                        # residual of the ODE itself
+            u = f(tc)
+            du, = torch.autograd.grad(u, tc, torch.ones_like(u),
+                                      create_graph=True)
+            loss = loss + ((du - torch.cos(tc)) ** 2).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+    return (f(tt) - torch.sin(tt)).abs().max().item()
+
+print("data", tuple(td.shape), "collocation", tuple(tc.shape))
+print("data loss only   max |error| on [2,8]: %.4f" % train(False))
+print("+ physics residual                   : %.4f" % train(True))</code></pre>
+      <div class="tryit-out">The plain fit has a maximum error of <code>1.6343</code> on <code>[2, 8]</code>, and the physics-informed one has <code>0.0005</code>, a factor of three thousand. Both networks saw the same 12 data points, all in <code>[0, 2]</code>, so the residual term is what carries the second one.</div>
+    </details>
+
+    <p>Without the residual, the fit leaves the data and produces nonsense: a maximum error of 1.6343 on a function whose entire range is <span>$[-1, 1]$</span>. The physics-informed network tracks <code>sin</code> out to <span>$t = 8$</span> with an error of 0.0005, a factor of three thousand better, and nobody told it the answer out there. Its residual term is carrying it, not the data.</p>
+
+    <h3 id="where-pinns-go-wrong">Where PINNs go wrong</h3>
+    <p>That demo is also a fair warning, because the ODE there is trivial. Real problems behave worse, and the failure modes are well documented. First, the loss terms compete. Data, boundary and residual terms have different scales and different gradients, and a badly set weight lets the network satisfy the residual while ignoring the boundary. Many residuals are also, perhaps surprisingly, minimised by <span>$u = 0$</span>, so if the data and boundary terms are weak, that trivial solution is where the optimiser goes.</p>
+
+    <p>Networks also learn low frequencies first, a tendency called <strong>spectral bias</strong>, so stiff and multiscale problems converge slowly or not at all. And for a problem a finite-element solver handles well, you've swapped an exact method (a linear solve) for non-convex optimisation by gradient descent. Given all that, when is a PINN worth using?</p>
+
+    <h4 class="why">When is a PINN the right tool?</h4>
+    <p>On forward problems that classical solvers handle well, PINNs are usually slower and less accurate. A 2023 study asked this directly in its title and found the finite-element method competitive or better across its benchmarks. The real niche is the <strong>inverse problem</strong>. An unknown coefficient in the PDE becomes one more trainable parameter, and sparse, noisy measurements plus the equation are enough to recover it. That's awkward for a classical solver and natural here. So choose a PINN when you have partial data and a missing constant, and use a classical solver when you have a well-posed problem and a mesh. One more limit remains: a PINN is trained for one problem instance, and if you change the initial condition you retrain it.</p>
+  </section>
+
+  <section id="operators">
+    <h2><span class="num">08</span>Neural operators: learning the solver, not the solution</h2>
+
+    <p>Operators fix that limit. A <strong>neural operator</strong> learns a mapping between function spaces: give it an initial condition or a coefficient field as a function, and it returns the solution as a function. Training costs a lot of solved instances, and after that inference is a single forward pass.</p>
+
+    <p>Two designs dominate. The <strong>Fourier Neural Operator</strong> transforms each layer's input to Fourier space, multiplies a learned complex weight per frequency mode, truncates the high modes, and transforms back. The FFT makes this a global convolution, so information crosses the whole domain in one layer. <strong>DeepONet</strong> uses two networks: a branch network encodes the input function sampled at fixed sensors, a trunk network encodes the query location, and the output is their inner product, a structure that follows a universal approximation theorem for operators.</p>
+
+    <p>One property deserves a closer look, <strong>discretisation invariance</strong>. The FNO's weights live on Fourier modes, not on grid cells, so the same trained model can be evaluated on a finer grid than it was trained on. It learned an operator, not an array. Weather models apply the same idea at scale: GraphCast and GenCast learn the map from one atmospheric state to the next, and page <a href="/topics/37-ai-in-industry">37</a> has the deployment evidence and the skill numbers.</p>
+
+    <p>The costs are real. You need a large corpus of solved instances, so the classical solver has to run many times first. Also, the surrogate has no error bar, and it degrades silently off distribution, the regime you most wanted it for. Both PINNs and operators output numbers, though. Next comes a family whose output a person can read.</p>
+  </section>
+
+  <section id="symbolic">
+    <h2><span class="num">09</span>Symbolic regression, and outputs you can check</h2>
+
+    <h3 id="searching-for-the-equation-itself">Searching for the equation itself</h3>
+    <p>Everything above outputs numbers. <strong>Symbolic regression</strong> outputs an equation that a scientist can read and an algebra system can verify. It searches the space of mathematical expressions for one that fits the data, and that space is discrete, combinatorial and enormous, so the approaches differ mainly in how they cut it down.</p>
+
+    <p><strong>Genetic programming</strong> mutates and recombines expression trees and keeps what fits, and <code>PySR</code> is the practical modern implementation. <strong>Physics-motivated decomposition</strong> is the idea behind AI Feynman: it tests for properties that shrink the problem, including dimensional analysis, symmetry and separability, and then recurses on the smaller pieces. <strong>Sparse regression</strong> is the idea behind SINDy, one that fixes a library of candidate terms and selects a sparse combination of them. That turns the search into a regression with an <span>$\ell_1$</span> penalty (a cost on the sum of absolute coefficients that pushes most of them to zero), and that's dramatically more tractable.</p>
+
+    <p>Its output is a <strong>Pareto front</strong>, a set of equations trading accuracy against complexity, and not a single answer. You pick the point, and that choice is a scientific judgement the method can't make for you. Its limits are real too: symbolic regression scales badly past a handful of variables, and an expression that fits your data may not be a law of nature.</p>
+
+    <h3 id="two-other-fields-with-the-same-shape">Two other fields with the same shape</h3>
+    <p>Look at what symbolic regression, theorem proving and program synthesis have in common. Each has a vast discrete search space and a checker that costs almost nothing: evaluate the expression, compile the Lean proof, run the tests. That combination is where current AI is strongest, and it's the argument page <a href="/topics/36-millennium-prize-problems">36</a> makes for mathematics and page <a href="/topics/37-ai-in-industry">37</a> makes for industry. Where the checker is a wet-lab experiment instead, throughput on candidates stops being the bottleneck. And that raises a last question: in science the model doesn't have to take a fixed dataset, so who decides what to measure next?</p>
+  </section>
+
+  <section id="loop">
+    <h2><span class="num">10</span>The loop around the model</h2>
+
+    <p>In science the model rarely gets a fixed dataset. It gets to ask for the next experiment, and that changes what a good model is. <strong>Bayesian optimisation</strong> is the standard machinery for optimising something expensive: fit a probabilistic surrogate, usually a Gaussian process, then choose the next point by maximising an <strong>acquisition function</strong> over it. Three acquisition functions are common. <strong>Expected improvement</strong> scores how much a point is likely to beat the current best. <strong>Upper confidence bound</strong> adds a tunable multiple of the predicted standard deviation to the mean. <strong>Thompson sampling</strong> draws one function from the posterior and takes its argmax, so uncertainty drives exploration directly.</p>
+
+    <p><strong>Active learning</strong> is the same idea aimed at the model and not the objective: label the points the model is least sure about. For neural potentials the usual uncertainty estimate is the disagreement across a small ensemble. <strong>Inverse design</strong> turns the question around. You know the property you want and need a structure that has it, so you either search a generative model's latent space against a property predictor, or condition the generator on the property directly.</p>
+
+    <p>Every one of these assumes the surrogate's uncertainty means something. A Gaussian process on twenty points is reasonable. A deep ensemble of neural potentials is often confidently wrong in exactly the regions it has never seen. When that happens the loop stops exploring and repeatedly samples a region it believes is understood, and the symptom is an active-learning campaign whose error curve flattens early while coverage of the design space quietly stays tiny.</p>
+
+    <p>That brings us back to where the chapter started. Symmetry and equations are exact knowledge you can build in, uncertainty is knowledge you have to earn, and the whole field depends on being able to check what a model says.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">11</span>Summary</h2>
+    <ol>
+      <li><strong>Science has little data and a lot of exact structure.</strong> One DFT energy costs CPU-hours, a crystal structure takes a lab, and what you have in return is symmetries, conservation laws and cheap verifiers.</li>
+      <li><strong>Symmetry substitutes for data.</strong> Every symmetry you don't build in is something the model has to learn from examples you can't afford.</li>
+      <li><strong>Invariant means unchanged, equivariant means transformed the same way.</strong> Energy is invariant under rotation, and force rotates with the molecule.</li>
+      <li><strong>Pairwise distances give invariance for free but only scalars.</strong> Equivariant networks keep typed geometric features through the layers, so they can output vectors such as forces.</li>
+      <li><strong>Built-in equivariance is a guarantee and augmentation is evidence.</strong> In our run the distance model reached an RMSE of 0.078 against 0.741 for raw coordinates and 0.349 with augmentation, and NequIP reports up to three orders of magnitude less training data.</li>
+      <li><strong>The bias can be replaced by scale.</strong> Augmentation can close the gap given enough epochs, and AlphaFold 3 works on raw coordinates, but most scientific problems have neither enough data nor enough compute for that.</li>
+      <li><strong>Predict an energy and take its negative gradient for forces.</strong> The forces are then equivariant and conservative, and a low force error on a benchmark still doesn't prove a long simulation stays stable.</li>
+      <li><strong>AlphaFold stacks several priors:</strong> coevolution, coupled representations, triangle updates, equivariant frames and recycling. pLDDT is a ranking signal and not a calibrated probability.</li>
+      <li><strong>A PINN puts the equation in the loss.</strong> It extrapolates where data doesn't exist, but it's fragile and usually loses to a classical solver on forward problems, so its niche is inverse problems with a missing constant.</li>
+      <li><strong>Neural operators learn the solution map for a whole family of problems,</strong> and the Fourier version can be evaluated on a finer grid than it was trained on. They need many solved instances and give no error bar.</li>
+      <li><strong>Everything depends on a check.</strong> Generators attached to cheap verifiers work, loops are only as good as their uncertainty, and a list of candidates with no hit rate isn't a discovery.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">12</span>Build this</h2>
+    <p class="lede">Section 03 showed the gap at one training-set size. The interesting object is the whole curve, and it takes an afternoon on a laptop.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">Fit a toy interatomic potential three ways, then run it</span>
+        <span class="proj-meta">~4 hours · torch on CPU</span>
+      </div>
+      <p>Build a five-atom system with a known analytic energy, fit it with and without the symmetry built in, and then use each learned energy as a force field. The second half is where the differences stop being academic.</p>
+      <ol class="proj-steps">
+        <li>Define ground truth: a Lennard-Jones energy over all pairs of five atoms in 3D. Generate configurations by perturbing a cluster, and keep the analytic forces too. You will need them later.</li>
+        <li>Build three feature maps. Flattened coordinates, flattened coordinates with a fresh random rotation each epoch, and the sorted vector of pairwise distances. Same network body for all three.</li>
+        <li>Train each at sizes 8, 32, 128, 512 and 2048, holding steps and architecture fixed. Plot test RMSE against training size on log-log axes. This is the figure this page is built around.</li>
+        <li>Now get forces by differentiating the predicted energy with respect to the input coordinates, and skip adding a second head. Compare direction against the analytic force using cosine similarity.</li>
+        <li>Run velocity-Verlet molecular dynamics for a few thousand steps under each learned force field. Plot total energy against time.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the distance model's curve sits below the other two at every training size and the vertical gap widens as the dataset shrinks. In the dynamics, look for which trajectories conserve total energy and which drift or blow up. The ranking there is usually starker than the RMSE ranking.</div>
+      <div class="proj-stretch"><strong>Then break something on purpose.</strong> Replace the sorted distance vector with an unsorted one and retrain. You have kept rotation invariance and thrown away permutation invariance, and the curve should move. Try feeding coordinates recentred on the centroid, which buys translation invariance only, and see how much of the gap that one cheap step closes. That tells you which symmetry was doing the work for your target, and the answer is not always the one you expected.</div>
+    </div>
+  </section>
+
+  <section id="tradeoffs">
+    <h2><span class="num">13</span>What breaks</h2>
+    <p class="lede">Almost none of these are modelling failures. They are evaluation failures that a modelling story got attached to.</p>
+
+    <ul>
+      <li><strong>The random split leaked.</strong> Molecular datasets are full of near-duplicate scaffolds, so a random split puts relatives on both sides. Re-split by scaffold or by date and the headline number drops, sometimes by half.</li>
+      <li><strong>The potential is accurate and the simulation explodes.</strong> Force error on the held-out set looks excellent. Molecular dynamics wanders into configurations the training set never contained and the trajectory diverges.</li>
+      <li><strong>Symmetry was built in, then broken by preprocessing.</strong> A canonical orientation, an unsorted feature vector, or a global coordinate frame quietly reintroduces pose dependence that the architecture had eliminated.</li>
+      <li><strong>The PINN found a trivial solution.</strong> The residual is satisfied, the boundary term had a weight three orders of magnitude too small, and the network is happily returning something close to zero.</li>
+      <li><strong>The neural operator was only ever tested at training resolution.</strong> The discretisation-invariance claim is the selling point and is the thing nobody checked.</li>
+      <li><strong>The generated molecules cannot be made.</strong> Validity, novelty and synthesisability are three different properties. Only the first is usually in the loss.</li>
+      <li><strong>A confidence score is treated as a probability.</strong> pLDDT, ensemble variance and softmax outputs all rank well and none of them are calibrated out of the box.</li>
+      <li><strong>The result is a list with no hit rate.</strong> A model proposed 380,000 candidate crystals. The number that matters is what fraction survived contact with a chemist, and page <a href="/topics/37-ai-in-industry">37</a> has that story in full.</li>
+    </ul>
+  </section>
+
+  <section id="in-the-wild">
+    <h2><span class="num">14</span>Where you meet this in the wild</h2>
+    <p class="lede">Same inductive-bias argument, four very different verifiers.</p>
+
+    <div class="wild-grid">
+      <div class="wild-card">
+        <div class="wild-head"><strong>A drug-discovery screen</strong></div>
+        <p>Millions of candidate compounds, a few hundred that can be tested, and a verifier that costs weeks. The model's job is to rank, and the honest metric is the wet-lab hit rate of the top slice.</p>
+        <p class="reach reach-yes">2D fingerprints and graph models as the cheap filter, 3D structure for the survivors.</p>
+        <p class="reach reach-no">Not an end-to-end generator pointed at the clinic.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>A national weather service</strong></div>
+        <p>Decades of uniform reanalysis data and a free honest verifier, because tomorrow arrives. It is the most favourable setup in the field, and the one that reached operations.</p>
+        <p class="reach reach-yes">Learned surrogates for the full forecast, run alongside the physics model.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>A battery or catalyst team</strong></div>
+        <p>Screening needs simulations that DFT cannot afford, so a learned potential replaces it inside a larger search. Stability of the resulting dynamics matters more than any benchmark error.</p>
+        <p class="reach reach-yes">Equivariant potentials plus active learning on the configurations the simulation visits.</p>
+      </div>
+      <div class="wild-card">
+        <div class="wild-head"><strong>An engineering simulation group</strong></div>
+        <p>Thousands of near-identical CFD or structural runs during design iteration. A surrogate trained on those runs turns a nightly job into an interactive one, inside the design envelope.</p>
+        <p class="reach reach-yes">Neural operators for the repeated sweep.</p>
+        <p class="reach reach-no">Not for the certification run, where an unbounded error is unacceptable.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">15</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>What is the difference between invariance and equivariance, and why does it matter?</summary>
+      <div class="qa-body"><p>A function is invariant to a transformation if applying the transformation to the input leaves the output unchanged, and equivariant if the output undergoes the corresponding transformation. Rotating a molecule leaves its energy unchanged, so energy is a rotation-invariant quantity, while the force on each atom rotates along with the molecule, so forces are equivariant. The distinction decides what a model is capable of emitting. A network built on pairwise distances discards the orientation entirely, which makes it exactly invariant but means it can only ever produce scalars, since it has no representation of direction. To predict a vector quantity you need equivariant internal features that carry orientation through the layers. Getting this wrong shows up as a model that cannot express the target at all, rather than as a model that trains badly.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why is data augmentation not equivalent to building a symmetry into the architecture?</summary>
+      <div class="qa-body"><p>Augmentation teaches the symmetry statistically from examples, so the model approximately satisfies it near the transformations that were sampled and the guarantee degrades away from them. Built-in equivariance is an algebraic property of the architecture, so it holds exactly for every element of the group, at initialisation, before any training, and it cannot be lost during optimisation. The practical consequences are data efficiency and reliability. The augmented model spends capacity and training samples relearning something already known, and it needs more epochs to approach the same accuracy. Published work comparing the two finds that augmentation can eventually close the data-efficiency gap given enough epochs, while equivariant models still win at a fixed compute budget. Augmentation also cannot give you correct equivariant outputs such as forces, only approximately invariant scalars.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why should a machine-learned force field predict energy and differentiate it, rather than predicting forces directly?</summary>
+      <div class="qa-body"><p>Because two physical properties come for free. If the network outputs a rotation-invariant scalar energy and forces are defined as the negative gradient of that energy with respect to atomic positions, the forces are automatically equivariant, since the gradient of an invariant scalar is a vector that rotates with the input. They are also automatically conservative, so no work is created around a closed loop and total energy is conserved along a molecular dynamics trajectory. A separate force head enforces neither property. It may be approximately consistent on the training distribution, but it produces a non-conservative field, and the symptom is steady energy drift or an outright blow-up during long simulations. The gradient approach costs one extra backward pass per evaluation, which is cheap against the failure it prevents.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Walk through how AlphaFold 2 gets from a sequence to coordinates.</summary>
+      <div class="qa-body"><p>The input is not a single sequence but a multiple sequence alignment of evolutionary relatives, plus any structural templates, because residue pairs that mutate together are likely to be in physical contact and that coevolution signal carries much of the prior. The Evoformer trunk maintains two coupled representations, one over the alignment and one over residue pairs, and passes information between them for many blocks. Triangle multiplicative updates constrain each pair edge using the other two edges of every triangle, imposing the triangle inequality that real distances obey. The structure module then gives each residue a local frame and uses Invariant Point Attention to reason about points in those frames, making it equivariant to global rotation and translation, and it outputs backbone frames and torsion angles. The network is recycled on its own output several times, trained end to end against a frame-aligned point error, and emits a per-residue pLDDT confidence.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What is a neural operator, and how does it differ from a physics-informed neural network?</summary>
+      <div class="qa-body"><p>A physics-informed network represents the solution to one problem instance as a network of the coordinates, trained by penalising the residual of the governing equation at collocation points. Change the initial condition or a coefficient and you train again from scratch. A neural operator instead learns a mapping between function spaces, taking an input function such as an initial condition or a coefficient field and returning the solution function, so one trained model covers a whole family of instances and inference is a single forward pass. The Fourier Neural Operator learns weights on Fourier modes, which makes each layer a global convolution and gives discretisation invariance, since the model can be evaluated on a finer grid than it was trained on. DeepONet uses a branch network over the input function sampled at fixed sensors and a trunk network over the query point. The trade is that operators need a large corpus of already-solved instances, which means running the classical solver many times first.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>When would you not use a PINN, and what is it genuinely good at?</summary>
+      <div class="qa-body"><p>Avoid it for well-posed forward problems an established numerical method already handles, because you are replacing an exact linear solve with non-convex gradient descent, and published comparisons find finite elements competitive or better on standard benchmarks in both accuracy and time. The specific failure modes are several loss terms at different scales whose relative weights are hyperparameters, residuals trivially minimised by the zero function when the data and boundary terms are too weak, spectral bias that makes stiff or high-frequency problems converge slowly, and an optimisation landscape that gets harder as the physics gets harder. The genuine niche is the inverse problem. An unknown coefficient in the equation becomes another trainable parameter, and sparse noisy measurements combined with the residual recover it without a mesh and without an adjoint solver, which is awkward classically and natural here. It is also reasonable where meshing is itself the hard part.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Your equivariant model reports a strong test score. What would you check before believing it?</summary>
+      <div class="qa-body"><p>First check the split. Random splits over molecular datasets put near-identical scaffolds on both sides and inflate the score, so re-evaluate under a scaffold or temporal split and expect the number to fall. Second, test the symmetry rather than trusting it: pass a rotated, translated and atom-permuted copy of the same input and confirm the prediction is unchanged to numerical precision, because a canonical frame, centring or an unsorted feature vector routinely breaks a guarantee the architecture provided. Third, check the metric matches the use. Low force error on held-out snapshots does not establish that a long molecular dynamics trajectory stays stable, so run the dynamics and look at energy conservation. Fourth, compare against an unfashionable baseline such as fingerprints plus gradient boosting. Finally, examine where the errors live, since aggregate error hides systematic failure on the chemically novel subset you cared about.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>AlphaFold 3 dropped explicit equivariance from its structure prediction. Does that undermine the case for inductive bias?</summary>
+      <div class="qa-body"><p>It bounds the case rather than undermining it. The AlphaFold 3 diffusion module operates directly on raw atom coordinates without rotational frames or equivariant processing, relying on random rotation and translation augmentation instead, and the authors state that they found no invariance or equivariance requirement in the architecture. That is a real data point. With enough training data, capacity and compute, a network can learn a symmetry well enough that enforcing it costs more in complexity and throughput than it returns, and scaling studies show augmentation closing the data-efficiency gap given sufficient epochs. The condition is the part that matters. Most scientific problems have neither a Protein Data Bank nor that compute budget, and in the low-data regime the constraint still buys orders of magnitude, as equivariant interatomic potentials show. The question is not whether the symmetry is true, which it is, but whether you can afford to learn it.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">16</span>Go deeper</h2>
+    <p class="dek">Primary sources for each mechanism on this page, including the papers that report the limitations.</p>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://www.nature.com/articles/s41586-021-03819-2" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Highly accurate protein structure prediction with AlphaFold</div><div class="r-sub">Jumper et al., Nature 2021. The Evoformer, Invariant Point Attention and recycling, described by the people who built them.</div></div>
+      </a>
+      <a class="resource-card" href="https://pmc.ncbi.nlm.nih.gov/articles/PMC11168924/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Accurate structure prediction of biomolecular interactions with AlphaFold 3</div><div class="r-sub">Abramson et al., Nature 2024. Read section "diffusion module" for the decision to drop equivariant processing entirely.</div></div>
+      </a>
+      <a class="resource-card" href="https://www.nature.com/articles/s41467-022-29939-5" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">E(3)-equivariant graph neural networks for data-efficient and accurate interatomic potentials</div><div class="r-sub">The NequIP paper, Nature Communications 2022. Source of the "up to three orders of magnitude fewer training data" claim.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2410.23179" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Does equivariance matter at scale?</div><div class="r-sub">Brehmer et al. — the honest scaling comparison against augmentation. Read this next to the NequIP paper — arXiv:2410.23179</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2203.17003" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Equivariant Diffusion for Molecule Generation in 3D</div><div class="r-sub">Hoogeboom et al. — why an equivariant denoiser gives a rotation-invariant distribution — arXiv:2203.17003</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1711.10561" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Physics Informed Deep Learning (Part I)</div><div class="r-sub">Raissi, Perdikaris &amp; Karniadakis — the original PINN formulation, residual loss and all — arXiv:1711.10561</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2109.01050" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Characterizing possible failure modes in physics-informed neural networks</div><div class="r-sub">Krishnapriyan et al. — the optimisation pathologies in section 07, diagnosed properly — arXiv:2109.01050</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2302.04107" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Can Physics-Informed Neural Networks beat the Finite Element Method?</div><div class="r-sub">Grossmann et al. — the comparison that keeps the PINN enthusiasm honest — arXiv:2302.04107</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/2010.08895" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Fourier Neural Operator for Parametric Partial Differential Equations</div><div class="r-sub">Li et al. — learned weights on Fourier modes, and where discretisation invariance comes from — arXiv:2010.08895</div></div>
+      </a>
+      <a class="resource-card" href="https://github.com/e3nn/e3nn" target="_blank" rel="noopener">
+        <div class="r-icon">🔧</div>
+        <div class="r-body"><div class="r-kind">Tool</div><div class="r-title">e3nn</div><div class="r-sub">The library for building E(3)-equivariant networks. Start here rather than deriving the tensor products yourself.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">17</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/37-ai-in-industry"><div class="rc-sec" style="color:var(--c-challenge)">37 · The survey this page serves</div><div class="rc-title">AI in Industry: What It Solves</div><div class="rc-hook">Which of these results held up, which did not, and the search-plus-verifier argument that predicts the difference.</div></a>
+      <a class="related-card" href="/topics/12-generative-models"><div class="rc-sec" style="color:var(--c-genai)">12 · Directly reused</div><div class="rc-title">Generative Models</div><div class="rc-hook">The diffusion machinery that molecular and protein design bolt an equivariant denoiser onto.</div></a>
+      <a class="related-card" href="/topics/36-millennium-prize-problems"><div class="rc-sec" style="color:var(--c-challenge)">36 · The same argument in maths</div><div class="rc-title">The Millennium Prize Problems</div><div class="rc-hook">Search over a huge space with a cheap checker, when the checker is Lean rather than a wet lab.</div></a>
+      <a class="related-card" href="/topics/04-neural-network-fundamentals"><div class="rc-sec" style="color:var(--c-nn)">04 · The prerequisite</div><div class="rc-title">Neural Network Fundamentals</div><div class="rc-hook">Autodiff, which is what makes a PDE residual and a force-from-energy gradient possible at all.</div></a>
+    </div>
+  </section>

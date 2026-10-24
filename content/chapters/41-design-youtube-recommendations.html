@@ -1,0 +1,1081 @@
+---
+title: "Designing YouTube Recommendations"
+dek: "Follow Arjun's evening on YouTube down to the machinery that picks a dozen videos for him out of billions. We build it from the obvious version, fix each failure in turn, and look at the choices YouTube published along the way, including the ones it later changed."
+readingTime: "~66 min"
+prereqs: "recommenders (16), reinforcement learning (15)"
+group: "ML System Design"
+label: "Case study 41"
+description: "From billions of videos to the dozen a person sees: co-visitation, candidate generation as extreme classification, two-tower retrieval with the logQ correction, expected watch time, multitask ranking with a position tower, objective choice and the feedback loop, built on YouTube's own papers."
+---
+<section id="tldr">
+    <p>Arjun is lying in bed in Pune a little before ten at night, holding his phone above his face. He has just finished a seven-minute video on fixing a slipped bicycle chain, and a small countdown on the screen says the next video will start in five seconds. He doesn't touch anything. It starts, a different channel but the same sort of repair, and he watches that too. Afterwards he goes back to the home screen, where a dozen thumbnails are already waiting: a cricket highlight, a Marathi cooking video, a long talk about monsoon cloud formation, and a few others he hadn't asked for. He taps the one about clouds.</p>
+
+    <p>Behind those dozen thumbnails there were billions of candidates, and the choice had to be made in a fraction of a second, for him in particular, using nothing but what he had watched before. There's a second problem hiding in the scene. This system can't see what Arjun wanted. It can see that he tapped, that he stayed for four minutes, that he didn't press dislike, and from those traces it has to guess. Software that makes this kind of guess, picking a few items from a huge catalogue for one particular person, is a <strong>recommender system</strong>, and the catalogue it picks from is the <strong>corpus</strong>. That guess matters more than it first seems, because whatever the system learns to reward, millions of people who make videos will learn to produce.</p>
+
+    <p>So the question this chapter answers is: <strong>how does YouTube choose a dozen videos for one person out of billions, in a fraction of a second, when it can only measure what people do and not what they wanted?</strong></p>
+
+    <p>We'll build the design the way an engineer would, from the most obvious version, "show what's popular and what's similar", and fix each failure in turn. That takes us through candidate generation framed as a classification problem with millions of classes, a two-tower retrieval model and the correction that makes its training honest, nearest-neighbour search, and a ranker that predicts watch time. After that come the multitask model that separates what people do from what they value, the history of YouTube changing its objective, and the feedback loop in which every model's choices become the next model's training data. We use YouTube's own published papers and blog posts throughout, and say plainly where its internals are unpublished.</p>
+  </section>
+
+  <section id="requirements">
+    <h2><span class="num">01</span>What we're building, and how big</h2>
+
+    <h3 id="1-1-what-it-has-to-do">1.1 What it has to do</h3>
+
+    <p>YouTube recommends in many places: the home feed, the "Up next" list beside and below a playing video, Shorts, notifications, and the end screens that suggest what comes next. We'll concentrate on the first two. On the <strong>home feed</strong> there's no current video, so the system has to infer what Arjun wants from his history and the time of day. On <strong>Up next</strong> the video he's watching is itself a strong clue, so the question changes to "given this video and this person, what comes next?" The two surfaces share most of their machinery and differ in what they feed it.</p>
+
+    <p>The system has to put a ranked list of about a dozen videos in front of someone within a fraction of a second of opening the app. Those videos should be ones the person is glad they watched, which differs from the ones they clicked, and a whole section below deals with that gap. New uploads need a fair chance within hours, the list shouldn't be a dozen near-copies, and the system must behave sensibly for a person it has never seen and for a video nobody has watched.</p>
+
+    <h3 id="1-2-how-big-is-it">1.2 How big is it?</h3>
+
+    <p>Published numbers come from different years, so we'll date each one. In 2016, the YouTube team wrote that its recommendations were "helping more than a billion users discover personalized content" (Covington, Adams and Sargin, RecSys 2016). The same paper described models with about a billion parameters trained on hundreds of billions of examples. By 2019, a YouTube ranking paper cited 1.9 billion monthly active users and hundreds of billions of user-interaction log entries a day (Zhao et al., RecSys 2019). In January 2018 YouTube's chief product officer, Neal Mohan, said at CES that more than 70% of watch time came from recommendations, as press reports of the talk put it. In September 2021 a YouTube blog post by Cristos Goodrow, then VP of engineering, said the system learns from "over 80 billion pieces of information" it calls signals, and that recommendations drive a significant share of all viewing.</p>
+
+    <p>Corpus size is harder to pin down. YouTube's press page in 2026 says that on average over 20 million videos are uploaded every day, and that Shorts alone average over 200 billion views a day. YouTube hasn't published the size of the full corpus, but 20 million uploads a day adds up to roughly 7 billion in a year, so billions of videos is probably the right order of magnitude. In 2016 the paper described a corpus with "many hours" of video uploaded each second, and that rate makes freshness a hard constraint.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">Suppose we scored every video in a one-billion-video corpus with a big ranking model for every request. This model costs half a millisecond of CPU per video (an illustrative figure, since YouTube doesn't publish its model costs). How many CPU-seconds is one request, and how many cores would you need to answer in 100 milliseconds? Then compare with scoring just 500 candidates.</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>One billion videos at 0.0005 seconds each is 500,000 CPU-seconds for a single request. To finish in 0.1 seconds you'd spread that across 5 million cores, for one person's one page load. Scoring 500 candidates costs 0.25 CPU-seconds, which two or three cores can do in 100 ms. At an illustrative 10,000 requests a second that's about 2,500 cores, a size you can build.</p>
+        <p>That conclusion gives the whole design its shape. Only a few hundred videos can reach the expensive model, so something much cheaper must choose those few hundred from the billions, and "cheaper" has to mean a cost that barely grows with the size of the corpus.</p>
+      </details>
+    </div>
+
+    <p>We also have no published figure for YouTube's end-to-end latency budget, and we won't invent one. That 2016 paper says only that scoring millions of items needs to happen "under a strict serving latency of tens of milliseconds" for the candidate stage. We'll treat that as the guide and reason about the rest from what a request has to do.</p>
+  </section>
+
+  <section id="v1">
+    <h2><span class="num">02</span>Version 1: popular videos and similar videos</h2>
+
+    <p>Our first design has two lists, and it's the obvious one. One is whatever is most watched right now, shown to everybody. The other is videos similar to the one you're watching, for Up next. We can make "similar" precise without any machine learning at all. If lots of people who watched video A also watched video B within the same day, then A and B are related, and counting those pairs gives a score. That count is the <strong>co-visitation</strong> count, and it's what the first published description of YouTube's recommender used, in a 2010 RecSys paper by James Davidson and colleagues.</p>
+
+    <p>The 2010 system works in three steps. For each pair of videos, it counts how many times the pair was watched by the same signed-in user within a window of roughly 24 hours, and turns the count into a relatedness score by dividing by a measure of each video's overall popularity, so a video that everyone watches isn't related to everything. Then, for a given person, it takes a <strong>seed set</strong> of videos from their own history (watched, liked, favourited) and looks up each seed's most related videos. Last, it expands outward: related videos of related videos, a few steps along the graph, so the list isn't limited to direct neighbours. Candidates are then ranked using signals about the video's overall quality, the user's own habits, and a diversity step that stops one seed from filling the whole list.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">Version 1: a hand-built relatedness graph
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 245" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="50" width="120" height="80" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="50" width="120" height="80" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="80.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">HISTORY</text>
+<text x="80.0" y="94" text-anchor="middle" font-size="10" class="dim">Arjun's watches</text>
+<text x="80.0" y="108" text-anchor="middle" font-size="10" class="dim">= seed videos</text>
+<path d="M146,90 L182,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="188" y="50" width="130" height="80" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="188" y="50" width="130" height="80" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="253.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">CO-VISIT GRAPH</text>
+<text x="253.0" y="94" text-anchor="middle" font-size="10" class="dim">pairs watched by one</text>
+<text x="253.0" y="108" text-anchor="middle" font-size="10" class="dim">user within ~24 h</text>
+<path d="M324,90 L360,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="366" y="50" width="120" height="80" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="366" y="50" width="120" height="80" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="426.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">EXPAND</text>
+<text x="426.0" y="94" text-anchor="middle" font-size="10" class="dim">neighbours of</text>
+<text x="426.0" y="108" text-anchor="middle" font-size="10" class="dim">neighbours</text>
+<path d="M492,90 L528,90" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="534" y="50" width="146" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="534" y="50" width="146" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="607.0" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RANK + DIVERSIFY</text>
+<text x="607.0" y="94" text-anchor="middle" font-size="10" class="dim">quality, user habits,</text>
+<text x="607.0" y="108" text-anchor="middle" font-size="10" class="dim">variety</text>
+<text x="20" y="175" text-anchor="start" font-size="10.5" class="dim">Built offline from logs; a lookup at request time is nearly free.</text>
+<text x="20" y="200" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">A video uploaded an hour ago has no pairs yet, so it has no edges and can never be a candidate.</text>
+<text x="20" y="222" text-anchor="start" font-size="10.5" class="dim">The graph sees a bag of seeds: no order, no time of day, no learned idea of what keeps someone watching.</text>
+      </svg>
+      <div class="diagram-caption">Follow the arrows left to right, then read the two lines underneath. Every box is cheap, which is why this design lasted, and the amber line is the first thing that breaks.</div>
+    </div>
+
+    <p>This design has real strengths, and that's why it lasted. It needs no content understanding, no labels and no deep learning, lookups on a precomputed graph cost almost nothing, and it works in any language for any video that has been watched alongside others.</p>
+
+    <p>It breaks in ways that tell us exactly what to fix. A video uploaded an hour ago has no co-visitation counts, so it can't be recommended, and for a platform whose product is partly "what's happening now" that's a serious hole. The graph treats Arjun's history as an unordered bag of seeds, so it can't tell that he has finished the bicycle series and is moving on, or that his tastes at ten at night differ from his tastes at noon. It has one idea of relatedness, a count, and nothing in it learns what makes a person stay. It can also only reach videos linked to the person's seeds through the graph, so surprises are hard to introduce.</p>
+
+    <p>Each of these points toward the same remedy: replace the hand-built graph and its hand-written scoring with a model that learns from every watch, takes many kinds of signal as input, and can score a video it has never seen. YouTube published exactly that move in 2016, replacing a matrix-factorization system with a neural network, and that's where we go next.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Candidate source</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Most popular</td><td>Trivial, never empty, good for brand-new users</td><td>Identical for everyone, and popular things get more popular</td></tr>
+        <tr><td>Co-visitation graph (2010)</td><td>Cheap lookups, no content understanding, explainable</td><td>Blind to new videos, ignores order and context, one hand-made notion of relatedness</td></tr>
+        <tr><td>Learned model over history</td><td>Uses any signal, generalises to unseen combinations</td><td>Needs a training pipeline, serving index and careful label design</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>None of these choices is permanent. In 2016 the paper says its neural generator was designed so that candidates from other sources, "such as those described in an earlier work", the 2010 system among them, could still be blended in. In 2019, Zhao and colleagues describe a candidate stage that pools several generators: one matching topics of the playing video, one built on how often videos are watched together, and a sequence model over the user's history.</p>
+  </section>
+
+  <section id="candidates">
+    <h2><span class="num">03</span>Candidate generation as classification</h2>
+
+    <p>We now want one model that looks at Arjun's history and proposes a few hundred videos worth ranking. A natural way to set the task up is the way a language model predicts the next word. Take a moment in some user's past, show the model everything that came before it, and ask it to name the video that was watched next. Its answer is a probability for every video in the corpus, and the candidates are the ones with the highest probability. Covington, Adams and Sargin described YouTube's version of this in 2016 and called it "extreme multiclass classification", where each of millions of videos is a class.</p>
+
+    <p>Formally, a neural network turns the user and their context into a vector <span>$u$</span>, and each video <span>$i$</span> has its own learned vector <span>$v_i$</span>. The probability that the next watch is video <span>$i$</span> is a softmax over the dot products:</p>
+
+    <div class="eq-block"><span>$$P(w_t = i \mid U, C) \;=\; \frac{e^{v_i^{\top} u}}{\sum_{j \in V} e^{v_j^{\top} u}}$$</span></div>
+
+    <p>Here <span>$U$</span> is the user, <span>$C$</span> the context, and <span>$V$</span> the whole corpus. The network that produces <span>$u$</span> is simple. Each video the user watched is a row in an embedding table, which is a learned list of numbers per video. This paper averages the embeddings of the last 50 watches into one vector, did the same for the last 50 search queries (split into one-word and two-word tokens), and added coarse features such as geography, device, age and gender. These are concatenated and passed through ReLU layers whose widths halve at each step, 1024 then 512 then 256, so the output matches the 256-dimensional video vectors. Averaging beat sum and component-wise max in the authors' tests. Vocabulary size was 1 million videos and 1 million search tokens, each embedded with 256 numbers.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The 2016 candidate generator
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 372" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="40" width="150" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="150" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="95.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">WATCH HISTORY</text>
+<text x="95.0" y="72" text-anchor="middle" font-size="10" class="dim">last 50 IDs, embedded</text>
+<text x="95.0" y="86" text-anchor="middle" font-size="10" class="dim">then averaged</text>
+<rect x="184" y="40" width="150" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="184" y="40" width="150" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="259.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">SEARCH HISTORY</text>
+<text x="259.0" y="72" text-anchor="middle" font-size="10" class="dim">last 50 queries, tokens</text>
+<text x="259.0" y="86" text-anchor="middle" font-size="10" class="dim">embedded, averaged</text>
+<rect x="348" y="40" width="150" height="56" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="348" y="40" width="150" height="56" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="423.0" y="65" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">EXAMPLE AGE</text>
+<text x="423.0" y="79" text-anchor="middle" font-size="10" class="dim">0 at serving time</text>
+<rect x="512" y="40" width="168" height="56" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="512" y="40" width="168" height="56" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="596.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">CONTEXT</text>
+<text x="596.0" y="72" text-anchor="middle" font-size="10" class="dim">geography, device, age,</text>
+<text x="596.0" y="86" text-anchor="middle" font-size="10" class="dim">gender, logged-in</text>
+<path d="M95,98 L95,122" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M259,98 L259,122" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M423,98 L423,122" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M596,98 L596,122" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="124" width="660" height="34" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="124" width="660" height="34" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="145" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">CONCATENATE</text>
+<path d="M350,160 L350,178" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="180" y="180" width="340" height="32" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="180" y="180" width="340" height="32" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="200" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">ReLU 1024</text>
+<rect x="210" y="216" width="280" height="32" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="210" y="216" width="280" height="32" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="236" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">ReLU 512</text>
+<rect x="240" y="252" width="220" height="32" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="240" y="252" width="220" height="32" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="272" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">ReLU 256  =  user vector u</text>
+<path d="M240,268 L150,300" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M460,268 L550,300" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="300" width="260" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="300" width="260" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="150.0" y="315" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">TRAINING</text>
+<text x="150.0" y="329" text-anchor="middle" font-size="10" class="dim">softmax over ~1M video classes,</text>
+<text x="150.0" y="343" text-anchor="middle" font-size="10" class="dim">several thousand sampled negatives</text>
+<rect x="430" y="300" width="250" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="430" y="300" width="250" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="555.0" y="315" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">SERVING</text>
+<text x="555.0" y="329" text-anchor="middle" font-size="10" class="dim">nearest neighbours of u among</text>
+<text x="555.0" y="343" text-anchor="middle" font-size="10" class="dim">video vectors v (dot product)</text>
+      </svg>
+      <div class="diagram-caption">Read top to bottom. Sparse histories become fixed-width vectors by averaging, the stack of layers halves in width until it matches the 256-number video vectors, and the same user vector u is used two ways: against sampled negatives in training and as a search query in serving.</div>
+    </div>
+
+    <h3 id="3-1-why-the-softmax-breaks-and-the-fix">3.1 Why the softmax breaks, and the fix</h3>
+
+    <p>At this scale the softmax has a problem. Its denominator sums over every video, so each training example costs a pass over millions of classes, and training sees hundreds of billions of examples. The standard escape is <strong>sampled softmax</strong>. For each example, keep the true next video and draw only a few thousand other videos at random as stand-ins for "everything else". Loss is computed over that small set only. Drawing the stand-ins at random from the training data would favour popular videos, so the sampled scores are corrected with importance weights. In terms of scores (logits, the numbers fed into the softmax) the correction subtracts the log of the probability with which each negative was drawn:</p>
+
+    <div class="eq-block"><span>$$\ell(i) \;=\; -\log \frac{e^{\,s(u,i) - \log Q(i)}}{\sum_{j \in S} e^{\,s(u,j) - \log Q(j)}}, \qquad s(u,i) = v_i^{\top}u$$</span></div>
+
+    <p>Here <span>$S$</span> is the sampled set (the positive plus the negatives) and <span>$Q(j)$</span> is how likely video <span>$j$</span> was to be drawn. That paper reports several thousand negatives per example, "more than 100 times speedup over traditional softmax". It also tried hierarchical softmax, which arranges the classes in a tree so you only evaluate one path, and couldn't match the accuracy, because each node in the tree has to separate groups of videos that have little in common. We'll meet this equation again in section 04, where the choice of <span>$Q$</span> turns out to matter a great deal.</p>
+
+    <h3 id="3-2-three-decisions-about-the-training-examples">3.2 Three decisions about the training examples</h3>
+
+    <p>In 2016 the paper spends as much time on which examples to train on as on the architecture, and says the choice has "outsized importance" in A/B tests while being hard to measure offline. Three of its choices show how much room there is to go wrong.</p>
+
+    <p>First, which watches count. Training examples come from all YouTube watches, "even those embedded on other sites", and not only from watches that followed a recommendation. If the model learned only from clicks on its own suggestions it would keep reinforcing itself and new content would struggle to surface, so a video discovered through search or a friend's link is fed back into collaborative filtering too. Second, weighting. Here the paper generates a fixed number of examples per user, which weights users equally and stops a small group of heavy viewers from dominating the loss. Third, and least obvious, is the label itself.</p>
+
+    <p>A common recipe in collaborative filtering is to hide a random item from a person's history and predict it from the others. This paper argues this leaks the future: if you know what Arjun watched after the video you're predicting, you can almost read the answer off. Watching patterns are also asymmetric. People watch a series in order, and they find a genre's famous videos before its niche ones. So instead of a random hold-out, the paper "rolls back" a user's history to a random moment and feeds the model only what came before, then asks for the next watch. Withholding information matters in the other direction too. If Arjun has just searched for a cricket player and the model sees that search as an ordered event, it will predict the videos on that search results page, since those are what people watch next. Reproducing the last search page as a home feed performs very poorly, as the authors put it, so search queries are fed in as an unordered bag of tokens that hides where the label came from.</p>
+
+    <h3 id="3-3-telling-the-model-what-day-it-is">3.3 Telling the model what day it is</h3>
+
+    <p>One more problem comes from how training works. Our model learns from watches over a window of several weeks, so the probabilities it produces reflect average popularity across that whole window. But video popularity is far from constant: a video uploaded yesterday may already be the most watched thing in the corpus, while one that peaked three weeks ago has faded. Left alone, the model "has an implicit bias towards the past".</p>
+
+    <p>The paper's fix is a feature called <strong>example age</strong>. During training, each example is given the age of the example (how long before the end of the training window the watch happened) as an input. The network can then learn that watching probability for a given video rises and falls with time. At serving time the feature is set to zero, or slightly negative, which tells the model "predict as if it's the very end of the training window", meaning right now. This paper's Figure 4 shows a video where the model with example age follows the actual upload spike, and the model without it predicts a flat average. They report that the feature improved offline precision and "increased the watch time dramatically on recently uploaded videos in A/B testing".</p>
+
+    <h4 class="why">Why predict the next watch and not a random held-out one?</h4>
+
+    <p>Because the thing we do at serving time is predict the future from the past. A random hold-out gives the model information about later events that won't exist when it serves, so offline accuracy goes up while live performance doesn't. Rolling back makes training look like serving. It also keeps the model honest about order, so it can learn that a person who has watched episode two will want episode three.</p>
+
+        <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Way to train over millions of classes</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Full softmax</td><td>Exact gradient</td><td>Every example costs a pass over the whole corpus</td></tr>
+        <tr><td>Hierarchical softmax</td><td>Cost grows with the log of the corpus</td><td>Tree nodes compare unrelated videos, which hurt accuracy in YouTube's tests</td></tr>
+        <tr><td>Sampled softmax with importance correction</td><td>A few thousand negatives per example, over 100 times faster</td><td>Quality depends on the sampling distribution and on getting the correction right</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>YouTube chose sampled softmax in the 2016 paper, and it still uses a variant of it in 2019, as the next section shows. Depth helped in a clean way: holdout mean average precision rose as hidden layers were added, from zero (a linear factorization that performed like the predecessor system) up to four, with shrinking returns, and adding search history on top of watch history helped as well. This system is still collaborative filtering, but now other signals can take part.</p>
+
+    <p>Predicting the next item with a softmax over a huge vocabulary, is how language models work, with tokens as the classes. Sampled softmax is also a standard tool for large-vocabulary speech and translation models, and the 2016 paper cites that literature for its importance weighting.</p>
+  </section>
+
+  <section id="two-tower">
+    <h2><span class="num">04</span>Two towers, and training them honestly</h2>
+
+    <p>Our 2016 candidate generator has a limitation that shows up as soon as you try to use it for the fresh-content problem. Its video vectors <span>$v_i$</span> are learned per video ID, in an embedding table, and a video that has just been uploaded has no row that has ever received a gradient. This model can only represent a video through watches, which a new video hasn't had. We'd like each video's vector to be computed from the video's features instead: its title, its topics, its channel, its length, whatever the system knows about it at upload time.</p>
+
+    <p>That points to the design on page 16, the <strong>two-tower</strong> model. One network, the user tower, maps everything known about the user and context to a vector. A second network, the item tower, maps everything known about a video to a vector of the same length. A pair's score is a dot product:</p>
+
+    <div class="eq-block"><span>$$s(x, y) \;=\; \langle\, u(x),\; v(y) \,\rangle$$</span></div>
+
+    <p>Here <span>$x$</span> is the user-and-context features, <span>$y$</span> the video features, and <span>$u$</span> and <span>$v$</span> the two towers. Because the video vector depends only on the video, every vector can be computed ahead of time and stored in an index, and a request needs only one run of the user tower. A video that was uploaded a minute ago has features, so it gets a vector the moment its features are known. YouTube's 2019 paper by Xinyang Yi and colleagues (RecSys 2019) describes this as <strong>Neural Deep Retrieval</strong>, a retrieval system that serves personalised suggestions from a corpus of tens of millions of videos. (YouTube doesn't say how the "tens of millions" relates to the whole corpus. It's probably the subset eligible for that surface.)</p>
+
+    <h3 id="4-1-where-the-negatives-come-from">4.1 Where the negatives come from</h3>
+
+    <p>Training this model is again a softmax over the corpus, and again we can't afford the full denominator. Section 03's sampled softmax drew negatives from a separate sampler, but there's a cheaper source that needs no extra work. Take a batch of <span>$B$</span> training examples, each a user with the video they watched. Score every user against every video in the batch. That's a <span>$B \times B$</span> table. The diagonal holds the true pairs, and every off-diagonal cell is a pair that didn't happen, so the other videos in the batch serve as the negatives for each user. These are <strong>in-batch negatives</strong>. They cost nothing extra, because the item tower has already encoded every video in the batch.</p>
+
+    <p>There's a catch, and it's the point of the 2019 paper. Videos in a batch are there because someone watched them, so a popular video shows up as a negative far more often than a rare one. Sampling follows the watch distribution itself. A model trained with plain in-batch softmax learns that popular videos are usually wrong answers, because it keeps seeing them in the wrong-answer role. It penalises popularity that is, in fact, real.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">In-batch negatives: a batch of 4, scored as a 4 x 4 table
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 356" xmlns="http://www.w3.org/2000/svg">
+<text x="235" y="58" text-anchor="middle" font-size="10" class="dim">video 1</text>
+<text x="340" y="58" text-anchor="middle" font-size="10" class="dim">video 2</text>
+<text x="445" y="58" text-anchor="middle" font-size="10" class="dim">video 3</text>
+<text x="550" y="58" text-anchor="middle" font-size="10" class="dim">video 4</text>
+<text x="235" y="72" text-anchor="middle" font-size="10" class="dim" fill="#fbbf24">(popular)</text>
+<text x="170" y="112" text-anchor="end" font-size="11" class="dim">user 1</text>
+<rect x="190" y="84" width="90" height="38" rx="6" fill="#34d399" opacity="0.30"/>
+<rect x="190" y="84" width="90" height="38" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="235" y="107" text-anchor="middle" font-size="10" class="" fill="#34d399">true pair</text>
+<rect x="295" y="84" width="90" height="38" rx="6" fill="#818cf8" opacity="0.08"/>
+<rect x="295" y="84" width="90" height="38" rx="6" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="340" y="107" text-anchor="middle" font-size="10" class="dim">negative</text>
+<rect x="400" y="84" width="90" height="38" rx="6" fill="#818cf8" opacity="0.08"/>
+<rect x="400" y="84" width="90" height="38" rx="6" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="445" y="107" text-anchor="middle" font-size="10" class="dim">negative</text>
+<rect x="505" y="84" width="90" height="38" rx="6" fill="#818cf8" opacity="0.08"/>
+<rect x="505" y="84" width="90" height="38" rx="6" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="550" y="107" text-anchor="middle" font-size="10" class="dim">negative</text>
+<text x="170" y="160" text-anchor="end" font-size="11" class="dim">user 2</text>
+<rect x="190" y="132" width="90" height="38" rx="6" fill="#fbbf24" opacity="0.20"/>
+<rect x="190" y="132" width="90" height="38" rx="6" fill="none" stroke="#fbbf24" stroke-width="1.2"/>
+<text x="235" y="155" text-anchor="middle" font-size="10" class="dim">negative</text>
+<rect x="295" y="132" width="90" height="38" rx="6" fill="#34d399" opacity="0.30"/>
+<rect x="295" y="132" width="90" height="38" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="340" y="155" text-anchor="middle" font-size="10" class="" fill="#34d399">true pair</text>
+<rect x="400" y="132" width="90" height="38" rx="6" fill="#818cf8" opacity="0.08"/>
+<rect x="400" y="132" width="90" height="38" rx="6" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="445" y="155" text-anchor="middle" font-size="10" class="dim">negative</text>
+<rect x="505" y="132" width="90" height="38" rx="6" fill="#818cf8" opacity="0.08"/>
+<rect x="505" y="132" width="90" height="38" rx="6" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="550" y="155" text-anchor="middle" font-size="10" class="dim">negative</text>
+<text x="170" y="208" text-anchor="end" font-size="11" class="dim">user 3</text>
+<rect x="190" y="180" width="90" height="38" rx="6" fill="#fbbf24" opacity="0.20"/>
+<rect x="190" y="180" width="90" height="38" rx="6" fill="none" stroke="#fbbf24" stroke-width="1.2"/>
+<text x="235" y="203" text-anchor="middle" font-size="10" class="dim">negative</text>
+<rect x="295" y="180" width="90" height="38" rx="6" fill="#818cf8" opacity="0.08"/>
+<rect x="295" y="180" width="90" height="38" rx="6" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="340" y="203" text-anchor="middle" font-size="10" class="dim">negative</text>
+<rect x="400" y="180" width="90" height="38" rx="6" fill="#34d399" opacity="0.30"/>
+<rect x="400" y="180" width="90" height="38" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="445" y="203" text-anchor="middle" font-size="10" class="" fill="#34d399">true pair</text>
+<rect x="505" y="180" width="90" height="38" rx="6" fill="#818cf8" opacity="0.08"/>
+<rect x="505" y="180" width="90" height="38" rx="6" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="550" y="203" text-anchor="middle" font-size="10" class="dim">negative</text>
+<text x="170" y="256" text-anchor="end" font-size="11" class="dim">user 4</text>
+<rect x="190" y="228" width="90" height="38" rx="6" fill="#fbbf24" opacity="0.20"/>
+<rect x="190" y="228" width="90" height="38" rx="6" fill="none" stroke="#fbbf24" stroke-width="1.2"/>
+<text x="235" y="251" text-anchor="middle" font-size="10" class="dim">negative</text>
+<rect x="295" y="228" width="90" height="38" rx="6" fill="#818cf8" opacity="0.08"/>
+<rect x="295" y="228" width="90" height="38" rx="6" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="340" y="251" text-anchor="middle" font-size="10" class="dim">negative</text>
+<rect x="400" y="228" width="90" height="38" rx="6" fill="#818cf8" opacity="0.08"/>
+<rect x="400" y="228" width="90" height="38" rx="6" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+<text x="445" y="251" text-anchor="middle" font-size="10" class="dim">negative</text>
+<rect x="505" y="228" width="90" height="38" rx="6" fill="#34d399" opacity="0.30"/>
+<rect x="505" y="228" width="90" height="38" rx="6" fill="none" stroke="#34d399" stroke-width="1.2"/>
+<text x="550" y="251" text-anchor="middle" font-size="10" class="" fill="#34d399">true pair</text>
+<text x="20" y="296" text-anchor="start" font-size="10.5" class="dim">Every off-diagonal cell is a free negative. Column 1 is a popular video, so it is a negative for every other user.</text>
+<text x="20" y="316" text-anchor="start" font-size="10.5" class="" fill="#fbbf24">Plain softmax learns to push that column down. Subtracting log p(video) from each column's score cancels it.</text>
+<text x="20" y="336" text-anchor="start" font-size="10.5" class="" fill="#e9e9ef">Corrected score:  s_c(x, y_j) = s(x, y_j) - log p_j        (serving uses the uncorrected s)</text>
+      </svg>
+      <div class="diagram-caption">Look at the amber column. Videos that people watch a lot show up in the batch more often, so they are negatives more often, which is the bias that the logQ term removes.</div>
+    </div>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">We train a retrieval model with plain in-batch negatives, no correction, on data where popular videos are in fact watched more. Then we retrieve the top 10 videos for each kind of user. Compared with the truth, will the retrieved videos be more popular, less popular, or about the same?</p>
+      <ol>
+        <li>More popular, since popular videos are everywhere in the data</li>
+        <li>Less popular, since popular videos appear as negatives most often</li>
+        <li>About the same</li>
+      </ol>
+      <details>
+        <summary>Show the answer</summary>
+        <p><strong>B, less popular.</strong> A popular video is the "wrong answer" in many more rows of the batch than a rare one, so the loss keeps pushing its score down. The experiment below measures it: the uncorrected model's picks are far less popular than the true top 10, and overlap with the truth is low.</p>
+      </details>
+    </div>
+
+    <h3 id="4-2-the-logq-correction">4.2 The logQ correction</h3>
+
+    <p>We fix it with the importance correction from sampled softmax, applied to the batch. If video <span>$j$</span> appears in a batch with probability proportional to <span>$p_j$</span>, its frequency, then we subtract <span>$\log p_j$</span> from its score before the softmax, so a frequent negative counts for less in proportion to how often it turns up. Yi et al. write the corrected score as</p>
+
+    <div class="eq-block"><span>$$s^{c}(x_i, y_j) \;=\; s(x_i, y_j) \;-\; \log p_j$$</span></div>
+
+    <p>and the batch loss for example <span>$i$</span> is the softmax over <span>$j$</span> of those corrected scores, with the true pair on the diagonal. After training, serving uses the uncorrected score <span>$s$</span>, because the correction only exists to undo how we picked negatives. That paper also divides scores by a temperature and weights examples by a reward, such as watch time, but the correction is the part that carries the idea.</p>
+
+    <p>That leaves how to know <span>$p_j$</span>. In a stationary dataset you'd count. On YouTube the corpus changes constantly and there's no fixed vocabulary of video IDs to count over, so the paper proposes estimating item frequency from the stream. It keeps arrays indexed by a hash of the video ID, and for each hash bucket it tracks, with a moving average, the number of training steps between consecutive appearances of that item. The frequency is the inverse of that gap: an item that appears every 100 steps has <span>$p \approx 1/100$</span> per sample. This estimate adapts when popularity shifts, works for videos the system has never counted before, and the paper analyses it as producing unbiased estimates. Hashing keeps the memory fixed, at the price of occasional collisions between items. (A 2025 follow-up from other authors argues the standard formula can be improved by excluding the positive item from the denominator, which shows that this part of the recipe is still being refined.)</p>
+
+    <p>Here is the correction measured in a toy world. Twenty groups of users each have their own taste over 300 videos, with a long-tailed popularity built in, and positives are drawn from the true preferences. We train a table of scores with the in-batch loss, once plain and once with the <span>$\log Q$</span> term, and compare the learned top 10 with the true top 10.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Train a two-tower-style retrieval loss with and without the logQ correction</span>
+      </summary>
+<pre><code>import numpy as np, torch
+torch.manual_seed(0); rng = np.random.default_rng(0)
+C, N, B = 20, 300, 128                 # user groups, videos, batch size
+pop = 1 / np.arange(1, N + 1) ** 1.1   # a few videos dominate
+pop /= pop.sum()
+a = rng.normal(0, 1.5, (C, N)) + np.log(pop)    # true affinity logits
+P = np.exp(a - a.max(1, keepdims=True))
+P /= P.sum(1, keepdims=True)                    # true P(j | group c)
+q = (P.mean(0))                                  # marginal item frequency
+logq = torch.tensor(np.log(q), dtype=torch.float32)
+
+def train(correct, steps=3000):
+    S = torch.zeros(C, N, requires_grad=True)    # score table s(c, j)
+    opt = torch.optim.Adam([S], lr=0.05)
+    for _ in range(steps):
+        c = rng.integers(0, C, B)
+        j = np.array([rng.choice(N, p=P[k]) for k in c])
+        logits = S[c][:, j]                       # B x B, in-batch
+        if correct:
+            logits = logits - logq[j][None, :]    # minus log Q
+        loss = torch.nn.functional.cross_entropy(logits, torch.arange(B))
+        opt.zero_grad(); loss.backward(); opt.step()
+    return S.detach().numpy()
+
+for name, flag in [(&quot;plain in-batch&quot;, False), (&quot;with logQ&quot;, True)]:
+    S = train(flag)
+    top = np.argsort(-S, 1)[:, :10]
+    true = np.argsort(-P, 1)[:, :10]
+    rec = np.mean([len(set(t) &amp; set(r)) / 10 for t, r in zip(top, true)])
+    print(f&quot;{name:15} overlap with true top-10: {rec:.2f}, &quot;
+          f&quot;mean log-pop of picks: {np.log(q[top]).mean():.2f}&quot;)
+tt = np.argsort(-P, 1)[:, :10]
+print(f&quot;{&#x27;truth&#x27;:15} {&#x27;&#x27;:27} mean log-pop of picks: &quot;
+      f&quot;{np.log(q[tt]).mean():.2f}&quot;)</code></pre>
+      <div class="tryit-out">With plain in-batch negatives the learned top 10 overlaps the true top 10 by only <code>0.26</code>, and the mean log-popularity of its picks is <code>-6.82</code> against <code>-4.27</code> for the truth, so it has learned to avoid popular videos. Subtracting log Q from the scores lifts the overlap to <code>0.87</code> and brings the picks to <code>-4.33</code>, almost exactly the truth. Only the loss changed between the two runs.</div>
+    </details>
+
+    <p>The plain model's picks sit roughly two and a half log-units lower in popularity than the truth, and only a quarter of its top 10 overlaps with the real top 10. With the correction the picks are almost exactly as popular as the truth and 87% of the top 10 matches. Nothing else changed between the runs, so the sampling choice alone changes what the model recommends. (The toy uses score tables where the paper uses neural towers, because the correction acts on the scores either way.)</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Retrieval model</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Per-ID embeddings (2016 style)</td><td>Strong for videos with plenty of watches</td><td>New videos have no trained vector; a long tail gets noisy ones</td></tr>
+        <tr><td>Two towers, plain in-batch negatives</td><td>Free negatives, video vectors from content</td><td>Learns to avoid popular videos</td></tr>
+        <tr><td>Two towers, in-batch negatives with logQ</td><td>Free negatives, content-based, and the popularity bias is removed</td><td>Needs a streaming frequency estimate</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>YouTube published the per-ID model in 2016 and the two-tower design in 2019. Yi's paper reports offline gains on two datasets and live A/B improvements in recommendation quality on YouTube, but gives no headline percentage that we can quote, and we won't make one up. Whether the older model still runs beside the newer one is unpublished. That 2019 ranking paper does say the candidate stage pools several generators, and a per-ID model remembers well-watched videos better while a content-based tower covers the new ones, so keeping both seems a sensible design.</p>
+
+    <p>Towers for cheap retrieval plus a frequency correction for in-batch negatives are the standard recipe for dense retrieval in search, ads and app stores, and in the retrieval half of retrieval-augmented generation on page 11. It matters wherever item popularity follows a power law.</p>
+  </section>
+
+  <section id="ann">
+    <h2><span class="num">05</span>Searching a billion vectors in a few milliseconds</h2>
+
+    <p>With the towers trained, every video has a vector and Arjun's request has produced a user vector. Next we need to find the videos whose vectors have the largest dot product with his. Computing the dot product against every vector is the linear scan we ruled out in section 01. We need something that gets close to the right answer while looking at a small fraction of the corpus. That's <strong>approximate nearest-neighbour search</strong>, and because the score is a dot product and not a distance, the technical name is maximum inner product search.</p>
+
+    <p>In 2016 the paper handled this in a sentence. Since the softmax's calibrated probabilities aren't needed at serving time, "the scoring problem reduces to a nearest neighbor search in the dot product space for which general purpose libraries can be used". They also report that "A/B results were not particularly sensitive to the choice of nearest neighbor search algorithm". So the quality of the vectors matters far more than the last few percent of search accuracy, and a good-enough index is a good place to save effort.</p>
+
+    <p>What does a good-enough index look like at a billion vectors? Storing the vectors is the main cost. A billion vectors of 256 numbers at four bytes each is roughly a terabyte, so you can't keep full vectors in memory on one machine. Standard practice is <strong>product quantization</strong>. Cut each vector into short pieces, learn a small codebook of typical pieces for each position, and store each piece as the index of its nearest codebook entry. A vector then costs a few bytes, and a dot product against a stored vector becomes a handful of table lookups. Google's open-source ScaNN library (Guo et al., ICML 2020) improves on plain quantization with one idea about what the quantization error should measure.</p>
+
+    <p>Ordinary quantization chooses codebooks to minimise how far the compressed vector lands from the original, the reconstruction error. But for retrieval the only errors that matter are the ones that change which vectors have the highest inner product with a query. If a stored vector <span>$x$</span> is replaced by <span>$\tilde{x}$</span>, the residual <span>$r = x - \tilde{x}$</span> splits into a part parallel to <span>$x$</span> and a part orthogonal to it. Error parallel to <span>$x$</span> changes the inner product with queries that point the same way as <span>$x$</span>, and those are exactly the queries for which <span>$x$</span> is a top result. Orthogonal error mostly moves the score of queries for which <span>$x$</span> was never going to win. ScaNN's score-aware loss weights the two differently:</p>
+
+    <div class="eq-block"><span>$$\ell(x,\tilde{x}) \;=\; h_{\parallel}\,\lVert r_{\parallel}\rVert^{2} \;+\; h_{\perp}\,\lVert r_{\perp}\rVert^{2}, \qquad h_{\parallel} \ge h_{\perp}$$</span></div>
+
+    <p>The paper proves <span>$h_{\parallel} \ge h_{\perp}$</span> for any weighting that gives larger inner products more weight, with equality only when all inner products are weighted equally. The result is called <strong>anisotropic</strong> quantization because the penalty depends on direction. In the paper's tests it reaches state-of-the-art results on the public ANN-benchmarks suite, for example on Glove-1.2M. We don't know whether YouTube's production retrieval uses ScaNN, since that's unpublished, though ScaNN was built at Google Research and is probably the kind of tool this stage needs.</p>
+
+    <p>One operational detail follows from the design even though YouTube hasn't published it. The index is built from the item tower's output, so the user tower that's serving must come from the same training run as the item vectors in the index, or the dot products mean nothing. They have to be deployed as a pair. How often YouTube rebuilds or updates the index is unpublished, and that schedule sets a floor on how quickly a brand-new video can appear in retrieval.</p>
+
+    <p>Vector search of this kind also runs retrieval-augmented generation, image search and ad targeting. Index details vary (graph indexes such as HNSW trade memory for speed, quantized ones such as ScaNN or IVF-PQ trade accuracy for memory), but the shape is constant: precompute vectors, compress them, probe a small part of the index per query.</p>
+  </section>
+
+  <section id="ranking">
+    <h2><span class="num">06</span>Ranking: predicting expected watch time</h2>
+
+    <p>Retrieval has handed us a few hundred candidates for Arjun, and now we can afford to look at each one carefully. Section 02's list was ordered by relatedness, and section 03's by the probability of the next watch. Neither says which of these videos he'd be happiest to see first. A ranking stage assigns each candidate a score for a chosen objective and sorts by it. In 2016 the paper explains why the stage exists: candidate generation uses coarse features, and showing a few best videos "requires a fine-level representation to distinguish relative importance among candidates with high recall".</p>
+
+    <p>First we have to decide what to score. YouTube's early answer was click probability, and the bicycle-chain example shows why that fails. Imagine two candidates for Arjun. One has a thumbnail built to be irresistible, and 30% of people who see it click, but they leave after twenty seconds. Another is a tutorial that only 10% click, though they watch five minutes. A click model puts the first on top. The objective YouTube moved to, in 2012, was watch time, and the 2016 paper describes how to train a model whose output is the expected watch time of a candidate. We'll look at the motivation in section 08 and the mechanism now.</p>
+
+    <h3 id="6-1-weighted-logistic-regression">6.1 Weighted logistic regression</h3>
+
+    <p>Watch time is awkward to predict directly. Most impressions are never clicked, so for most of them it's exactly zero. Clicked ones have a long-tailed watch time, from three seconds to three hours. Fitting a regression to that mixture is hard. Here the paper uses a trick: train an ordinary logistic regression, the kind that predicts a click with a sigmoid, but change the weight of each training example. A clicked impression counts with a weight equal to the seconds the person then watched. An unclicked impression counts with weight 1. Under the standard cross-entropy loss the objective becomes</p>
+
+    <div class="eq-block"><span>$$\mathcal{L} \;=\; -\sum_{i} \Big[\, w_i\, y_i \log \sigma(z_i) \;+\; (1-y_i)\log\big(1-\sigma(z_i)\big) \Big], \qquad w_i = \begin{cases} T_i & y_i = 1 \\ 1 & y_i = 0 \end{cases}$$</span></div>
+
+    <p>Here <span>$y_i$</span> is 1 if impression <span>$i$</span> was clicked, <span>$T_i$</span> is its watch time, and <span>$z_i$</span> is the model's output before the sigmoid. Why does this give expected watch time? A logistic regression's output <span>$\sigma(z)$</span> is the fraction of positive weight, so its odds, <span>$e^{z}$</span>, equal the total positive weight divided by the total negative weight. Say we have <span>$N$</span> impressions and <span>$k$</span> of them were clicked. The positive weight adds up to <span>$\sum_i T_i$</span> and the negative weight is <span>$N-k$</span>, so the odds the model learns are</p>
+
+    <div class="eq-block"><span>$$e^{z} \;\approx\; \frac{\sum_i T_i}{N-k} \;=\; \frac{N\,\mathbb{E}[T]}{N(1-P)} \;=\; \frac{\mathbb{E}[T]}{1-P} \;\approx\; \mathbb{E}[T]\,(1+P)$$</span></div>
+
+    <p>where <span>$\mathbb{E}[T]$</span> is the expected watch time of an impression (zero when it isn't clicked) and <span>$P$</span> is the click probability. Because <span>$P$</span> is small on a page of recommendations, <span>$1+P$</span> is close to 1, and the odds are close to the expected watch time. So at serving time the model applies <span>$e^{x}$</span>, the exponential, as its final activation and reads the result as an estimate of expected watch time. That 2016 paper gives this derivation and reports that it "performed much better on watch-time weighted ranking evaluation metrics compared to predicting click-through rate directly".</p>
+
+    <p>Our experiment below builds four kinds of video with a known click probability and watch time, trains the weighted regression and an ordinary click model on simulated impressions, and compares what each learns.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Click model versus watch-time-weighted logistic regression</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(1)
+# Four kinds of video: click probability and mean watch time (seconds)
+kinds = [&quot;bait thumbnail&quot;, &quot;news clip&quot;, &quot;tutorial&quot;, &quot;long lecture&quot;]
+p_click = np.array([0.30, 0.15, 0.10, 0.05])
+mean_T = np.array([20.0, 90.0, 300.0, 900.0])
+n = 400_000
+k = rng.integers(0, 4, n)                         # impression -&gt; kind
+click = rng.random(n) &lt; p_click[k]
+T = np.where(click, rng.exponential(mean_T[k]), 0.0)
+
+X = np.eye(4)[k]                                  # one-hot features
+def fit(weights, steps=4000, lr=2.0):
+    w = np.zeros(4)
+    for _ in range(steps):
+        p = 1 / (1 + np.exp(-X @ w))
+        g = X.T @ (weights * (p - click)) / n
+        w -= lr * g / weights.mean()
+    return w
+
+w_ctr = fit(np.ones(n))                           # plain click model
+wt = np.where(click, T, 1.0)                      # watch time weights
+w_wt = fit(wt)                                    # weighted logistic reg
+print(f&quot;{&#x27;kind&#x27;:15}{&#x27;CTR&#x27;:&gt;7}{&#x27;exp(w)&#x27;:&gt;9}{&#x27;E[T]&#x27;:&gt;8}{&#x27;P*E[T]&#x27;:&gt;9}&quot;)
+for i in range(4):
+    print(f&quot;{kinds[i]:15}{1/(1+np.exp(-w_ctr[i])):7.2f}&quot;
+          f&quot;{np.exp(w_wt[i]):9.1f}{mean_T[i]:8.0f}&quot;
+          f&quot;{p_click[i]*mean_T[i]:9.1f}&quot;)
+print(&quot;rank by CTR      :&quot;, [kinds[i] for i in np.argsort(-w_ctr)])
+print(&quot;rank by exp(w)   :&quot;, [kinds[i] for i in np.argsort(-w_wt)])</code></pre>
+      <div class="tryit-out">The click model ranks the four kinds <code>bait thumbnail, news clip, tutorial, long lecture</code> and the weighted model ranks them in exactly the reverse order. The learned odds track the formula: for the bait thumbnail, expected watch time per impression is <code>6.0</code> seconds, and <code>6.0 / (1 - 0.30)</code> is about <code>8.6</code>, against the <code>8.5</code> the model learned.</div>
+    </details>
+
+    <p>Here the click model ranks the bait thumbnail first and the long lecture last, an exact reversal of the watch-time ranking. The learned odds also land close to the formula: for the bait thumbnail, 0.30 × 20 seconds is 6 seconds of expected watch time per impression, and dividing by <span>$1-P = 0.7$</span> gives 8.6, close to the 8.5 the model learned. Whether the lecture should be on top for Arjun is another matter, and section 08 returns to it.</p>
+
+    <div class="predict">
+      <span class="predict-label">Predict before you read on</span>
+      <p class="predict-q">In the experiment above, suppose we drop the watch-time weights and only keep the click label, but we keep the same data. Which video does the model rank last, and does anything in the training data change?</p>
+      <details>
+        <summary>Show the answer</summary>
+        <p>Ranking flips. With unit weights the model learns click-through rates, 0.30, 0.15, 0.10 and 0.05, so the long lecture comes last even though it has the highest expected watch time per impression. Data is identical, since the same impressions were logged. Only the loss changed, and the 2016 paper reports that weighting positives equally increased the watch-time-weighted loss by 4.1%.</p>
+      </details>
+    </div>
+
+    <h3 id="6-2-the-model-and-its-features">6.2 The model and its features</h3>
+
+    <p>Behind the logistic output sits a deep network. Its version feeds in hundreds of features, split about evenly between categorical ones (video ID, language, channel) and continuous ones (time since the last watch, number of previous impressions). Categorical features are embedded, with the embedding size growing roughly with the logarithm of how many distinct values there are. Features that refer to videos share one embedding table (the impression video, the last video watched, the video that seeded the recommendation), which improves generalisation and cuts memory, and each still enters the network separately. Most parameters sit in these tables: one million IDs in 32 dimensions have seven times more parameters than fully connected layers 2048 units wide.</p>
+
+    <p>Continuous features get unusual care. Neural networks are sensitive to the scale of their inputs, so each continuous value is replaced by its position in its own distribution: its percentile, computed from quantiles collected in one pass over the data. The network receives that value <span>$\tilde{x}$</span> and also <span>$\tilde{x}^{2}$</span> and <span>$\sqrt{\tilde{x}}$</span>, which makes it easy to build super-linear and sub-linear responses. Offering the powers lowered the offline loss by 0.2% in the paper's test.</p>
+
+    <p>Features that mattered most are the ones that connect the person to the specific candidate. This paper says the strongest signals "describe a user's previous interaction with the item itself and other similar items", for example how many videos Arjun has watched from this channel, and when he last watched something on this topic. Two other kinds of feature are easy to overlook. One is which candidate generators nominated this video, and with what scores, so retrieval's opinion flows into ranking as an input. Another is how often the video was already shown to this person. If a video was recommended to Arjun last time and he scrolled past it, the model sees a high impression count with no watch, and demotes it. That paper calls this "churn": successive page loads shouldn't return identical lists.</p>
+
+    <p>Architecture was tuned against a budget. Table 1 of the paper reports a watch-time-weighted pairwise loss on next-day holdout data: 41.6% with no hidden layers, 36.9% with one 256-wide ReLU layer, 35.8% with a 1024-wide one, and 34.6% for the three-layer 1024, 512, 256 stack that the authors chose because it stayed inside the serving CPU budget. This loss takes one clicked and one unclicked impression from the same page. If the unclicked one scores higher, the clicked impression's watch time counts as mispredicted, and the loss is the mispredicted share of total watch time.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>What the ranker predicts</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>Click probability</td><td>Calibrated, simple, plenty of labels</td><td>Rewards thumbnails that win clicks and lose viewers</td></tr>
+        <tr><td>Watch time as a regression</td><td>Targets the quantity directly</td><td>Mostly zeros plus a heavy tail, so fits poorly</td></tr>
+        <tr><td>Weighted logistic regression (2016)</td><td>Stable training, odds approximate expected watch time</td><td>Favours long videos, and says nothing about whether people were glad they watched</td></tr>
+        <tr><td>Several predictions combined (2019)</td><td>Can include likes, dismissals and survey scores</td><td>Combination weights need hand tuning</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>YouTube chose the weighted regression in 2016 and had moved to the last row by 2019, the subject of the next section. Weighting travels well: expected revenue per ad impression, or basket size per search, also mix zeros with a heavy tail and can use sample weights on a logistic loss in the same way.</p>
+
+      </section>
+
+  <section id="multitask">
+    <h2><span class="num">07</span>Many goals at once: multitask ranking and position bias</h2>
+
+    <p>By 2019 the question had grown. Arjun could click a video, watch half of it, press like, share it, or tap "not interested", and each of those says something different. Watch time alone treats a video he left on in the background and one he loved as the same thing. A paper by Zhe Zhao and colleagues at YouTube (RecSys 2019) describes the ranking system for Up next that results, and it makes two changes to the single-objective ranker of section 06. It predicts several things at once, and it separates how good a video is from where it was shown.</p>
+
+    <h3 id="7-1-several-objectives">7.1 Several objectives</h3>
+
+    <p>The paper groups the labels into two families. <strong>Engagement</strong> objectives are about behaviour: clicks and watches, where the label is a yes or no, and time spent, where the label is a number. <strong>Satisfaction</strong> objectives are about judgement: pressing like, leaving a rating, or dismissing a recommendation. Each objective is its own prediction task, trained with cross-entropy for yes-or-no labels and squared error for numeric ones. At serving time each candidate has a handful of predictions, and the paper combines them "in the form of weighted multiplication", with weights "manually tuned to achieve best performance on both user engagements and user satisfactions".</p>
+
+    <p>Sharing work between tasks usually starts with a shared-bottom network: one stack of layers feeds a separate output head for each task. It works when the tasks are closely related, and it hurts when they're not. Predicting a like and predicting watch time pull the shared layers in different directions, and a single set of weights has to serve both. Here the paper adopts <strong>Multi-gate Mixture-of-Experts</strong> (MMoE), an architecture from Ma et al. (KDD 2018), to let tasks decide how much to share.</p>
+
+    <p>An MMoE layer holds several small networks called experts, each a plain ReLU network of its own. For every task there's a gate: a linear layer followed by a softmax that gives one weight per expert. A task's input is the gate-weighted sum of the experts' outputs. With <span>$n$</span> experts <span>$f_1,\dots,f_n$</span>, a lower-level shared embedding <span>$x$</span>, and a tower <span>$h_k$</span> for task <span>$k$</span>:</p>
+
+    <div class="eq-block"><span>$$y_k = h_k\big(f^{k}(x)\big), \quad f^{k}(x) = \sum_{i=1}^{n} g^{k}(x)_i\, f_i(x), \quad g^{k}(x) = \operatorname{softmax}(W_{g^k} x)$$</span></div>
+
+    <p>All tasks share the experts, but each task chooses its own mixture. Two related tasks, such as click and watch, can lean on the same experts. Two conflicting ones can each pick experts the other ignores. Cost stays small, because the gates are tiny compared with the experts. In the paper the experts sit on top of one shared hidden layer, since putting them straight on the very wide input layer would make training and serving much more expensive.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The 2019 ranker: experts, gates and a side tower
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 372" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="310" width="392" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="310" width="392" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="216.0" y="334" text-anchor="middle" font-size="11" font-weight="700" fill="#818cf8">FEATURES  -&gt;  shared hidden layer  -&gt;  experts</text>
+<path d="M66,308 L66,272" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="224" width="92" height="46" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="224" width="92" height="46" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="66.0" y="251" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">Expert 1</text>
+<path d="M166,308 L166,272" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="120" y="224" width="92" height="46" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="120" y="224" width="92" height="46" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="166.0" y="251" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">Expert 2</text>
+<path d="M266,308 L266,272" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="220" y="224" width="92" height="46" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="220" y="224" width="92" height="46" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="266.0" y="251" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">Expert 3</text>
+<path d="M366,308 L366,272" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="320" y="224" width="92" height="46" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="320" y="224" width="92" height="46" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="366.0" y="251" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">Expert 4</text>
+<path d="M66,222 L66,188" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="152" width="92" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="152" width="92" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="66.0" y="173" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fbbf24">gate: click</text>
+<path d="M66,150 L66,136" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="102" width="92" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="102" width="92" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="66.0" y="123" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fbbf24">click head</text>
+<path d="M66,100 L66,92" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M166,222 L166,188" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="120" y="152" width="92" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="120" y="152" width="92" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="166.0" y="173" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fbbf24">gate: watch time</text>
+<path d="M166,150 L166,136" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="120" y="102" width="92" height="34" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="120" y="102" width="92" height="34" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="166.0" y="123" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fbbf24">watch time head</text>
+<path d="M166,100 L166,92" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M266,222 L266,188" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="220" y="152" width="92" height="34" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="220" y="152" width="92" height="34" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="266.0" y="173" text-anchor="middle" font-size="9.5" font-weight="700" fill="#f472b6">gate: like</text>
+<path d="M266,150 L266,136" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="220" y="102" width="92" height="34" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="220" y="102" width="92" height="34" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="266.0" y="123" text-anchor="middle" font-size="9.5" font-weight="700" fill="#f472b6">like head</text>
+<path d="M266,100 L266,92" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M366,222 L366,188" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="320" y="152" width="92" height="34" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="320" y="152" width="92" height="34" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="366.0" y="173" text-anchor="middle" font-size="9.5" font-weight="700" fill="#f472b6">gate: survey</text>
+<path d="M366,150 L366,136" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="320" y="102" width="92" height="34" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="320" y="102" width="92" height="34" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="366.0" y="123" text-anchor="middle" font-size="9.5" font-weight="700" fill="#f472b6">survey head</text>
+<path d="M366,100 L366,92" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M66,92 L468,92" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="78" text-anchor="start" font-size="10" class="dim">engagement tasks (amber)   satisfaction tasks (pink)   all experts are shared</text>
+<rect x="470" y="60" width="210" height="100" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="470" y="60" width="210" height="100" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="575.0" y="93" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">COMBINE</text>
+<text x="575.0" y="107" text-anchor="middle" font-size="10" class="dim">weighted product of the</text>
+<text x="575.0" y="121" text-anchor="middle" font-size="10" class="dim">predictions, with</text>
+<text x="575.0" y="135" text-anchor="middle" font-size="10" class="dim">hand-tuned weights</text>
+<rect x="470" y="206" width="210" height="80" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="470" y="206" width="210" height="80" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="575.0" y="229" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SHALLOW TOWER</text>
+<text x="575.0" y="243" text-anchor="middle" font-size="10" class="dim">inputs: position, device</text>
+<text x="575.0" y="257" text-anchor="middle" font-size="10" class="dim">added to the logit in training</text>
+<text x="575.0" y="271" text-anchor="middle" font-size="10" class="dim">position missing at serving</text>
+<path d="M468,246 L440,246 L440,127 L414,127" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="20" y="34" text-anchor="start" font-size="10.5" class="dim">Each task chooses its own mixture of experts through its gate.</text>
+      </svg>
+      <div class="diagram-caption">Follow one task, such as watch time. Its gate picks a mixture of the shared experts, its head turns the mixture into a prediction, and the shallow tower on the right adds a position term to the logit during training only.</div>
+    </div>
+
+    <p>The paper's live YouTube experiment compares MMoE to a shared-bottom model at matched cost, measured as the number of multiplications in the model. With 3.7 million multiplications, a four-expert MMoE improved engagement by 0.20% and the satisfaction metric (survey ratings) by 1.22% over a shared-bottom baseline of the same size. With 6.1 million, an eight-expert MMoE gained 0.45% engagement and 3.07% satisfaction. A shared-bottom model enlarged to 6.1 million multiplications gained only 0.1% and 1.89%, so most of the improvement seems to come from the architecture and not from extra capacity.</p>
+
+    <p>The paper also reports a training problem. In distributed training the gates sometimes collapse so that one expert gets nearly all the weight and the others get none. They saw this "gating network polarization" about 20% of the time. They fixed it with dropout on the gates: with probability 10%, each expert's weight is set to zero and the softmax is renormalised, which forces the gate to keep several experts in play. After that, polarization disappeared in their models.</p>
+
+    <h3 id="7-2-position-bias-and-the-shallow-tower">7.2 Position bias and the shallow tower</h3>
+
+    <p>Our second change handles a problem from the data. Imagine the video in the first slot of Up next gets clicked three times as often as the one in slot five. Is the first video three times as good? Not necessarily: people look at the top of a list first, so a mediocre video in slot one gets clicked more than a great one in slot five. If the ranker trains on raw clicks, it learns that videos the old system ranked highly are good, which is the old system's opinion handed back to it. This is <strong>position bias</strong>, and it's one case of selection bias, since the logs only record how people reacted to what they were shown, in the order they were shown it.</p>
+
+    <p>One common remedy is to feed the position in as a feature during training and set it to a fixed value at serving. This paper compares it with two other designs and settles on a <strong>shallow tower</strong>, a small side network taking only bias-related features, such as the position and the device, whose output is added to the main model's logit:</p>
+
+    <div class="eq-block"><span>$$\operatorname{logit}\,P(\text{click} \mid x, \text{pos}) \;=\; f_{\text{main}}(x) \;+\; f_{\text{shallow}}(\text{pos}, \text{device})$$</span></div>
+
+    <p>During training, the shallow tower soaks up whatever click probability position explains, so the main tower is free to learn how good the video is. At serving time the position is treated as missing and only the main tower is used. That paper drops the position feature in training with 10% probability so the model doesn't lean on it entirely, and crosses it with device because position effects differ between phones and desktops. This structure is a Wide &amp; Deep model with the shallow tower as the "wide" half, and it learns the bias terms jointly with the main model, with no random experiment needed to measure propensities, meaning how likely each slot was to be examined.</p>
+
+    <p>We can test the idea in a toy world. Two hundred videos have a true appeal. An old ranker puts videos in eight slots using their appeal plus its own unrelated taste, and clicks happen with probability that depends on both appeal and slot. We then train one model with no position term and one with a position term, and ask how well each recovers the true appeal.</p>
+
+        <details class="tryit" open>
+      <summary class="tryit-head">
+        <span class="tryit-label">Try it</span>
+        <span class="tryit-what">Recover true appeal from clicks with and without a position term</span>
+      </summary>
+<pre><code>import numpy as np
+rng = np.random.default_rng(2)
+N, K, n = 200, 8, 600_000
+r = rng.normal(0, 1, N)                         # true appeal
+b_true = -0.7 * np.arange(K)                    # penalty per slot
+vid = rng.integers(0, N, n)
+# the old ranker ranks by appeal plus a taste of its own, plus noise
+bad = rng.normal(0, 1.0, N)                      # ranker&#x27;s own taste
+est = r[vid] + bad[vid] + rng.normal(0, 0.5, n)
+rank = np.argsort(np.argsort(-est)) / n         # 0 = best
+pos = np.minimum((rank * K).astype(int), K - 1)
+p = 1 / (1 + np.exp(-(r[vid] - 2.5 + b_true[pos])))
+click = rng.random(n) &lt; p
+
+def fit(use_pos, steps=3000, lr=1.0):
+    s, b = np.zeros(N), np.zeros(K)
+    for _ in range(steps):
+        z = s[vid] + (b[pos] if use_pos else 0)
+        g = 1 / (1 + np.exp(-z)) - click
+        s -= lr * np.bincount(vid, g, N) / (n / N)
+        if use_pos:
+            b -= lr * np.bincount(pos, g, K) / (n / K)
+    return s, b
+for name, use in [(&quot;no position term&quot;, False), (&quot;position tower&quot;, True)]:
+    s, b = fit(use)
+    top = set(np.argsort(-s)[:20]) &amp; set(np.argsort(-r)[:20])
+    slope = np.polyfit(r, s, 1)[0]
+    print(f&quot;{name:17} slope on true appeal {slope:.2f}, &quot;
+          f&quot;top-20 overlap {len(top)}/20&quot;)
+ctr = [click[pos == k].mean() for k in range(K)]
+print(&quot;CTR by slot :&quot;, np.round(ctr, 3))
+print(&quot;learned bias:&quot;, np.round(b - b[0], 2))
+print(&quot;true bias   :&quot;, np.round(b_true, 2))</code></pre>
+      <div class="tryit-out">Without a position term the learned scores have a slope of <code>1.82</code> against true appeal, inflated by the old ranker's taste, and only <code>13/20</code> of the true top 20 are found. With the position term the slope is <code>1.05</code> and <code>19/20</code> match. The learned slot biases follow the true ones closely for the first six slots (<code>-3.31</code> against <code>-3.5</code> at slot six) and drift for the last two, where almost nothing is clicked.</div>
+    </details>
+
+    <p>Without a position term, the learned scores are inflated by the old ranker's taste, so their slope against true appeal is 1.8 and only 13 of the true top 20 videos land in the model's top 20. With a position term the slope is close to 1 and 19 of 20 match, and the learned slot biases follow the true ones closely for the first five slots, drifting for the last few where almost nothing is clicked.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Handling position bias</th><th>Plus</th><th>Minus</th><th>Live result (2019)</th></tr></thead>
+      <tbody>
+        <tr><td>Position as an ordinary input feature</td><td>Trivial to add</td><td>The model can leak it into everything it learns</td><td>&minus;0.07% engagement</td></tr>
+        <tr><td>Adversarial loss</td><td>Pushes the main model to ignore position</td><td>Harder to train, an extra task</td><td>+0.01%</td></tr>
+        <tr><td>Shallow tower</td><td>Small, learns propensity jointly, no randomisation</td><td>Assumes bias adds in logit space</td><td>+0.24%</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>YouTube picked the shallow tower in 2019 on the strength of the +0.24% engagement gain in a live experiment, against &minus;0.07% for the plain feature. Learned biases decreased monotonically with slot, as expected. They list limits too: other biases exist that aren't known or modelled, and an elaborate model adds latency, which "can decrease user satisfaction and live metrics", so they prefer simpler architectures.</p>
+
+    <p>Search engines, ad auctions, e-commerce results and app stores all train click models with a position term or a propensity weight. Forms vary, and the goal is always to estimate how good the item is separately from where it was shown.</p>
+
+    <h4 class="why">Why is the position set to "missing" at serving time and not to slot one?</h4>
+
+    <p>At serving we're choosing the order, so there's no position yet to supply. The aim is a score that reflects the video alone, and the main tower learns exactly that once the shallow tower takes responsibility for position. Setting the feature to slot one is the older recipe from click-model research, where you evaluate "as if" every item were at the top. Treating it as missing does the same job in a way that fits the 10% training dropout, since the model has seen what its output looks like with the position absent.</p>
+  </section>
+
+  <section id="objective">
+    <h2><span class="num">08</span>What are we optimising? Clicks, watch time, satisfaction</h2>
+
+    <p>Everything so far assumed we knew what to predict. The biggest decisions in this system were about the objective, and they changed over time. Here's the history YouTube has told in its own words.</p>
+
+    <p>Goodrow's 2021 post and the 2012 creator blog both describe a first version that optimised views. "Our video discovery features were previously designed to drive views," the 2012 post says. A video that earned many clicks was a good video. By 2011, according to the 2021 post, YouTube had learned that clicks alone don't mean a video was watched, and it began favouring videos that people stayed with. On August 10, 2012, Eric Meyerson announced the change on the creator blog under the title "YouTube Now: Why We Focus on Watch Time". Search and suggested videos would now favour the videos viewers stay with over the ones they click on and then abandon, and recommendations would aim to increase the total time a person spends watching. The stated rationale was that if people are watching more YouTube, "it signals to us that they're happier with the content they've found". Goodrow's 2021 post adds that when watch time was first incorporated, views fell by about 20%, which suggests that a large share of the earlier views were click-and-leave.</p>
+
+    <p>Watch time fixed one failure and has weaknesses of its own, which explain the next two changes. It favours long videos, and the 2012 post saw that coming, telling creators that padding a video wouldn't help since the system optimises "how a video contributes to a longer viewing session". It can't tell whether time was well spent, since a person hooked by something sensational looks the same as one enjoying a documentary. And it measures what people do, which only correlates with what they'd say if asked.</p>
+
+    <p>Next came asking, which the 2021 post describes. YouTube's surveys ask viewers to rate a video from one to five stars. That post says "only videos that you rate highly with four or five stars are counted as valued watchtime". So the quantity YouTube wants to maximise is closer to valued watch time than raw watch time. It also lists shares, likes and dislikes as signals ("people are more likely to be satisfied by videos that they share or like"), and adds that each signal's weight differs by person: someone who shares every video they see gets less weight on shares. Zhao et al. show how the model side works in 2019: the satisfaction family of objectives includes a survey rating predicted as a regression task, and live satisfaction is measured with survey responses.</p>
+
+    <p>Surveys have a statistical problem, though. They reach a small fraction of impressions, and the people who answer aren't a random sample of viewers. YouTube hasn't published response rates or how it adjusts for non-response. The multitask model of section 07 predicts the rating for impressions nobody was asked about, using the behaviour logged for all of them.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Objective</th><th>Plus</th><th>Minus</th><th>YouTube</th></tr></thead>
+      <tbody>
+        <tr><td>Views and clicks</td><td>Plentiful, immediate, easy to measure</td><td>Rewards bait; click-and-leave looks like success</td><td>Until about 2011&ndash;2012</td></tr>
+        <tr><td>Watch time</td><td>Hard to fake by clicking; correlates with enjoying</td><td>Favours length; blind to regret; rewards whatever holds attention</td><td>From August 2012</td></tr>
+        <tr><td>Survey-weighted, multi-objective</td><td>Closer to what people say they valued</td><td>Sparse labels, hand-tuned combination, survey bias</td><td>Described 2019&ndash;2021</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Each objective in that table stood in for something we can't measure directly, and the system's incentives followed the stand-in. When it was clicks, creators and the model both learned to produce clicks, and when it became watch time they learned to produce watch time. Surveys bring in a measurement closer to the real target, with their own noise. Every product that optimises engagement, from news feeds to streaming services, faces the same pattern.</p>
+
+    <h4 class="why">Why not predict the survey rating directly and rank by it?</h4>
+
+    <p>There aren't enough labels. A survey covers a tiny slice of impressions, so a ranker trained only on surveys would be sparse and noisy. Behaviour labels exist for every impression, so the model learns from those and treats the survey as one task among several.</p>
+  </section>
+
+  <section id="serving">
+    <h2><span class="num">09</span>Serving: one request through the funnel</h2>
+
+    <p>Now we can assemble the stages and follow Arjun's request. YouTube's own diagram of the system, in the 2016 paper, is a funnel: the video corpus narrows to "millions", then "hundreds", then "dozens". That's the same shape as the arithmetic in section 01, which required the expensive model to see only a few hundred videos.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">One home-feed request: how many videos each stage sees
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 282" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="70.0" width="200" height="130" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="70.0" width="200" height="130" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="120.0" y="125" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">CORPUS</text>
+<text x="120.0" y="142" text-anchor="middle" font-size="15" font-weight="700" fill="#e9e9ef">millions+</text>
+<text x="120.0" y="156" text-anchor="middle" font-size="10" class="dim">videos you could recommend</text>
+<rect x="250" y="85.0" width="200" height="100" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="250" y="85.0" width="200" height="100" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="350.0" y="125" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">CANDIDATES</text>
+<text x="350.0" y="142" text-anchor="middle" font-size="15" font-weight="700" fill="#e9e9ef">hundreds</text>
+<text x="350.0" y="156" text-anchor="middle" font-size="10" class="dim">one cheap score each</text>
+<rect x="480" y="102.0" width="200" height="66" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="480" y="102.0" width="200" height="66" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="580.0" y="125" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">SHOWN</text>
+<text x="580.0" y="142" text-anchor="middle" font-size="15" font-weight="700" fill="#e9e9ef">~a dozen</text>
+<text x="580.0" y="156" text-anchor="middle" font-size="10" class="dim">ranked, then reranked</text>
+<path d="M224,135 L246,135" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M454,135 L476,135" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<text x="235" y="50" text-anchor="middle" font-size="11" class="" fill="#fbbf24">candidate generation</text>
+<text x="465" y="50" text-anchor="middle" font-size="11" class="" fill="#34d399">ranking + rerank</text>
+<text x="20" y="240" text-anchor="start" font-size="10.5" class="dim">Stage sizes follow the 2016 paper (millions, hundreds, dozens); YouTube has not published exact counts.</text>
+<text x="20" y="260" text-anchor="start" font-size="10.5" class="dim">Each stage sees far fewer videos than the one before, so it can afford far more work per video.</text>
+      </svg>
+      <div class="diagram-caption">Read the big numbers across the top. The expensive model only ever meets the last box, and the first stage has to be sublinear in the size of the corpus.</div>
+    </div>
+
+    <p>Here's the path of one home-feed request, with the details that are published and a flag where they're not.</p>
+
+    <ol class="steplist">
+      <li><span class="st-lane">Request</span><span>Arjun opens the app. A server looks up his recent watches, searches, and the videos already shown to him. In 2016 the paper calls serving up-to-the-second impression and watch history "an engineering feat onto itself", and says it's vital for responsive recommendations.</span></li>
+      <li><span class="st-lane">Candidates</span><span>Several generators run: the user tower against the vector index, a sequence model over his history, co-watch and topic lookups. Each nominates videos. That 2019 paper pools their output into one set of "a few hundred".</span></li>
+      <li><span class="st-lane">Features</span><span>For each candidate the system assembles features about the video, about Arjun, and about the pair: how often he's watched this channel, when he last watched this topic, how many times this video was already shown to him, and which generators nominated it.</span></li>
+      <li><span class="st-lane">Score</span><span>The ranker predicts several outputs for every candidate (clicks, expected watch time, likes, dismissals, a survey rating). This paper's combination is a weighted product with manually tuned weights, with position treated as missing. </span></li>
+      <li><span class="st-lane">Rerank</span><span>The sorted list gets final passes for variety and policy. That 2021 post says borderline content is demoted and authoritative sources promoted for news and information, using signals from human evaluators. Where exactly in the pipeline these happen is unpublished.</span></li>
+      <li><span class="st-lane">Log</span><span>The dozen videos shown, their positions, and what Arjun does next (taps, watches, likes, dismisses, answers a survey) are logged. This log is tomorrow's training data.</span></li>
+    </ol>
+
+    <p>Two published facts shape how this runs. Models train in temporal order and keep training: the 2019 paper describes going "through training data of past days following a temporal order" and consuming newly arriving data, so the model tracks recent behaviour (it trains on TPUs and serves with TensorFlow Serving). And model cost is a design variable. The 2016 ranker's 1024, 512, 256 tower was chosen to stay "within our serving CPU budget", and the 2019 paper warns that an overly complicated model can add enough latency to lower live metrics.</p>
+
+    <p>Up next differs in what feeds the first steps. There's a playing video, so one generator matches its topic, another follows what's often watched alongside it, and the ranker receives the playing video's features as part of the query. In 2019 the multitask paper describes this surface, and the 2016 paper describes the home feed, from the same two-stage design.</p>
+  </section>
+
+  <section id="feedback">
+    <h2><span class="num">10</span>Training data and the feedback loop</h2>
+
+    <p>Each stage so far learns from logs, and the logs record what the previous system chose to show. We've already seen pieces of this: position bias in section 07, and the choice of watches from all of YouTube in section 03. Now we look at the loop as a whole, because it's the structural problem in recommendation. Arjun's model trains on videos that earlier models put in front of people. A video that was never shown has no clicks, so it gets no credit and stays unshown. Videos that were shown a lot get clicks, so they get more credit and are shown even more. This system is learning from a world it partly created.</p>
+
+    <p>We can say the same thing in the language of reinforcement learning, which page 15 introduced. The recommender is a <strong>policy</strong>, a rule that picks a video given what we know about the user. Logged data was generated by older policies, called <strong>behaviour policies</strong>, and we want to train a new policy on it. Learning about one policy from data produced by another is <strong>off-policy</strong> learning, and the standard repair is importance weighting. A 2019 WSDM paper by Minmin Chen and colleagues applied this to a candidate generator in production at YouTube.</p>
+
+    <p>The setup models the user's state as a vector summarised by a recurrent network that reads the sequence of videos watched. The policy <span>$\pi_\theta(a \mid s)$</span> is a softmax over a corpus of millions of videos, the same shape as section 03. The policy gradient with a reward <span>$R_t$</span> (for example, watch time) normally assumes the actions were sampled from <span>$\pi_\theta$</span> itself. Here they were sampled from an ensemble of earlier policies <span>$\beta$</span>, so the gradient is reweighted by the ratio of the probabilities:</p>
+
+    <div class="eq-block"><span>$$\nabla_\theta J \;\approx\; \sum_t \frac{\pi_\theta(a_t \mid s_t)}{\beta(a_t \mid s_t)}\; R_t\, \nabla_\theta \log \pi_\theta(a_t \mid s_t)$$</span></div>
+
+    <p>That ratio is large when the new policy likes an action the old policies rarely took, and those rare actions can swamp the gradient. Here the paper handles this with a cap: the ratio is clipped at <span>$c = e^{3}$</span> in production, and the authors report that weight capping gave the biggest online gain of the variance-reduction techniques they tried. A second issue is that the logs don't contain <span>$\beta$</span>. This paper learns it, with a separate head trained to predict the logged action.</p>
+
+    <p>A recommender shows a page, not a single video, and the paper's second contribution accounts for that. If the page holds <span>$K$</span> videos and a person might pick any of them, the chance that video <span>$a$</span> appears on the page is not <span>$\pi(a \mid s)$</span> but <span>$1-(1-\pi(a \mid s))^{K}$</span>. Differentiating that adds a multiplier to the gradient, the <strong>top-K correction</strong>:</p>
+
+    <div class="eq-block"><span>$$\lambda_K(s,a) \;=\; K\,\big(1-\pi_\theta(a \mid s)\big)^{K-1}$$</span></div>
+
+    <p>When <span>$\pi_\theta(a \mid s)$</span> is near zero the multiplier is near <span>$K$</span>, so a video the policy hardly ever picks gets a bigger push. When <span>$\pi_\theta$</span> is near one the multiplier goes to zero, because a video that's already certain to be on the page needs no more weight. Smoother policies result. Without the correction, a policy trained to get the single best video right becomes extremely peaked on it, and the rest of the page is neglected. In the paper's live experiments with <span>$K=16$</span>, setting <span>$K=1$</span>, which reduces the method to the standard correction, lowered ViewTime by 0.66% compared with the production setting, and <span>$K=2$</span> lowered it by 0.35%. That paper doesn't claim that this is how all of YouTube's recommendations are trained. It describes one production candidate generator, and says it's one of many.</p>
+
+    <p>The loop-breaking tool that's easiest to understand is exploration, which is where section 11 goes next. Chen's paper uses a stochastic policy, drawing videos from the softmax with some randomness instead of always taking the top ones, so the data contains actions the old system wouldn't have chosen. In one live test the authors split users 90%, 5% and 5%, serving the first two groups a deterministic policy and the last a stochastic one, with the model trained on all of it. ViewTime, the paper's name for time spent watching, rose by 0.07% in the test group. They note it's a small gain from a small amount of exploration, since only 5% of users saw the stochastic policy, and expect more once it's launched widely.</p>
+
+    <p>Ad ranking uses inverse propensity weights, and search engines use randomised slots to collect unbiased clicks, for the same reason: you only observe the consequences of what you did.</p>
+  </section>
+
+  <section id="fresh">
+    <h2><span class="num">11</span>New videos, new users, and how much to explore</h2>
+
+    <p>A brand-new video has no history, a brand-new person has none either, and a system that only acts on what it already knows would never find out when it's wrong. Several techniques from earlier sections address these, and here they sit side by side.</p>
+
+    <p>For a new video, the item tower of section 04 produces a vector from content features such as title, topic and channel, so retrieval can nominate it before anyone has watched it. The example-age feature of section 03 lets the 2016 generator represent the upload-time spike in popularity instead of averaging it away, and the paper adds that fresh content matters for "bootstrapping and propagating viral content". Training on all watches, not only recommended ones, means a video discovered through search or a link starts earning signal early. In ranking, impression-count features push down a video that has been shown repeatedly and ignored.</p>
+
+    <p>For a new person, the 2016 paper says demographic features "are important for providing priors so that the recommendations behave reasonably for new users". Geography and device are embedded, and binary or continuous features such as logged-in state and age go in directly. That's a coarse starting point that real history replaces within a few watches. YouTube hasn't published a dedicated cold-start model for viewers or for creators.</p>
+
+    <p>Exploration is the deliberate version. Chen's paper rules out the classic approach, noting that brute-force exploration such as epsilon-greedy "is not viable in a production system like YouTube where this could, and mostly likely would, result in inappropriate recommendations and a bad user experience". It uses Boltzmann exploration instead, drawing from the model's own softmax with a temperature. With the temperature at 1, a live test found no statistically significant change in ViewTime, so the added randomness probably didn't hurt users directly.</p>
+
+    <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>Exploration strategy</th><th>Plus</th><th>Minus</th></tr></thead>
+      <tbody>
+        <tr><td>None (always show the top)</td><td>Best immediate quality on known tastes</td><td>Unshown items never get evidence; the loop closes</td></tr>
+        <tr><td>Epsilon-greedy</td><td>Easy to implement and reason about</td><td>Random videos can be bad or inappropriate; YouTube judged it not viable</td></tr>
+        <tr><td>Sample from the model's softmax (Boltzmann)</td><td>Exploration is concentrated on plausible videos; no measurable loss at T=1</td><td>The model must be calibrated enough for its probabilities to mean something</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+      </section>
+
+  <section id="evaluation">
+    <h2><span class="num">12</span>How YouTube knows a change helped</h2>
+
+    <p>Everything above is a guess about what will make people glad they watched, so we need a way to check. Published practice has two layers. Offline, you replay logged data. Online, you run an experiment on live traffic. That 2016 paper states the division of labour: "During development, we make extensive use of offline metrics (precision, recall, ranking loss, etc.) to guide iterative improvements to our system. However for the final determination of the effectiveness of an algorithm or model, we rely on A/B testing via live experiments." And then the sentence that matters most: "live A/B results are not always correlated with offline experiments".</p>
+
+    <p>Offline metrics are specific to each stage. Retrieval is judged on holdout mean average precision for next-watch prediction, ranking in 2016 on the watch-time-weighted pairwise loss of section 06, and the 2019 paper monitors AUC (area under the ROC curve) for yes-or-no tasks and squared error for numeric ones. They're quick and cheap, so they tune hyperparameters and discard bad ideas.</p>
+
+    <p>Offline numbers can't settle the question, for a reason we now understand. They're computed on logs from the old system, so a new model gets credit only for videos the old one chose to show, and whatever it would do differently has no click to be right or wrong about.</p>
+
+    <p>In a live experiment, a fraction of users are served by the new model and compared with a control group on engagement and satisfaction metrics. The papers name the ones they watch: click-through rate and watch time in 2016, time spent on YouTube in 2019, alongside satisfaction measures such as the rate of dismissals and user survey responses. The 2019 position-bias result, +0.24% engagement, and the MMoE result, +3.07% on the satisfaction metric, are numbers of this kind. Changes of a few tenths of a percent can be detected because the traffic is so large.</p>
+
+    <p>The Chen paper adds a caution that anyone running a sequence of experiments should know. Each new production system provides the training data for the next experiment, so once a new approach has launched, later results can't be compared with earlier ones. Each experiment in the paper is therefore reported against whatever the previous system was, and, in the authors' words, "should be taken as the analysis for each component individually".</p>
+
+    <p>Beyond the experiment metrics, the satisfaction survey of section 08 tries to measure what a click-based metric can't. Another measure is the policy-level number YouTube reported in 2021: the share of views that come from borderline content in recommendations, which the post says is "significantly below 1%", with a goal of keeping it under 0.5% of all views on YouTube. It describes a property of the whole system, computed with human evaluators and classifiers whose workings are unpublished.</p>
+
+    <h4 class="why">Why can't we skip A/B tests and trust a good offline metric?</h4>
+
+    <p>Because the offline set was produced by the system we're trying to improve. A ranker that's better at something the old one never surfaced can look worse offline, and one that imitates the old ranker looks great. Only the experiment shows the new model's own choices to real people.</p>
+  </section>
+
+  <section id="wrong">
+    <h2><span class="num">13</span>What went wrong, and what it cost</h2>
+
+    <p>YouTube's own accounts describe several rounds of fixing a recommender that had learned to chase the wrong thing. We list them as the posts and papers present them, and we say where a claim can't be checked from the outside.</p>
+
+    <p>First came the clickbait era. When discovery was built on views, a thumbnail and title that won a click were enough, whether or not the video delivered. The 2012 change to watch time was the response, and it cost views: roughly 20% when watch time was first incorporated, in Goodrow's account.</p>
+
+    <p>Second came tabloid-style content. Goodrow's 2021 post says that demoting it in 2015 coincided with a 0.5% increase in watch time over 2.5 months. That post also lists earlier policy changes in recommendations: classifiers that kept racy or violent videos out in 2011, removal of videos showing minors in risky situations in 2016, and the start of fairness evaluations across protected groups in 2017.</p>
+
+    <p>Third came borderline content. In a January 25, 2019 post, YouTube described content that "comes close to, but doesn't quite cross the line of" violating its Community Guidelines, and said it would reduce recommendations of it, with human evaluators across the United States training the machine-learning systems that identify it. It stated that this applied to less than 1% of content, would roll out gradually starting in the United States, and would change only what's recommended and not what's available: videos stay on the site and may still appear to subscribers and in search. In 2021 the post reports the result: demoting borderline content in 2019 cut watch time of non-subscribed, recommended borderline content in the United States by 70%, and consumption of borderline content from recommendations is now significantly below 1% of views.</p>
+
+    <p>Those figures are YouTube's own, measured with its own definition of "borderline", and outsiders probably can't reproduce them because the classifiers and evaluator guidelines aren't published. The structural reason the problem arises is clear from the published material, though. A model trained to maximise a behaviour will find whatever content maximises it, including content people regret, and human evaluators, surveys and demotion rules are how the system tries to put the missing term back. How well that works is something the published numbers can't settle alone.</p>
+
+        <p>Across these episodes, the cost of a wrong objective was paid in what millions of people saw and what creators made. Technical fixes such as the weighted regression and the shallow tower dealt with bias in the data. The changes that mattered most to the product were about the target: views, then watch time, then valued watch time, then valued watch time minus content YouTube decided not to amplify.</p>
+  </section>
+
+  <section id="whole">
+    <h2><span class="num">14</span>The whole system</h2>
+
+    <p>We can now draw the full design. On the left, the online path is Arjun's request, running in a fraction of a second. On the right, the offline path is the loop that keeps the models current: every impression and reaction is logged, turned into labels, and used to train the next version of each model, which is then tested in a live experiment before it replaces the old one.</p>
+
+        <div class="diagram">
+      <div class="diagram-title">The whole design, online and offline
+        <div class="diagram-controls"><button data-diagram-toggle>⏸ Pause</button></div>
+      </div>
+      <svg viewBox="0 0 700 478" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">ONLINE: Arjun's request, a fraction of a second</text>
+<text x="400" y="24" text-anchor="start" font-size="11.5" class="" fill="#e9e9ef">OFFLINE: the loop that keeps models current</text>
+<rect x="20" y="40" width="280" height="40" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="20" y="40" width="280" height="40" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="160.0" y="57" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">APP</text>
+<text x="160.0" y="71" text-anchor="middle" font-size="10" class="dim">home feed / Up next</text>
+<path d="M160,82 L160,98" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="100" width="280" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="100" width="280" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="160.0" y="119" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">REQUEST</text>
+<text x="160.0" y="133" text-anchor="middle" font-size="10" class="dim">recent watches, searches, impressions</text>
+<path d="M64,146 L64,160" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="162" width="88" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="20" y="162" width="88" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="64.0" y="188" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fbbf24">Two-tower + ANN</text>
+<path d="M64,208 L64,222" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M160,146 L160,160" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="116" y="162" width="88" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="116" y="162" width="88" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="160.0" y="188" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fbbf24">Sequence model</text>
+<path d="M160,208 L160,222" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<path d="M256,146 L256,160" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="212" y="162" width="88" height="44" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="212" y="162" width="88" height="44" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="256.0" y="188" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fbbf24">Co-watch, topics</text>
+<path d="M256,208 L256,222" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="224" width="280" height="34" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="224" width="280" height="34" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="160.0" y="245" text-anchor="middle" font-size="10.5" font-weight="700" fill="#34d399">POOL: a few hundred candidates</text>
+<path d="M160,260 L160,274" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="276" width="280" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="20" y="276" width="280" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="160.0" y="298" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">RANKER</text>
+<text x="160.0" y="312" text-anchor="middle" font-size="10" class="dim">multitask MMoE + position tower</text>
+<path d="M160,328 L160,342" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="344" width="280" height="40" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="344" width="280" height="40" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="160.0" y="361" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">RERANK</text>
+<text x="160.0" y="375" text-anchor="middle" font-size="10" class="dim">variety and policy rules</text>
+<path d="M160,386 L160,400" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="20" y="402" width="280" height="34" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="20" y="402" width="280" height="34" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="160.0" y="423" text-anchor="middle" font-size="11" font-weight="700" fill="#f472b6">FEED: about a dozen videos</text>
+<rect x="400" y="40" width="280" height="56" rx="8" fill="#818cf8" opacity="0.14"/>
+<rect x="400" y="40" width="280" height="56" rx="8" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+<text x="540.0" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#818cf8">LOGS</text>
+<text x="540.0" y="72" text-anchor="middle" font-size="10" class="dim">impressions, slots, clicks, watch time,</text>
+<text x="540.0" y="86" text-anchor="middle" font-size="10" class="dim">likes, dismissals, survey answers</text>
+<path d="M540,98 L540,114" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="116" width="280" height="50" rx="8" fill="#fbbf24" opacity="0.14"/>
+<rect x="400" y="116" width="280" height="50" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="540.0" y="131" text-anchor="middle" font-size="11.5" font-weight="700" fill="#fbbf24">LABELS + FEATURES</text>
+<text x="540.0" y="145" text-anchor="middle" font-size="10" class="dim">next-watch labels, example age,</text>
+<text x="540.0" y="159" text-anchor="middle" font-size="10" class="dim">per-user example caps</text>
+<path d="M540,168 L540,184" stroke="#fbbf24" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="186" width="280" height="50" rx="8" fill="#34d399" opacity="0.14"/>
+<rect x="400" y="186" width="280" height="50" rx="8" fill="none" stroke="#34d399" stroke-width="1.6"/>
+<text x="540.0" y="201" text-anchor="middle" font-size="11.5" font-weight="700" fill="#34d399">TRAINING, IN TIME ORDER</text>
+<text x="540.0" y="215" text-anchor="middle" font-size="10" class="dim">towers, ranker, policy heads;</text>
+<text x="540.0" y="229" text-anchor="middle" font-size="10" class="dim">keeps consuming new data</text>
+<path d="M540,238 L540,254" stroke="#34d399" stroke-width="2" fill="none" class="flow-line"/>
+<rect x="400" y="256" width="280" height="50" rx="8" fill="#f472b6" opacity="0.14"/>
+<rect x="400" y="256" width="280" height="50" rx="8" fill="none" stroke="#f472b6" stroke-width="1.6"/>
+<text x="540.0" y="271" text-anchor="middle" font-size="11.5" font-weight="700" fill="#f472b6">LIVE A/B EXPERIMENT</text>
+<text x="540.0" y="285" text-anchor="middle" font-size="10" class="dim">engagement + satisfaction metrics;</text>
+<text x="540.0" y="299" text-anchor="middle" font-size="10" class="dim">promote only what wins</text>
+<path d="M400,296 L340,296 L340,300 L302,300" stroke="#f472b6" stroke-width="2" fill="none" class="flow-line"/>
+<text x="306" y="290" text-anchor="start" font-size="10" class="dim">promote</text>
+<path d="M302,419 L360,419 L360,68 L398,68" stroke="#818cf8" stroke-width="2" fill="none" class="flow-line"/>
+<text x="368" y="380" text-anchor="start" font-size="10" class="dim">what was shown</text>
+<text x="368" y="394" text-anchor="start" font-size="10" class="dim">and what he did</text>
+<text x="20" y="462" text-anchor="start" font-size="10.5" class="dim">Arjun's taps become tomorrow's labels. Whatever the model shows is what it will learn from next, and that is the feedback loop.</text>
+      </svg>
+      <div class="diagram-caption">Start at the app on the left and follow the request down to the feed. Then follow the log across to the right, down through training and the experiment, and back to the ranker.</div>
+    </div>
+
+    <p>Arjun's request fans out to several candidate generators, whose results are pooled. The ranker predicts several things per candidate, and the reranker applies variety and policy rules. What he sees is logged with each position and his reaction, and that log feeds the labels and the training of every model, in time order. A candidate model, or a new setting of the combination weights, goes to a live experiment, and only wins on the engagement and satisfaction metrics get promoted. The loop closes when the promoted model changes what Arjun sees tomorrow.</p>
+
+    <p>Several parts of this picture are unpublished: how many candidate generators run today, how the reranker applies its rules, how often indexes and models refresh, and the end-to-end latency budget. The sources describe the system as of 2016, 2019 and 2021, and the current system has certainly moved since.</p>
+  </section>
+
+  <section id="summary">
+    <h2><span class="num">15</span>Summary</h2>
+    <ol>
+      <li><strong>A billion videos can't be scored per request,</strong> so the system narrows in stages: millions, then hundreds, then a dozen. Each stage is cheaper per video and sees fewer videos than the one after it.</li>
+      <li><strong>The first design was co-visitation.</strong> Counting videos watched together (Davidson et al., 2010) is cheap and needs no content understanding, but it can't see new videos and ignores order and context.</li>
+      <li><strong>Candidate generation is classification over millions of videos</strong> (Covington et al., 2016). Sampled softmax with importance correction makes it trainable, about 100 times faster than the full softmax.</li>
+      <li><strong>Label design matters as much as architecture.</strong> Predicting the next watch from history before it, hiding the search page's ordering, equal weight per user, and the example-age feature each fix a specific bias.</li>
+      <li><strong>Two towers let new videos have vectors,</strong> and in-batch negatives make training cheap. But popular videos appear as negatives too often, and the logQ correction (Yi et al., 2019) removes the resulting bias.</li>
+      <li><strong>Retrieval is approximate nearest-neighbour search.</strong> Product quantization compresses billions of vectors, and ScaNN's anisotropic loss spends accuracy where the largest inner products are.</li>
+      <li><strong>The ranker predicts expected watch time</strong> by weighting clicked examples with their watch time in a logistic regression, so that the odds approximate expected watch time per impression.</li>
+      <li><strong>Multitask ranking separates behaviour from judgement.</strong> MMoE lets engagement and satisfaction objectives share experts selectively, and a shallow tower removes position bias (+0.24% engagement live in 2019).</li>
+      <li><strong>Each objective was a stand-in</strong> for something unmeasurable: views, then watch time (2012), then survey-weighted valued watch time. Creators and models both followed whichever was chosen.</li>
+      <li><strong>The logs record the old system's choices,</strong> so training on them is a feedback loop. Off-policy correction with capped weights, the top-K multiplier, and a small amount of exploration are the published remedies.</li>
+      <li><strong>Offline metrics filter and live experiments decide.</strong> YouTube says offline and live results aren't always correlated, and policy changes such as the 2019 borderline demotion are judged on system-level measures as well.</li>
+    </ol>
+  </section>
+
+  <section id="build">
+    <h2><span class="num">16</span>Build this</h2>
+    <p class="lede">The corrections in this chapter are easy to nod along to and easy to get wrong. You can rebuild the heart of the system in a day with synthetic data and no GPU, and watch each fix change what gets recommended.</p>
+
+    <div class="project">
+      <div class="proj-head">
+        <span class="proj-label">Project</span>
+        <span class="proj-title">A two-stage recommender with honest negatives and a position tower</span>
+        <span class="proj-meta">~6 hours &middot; numpy and torch</span>
+      </div>
+      <p>Build a small world where you know the truth: 2,000 users in 20 taste groups, 5,000 videos with a long-tailed popularity and a true appeal per user group, and a simulated old ranker that places videos in eight slots. Everything you train will be judged against that truth, which no real system can do.</p>
+      <ol class="proj-steps">
+        <li>Generate impressions from the old ranker, with a click model whose probability depends on true appeal and slot, and a watch time drawn for each click. Log impressions and clicks, not only clicks.</li>
+        <li>Train a two-tower retrieval model on clicked pairs with in-batch negatives, once plain and once with the logQ correction. Estimate frequencies by streaming, with the hash-and-gap method from section 04, and compare with exact counts.</li>
+        <li>Index the item vectors and retrieve 200 candidates per user with brute force, then with an approximate index such as FAISS or ScaNN. Report recall of the exact top 200 and the speedup.</li>
+        <li>Train a ranker on those candidates with three variants: click-through rate, watch-time-weighted logistic regression, and a two-head model with a shallow position tower. Check each against the true appeal and the true expected watch time.</li>
+        <li>Close the loop. Retrain every round on the logs the previous round produced, for 15 rounds, and plot what fraction of the 5,000 videos is ever shown. Repeat with 5% of impressions sampled from the model's softmax.</li>
+      </ol>
+      <div class="proj-done"><strong>You'll know it worked when</strong> the plain in-batch model recommends visibly less popular videos than the truth and the logQ version matches it, the click model and the watch-time model disagree about the same videos in the way section 06 predicts, the model with a position tower recovers true appeal where the one without it inflates what the old ranker liked, and the explored run keeps a larger share of the catalogue alive.</div>
+      <div class="proj-stretch"><strong>A harder variant.</strong> Add a second label that behaves like a survey, available for only 2% of impressions and correlated with true appeal but not with clicks. Train a multitask model with an MMoE layer and see whether the sparse label improves the ranking of videos that clicks alone would have ranked too high.</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2><span class="num">17</span>Interview questions</h2>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why does YouTube use candidate generation followed by ranking instead of one model?</summary>
+      <div class="qa-body"><p>A model that looks at the user and a video together is too slow to run over a billion videos for every request. If it costs half a millisecond per video, one request would take 500,000 CPU-seconds. So a cheap first stage selects a few hundred candidates using a cost that barely grows with the corpus, and an expensive ranker, which can use rich features about the pair, scores only those. In 2016 the YouTube paper describes this funnel: millions, hundreds, dozens. A useful side effect is that candidates from several sources can be pooled before ranking.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level beginner">Beginner</span>Why did YouTube move from optimising views to watch time?</summary>
+      <div class="qa-body"><p>Views reward the click, and a title or thumbnail can win a click without the video being any good. YouTube's August 2012 creator post said the discovery features had been designed to drive views and would now favour videos people watch to the end over those they click on and abandon, with the stated rationale that more watching signals happier viewers. Goodrow's 2021 post says views dropped about 20% at first. Watch time has its own weaknesses, such as favouring length and being blind to regret, so surveys and satisfaction signals were added later.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Explain weighted logistic regression for expected watch time.</summary>
+      <div class="qa-body"><p>Train a normal logistic regression on click versus no click, but weight each clicked example by its watch time and each unclicked example by 1. The model's odds then equal the total watch time of clicked examples divided by the number of unclicked ones. With N impressions, k clicks and click probability P, that's E[T]/(1-P), which is approximately E[T](1+P) and close to E[T] when clicks are rare. At serving the exponential of the logit is read as expected watch time. The weighting changes the loss and not the data, and the 2016 paper reports that equal weighting raised the watch-time-weighted loss by 4.1%.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>What is the logQ correction and why is it needed?</summary>
+      <div class="qa-body"><p>In-batch negatives are the other videos in the same training batch, so they are sampled in proportion to how often each video is watched. Popular videos therefore appear as negatives much more often than rare ones, and a plain softmax learns to penalise popularity, which is a real signal. Subtracting log of the video's sampling probability from its logit (s - log p) makes frequent negatives count for less, in proportion to their frequency, which undoes the sampling bias. After training, serving uses the uncorrected score. The probability has to be estimated, and Yi et al. (2019) do it from the stream using a hashed array that tracks the average gap between appearances of each item, which handles a corpus with no fixed vocabulary.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>How does a shallow tower remove position bias?</summary>
+      <div class="qa-body"><p>A small side network takes only bias-related features such as slot and device, and its output is added to the main model's logit during training. It absorbs the click probability that position explains, so the main tower learns how good the video is. At serving the position is treated as missing and only the main tower's output counts. That 2019 YouTube paper drops the position feature 10% of the time in training and crosses it with device. In its live tests the shallow tower gave +0.24% engagement, against &minus;0.07% for position as an input feature and +0.01% for an adversarial loss.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level intermediate">Intermediate</span>Why predict the next watch and not a random held-out watch?</summary>
+      <div class="qa-body"><p>At serving time you predict the future from the past. A random hold-out lets the model see events that happened after the label, so it learns shortcuts that won't exist live, and it ignores asymmetric patterns such as watching a series in order. In 2016 the paper rolls back each user's history to a random moment and feeds only earlier actions. It also removes ordering from search queries by using an unordered bag of tokens, so the model can't reproduce the last search results page.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Your offline metrics improve but the live experiment is flat. What do you look at?</summary>
+      <div class="qa-body"><p>First, the offline data comes from the old system, so the new model is credited only for videos the old system showed and can look better by imitating it; the 2016 paper says live and offline results are not always correlated. Second, position bias in the logs may be inflating the metric for items that were ranked high. Third, a mismatch between the training label and what the live metric measures, for example optimising click prediction when the experiment measures watch time or satisfaction. Fourth, train-serve skew in features such as impression counts and example age. I'd probably check each, then consider whether the model needs exploration data to see what it hasn't been shown.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>Describe the top-K off-policy correction. When would it matter and when not?</summary>
+      <div class="qa-body"><p>A standard off-policy policy gradient weights each logged action by pi/beta, the new policy's probability over the behaviour policy's. Chen et al. (2019) note the system shows K items, so the chance a video appears on the page is 1-(1-pi)^K, and its derivative adds a multiplier K(1-pi)^(K-1). When pi is small it is about K, and when pi approaches 1 it goes to zero, so already-certain items stop absorbing gradient and probability mass spreads to other good items. With K=1 it reduces to the standard correction. In their live tests with K=16 as production, K=1 lost 0.66% ViewTime and K=2 lost 0.35%. It matters when a page shows several items that can each be taken independently, and matters less for a single-slot decision. The importance weights also need capping, e^3 in the paper, to control variance.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="qa-level deep">Deep</span>What are the risks of optimising for watch time, and what did YouTube do about them?</summary>
+      <div class="qa-body"><p>Watch time favours long videos, rewards whatever holds attention including content people regret, and measures behaviour, which is only correlated with satisfaction. YouTube's published responses are layered. It added survey responses and counts only four- and five-star ratings as valued watch time, according to the 2021 post. That 2019 multitask paper adds satisfaction objectives (likes, dismissals, survey ratings) combined by hand-tuned weights. It demoted tabloid-style content in 2015 and borderline content in 2019, and has human evaluators rate authoritativeness for news. These are system-level corrections, and their effects, such as the reported 70% drop in borderline watch time, are measured by YouTube with definitions outsiders can't inspect.</p></div>
+    </details>
+  </section>
+
+  <section id="resources">
+    <h2><span class="num">18</span>Go deeper</h2>
+    <div class="resource-grid">
+      <a class="resource-card" href="https://research.google/pubs/the-youtube-video-recommendation-system/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">The YouTube Video Recommendation System</div><div class="r-sub">Davidson et al., RecSys 2010. The co-visitation system of section 02: seeds, the relatedness graph and expansion.</div></div>
+      </a>
+      <a class="resource-card" href="https://research.google/pubs/deep-neural-networks-for-youtube-recommendations/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Deep Neural Networks for YouTube Recommendations</div><div class="r-sub">Covington, Adams and Sargin, RecSys 2016. Candidate generation as extreme classification, example age, and the weighted logistic ranker of sections 03 and 06.</div></div>
+      </a>
+      <a class="resource-card" href="https://research.google/pubs/sampling-bias-corrected-neural-modeling-for-large-corpus-item-recommendations/" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Sampling-Bias-Corrected Neural Modeling for Large Corpus Item Recommendations</div><div class="r-sub">Yi et al., RecSys 2019. Two towers, in-batch negatives, the logQ correction and streaming frequency estimation.</div></div>
+      </a>
+      <a class="resource-card" href="https://dl.acm.org/doi/10.1145/3298689.3346997" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Recommending What Video to Watch Next: A Multitask Ranking System</div><div class="r-sub">Zhao et al., RecSys 2019. MMoE for engagement and satisfaction objectives, and the shallow tower for position bias.</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1812.02353" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Top-K Off-Policy Correction for a REINFORCE Recommender System</div><div class="r-sub">Chen et al., WSDM 2019. Off-policy correction, the top-K multiplier, weight capping and exploration, with live YouTube results. arXiv:1812.02353</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1905.12767" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Reinforcement Learning for Slate-based Recommender Systems (SlateQ)</div><div class="r-sub">Ie et al., 2019. A decomposition for long-term value over slates, validated in live YouTube experiments. arXiv:1905.12767</div></div>
+      </a>
+      <a class="resource-card" href="https://arxiv.org/abs/1908.10396" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Accelerating Large-Scale Inference with Anisotropic Vector Quantization (ScaNN)</div><div class="r-sub">Guo et al., ICML 2020. The score-aware quantization loss of section 05. arXiv:1908.10396</div></div>
+      </a>
+      <a class="resource-card" href="https://dl.acm.org/doi/10.1145/3219819.3220007" target="_blank" rel="noopener">
+        <div class="r-icon">📄</div>
+        <div class="r-body"><div class="r-kind">Paper</div><div class="r-title">Modeling Task Relationships in Multi-task Learning with Multi-gate Mixture-of-Experts</div><div class="r-sub">Ma et al., KDD 2018. The MMoE layer that the 2019 YouTube ranker adopts.</div></div>
+      </a>
+      <a class="resource-card" href="https://blog.youtube/inside-youtube/on-youtubes-recommendation-system/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">On YouTube's Recommendation System</div><div class="r-sub">Cristos Goodrow, September 15, 2021. Signals, surveys, watch time, borderline content and the history of the changes.</div></div>
+      </a>
+      <a class="resource-card" href="https://blog.youtube/news-and-events/youtube-now-why-we-focus-on-watch-time" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">YouTube Now: Why We Focus on Watch Time</div><div class="r-sub">Eric Meyerson, August 10, 2012. The announcement of the move from views to watch time.</div></div>
+      </a>
+      <a class="resource-card" href="https://blog.youtube/news-and-events/continuing-our-work-to-improve/" target="_blank" rel="noopener">
+        <div class="r-icon">📝</div>
+        <div class="r-body"><div class="r-kind">Company blog</div><div class="r-title">Continuing Our Work to Improve Recommendations on YouTube</div><div class="r-sub">The YouTube Team, January 25, 2019. The announcement about borderline content.</div></div>
+      </a>
+    </div>
+  </section>
+
+  <section id="related">
+    <h2><span class="num">19</span>Related pages</h2>
+    <div class="related-grid">
+      <a class="related-card" href="/topics/16-recommenders-ranking-search"><div class="rc-sec" style="color:var(--c-rec)">16 · The foundations</div><div class="rc-title">Recommenders, Ranking &amp; Search</div><div class="rc-hook">The funnel, two towers, in-batch negatives and the feedback loop, in general form. This case study is those ideas in one company.</div></a>
+      <a class="related-card" href="/topics/15-reinforcement-learning"><div class="rc-sec" style="color:var(--c-rl)">15 · The policy view</div><div class="rc-title">Reinforcement Learning</div><div class="rc-hook">Policies, importance weights and exploration, which section 10 uses for off-policy correction.</div></a>
+      <a class="related-card" href="/topics/23-efficient-ai-systems"><div class="rc-sec" style="color:var(--c-efficient)">23 · Serving cost</div><div class="rc-title">Efficient AI &amp; Systems</div><div class="rc-hook">Quantization, latency budgets and why model cost is a design variable.</div></a>
+      <a class="related-card" href="/topics/24-mlops"><div class="rc-sec" style="color:var(--c-mlops)">24 · Running it</div><div class="rc-title">ML Engineering &amp; MLOps</div><div class="rc-hook">A/B testing, continuous training and train-serve skew, the machinery behind section 12.</div></a>
+      <a class="related-card" href="/topics/25-evaluation-reliability-safety"><div class="rc-sec" style="color:var(--c-eval)">25 · Measuring it</div><div class="rc-title">Evaluation &amp; Safety</div><div class="rc-hook">Why offline metrics mislead and how proxies drift from the goal they stand for.</div></a>
+      <a class="related-card" href="/topics/31-llm-inference-serving"><div class="rc-sec" style="color:var(--c-practice)">31 · Serving at scale</div><div class="rc-title">LLM Inference &amp; Serving</div><div class="rc-hook">Another system where latency, batching and hardware cost shape the architecture.</div></a>
+    </div>
+  </section>
